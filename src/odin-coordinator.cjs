@@ -205,7 +205,7 @@ function sendFrame(socket, opcode, payload) {
 async function buildState() {
   version += 1;
   const observedAt = new Date().toISOString();
-  const [docker, adb, hosts, yggdrasilServices, nightwingServices, nightwingGpu, voidBotDashboard, observations] = await Promise.all([
+  const [docker, adb, hosts, yggdrasilServices, nightwingServices, nightwingGpu, voidBotDashboard, mimirLiveStats, observations] = await Promise.all([
     dockerSnapshot(),
     adbSnapshot(),
     hostChecks(),
@@ -213,6 +213,7 @@ async function buildState() {
     remoteServices("nightwing", ["ssh", "nightwing-eve-dashboard", "nightwing-eve-browser-reference", "gamecult-visible-ops", "docker"]),
     remoteGpu("nightwing"),
     fetchEveProvider(eveDeckUrl, "voidbot.swarm"),
+    fetchEveProvider(eveDeckUrl, "mimir.live.stats"),
     observationSnapshot(observationLogPath, observationFreshSeconds),
   ]);
 
@@ -223,6 +224,7 @@ async function buildState() {
       service("adb", "Periwinkle ADB", adb.devices.length ? "active" : "waiting", adb.devices.map((device) => `${device.serial}:${device.state}`).join(", ") || adb.error || "no devices"),
       service("cultcache", "Odin CultCache", fs.existsSync(cachePath) ? "active" : "waiting", path.basename(cachePath)),
       service("voidbot-swarm", "VoidBot Swarm", voidBotDashboard.state, voidBotDashboard.detail),
+      service("mimir-live-stats", "Mimir Live Stats", mimirLiveStats.state, mimirLiveStats.detail),
       service("mimir-observation-ledger", "Mimir Observation Ledger", observations.state, observations.detail),
       ...docker.containers.map((container) => service(`docker-${container.name}`, container.name, "active", container.image)),
     ]),
@@ -267,7 +269,7 @@ async function buildState() {
       health: entry.status,
       detail: entry.capabilities.join(", "),
     })),
-    surface: buildSurface({ observedAt, docker, adb, hosts, yggdrasilServices, verses, interfaces: [voidBotDashboard], observations }),
+    surface: buildSurface({ observedAt, docker, adb, hosts, yggdrasilServices, verses, interfaces: [mimirLiveStats, voidBotDashboard], observations }),
   };
 }
 

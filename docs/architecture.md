@@ -59,7 +59,7 @@ The compact Nightwing TUI lowers these into dense cells and fills surplus screen
 
 ## Current Interface Surface
 
-Odin currently ingests `voidbot.swarm` from the local Mimir Eve deck at `ws://127.0.0.1:8795/eve/deck`. That provider owns the VoidBot swarm composition: CTB rail, selected Face summary, state graph, and state detail. Odin embeds the provider's `surface.root` as an `interface` child with provenance, version, status, and source endpoint.
+Odin currently ingests `mimir.live.stats` and `voidbot.swarm` from the local Mimir Eve deck at `ws://127.0.0.1:8795/eve/deck`. `mimir.live.stats` owns the compact Mimir telemetry composition: RMS bars, sync confidence, runtime buffer facts, actuator state, and device observation streams. `voidbot.swarm` owns the VoidBot swarm composition: CTB rail, selected Face summary, state graph, and state detail. Odin embeds each provider's `surface.root` as an `interface` child with provenance, version, status, and source endpoint.
 
 This is the model for future services: if a service publishes an operator interface, ingest the Eve/CultUI composition graph and lower it. Do not collapse it into a service-status tile unless the graph is unavailable and the tile is explicitly a temporary probe.
 
