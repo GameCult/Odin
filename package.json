@@ -1,0 +1,15 @@
+{
+  "name": "@gamecult/odin",
+  "version": "0.1.0",
+  "private": true,
+  "description": "GameCult all-seer: CultMesh Verse discovery, schema awareness, translation, and Eve surface publication.",
+  "type": "commonjs",
+  "scripts": {
+    "check": "node --check src/odin-coordinator.cjs",
+    "start": "node src/odin-coordinator.cjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
+
