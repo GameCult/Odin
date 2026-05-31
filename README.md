@@ -45,5 +45,6 @@ The first executable is deliberately narrow:
 - observes Starfire Docker, Periwinkle ADB, Nightwing services/GPU, Raven, EVE, and Yggdrasil reachability;
 - exposes Yggdrasil service status when the local SSH alias can reach it.
 - publishes explicit `verse` and `service` nodes for compact Eve/CultUI lowerers.
+- ingests the `voidbot.swarm` Eve/CultUI dashboard from Mimir's `/eve/deck` provider surface and embeds it as an Odin `interface` node.
 
 The next real cut is to replace static host probes with CultNet schema discovery and CultMesh Verse peer exchange. The probe layer is an input adapter. It must not become the architecture.

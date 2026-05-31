@@ -36,6 +36,7 @@ const intervalMs = Number(args.intervalMs || 5000);
 const stateDir = args.stateDir || path.join(repoRoot, "scratch", "odin");
 const cachePath = args.cachePath || path.join(stateDir, "odin.ccmp");
 const surfaceKey = "surface:gamecult.network.status";
+const eveDeckUrl = args.eveDeckUrl || "ws://127.0.0.1:8795/eve/deck";
 
 fs.mkdirSync(stateDir, { recursive: true });
 
@@ -202,13 +203,14 @@ function sendFrame(socket, opcode, payload) {
 async function buildState() {
   version += 1;
   const observedAt = new Date().toISOString();
-  const [docker, adb, hosts, yggdrasilServices, nightwingServices, nightwingGpu] = await Promise.all([
+  const [docker, adb, hosts, yggdrasilServices, nightwingServices, nightwingGpu, voidBotDashboard] = await Promise.all([
     dockerSnapshot(),
     adbSnapshot(),
     hostChecks(),
     remoteServices("ygg", ["nginx", "streampixels-web", "streampixels-service", "heimdall", "repixelizer-gui", "bifrost"]),
     remoteServices("nightwing", ["ssh", "nightwing-eve-dashboard", "nightwing-eve-browser-reference", "gamecult-visible-ops", "docker"]),
     remoteGpu("nightwing"),
+    fetchEveProvider(eveDeckUrl, "voidbot.swarm"),
   ]);
 
   const verses = [
@@ -217,6 +219,7 @@ async function buildState() {
       service("docker", "Docker", docker.state === "ok" ? "active" : "warn", `${docker.containers.length} running`),
       service("adb", "Periwinkle ADB", adb.devices.length ? "active" : "waiting", adb.devices.map((device) => `${device.serial}:${device.state}`).join(", ") || adb.error || "no devices"),
       service("cultcache", "Odin CultCache", fs.existsSync(cachePath) ? "active" : "waiting", path.basename(cachePath)),
+      service("voidbot-swarm", "VoidBot Swarm", voidBotDashboard.state, voidBotDashboard.detail),
       ...docker.containers.map((container) => service(`docker-${container.name}`, container.name, "active", container.image)),
     ]),
     verse("nightwing.local", "Nightwing", "dashboard-renderer", hostState(hosts.Nightwing), ["eve-tui", "gpu-worker"], [
@@ -259,7 +262,7 @@ async function buildState() {
       health: entry.status,
       detail: entry.capabilities.join(", "),
     })),
-    surface: buildSurface({ observedAt, docker, adb, hosts, yggdrasilServices, verses }),
+    surface: buildSurface({ observedAt, docker, adb, hosts, yggdrasilServices, verses, interfaces: [voidBotDashboard] }),
   };
 }
 
@@ -284,7 +287,8 @@ function buildPendingState(message) {
   };
 }
 
-function buildSurface({ observedAt, docker, adb, hosts, yggdrasilServices, verses }) {
+function buildSurface({ observedAt, docker, adb, hosts, yggdrasilServices, verses, interfaces }) {
+  const activeInterfaces = interfaces.filter((entry) => entry.surface?.root);
   return {
     schema: "gamecult.eve.surface.v1",
     id: "gamecult.network.status.surface",
@@ -295,7 +299,7 @@ function buildSurface({ observedAt, docker, adb, hosts, yggdrasilServices, verse
       props: {
         title: "Odin All-Seer",
         observedAt,
-        summary: `${verses.length} Verses / ${verses.reduce((sum, entry) => sum + entry.services.length, 0)} service squares`,
+        summary: `${verses.length} Verses / ${verses.reduce((sum, entry) => sum + entry.services.length, 0)} services / ${activeInterfaces.length} interfaces`,
       },
       children: [
         pane("Coordinator", [
@@ -304,6 +308,22 @@ function buildSurface({ observedAt, docker, adb, hosts, yggdrasilServices, verse
           metric("docker-count", "Docker containers", docker.containers.length, docker.state === "ok" ? "ok" : "warn"),
           metric("adb-count", "ADB devices", adb.devices.length, adb.devices.length ? "ok" : "warn"),
         ]),
+        ...interfaces.map((entry) => ({
+          id: `interface-${stableId(entry.providerId)}`,
+          kind: "interface",
+          props: {
+            title: entry.title,
+            providerId: entry.providerId,
+            source: entry.source,
+            status: entry.state,
+            detail: entry.detail,
+            version: entry.version,
+            updatedAt: entry.updatedAt,
+          },
+          children: entry.surface?.root ? [entry.surface.root] : [
+            text(`interface-${stableId(entry.providerId)}-missing`, entry.detail || "interface unavailable"),
+          ],
+        })),
         ...verses.map((entry) => ({
           id: `verse-${entry.verseId}`,
           kind: "verse",
@@ -493,6 +513,160 @@ async function remoteGpu(target) {
   } catch (error) {
     return { state: "unknown", detail: error.message };
   }
+}
+
+async function fetchEveProvider(url, providerId) {
+  try {
+    const socket = await openWebSocket(url);
+    try {
+      sendClientFrame(socket, JSON.stringify({ type: "open-provider", providerId }));
+      for (let index = 0; index < 8; index += 1) {
+        const message = await readServerTextFrame(socket, 2500);
+        const state = JSON.parse(message);
+        if (state?.providerId === providerId) {
+          return {
+            providerId,
+            title: state.title || providerId,
+            state: "active",
+            detail: `${state.surface?.root?.kind || "surface"} ${state.nodes?.length || 0} nodes`,
+            version: state.version,
+            updatedAt: state.updatedAt,
+            source: url,
+            surface: state.surface,
+          };
+        }
+      }
+      return dashboardUnavailable(providerId, url, "provider did not publish matching state");
+    } finally {
+      socket.destroy();
+    }
+  } catch (error) {
+    return dashboardUnavailable(providerId, url, error.message);
+  }
+}
+
+function dashboardUnavailable(providerId, source, detail) {
+  return {
+    providerId,
+    title: providerId,
+    state: "unavailable",
+    detail,
+    version: 0,
+    updatedAt: new Date().toISOString(),
+    source,
+    surface: null,
+  };
+}
+
+function openWebSocket(url) {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    const port = Number(parsed.port || (parsed.protocol === "wss:" ? 443 : 80));
+    const socket = net.createConnection({ host: parsed.hostname, port, timeout: 2500 });
+    const key = crypto.randomBytes(16).toString("base64");
+    const pathName = `${parsed.pathname || "/"}${parsed.search || ""}`;
+    let buffer = Buffer.alloc(0);
+    socket.on("connect", () => {
+      socket.write([
+        `GET ${pathName} HTTP/1.1`,
+        `Host: ${parsed.hostname}:${port}`,
+        "Upgrade: websocket",
+        "Connection: Upgrade",
+        `Sec-WebSocket-Key: ${key}`,
+        "Sec-WebSocket-Version: 13",
+        "",
+        "",
+      ].join("\r\n"));
+    });
+    socket.on("data", function onHandshake(chunk) {
+      buffer = Buffer.concat([buffer, chunk]);
+      const marker = buffer.indexOf("\r\n\r\n");
+      if (marker < 0) return;
+      const header = buffer.subarray(0, marker).toString("latin1");
+      if (!header.startsWith("HTTP/1.1 101")) {
+        reject(new Error(header.split(/\r?\n/)[0] || "websocket handshake failed"));
+        socket.destroy();
+        return;
+      }
+      socket.off("data", onHandshake);
+      socket.unshift(buffer.subarray(marker + 4));
+      resolve(socket);
+    });
+    socket.on("timeout", () => {
+      reject(new Error("websocket connection timed out"));
+      socket.destroy();
+    });
+    socket.on("error", reject);
+  });
+}
+
+function sendClientFrame(socket, textValue) {
+  const payload = Buffer.from(textValue, "utf8");
+  const mask = crypto.randomBytes(4);
+  const header = [0x81];
+  if (payload.length < 126) {
+    header.push(0x80 | payload.length);
+  } else if (payload.length <= 0xffff) {
+    header.push(0x80 | 126, payload.length >> 8, payload.length & 0xff);
+  } else {
+    const length = Buffer.alloc(8);
+    length.writeBigUInt64BE(BigInt(payload.length));
+    header.push(0x80 | 127, ...length);
+  }
+  const masked = Buffer.from(payload.map((byte, index) => byte ^ mask[index % 4]));
+  socket.write(Buffer.concat([Buffer.from(header), mask, masked]));
+}
+
+function readServerTextFrame(socket, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    let buffer = Buffer.alloc(0);
+    const timer = setTimeout(() => cleanup(new Error("timed out waiting for dashboard frame")), timeoutMs);
+    function cleanup(error, value) {
+      clearTimeout(timer);
+      socket.off("data", onData);
+      socket.off("error", onError);
+      if (error) reject(error);
+      else resolve(value);
+    }
+    function onError(error) {
+      cleanup(error);
+    }
+    function onData(chunk) {
+      buffer = Buffer.concat([buffer, chunk]);
+      const frame = tryReadFrame(buffer);
+      if (!frame) return;
+      buffer = buffer.subarray(frame.consumed);
+      if (frame.opcode === 0x1) cleanup(null, frame.payload.toString("utf8"));
+      if (frame.opcode === 0x8) cleanup(new Error("dashboard websocket closed"));
+    }
+    socket.on("data", onData);
+    socket.on("error", onError);
+  });
+}
+
+function tryReadFrame(buffer) {
+  if (buffer.length < 2) return null;
+  const opcode = buffer[0] & 0x0f;
+  const masked = Boolean(buffer[1] & 0x80);
+  let length = buffer[1] & 0x7f;
+  let offset = 2;
+  if (length === 126) {
+    if (buffer.length < offset + 2) return null;
+    length = buffer.readUInt16BE(offset);
+    offset += 2;
+  } else if (length === 127) {
+    if (buffer.length < offset + 8) return null;
+    length = Number(buffer.readBigUInt64BE(offset));
+    offset += 8;
+  }
+  const mask = masked ? buffer.subarray(offset, offset + 4) : null;
+  if (masked) offset += 4;
+  if (buffer.length < offset + length) return null;
+  let payload = buffer.subarray(offset, offset + length);
+  if (mask) {
+    payload = Buffer.from(payload.map((byte, index) => byte ^ mask[index % 4]));
+  }
+  return { opcode, payload, consumed: offset + length };
 }
 
 function stableId(value) {
