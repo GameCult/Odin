@@ -9,6 +9,7 @@ Odin is the central all-seer node for GameCult's CultMesh world: every Verse can
 ```text
 host / device / service probes
   -> Odin observation cycle
+  -> Verse-owned service records
   -> Odin state document
   -> CultMesh/CultCache persistence
   -> Eve dashboard state
@@ -34,6 +35,20 @@ Verse announcement
 - Translation paths must name source schema, target schema, lossiness, authority, and version.
 - Renderers lower surfaces only. If a renderer fixes network truth, the machine is split-brained.
 - CultCache is the durable state substrate; CultNet is the wire vocabulary; CultMesh is the Verse and peer-consensus layer.
+- The Eve surface carries explicit `verse` and `service` nodes. Compact renderers may derive visual facets from those nodes, but may not invent observation truth.
+
+## Current Service Surface
+
+Odin currently publishes service squares for:
+
+- Starfire: Odin, Docker, ADB, Odin CultCache, and running Docker containers.
+- Nightwing: SSH, Eve broker, Eve browser reference, visible TUI, Docker unit state, and NVIDIA GPU state.
+- EVE: SSH/native Eve reachability.
+- Periwinkle: ADB reachability.
+- Raven: SSH reachability.
+- Yggdrasil: SSH/HTTP/HTTPS reachability plus nginx, StreamPixels, Heimdall, Repixelizer, and Bifrost systemd state.
+
+The compact Nightwing TUI lowers these into dense cells and fills surplus screen space with derived schema, route, owner, and probe facets from the same Odin-owned service records.
 
 ## First Translation Model
 
@@ -47,4 +62,3 @@ Odin's translation registry should start as data, not magic:
 - `notes`
 
 No regex tribunals for meaning. Natural-language schema interpretation can be assisted by models later, but accepted translation routes must be inspectable typed state.
-

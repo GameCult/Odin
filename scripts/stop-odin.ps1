@@ -10,12 +10,12 @@ if (-not (Test-Path $pidPath)) {
   exit 0
 }
 
-$pid = (Get-Content -Raw $pidPath).Trim()
-if ($pid -match "^\d+$") {
-  $process = Get-Process -Id ([int] $pid) -ErrorAction SilentlyContinue
+$odinPid = (Get-Content -Raw $pidPath).Trim()
+if ($odinPid -match "^\d+$") {
+  $process = Get-Process -Id ([int] $odinPid) -ErrorAction SilentlyContinue
   if ($process) {
     Stop-Process -Id $process.Id
-    Write-Host "Stopped Odin PID $pid."
+    Write-Host "Stopped Odin PID $odinPid."
   }
 }
 

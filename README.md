@@ -42,8 +42,8 @@ The first executable is deliberately narrow:
 - publishes provider `odin.allseer`;
 - writes the latest surface to `scratch/odin/latest-surface.json`;
 - persists the same document through local CultMesh/CultCache when `CultLib` packages are available at `E:\Projects\CultLib\packages`;
-- observes Starfire Docker, Periwinkle ADB, Nightwing, Raven, EVE, and Yggdrasil reachability;
+- observes Starfire Docker, Periwinkle ADB, Nightwing services/GPU, Raven, EVE, and Yggdrasil reachability;
 - exposes Yggdrasil service status when the local SSH alias can reach it.
+- publishes explicit `verse` and `service` nodes for compact Eve/CultUI lowerers.
 
 The next real cut is to replace static host probes with CultNet schema discovery and CultMesh Verse peer exchange. The probe layer is an input adapter. It must not become the architecture.
-

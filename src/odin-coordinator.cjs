@@ -202,20 +202,37 @@ function sendFrame(socket, opcode, payload) {
 async function buildState() {
   version += 1;
   const observedAt = new Date().toISOString();
-  const [docker, adb, hosts, yggdrasilServices] = await Promise.all([
+  const [docker, adb, hosts, yggdrasilServices, nightwingServices, nightwingGpu] = await Promise.all([
     dockerSnapshot(),
     adbSnapshot(),
     hostChecks(),
     remoteServices("ygg", ["nginx", "streampixels-web", "streampixels-service", "heimdall", "repixelizer-gui", "bifrost"]),
+    remoteServices("nightwing", ["ssh", "nightwing-eve-dashboard", "nightwing-eve-browser-reference", "gamecult-visible-ops", "docker"]),
+    remoteGpu("nightwing"),
   ]);
 
   const verses = [
-    verse("starfire.local", "Starfire", "coordinator", "active", ["docker", "adb", "eve-provider"]),
-    verse("nightwing.local", "Nightwing", "dashboard-renderer", hostState(hosts.Nightwing), ["eve-tui", "gpu-worker"]),
-    verse("eve.ipad", "EVE", "ios-client", hostState(hosts.EVE), ["ssh", "native-eve"]),
-    verse("periwinkle.android", "Periwinkle", "android-client", adb.devices.length ? "connected" : "waiting", ["adb", "sensor-edge"]),
-    verse("raven.local", "Raven", "local-peer", hostState(hosts.Raven), ["ssh"]),
-    verse("yggdrasil.ops", "Yggdrasil", "ops-host", hostState(hosts.Yggdrasil), ["ssh", "https", "services"]),
+    verse("starfire.local", "Starfire", "coordinator", "active", ["docker", "adb", "eve-provider"], [
+      service("odin", "Odin all-seer", "active", "ws://0.0.0.0:8797/eve/deck"),
+      service("docker", "Docker", docker.state === "ok" ? "active" : "warn", `${docker.containers.length} running`),
+      service("adb", "Periwinkle ADB", adb.devices.length ? "active" : "waiting", adb.devices.map((device) => `${device.serial}:${device.state}`).join(", ") || adb.error || "no devices"),
+      service("cultcache", "Odin CultCache", fs.existsSync(cachePath) ? "active" : "waiting", path.basename(cachePath)),
+      ...docker.containers.map((container) => service(`docker-${container.name}`, container.name, "active", container.image)),
+    ]),
+    verse("nightwing.local", "Nightwing", "dashboard-renderer", hostState(hosts.Nightwing), ["eve-tui", "gpu-worker"], [
+      ...hostServices("Nightwing", hosts.Nightwing),
+      ...nightwingServices.map((entry) => service(`systemd-${entry.name}`, entry.name, systemdState(entry.state), entry.state)),
+      service("gpu", "GTX 860M", nightwingGpu.state, nightwingGpu.detail),
+    ]),
+    verse("eve.ipad", "EVE", "ios-client", hostState(hosts.EVE), ["ssh", "native-eve"], hostServices("EVE", hosts.EVE)),
+    verse("periwinkle.android", "Periwinkle", "android-client", adb.devices.length ? "connected" : "waiting", ["adb", "sensor-edge"], [
+      service("adb-device", "ADB device", adb.devices.length ? "active" : "waiting", adb.devices.map((device) => `${device.serial}:${device.state}`).join(", ") || adb.error || "no devices"),
+    ]),
+    verse("raven.local", "Raven", "local-peer", hostState(hosts.Raven), ["ssh"], hostServices("Raven", hosts.Raven)),
+    verse("yggdrasil.ops", "Yggdrasil", "ops-host", hostState(hosts.Yggdrasil), ["ssh", "https", "services"], [
+      ...hostServices("Yggdrasil", hosts.Yggdrasil),
+      ...yggdrasilServices.map((entry) => service(`systemd-${entry.name}`, entry.name, systemdState(entry.state), entry.state)),
+    ]),
   ];
 
   return {
@@ -274,8 +291,12 @@ function buildSurface({ observedAt, docker, adb, hosts, yggdrasilServices, verse
     title: "Odin",
     root: {
       id: "network-root",
-      kind: "stack",
-      props: { title: "GameCult Network" },
+      kind: "dashboard",
+      props: {
+        title: "Odin All-Seer",
+        observedAt,
+        summary: `${verses.length} Verses / ${verses.reduce((sum, entry) => sum + entry.services.length, 0)} service squares`,
+      },
       children: [
         pane("Coordinator", [
           text("observed", `observed ${observedAt}`),
@@ -283,6 +304,24 @@ function buildSurface({ observedAt, docker, adb, hosts, yggdrasilServices, verse
           metric("docker-count", "Docker containers", docker.containers.length, docker.state === "ok" ? "ok" : "warn"),
           metric("adb-count", "ADB devices", adb.devices.length, adb.devices.length ? "ok" : "warn"),
         ]),
+        ...verses.map((entry) => ({
+          id: `verse-${entry.verseId}`,
+          kind: "verse",
+          props: {
+            title: entry.name,
+            verseId: entry.verseId,
+            role: entry.role,
+            status: entry.status,
+            capabilities: entry.capabilities,
+            services: entry.services,
+          },
+          children: entry.services.map((item) => ({
+            id: `service-${entry.verseId}-${item.id}`,
+            kind: "service",
+            props: item,
+            children: [],
+          })),
+        })),
         pane("Verses", verses.map((entry) =>
           card(`verse-card-${entry.verseId}`, [
             text(`verse-title-${entry.verseId}`, `${entry.name} :: ${entry.verseId}`),
@@ -331,8 +370,25 @@ function metric(id, label, value, tone) {
   return { id, kind: "metric", props: { label, text: `${label}: ${value}`, value, tone }, children: [] };
 }
 
-function verse(verseId, name, role, status, capabilities) {
-  return { verseId, name, role, status, capabilities };
+function verse(verseId, name, role, status, capabilities, services = []) {
+  return { verseId, name, role, status, capabilities, services };
+}
+
+function service(id, name, state, detail = "") {
+  return { id: stableId(id), name, state, detail: String(detail || "") };
+}
+
+function hostServices(hostName, checks) {
+  return (checks || []).map((check) =>
+    service(`${hostName}-${check.name}`, `${hostName} ${check.name}`, check.state === "open" || check.state === "ok" ? "active" : check.state, check.detail),
+  );
+}
+
+function systemdState(state) {
+  if (state === "active") return "active";
+  if (state === "inactive") return "inactive";
+  if (state === "failed") return "failed";
+  return state.startsWith("unknown") ? "unknown" : "warn";
 }
 
 function hostState(checks) {
@@ -421,6 +477,21 @@ async function remoteServices(target, services) {
       .map((match) => ({ name: match[1], state: match[2].trim() }));
   } catch (error) {
     return services.map((name) => ({ name, state: `unknown: ${error.message}` }));
+  }
+}
+
+async function remoteGpu(target) {
+  try {
+    const { stdout } = await execFileAsync("ssh", [
+      "-o", "BatchMode=yes",
+      "-o", "ConnectTimeout=3",
+      target,
+      "nvidia-smi --query-gpu=name,driver_version,memory.total,utilization.gpu --format=csv,noheader,nounits 2>/dev/null | head -n 1",
+    ], { timeout: 6000 });
+    const detail = stdout.trim();
+    return detail ? { state: "active", detail } : { state: "unknown", detail: "nvidia-smi returned no GPU" };
+  } catch (error) {
+    return { state: "unknown", detail: error.message };
   }
 }
 
