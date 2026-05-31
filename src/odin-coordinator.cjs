@@ -37,6 +37,8 @@ const stateDir = args.stateDir || path.join(repoRoot, "scratch", "odin");
 const cachePath = args.cachePath || path.join(stateDir, "odin.ccmp");
 const surfaceKey = "surface:gamecult.network.status";
 const eveDeckUrl = args.eveDeckUrl || "ws://127.0.0.1:8795/eve/deck";
+const observationLogPath = args.observationLogPath || path.join(repoRoot, "..", "Mimir", "artifacts", "runtime", "periwinkle-cultmesh-sensors.out.log");
+const observationFreshSeconds = Number(args.observationFreshSeconds || 120);
 
 fs.mkdirSync(stateDir, { recursive: true });
 
@@ -203,7 +205,7 @@ function sendFrame(socket, opcode, payload) {
 async function buildState() {
   version += 1;
   const observedAt = new Date().toISOString();
-  const [docker, adb, hosts, yggdrasilServices, nightwingServices, nightwingGpu, voidBotDashboard] = await Promise.all([
+  const [docker, adb, hosts, yggdrasilServices, nightwingServices, nightwingGpu, voidBotDashboard, observations] = await Promise.all([
     dockerSnapshot(),
     adbSnapshot(),
     hostChecks(),
@@ -211,6 +213,7 @@ async function buildState() {
     remoteServices("nightwing", ["ssh", "nightwing-eve-dashboard", "nightwing-eve-browser-reference", "gamecult-visible-ops", "docker"]),
     remoteGpu("nightwing"),
     fetchEveProvider(eveDeckUrl, "voidbot.swarm"),
+    observationSnapshot(observationLogPath, observationFreshSeconds),
   ]);
 
   const verses = [
@@ -220,6 +223,7 @@ async function buildState() {
       service("adb", "Periwinkle ADB", adb.devices.length ? "active" : "waiting", adb.devices.map((device) => `${device.serial}:${device.state}`).join(", ") || adb.error || "no devices"),
       service("cultcache", "Odin CultCache", fs.existsSync(cachePath) ? "active" : "waiting", path.basename(cachePath)),
       service("voidbot-swarm", "VoidBot Swarm", voidBotDashboard.state, voidBotDashboard.detail),
+      service("mimir-observation-ledger", "Mimir Observation Ledger", observations.state, observations.detail),
       ...docker.containers.map((container) => service(`docker-${container.name}`, container.name, "active", container.image)),
     ]),
     verse("nightwing.local", "Nightwing", "dashboard-renderer", hostState(hosts.Nightwing), ["eve-tui", "gpu-worker"], [
@@ -230,6 +234,7 @@ async function buildState() {
     verse("eve.ipad", "EVE", "ios-client", hostState(hosts.EVE), ["ssh", "native-eve"], hostServices("EVE", hosts.EVE)),
     verse("periwinkle.android", "Periwinkle", "android-client", adb.devices.length ? "connected" : "waiting", ["adb", "sensor-edge"], [
       service("adb-device", "ADB device", adb.devices.length ? "active" : "waiting", adb.devices.map((device) => `${device.serial}:${device.state}`).join(", ") || adb.error || "no devices"),
+      ...observationServices(observations, "periwinkle"),
     ]),
     verse("raven.local", "Raven", "local-peer", hostState(hosts.Raven), ["ssh"], hostServices("Raven", hosts.Raven)),
     verse("yggdrasil.ops", "Yggdrasil", "ops-host", hostState(hosts.Yggdrasil), ["ssh", "https", "services"], [
@@ -262,7 +267,7 @@ async function buildState() {
       health: entry.status,
       detail: entry.capabilities.join(", "),
     })),
-    surface: buildSurface({ observedAt, docker, adb, hosts, yggdrasilServices, verses, interfaces: [voidBotDashboard] }),
+    surface: buildSurface({ observedAt, docker, adb, hosts, yggdrasilServices, verses, interfaces: [voidBotDashboard], observations }),
   };
 }
 
@@ -287,8 +292,9 @@ function buildPendingState(message) {
   };
 }
 
-function buildSurface({ observedAt, docker, adb, hosts, yggdrasilServices, verses, interfaces }) {
+function buildSurface({ observedAt, docker, adb, hosts, yggdrasilServices, verses, interfaces, observations }) {
   const activeInterfaces = interfaces.filter((entry) => entry.surface?.root);
+  const activeObservationStreams = observations.streams.filter((entry) => entry.state === "active");
   return {
     schema: "gamecult.eve.surface.v1",
     id: "gamecult.network.status.surface",
@@ -299,7 +305,7 @@ function buildSurface({ observedAt, docker, adb, hosts, yggdrasilServices, verse
       props: {
         title: "Odin All-Seer",
         observedAt,
-        summary: `${verses.length} Verses / ${verses.reduce((sum, entry) => sum + entry.services.length, 0)} services / ${activeInterfaces.length} interfaces`,
+        summary: `${verses.length} Verses / ${verses.reduce((sum, entry) => sum + entry.services.length, 0)} services / ${activeInterfaces.length} interfaces / ${activeObservationStreams.length} live streams`,
       },
       children: [
         pane("Coordinator", [
@@ -307,7 +313,10 @@ function buildSurface({ observedAt, docker, adb, hosts, yggdrasilServices, verse
           text("authority", "Odin owns Verse discovery, schema awareness, translation planning, and accepted surface publication. Renderers lower only."),
           metric("docker-count", "Docker containers", docker.containers.length, docker.state === "ok" ? "ok" : "warn"),
           metric("adb-count", "ADB devices", adb.devices.length, adb.devices.length ? "ok" : "warn"),
+          metric("observation-stream-count", "Observation streams", observations.streams.length, activeObservationStreams.length ? "ok" : "warn"),
+          text("observation-ledger", `observation ledger: ${observations.detail}`),
         ]),
+        observationPane(observations),
         ...interfaces.map((entry) => ({
           id: `interface-${stableId(entry.providerId)}`,
           kind: "interface",
@@ -370,6 +379,35 @@ function buildSurface({ observedAt, docker, adb, hosts, yggdrasilServices, verse
   };
 }
 
+function observationPane(observations) {
+  return {
+    id: "observation-streams",
+    kind: "pane",
+    props: {
+      title: "Device Observation Streams",
+      source: observations.source,
+      status: observations.state,
+      detail: observations.detail,
+    },
+    children: observations.streams.length
+      ? observations.streams.map(observationStreamNode)
+      : [text("observation-streams-empty", observations.detail || "no observation streams")],
+  };
+}
+
+function observationStreamNode(entry) {
+  return {
+    id: `observation-stream-${stableId(entry.deviceId)}-${stableId(entry.streamId)}-${stableId(entry.kind)}`,
+    kind: "observation-stream",
+    props: entry,
+    children: [
+      text(`observation-${stableId(entry.streamId)}-schema`, entry.document),
+      text(`observation-${stableId(entry.streamId)}-latest`, `${entry.kind} seq ${entry.sequence} age ${entry.ageSeconds}s`),
+      text(`observation-${stableId(entry.streamId)}-shape`, observationShape(entry)),
+    ],
+  };
+}
+
 function stack(id, children) {
   return { id, kind: "stack", props: {}, children };
 }
@@ -396,6 +434,17 @@ function verse(verseId, name, role, status, capabilities, services = []) {
 
 function service(id, name, state, detail = "") {
   return { id: stableId(id), name, state, detail: String(detail || "") };
+}
+
+function observationServices(observations, deviceId) {
+  return observations.streams
+    .filter((entry) => entry.deviceId === deviceId)
+    .map((entry) => service(
+      `observation-${entry.streamId}-${entry.kind}`,
+      `${entry.kind} observation`,
+      entry.state,
+      observationShape(entry),
+    ));
 }
 
 function hostServices(hostName, checks) {
@@ -485,6 +534,127 @@ async function adbSnapshot() {
   } catch (error) {
     return { state: "error", devices: [], error: error.message };
   }
+}
+
+async function observationSnapshot(source, freshSeconds) {
+  if (!fs.existsSync(source)) {
+    return {
+      state: "missing",
+      source,
+      detail: `missing ${source}`,
+      streams: [],
+    };
+  }
+
+  try {
+    const lines = tailTextFile(source, 512 * 1024)
+      .split(/\r?\n/)
+      .filter(Boolean);
+    const nowMs = Date.now();
+    const byStream = new Map();
+    let accepted = 0;
+    for (const line of lines) {
+      let item;
+      try {
+        item = JSON.parse(line);
+      } catch {
+        continue;
+      }
+
+      if (item.type !== "cultmesh-observation" && item.type !== "cultmesh-media-observation") {
+        continue;
+      }
+
+      accepted += 1;
+      const key = `${item.DeviceId || "unknown"}:${item.StreamId || "unknown"}:${item.Kind || "unknown"}`;
+      byStream.set(key, item);
+    }
+
+    const streams = [...byStream.values()]
+      .map((item) => observationStream(item, nowMs, freshSeconds))
+      .sort((left, right) => left.deviceId.localeCompare(right.deviceId)
+        || left.streamId.localeCompare(right.streamId)
+        || left.kind.localeCompare(right.kind));
+
+    const activeCount = streams.filter((entry) => entry.state === "active").length;
+    return {
+      state: streams.length ? (activeCount ? "active" : "stale") : "waiting",
+      source,
+      detail: `${streams.length} streams, ${activeCount} active, ${accepted} recent records`,
+      streams,
+    };
+  } catch (error) {
+    return {
+      state: "error",
+      source,
+      detail: error.message,
+      streams: [],
+    };
+  }
+}
+
+function tailTextFile(filePath, maxBytes) {
+  const stat = fs.statSync(filePath);
+  const length = Math.min(stat.size, maxBytes);
+  const buffer = Buffer.alloc(length);
+  const fd = fs.openSync(filePath, "r");
+  try {
+    fs.readSync(fd, buffer, 0, length, stat.size - length);
+  } finally {
+    fs.closeSync(fd);
+  }
+
+  return buffer.toString("utf8");
+}
+
+function observationStream(item, nowMs, freshSeconds) {
+  const latestMs = Date.parse(item.WallClockUtc || "");
+  const ageSeconds = Number.isFinite(latestMs) ? Math.max(0, Math.round((nowMs - latestMs) / 1000)) : null;
+  return {
+    deviceId: String(item.DeviceId || "unknown"),
+    streamId: String(item.StreamId || "unknown"),
+    kind: String(item.Kind || "unknown"),
+    document: String(item.document || "unknown"),
+    state: ageSeconds === null ? "unknown" : ageSeconds <= freshSeconds ? "active" : "stale",
+    sequence: item.Sequence ?? null,
+    latestAt: item.WallClockUtc || "",
+    ageSeconds,
+    clockDomainId: item.ClockDomainId || "",
+    format: item.Format || "",
+    width: item.Width ?? null,
+    height: item.Height ?? null,
+    sampleRate: item.SampleRate ?? null,
+    channels: item.Channels ?? null,
+    frameCount: item.FrameCount ?? null,
+    payloadEncoding: item.PayloadEncoding || "",
+    payloadBytes: item.PayloadBytes ?? null,
+    values: Array.isArray(item.Values) ? item.Values : null,
+    accuracy: item.Accuracy ?? null,
+    action: item.Action ?? null,
+    pointerCount: item.PointerCount ?? null,
+    x: item.X ?? null,
+    y: item.Y ?? null,
+  };
+}
+
+function observationShape(entry) {
+  if (entry.width && entry.height) {
+    return `${entry.format || "media"} ${entry.width}x${entry.height}, ${entry.payloadBytes || 0} bytes`;
+  }
+
+  if (entry.sampleRate) {
+    return `${entry.format || "audio"} ${entry.sampleRate} Hz x ${entry.channels || 1}, ${entry.frameCount || 0} frames, ${entry.payloadBytes || 0} bytes`;
+  }
+
+  if (entry.values) {
+    return `${entry.values.map((value) => Number(value).toFixed(3)).join(", ")} accuracy ${entry.accuracy ?? "unknown"}`;
+  }
+
+  if (entry.action) {
+    return `${entry.action} pointers ${entry.pointerCount ?? "unknown"} @ ${entry.x ?? "?"},${entry.y ?? "?"}`;
+  }
+
+  return entry.state;
 }
 
 async function remoteServices(target, services) {

@@ -7,7 +7,7 @@ It is not the renderer. It is not Eve. It is not a Starfire utility script weari
 ## Authority Map
 
 - Owner: Odin owns the network-wide Verse registry, schema catalog index, translation map, and the accepted `odin.allseer` Eve surface.
-- Inputs: CultMesh/CultNet peer announcements, schema catalog responses, local host probes, Docker/ADB host facts, SSH-reachable ops hosts, and later direct Verse subscriptions.
+- Inputs: CultMesh/CultNet peer announcements, schema catalog responses, local host probes, Docker/ADB host facts, SSH-reachable ops hosts, Mimir's normalized Eve observation ledger, and later direct Verse subscriptions.
 - Outputs: CultCache-backed Odin state, CultMesh documents, CultNet schema/catalog messages, and an Eve-compatible `/eve/deck` surface for dashboards.
 - Derived state: Nightwing's attached TUI, browser dashboards, and future Eve clients are projections of Odin state.
 - Forbidden writers: renderers do not probe the network or decide Verse truth; individual projects do not maintain private incompatible discovery ledgers once Odin can see them.
@@ -45,6 +45,7 @@ The first executable is deliberately narrow:
 - observes Starfire Docker, Periwinkle ADB, Nightwing services/GPU, Raven, EVE, and Yggdrasil reachability;
 - exposes Yggdrasil service status when the local SSH alias can reach it.
 - publishes explicit `verse` and `service` nodes for compact Eve/CultUI lowerers.
+- publishes explicit `observation-stream` nodes for Periwinkle/EVE sensor, microphone, touch, and camera stream summaries when Mimir's CultMesh observation ledger is present.
 - ingests the `voidbot.swarm` Eve/CultUI dashboard from Mimir's `/eve/deck` provider surface and embeds it as an Odin `interface` node.
 
 The next real cut is to replace static host probes with CultNet schema discovery and CultMesh Verse peer exchange. The probe layer is an input adapter. It must not become the architecture.
