@@ -46,6 +46,8 @@ The first executable is deliberately narrow:
 - exposes Yggdrasil service status when the local SSH alias can reach it.
 - publishes explicit `verse` and `service` nodes for compact Eve/CultUI lowerers.
 - publishes explicit `observation-stream` nodes for Periwinkle/EVE sensor, microphone, touch, and camera stream summaries when Mimir's CultMesh observation ledger is present.
-- ingests the `mimir.live.stats` and `voidbot.swarm` Eve/CultUI dashboards from Mimir's `/eve/deck` provider surfaces and embeds them as Odin `interface` nodes.
+- discovers Eve deck provider manifests from known/LAN deck endpoints;
+- ingests provider-owned Eve/CultUI dashboards, including `mimir.live.stats` and `voidbot.swarm`, and embeds them as Odin `interface` nodes;
+- persists operator tiling intent as `odin.interface_layout.v1` under ignored `scratch/odin/interface-layout.json`.
 
 The next real cut is to replace static host probes with CultNet schema discovery and CultMesh Verse peer exchange. The probe layer is an input adapter. It must not become the architecture.

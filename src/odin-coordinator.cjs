@@ -36,7 +36,11 @@ const intervalMs = Number(args.intervalMs || 5000);
 const stateDir = args.stateDir || path.join(repoRoot, "scratch", "odin");
 const cachePath = args.cachePath || path.join(stateDir, "odin.ccmp");
 const surfaceKey = "surface:gamecult.network.status";
-const eveDeckUrl = args.eveDeckUrl || "ws://127.0.0.1:8795/eve/deck";
+const layoutPath = args.layoutPath || path.join(stateDir, "interface-layout.json");
+const seedDeckUrls = String(args.eveDeckUrl || "ws://127.0.0.1:8795/eve/deck,ws://192.168.1.75:8795/eve/deck")
+  .split(",")
+  .map((entry) => entry.trim())
+  .filter(Boolean);
 const observationLogPath = args.observationLogPath || path.join(repoRoot, "..", "Mimir", "artifacts", "runtime", "periwinkle-cultmesh-sensors.out.log");
 const observationFreshSeconds = Number(args.observationFreshSeconds || 120);
 
@@ -63,6 +67,8 @@ const surfaceDefinition = defineDocumentType
 let meshNodePromise = null;
 let version = 0;
 let currentState = buildPendingState("Coordinator starting");
+let discoveredDeckUrls = [...seedDeckUrls];
+let lastLanScanAt = 0;
 const clients = new Set();
 
 main().catch((error) => {
@@ -181,10 +187,21 @@ function handleUpgrade(req, socket) {
 }
 
 function handleClientFrame(socket, chunk) {
-  const opcode = chunk[0] & 0x0f;
+  const frame = tryReadFrame(chunk);
+  const opcode = frame?.opcode ?? (chunk[0] & 0x0f);
   if (opcode === 0x8) {
     clients.delete(socket);
     socket.end();
+    return;
+  }
+  if (opcode !== 0x1 || !frame) {
+    return;
+  }
+  try {
+    const command = JSON.parse(frame.payload.toString("utf8"));
+    applyClientCommand(command);
+  } catch {
+    // Renderer input is advisory. Bad client frames do not get to kill Odin.
   }
 }
 
@@ -205,17 +222,21 @@ function sendFrame(socket, opcode, payload) {
 async function buildState() {
   version += 1;
   const observedAt = new Date().toISOString();
-  const [docker, adb, hosts, yggdrasilServices, nightwingServices, nightwingGpu, voidBotDashboard, mimirLiveStats, observations] = await Promise.all([
+  const [docker, adb, hosts, yggdrasilServices, nightwingServices, nightwingGpu, discoveredInterfaces, observations] = await Promise.all([
     dockerSnapshot(),
     adbSnapshot(),
     hostChecks(),
     remoteServices("ygg", ["nginx", "streampixels-web", "streampixels-service", "heimdall", "repixelizer-gui", "bifrost"]),
     remoteServices("nightwing", ["ssh", "nightwing-eve-dashboard", "nightwing-eve-browser-reference", "gamecult-visible-ops", "docker"]),
     remoteGpu("nightwing"),
-    fetchEveProvider(eveDeckUrl, "voidbot.swarm"),
-    fetchEveProvider(eveDeckUrl, "mimir.live.stats"),
+    discoverInterfaces(),
     observationSnapshot(observationLogPath, observationFreshSeconds),
   ]);
+  const interfaceById = new Map(discoveredInterfaces.map((entry) => [entry.providerId, entry]));
+  const interfaces = [...interfaceById.values()];
+  const interfaceSummary = interfaces.map((entry) => `${entry.providerId}:${entry.state}`).join(", ");
+  const voidBotDashboard = interfaceById.get("voidbot.swarm") || dashboardUnavailable("voidbot.swarm", "discovery", "not discovered");
+  const mimirLiveStats = interfaceById.get("mimir.live.stats") || dashboardUnavailable("mimir.live.stats", "discovery", "not discovered");
 
   const verses = [
     verse("starfire.local", "Starfire", "coordinator", "active", ["docker", "adb", "eve-provider"], [
@@ -223,6 +244,7 @@ async function buildState() {
       service("docker", "Docker", docker.state === "ok" ? "active" : "warn", `${docker.containers.length} running`),
       service("adb", "Periwinkle ADB", adb.devices.length ? "active" : "waiting", adb.devices.map((device) => `${device.serial}:${device.state}`).join(", ") || adb.error || "no devices"),
       service("cultcache", "Odin CultCache", fs.existsSync(cachePath) ? "active" : "waiting", path.basename(cachePath)),
+      service("interfaces", "Eve interfaces", interfaces.some((entry) => entry.surface?.root) ? "active" : "waiting", interfaceSummary || "no provider surfaces"),
       service("voidbot-swarm", "VoidBot Swarm", voidBotDashboard.state, voidBotDashboard.detail),
       service("mimir-live-stats", "Mimir Live Stats", mimirLiveStats.state, mimirLiveStats.detail),
       service("mimir-observation-ledger", "Mimir Observation Ledger", observations.state, observations.detail),
@@ -269,7 +291,7 @@ async function buildState() {
       health: entry.status,
       detail: entry.capabilities.join(", "),
     })),
-    surface: buildSurface({ observedAt, docker, adb, hosts, yggdrasilServices, verses, interfaces: [mimirLiveStats, voidBotDashboard], observations }),
+    surface: buildSurface({ observedAt, docker, adb, hosts, yggdrasilServices, verses, interfaces, observations }),
   };
 }
 
@@ -297,6 +319,7 @@ function buildPendingState(message) {
 function buildSurface({ observedAt, docker, adb, hosts, yggdrasilServices, verses, interfaces, observations }) {
   const activeInterfaces = interfaces.filter((entry) => entry.surface?.root);
   const activeObservationStreams = observations.streams.filter((entry) => entry.state === "active");
+  const layout = readLayout();
   return {
     schema: "gamecult.eve.surface.v1",
     id: "gamecult.network.status.surface",
@@ -330,6 +353,7 @@ function buildSurface({ observedAt, docker, adb, hosts, yggdrasilServices, verse
             detail: entry.detail,
             version: entry.version,
             updatedAt: entry.updatedAt,
+            layout: layout.tiles?.[entry.providerId] || defaultLayoutFor(entry, interfaces),
           },
           children: entry.surface?.root ? [entry.surface.root] : [
             text(`interface-${stableId(entry.providerId)}-missing`, entry.detail || "interface unavailable"),
@@ -687,7 +711,81 @@ async function remoteGpu(target) {
   }
 }
 
-async function fetchEveProvider(url, providerId) {
+async function discoverInterfaces() {
+  await refreshLanDeckDiscovery();
+  const manifestsByProvider = new Map();
+  for (const deckUrl of discoveredDeckUrls) {
+    const manifestUrl = deckUrl.replace(/^ws:/, "http:").replace(/\/eve\/deck.*$/, "/eve/deck/providers");
+    try {
+      const catalog = JSON.parse(await httpGet(manifestUrl, 2500));
+      for (const provider of catalog.providers || []) {
+        if (!provider?.id || provider.id === "eve.dashboard.broker") continue;
+        const existing = manifestsByProvider.get(provider.id);
+        if (!existing || deckUrl.startsWith("ws://127.0.0.1")) {
+          manifestsByProvider.set(provider.id, { provider, deckUrl });
+        }
+      }
+    } catch {
+      // Discovery is opportunistic. Failed endpoints fall out of the next pass.
+    }
+  }
+
+  const interfaces = [];
+  for (const { provider, deckUrl } of manifestsByProvider.values()) {
+    interfaces.push(await fetchEveProvider(deckUrl, provider.id, provider));
+  }
+  interfaces.sort((left, right) => left.providerId.localeCompare(right.providerId));
+  return interfaces;
+}
+
+async function refreshLanDeckDiscovery() {
+  const now = Date.now();
+  if (now - lastLanScanAt < 60000) return;
+  lastLanScanAt = now;
+  const urls = new Set(seedDeckUrls);
+  const checks = [];
+  for (const prefix of localIpv4Prefixes()) {
+    for (let host = 1; host <= 254; host += 1) {
+      const address = `${prefix}.${host}`;
+      checks.push(tcpCheck(address, 8795).then((check) => {
+        if (check.state === "open") urls.add(`ws://${address}:8795/eve/deck`);
+      }));
+    }
+  }
+  await Promise.allSettled(checks);
+  discoveredDeckUrls = [...urls].sort();
+}
+
+function localIpv4Prefixes() {
+  const prefixes = new Set();
+  for (const entries of Object.values(os.networkInterfaces())) {
+    for (const entry of entries || []) {
+      if (entry.family !== "IPv4" || entry.internal) continue;
+      const parts = entry.address.split(".");
+      if (parts.length === 4) prefixes.add(parts.slice(0, 3).join("."));
+    }
+  }
+  return [...prefixes];
+}
+
+function httpGet(url, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const req = http.get(url, { timeout: timeoutMs }, (res) => {
+      if ((res.statusCode || 0) >= 400) {
+        reject(new Error(`HTTP ${res.statusCode}`));
+        res.resume();
+        return;
+      }
+      const chunks = [];
+      res.on("data", (chunk) => chunks.push(chunk));
+      res.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    });
+    req.on("timeout", () => req.destroy(new Error("HTTP request timed out")));
+    req.on("error", reject);
+  });
+}
+
+async function fetchEveProvider(url, providerId, manifest = null) {
   try {
     const socket = await openWebSocket(url);
     try {
@@ -698,12 +796,13 @@ async function fetchEveProvider(url, providerId) {
         if (state?.providerId === providerId) {
           return {
             providerId,
-            title: state.title || providerId,
+            title: state.title || manifest?.title || providerId,
             state: "active",
             detail: `${state.surface?.root?.kind || "surface"} ${state.nodes?.length || 0} nodes`,
             version: state.version,
             updatedAt: state.updatedAt,
             source: url,
+            manifest,
             surface: state.surface,
           };
         }
@@ -726,6 +825,7 @@ function dashboardUnavailable(providerId, source, detail) {
     version: 0,
     updatedAt: new Date().toISOString(),
     source,
+    manifest: null,
     surface: null,
   };
 }
@@ -841,8 +941,69 @@ function tryReadFrame(buffer) {
   return { opcode, payload, consumed: offset + length };
 }
 
+function readLayout() {
+  try {
+    return JSON.parse(fs.readFileSync(layoutPath, "utf8"));
+  } catch {
+    return { schema: "odin.interface_layout.v1", tiles: {} };
+  }
+}
+
+function writeLayout(layout) {
+  fs.writeFileSync(layoutPath, JSON.stringify(layout, null, 2), "utf8");
+}
+
+function defaultLayoutFor(entry, interfaces) {
+  const index = Math.max(0, interfaces.findIndex((candidate) => candidate.providerId === entry.providerId));
+  return {
+    tileId: stableId(entry.providerId || "interface"),
+    visible: true,
+    priority: index,
+    x: index % 2,
+    y: Math.floor(index / 2),
+    w: 1,
+    h: entry.providerId === "voidbot.swarm" ? 2 : 1,
+    minWidth: 48,
+    minHeight: 8,
+    preferredWidth: 96,
+    preferredHeight: entry.providerId === "voidbot.swarm" ? 16 : 10,
+    viewportMode: "adaptive",
+  };
+}
+
+function applyClientCommand(command) {
+  if (!command || command.type !== "odin-layout-intent" || !command.providerId) return;
+  const layout = readLayout();
+  layout.schema = "odin.interface_layout.v1";
+  layout.updatedAt = new Date().toISOString();
+  layout.tiles ||= {};
+  const current = layout.tiles[command.providerId] || defaultLayoutFor({ providerId: command.providerId }, []);
+  const next = { ...current };
+  if (command.action === "focus") {
+    next.visible = true;
+    next.priority = -1;
+  } else if (command.action === "resize") {
+    next.w = clampNumber((next.w || 1) + Number(command.dw || 0), 1, 4);
+    next.h = clampNumber((next.h || 1) + Number(command.dh || 0), 1, 4);
+  } else if (command.action === "move") {
+    next.x = clampNumber((next.x || 0) + Number(command.dx || 0), 0, 12);
+    next.y = clampNumber((next.y || 0) + Number(command.dy || 0), 0, 12);
+  } else if (command.action === "toggle") {
+    next.visible = !next.visible;
+  } else {
+    return;
+  }
+  layout.tiles[command.providerId] = next;
+  writeLayout(layout);
+}
+
+function clampNumber(value, min, max) {
+  if (!Number.isFinite(value)) return min;
+  return Math.max(min, Math.min(max, Math.round(value)));
+}
+
 function stableId(value) {
-  return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  return String(value).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 }
 
 function parseArgs(argv) {

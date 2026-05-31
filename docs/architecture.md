@@ -59,9 +59,11 @@ The compact Nightwing TUI lowers these into dense cells and fills surplus screen
 
 ## Current Interface Surface
 
-Odin currently ingests `mimir.live.stats` and `voidbot.swarm` from the local Mimir Eve deck at `ws://127.0.0.1:8795/eve/deck`. `mimir.live.stats` owns the compact Mimir telemetry composition: RMS bars, sync confidence, runtime buffer facts, actuator state, and device observation streams. `voidbot.swarm` owns the VoidBot swarm composition: CTB rail, selected Face summary, state graph, and state detail. Odin embeds each provider's `surface.root` as an `interface` child with provenance, version, status, and source endpoint.
+Odin discovers Eve deck provider manifests from known deck endpoints and LAN hosts exposing the standard Eve deck port. It then ingests each provider's Eve/CultUI state through the provider switch command path. Providers own their compositions; Odin embeds each provider's `surface.root` as an `interface` child with provenance, version, status, source endpoint, and layout metadata.
 
 This is the model for future services: if a service publishes an operator interface, ingest the Eve/CultUI composition graph and lower it. Do not collapse it into a service-status tile unless the graph is unavailable and the tile is explicitly a temporary probe.
+
+Odin persists operator layout intent as `odin.interface_layout.v1` under `scratch/odin/interface-layout.json` for the current Starfire body. The durable CultMesh document should replace this local file once the layout schema is promoted. Layout intents name the provider id and request focus, move, resize, or visibility changes; renderers are input devices for those intents, not local layout owners.
 
 ## Current Observation Surface
 
