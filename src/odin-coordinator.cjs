@@ -43,6 +43,13 @@ const seedDeckUrls = String(args.eveDeckUrl || "ws://127.0.0.1:8795/eve/deck,ws:
   .filter(Boolean);
 const observationLogPath = args.observationLogPath || path.join(repoRoot, "..", "Mimir", "artifacts", "runtime", "periwinkle-cultmesh-sensors.out.log");
 const observationFreshSeconds = Number(args.observationFreshSeconds || 120);
+const interfaceBindingStores = String(
+  args.interfaceBindingStore ||
+  path.join(repoRoot, "..", "VoidBot", ".voidbot", "status", "cultmesh", "voidbot-swarm-state.cc"),
+)
+  .split(",")
+  .map((entry) => entry.trim())
+  .filter(Boolean);
 
 fs.mkdirSync(stateDir, { recursive: true });
 
@@ -50,6 +57,7 @@ const surfaceDefinition = defineDocumentType
   ? defineDocumentType({
       type: "gamecult.eve.surface_state",
       schemaName: "gamecult.eve.surface_state",
+      schemaId: "gamecult.eve.surface_state.v1",
       schemaVersion: "gamecult.eve.surface_state.v1",
       global: true,
       name: (value) => value?.providerId || "surface",
@@ -61,6 +69,38 @@ const surfaceDefinition = defineDocumentType
         { slot: 3, memberName: "updatedAt", typeName: "string" },
         { slot: 4, memberName: "surface", typeName: "object" },
       ],
+    })
+  : null;
+const interfaceBindingDefinition = defineDocumentType
+  ? defineDocumentType({
+      type: "gamecult.eve.interface_binding",
+      schemaName: "gamecult.eve.interface_binding",
+      schemaId: "gamecult.eve.interface_binding.v1",
+      schemaVersion: "gamecult.eve.interface_binding.v1",
+      global: true,
+      name: (value) => value?.bindingId || value?.providerId || "interface",
+      schema: parseObjectDocument("Eve interface binding"),
+    })
+  : null;
+const providerAdvertisementDefinition = defineDocumentType
+  ? defineDocumentType({
+      type: "gamecult.eve.provider_advertisement",
+      schemaName: "gamecult.eve.provider_advertisement",
+      schemaId: "gamecult.eve.provider_advertisement.v1",
+      schemaVersion: "gamecult.eve.provider_advertisement.v1",
+      global: true,
+      name: (value) => value?.providerId || "provider",
+      schema: parseObjectDocument("Eve provider advertisement"),
+    })
+  : null;
+const voidbotSwarmSnapshotDefinition = defineDocumentType
+  ? defineDocumentType({
+      type: "voidbot.swarm_state_snapshot",
+      schemaName: "voidbot.swarm_state_snapshot",
+      schemaId: "voidbot.swarm_state_snapshot.v1",
+      schemaVersion: "voidbot.swarm_state_snapshot.v1",
+      global: true,
+      schema: parseObjectDocument("VoidBot swarm snapshot"),
     })
   : null;
 
@@ -312,6 +352,17 @@ function buildPendingState(message) {
       title: "Odin",
       root: stack("root", [pane("Coordinator", [text("status", message)])]),
       assets: [],
+    },
+  };
+}
+
+function parseObjectDocument(label) {
+  return {
+    parse(value) {
+      if (!value || typeof value !== "object") {
+        throw new Error(`${label} must be an object`);
+      }
+      return value;
     },
   };
 }
@@ -734,7 +785,56 @@ async function discoverInterfaces() {
   for (const { provider, deckUrl } of manifestsByProvider.values()) {
     interfaces.push(await fetchEveProvider(deckUrl, provider.id, provider));
   }
+  for (const entry of await discoverCultMeshInterfaceBindings()) {
+    const existingIndex = interfaces.findIndex((candidate) => candidate.providerId === entry.providerId);
+    if (existingIndex >= 0) {
+      interfaces[existingIndex] = entry;
+    } else {
+      interfaces.push(entry);
+    }
+  }
   interfaces.sort((left, right) => left.providerId.localeCompare(right.providerId));
+  return interfaces;
+}
+
+async function discoverCultMeshInterfaceBindings() {
+  if (!CultMesh || !interfaceBindingDefinition || !surfaceDefinition || !voidbotSwarmSnapshotDefinition || !providerAdvertisementDefinition) {
+    return [];
+  }
+  const interfaces = [];
+  for (const storePath of interfaceBindingStores) {
+    try {
+      if (!fs.existsSync(storePath)) {
+        continue;
+      }
+      const node = await CultMesh.createNode(storePath, {
+        documents: [
+          voidbotSwarmSnapshotDefinition,
+          providerAdvertisementDefinition,
+          interfaceBindingDefinition,
+          surfaceDefinition,
+        ],
+      });
+      const binding = node.get(interfaceBindingDefinition, "voidbot.swarm");
+      if (!binding?.providerId) {
+        continue;
+      }
+      const state = node.get(surfaceDefinition, binding.providerId);
+      interfaces.push({
+        providerId: binding.providerId,
+        title: binding.title || state?.title || binding.providerId,
+        state: "active",
+        detail: `${state?.surface?.root?.kind || binding.kind || "surface"} ${state?.nodes?.length || 0} nodes via CultMesh`,
+        version: state?.version || 0,
+        updatedAt: state?.updatedAt || binding.updatedAt || new Date().toISOString(),
+        source: `cultmesh:${storePath}`,
+        manifest: binding.provider || null,
+        surface: state?.surface || binding.surface || null,
+      });
+    } catch (error) {
+      interfaces.push(dashboardUnavailable("voidbot.swarm", `cultmesh:${storePath}`, error.message));
+    }
+  }
   return interfaces;
 }
 
