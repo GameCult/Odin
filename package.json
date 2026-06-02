@@ -5,11 +5,10 @@
   "description": "GameCult all-seer: CultMesh Verse discovery, schema awareness, translation, and Eve surface publication.",
   "type": "commonjs",
   "scripts": {
-    "check": "node --check src/odin-coordinator.cjs",
+    "check": "node scripts/check-syntax.cjs",
     "start": "node src/odin-coordinator.cjs"
   },
   "engines": {
     "node": ">=20"
   }
 }
-

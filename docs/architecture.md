@@ -22,6 +22,23 @@ host / device / service probes
 
 This first path proves the operator surface and persistent state. It does not yet pretend to be full peer exchange.
 
+## Runtime Body
+
+Odin's executable body is split by ownership:
+
+- `src/odin-coordinator.cjs`: process lifecycle, refresh loop, persistence, health, and transport wiring.
+- `src/odin/config.cjs`: runtime paths, seed deck URLs, intervals, and CultLib module path setup.
+- `src/odin/documents.cjs`: CultCache/CultMesh document definitions accepted by Odin.
+- `src/odin/probes.cjs`: local Docker/ADB/TCP probes plus named SSH service and GPU probes.
+- `src/odin/observations.cjs`: Mimir observation ledger tailing and dashboard-ready stream projection.
+- `src/odin/interfaces.cjs`: Eve provider manifest discovery, provider WebSocket fetches, and CultMesh interface bindings.
+- `src/odin/layout.cjs`: `odin.interface_layout.v1` read/write and merge policy.
+- `src/odin/surface.cjs`: `gamecult.eve.surface.v1` tree projection.
+- `src/odin/state.cjs`: one refresh's input records into `odin.allseer` dashboard state.
+- `src/odin/websocket.cjs`: Eve deck HTTP/WebSocket serving and client WebSocket helpers.
+
+The entrypoint is not allowed to grow new probe, surface, provider, layout, or renderer policy. If a new owner is needed, name the owner and its invariant before adding code.
+
 ## Target Mechanism
 
 ```text
