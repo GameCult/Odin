@@ -404,7 +404,7 @@ function buildSurface({ observedAt, docker, adb, hosts, yggdrasilServices, verse
             detail: entry.detail,
             version: entry.version,
             updatedAt: entry.updatedAt,
-            layout: layout.tiles?.[entry.providerId] || defaultLayoutFor(entry, interfaces),
+            layout: mergeLayoutIntent(layout.tiles?.[entry.providerId], entry, interfaces),
           },
           children: entry.surface?.root ? [entry.surface.root] : [
             text(`interface-${stableId(entry.providerId)}-missing`, entry.detail || "interface unavailable"),
@@ -1055,20 +1055,65 @@ function writeLayout(layout) {
 
 function defaultLayoutFor(entry, interfaces) {
   const index = Math.max(0, interfaces.findIndex((candidate) => candidate.providerId === entry.providerId));
+  const intent = surfaceLayoutIntent(entry);
+  const preferredHeight = positiveNumber(intent.preferredHeight, entry.providerId === "voidbot.swarm" ? 16 : 10);
+  const minHeight = positiveNumber(intent.minHeight, 8);
+  const preferredWidth = positiveNumber(intent.preferredWidth, 96);
+  const minWidth = positiveNumber(intent.minWidth, 48);
+  const priority = Number.isFinite(intent.priority) ? intent.priority : index;
   return {
     tileId: stableId(entry.providerId || "interface"),
     visible: true,
-    priority: index,
+    priority,
     x: index % 2,
     y: Math.floor(index / 2),
     w: 1,
-    h: entry.providerId === "voidbot.swarm" ? 2 : 1,
-    minWidth: 48,
-    minHeight: 8,
-    preferredWidth: 96,
-    preferredHeight: entry.providerId === "voidbot.swarm" ? 16 : 10,
-    viewportMode: "adaptive",
+    h: Math.max(1, Math.ceil(preferredHeight / 12)),
+    minWidth,
+    minHeight,
+    preferredWidth,
+    preferredHeight,
+    density: intent.density || "adaptive",
+    viewportMode: intent.viewportMode || "adaptive",
   };
+}
+
+function mergeLayoutIntent(existing, entry, interfaces) {
+  const base = existing && typeof existing === "object"
+    ? { ...existing }
+    : defaultLayoutFor(entry, interfaces);
+  const intent = surfaceLayoutIntent(entry);
+  const fallback = defaultLayoutFor(entry, interfaces);
+  const minWidth = positiveNumber(intent.minWidth, positiveNumber(base.minWidth, fallback.minWidth));
+  const minHeight = positiveNumber(intent.minHeight, positiveNumber(base.minHeight, fallback.minHeight));
+  const preferredWidth = positiveNumber(intent.preferredWidth, positiveNumber(base.preferredWidth, fallback.preferredWidth));
+  const preferredHeight = positiveNumber(intent.preferredHeight, positiveNumber(base.preferredHeight, fallback.preferredHeight));
+  return {
+    ...base,
+    minWidth,
+    minHeight,
+    preferredWidth: Math.max(positiveNumber(base.preferredWidth, preferredWidth), preferredWidth),
+    preferredHeight: Math.max(positiveNumber(base.preferredHeight, preferredHeight), preferredHeight),
+    h: Math.max(positiveNumber(base.h, fallback.h), Math.ceil(preferredHeight / 12)),
+    w: Math.max(positiveNumber(base.w, fallback.w), Math.ceil(preferredWidth / 96)),
+    priority: Number.isFinite(intent.priority) ? Math.min(Number(base.priority ?? intent.priority), intent.priority) : base.priority,
+    density: intent.density || base.density || fallback.density,
+    viewportMode: intent.viewportMode || base.viewportMode || fallback.viewportMode,
+  };
+}
+
+function surfaceLayoutIntent(entry) {
+  const root = entry?.surface?.root;
+  if (!root || typeof root !== "object") return {};
+  const layout = root.layout && typeof root.layout === "object" ? root.layout : {};
+  const props = root.props && typeof root.props === "object" ? root.props : {};
+  const propLayout = props.layout && typeof props.layout === "object" ? props.layout : {};
+  return { ...propLayout, ...layout };
+}
+
+function positiveNumber(value, fallback) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : fallback;
 }
 
 function applyClientCommand(command) {
