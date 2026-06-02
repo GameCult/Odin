@@ -4,6 +4,11 @@ Odin is the GameCult all-seer: the central CultMesh node every Verse can use to 
 
 It is not the renderer. It is not Eve. It is not a Starfire utility script wearing a bigger coat. Odin owns discovery, schema awareness, translation planning, and accepted operator surfaces. Eve and the Nightwing compact TUI lower Odin's published CultUI surface into whatever body they have.
 
+Odin is also the compliance witness for the GameCult service architecture:
+durable service state in CultCache `.cc`, local Verse visibility through
+CultMesh, meaningful dashboards as Eve GUI/TUI DSL, and renderers as lowerers
+only.
+
 ## Authority Map
 
 - Owner: Odin owns the network-wide Verse registry, schema catalog index, translation map, and the accepted `odin.allseer` Eve surface.

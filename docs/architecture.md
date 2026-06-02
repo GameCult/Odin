@@ -60,6 +60,32 @@ Verse announcement
 - CultCache is the durable state substrate; CultNet is the wire vocabulary; CultMesh is the Verse and peer-consensus layer.
 - The Eve surface carries explicit `verse`, `service`, and `observation-stream` nodes. Compact renderers may derive visual facets from those nodes, but may not invent observation truth.
 
+## Service Architecture Contract
+
+Odin is the witness for the GameCult service contract:
+
+```text
+durable service state -> CultCache .cc
+shared local visibility -> CultMesh
+interactive operator surface -> Eve GUI/TUI DSL
+discovery and aggregation -> Odin
+renderer bodies -> Eve clients, browser, compact TUI, native surfaces, overlays
+```
+
+When Odin sees a service, it should be able to answer:
+
+- What Verse owns this service?
+- Which typed schemas does it publish?
+- Where is its durable `.cc` state or CultCache-compatible store?
+- Which CultMesh documents or providers make it visible locally?
+- Which Eve GUI/TUI surface represents its meaningful operator interface?
+- Which command boundary accepts, denies, forwards, or reconciles user intent?
+- Which fields are stale, predicted, denied, or authoritative?
+
+This is not a reporting nicety. It is how Odin prevents services from becoming
+private little islands with separate dashboards, separate state formats, and
+separate command languages.
+
 ## Current Service Surface
 
 Odin currently publishes service squares for:
@@ -79,6 +105,12 @@ The compact Nightwing TUI lowers these into dense cells and fills surplus screen
 Odin discovers Eve deck provider manifests from known deck endpoints and LAN hosts exposing the standard Eve deck port. It then ingests each provider's Eve/CultUI state through the provider switch command path. Providers own their compositions; Odin embeds each provider's `surface.root` as an `interface` child with provenance, version, status, source endpoint, and layout metadata.
 
 This is the model for future services: if a service publishes an operator interface, ingest the Eve/CultUI composition graph and lower it. Do not collapse it into a service-status tile unless the graph is unavailable and the tile is explicitly a temporary probe.
+
+The expected provider output is Eve DSL or an equivalent
+`gamecult.eve.surface.v1` retained tree. GUI and TUI are lowerings of the same
+interactive language; they are not separate dashboard products. Huginn's `.cc`
+inspection surface is the current clean example: Huginn inspects CultCache bytes
+and emits Eve DSL, while Eve or any other runtime owns presentation.
 
 Odin persists operator layout intent as `odin.interface_layout.v1` under `scratch/odin/interface-layout.json` for the current Starfire body. The durable CultMesh document should replace this local file once the layout schema is promoted. Layout intents name the provider id and request focus, move, resize, or visibility changes; renderers are input devices for those intents, not local layout owners.
 
