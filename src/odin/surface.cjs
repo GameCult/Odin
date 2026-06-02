@@ -19,6 +19,12 @@ function buildSurface({ observedAt, docker, adb, hosts, yggdrasilServices, verse
         observedAt,
         summary: `${verses.length} Verses / ${verses.reduce((sum, entry) => sum + entry.services.length, 0)} services / ${activeInterfaces.length} interfaces / ${activeObservationStreams.length} live streams`,
         layout: fullscreenLayoutIntent("odin.allseer", -100),
+        presentation: {
+          theme: "bifrost-pride",
+          frame: "animated-rainbow",
+          dividerMotion: "bifrost-rainbow-dance",
+          intent: "Nightwing Odin Overview should render with an animated rainbow frame and dancing dividers; renderer owns lowering, Odin owns truth.",
+        },
       },
       children: [
         pane("Coordinator", [
