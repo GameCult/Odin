@@ -47,6 +47,7 @@ The first executable is deliberately narrow:
 - publishes explicit `verse` and `service` nodes for compact Eve/CultUI lowerers.
 - publishes explicit `observation-stream` nodes for Periwinkle/EVE sensor, microphone, touch, and camera stream summaries when Mimir's CultMesh observation ledger is present.
 - discovers Eve deck provider manifests from known/LAN deck endpoints;
+- includes local Spotiverse on `ws://127.0.0.1:8796/eve/deck` in the known provider seed list;
 - ingests provider-owned Eve/CultUI dashboards, including `mimir.live.stats` and `voidbot.swarm`, and embeds them as Odin `interface` nodes;
 - persists operator tiling intent as `odin.interface_layout.v1` under ignored `scratch/odin/interface-layout.json`.
 

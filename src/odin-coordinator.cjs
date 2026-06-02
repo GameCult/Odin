@@ -37,7 +37,7 @@ const stateDir = args.stateDir || path.join(repoRoot, "scratch", "odin");
 const cachePath = args.cachePath || path.join(stateDir, "odin.ccmp");
 const surfaceKey = "surface:gamecult.network.status";
 const layoutPath = args.layoutPath || path.join(stateDir, "interface-layout.json");
-const seedDeckUrls = String(args.eveDeckUrl || "ws://127.0.0.1:8795/eve/deck,ws://192.168.1.75:8795/eve/deck")
+const seedDeckUrls = String(args.eveDeckUrl || "ws://127.0.0.1:8795/eve/deck,ws://127.0.0.1:8796/eve/deck,ws://192.168.1.75:8795/eve/deck")
   .split(",")
   .map((entry) => entry.trim())
   .filter(Boolean);
