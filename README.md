@@ -9,6 +9,19 @@ durable service state in CultCache `.cc`, local Verse visibility through
 CultMesh, meaningful dashboards as Eve GUI/TUI DSL, and renderers as lowerers
 only.
 
+## Gjallar
+
+Gjallar is Odin's herald organ: the daemon/persona package that should carry
+Odin's gathered sight into agent context. Odin sees the Verses; Gjallar
+transmits the usable tapestry of affordances without becoming the owner of
+discovery, probing, rendering, or schema truth.
+
+Local package surfaces:
+
+- Organ contract: `docs/gjallar.md`
+- Persona state: `personas/gjallar.persona_state.json`
+- Avatar asset: `assets/personas/gjallar-avatar.png`
+
 ## Authority Map
 
 - Owner: Odin owns the network-wide Verse registry, schema catalog index, translation map, and the accepted `odin.allseer` Eve surface.

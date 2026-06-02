@@ -5,6 +5,7 @@
   "description": "GameCult all-seer: CultMesh Verse discovery, schema awareness, translation, and Eve surface publication.",
   "type": "commonjs",
   "scripts": {
+    "gjallar:persona": "node -e \"const fs=require('node:fs'); JSON.parse(fs.readFileSync('personas/gjallar.persona_state.json','utf8')); console.log('Gjallar persona state is readable JSON.');\"",
     "check": "node scripts/check-syntax.cjs",
     "start": "node src/odin-coordinator.cjs"
   },
