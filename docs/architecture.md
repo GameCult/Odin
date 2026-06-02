@@ -40,13 +40,13 @@ Odin's executable body is split by ownership:
 The entrypoint is not allowed to grow new probe, surface, provider, layout, or renderer policy. If a new owner is needed, name the owner and its invariant before adding code.
 
 Gjallar is the named herald organ for future agent-context transmission. Its
-current package lives in `docs/gjallar.md`, `personas/gjallar.persona_state.json`,
-`assets/personas/gjallar-avatar.png`, and
+current package lives in `docs/gjallar.md`, `personas/gjallar.persona_state.cc`,
+`src/Gjallar/Gjallar.csproj`, `assets/personas/gjallar-avatar.png`, and
 `assets/personas/gjallar-avatar-pixel-256.png`. When it becomes executable, it
-should be added as its own entrypoint rather than being folded into Odin's
-coordinator. Gjallar may read Odin-owned state and emit affordance packets; it
-must not own the underlying registry, probe, provider, layout, or translation
-decisions.
+should be added as its own C# CultMesh entrypoint rather than being folded into
+Odin's coordinator. Gjallar may read Odin-owned state and emit affordance
+packets; it must not own the underlying registry, probe, provider, layout, or
+translation decisions.
 
 ## Target Mechanism
 

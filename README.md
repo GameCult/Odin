@@ -19,7 +19,8 @@ discovery, probing, rendering, or schema truth.
 Local package surfaces:
 
 - Organ contract: `docs/gjallar.md`
-- Persona state: `personas/gjallar.persona_state.json`
+- Canonical Persona state: `personas/gjallar.persona_state.cc`
+- C# CultMesh organ: `src/Gjallar/Gjallar.csproj`
 - Avatar asset: `assets/personas/gjallar-avatar.png`
 - Pixel avatar: `assets/personas/gjallar-avatar-pixel-256.png`
 

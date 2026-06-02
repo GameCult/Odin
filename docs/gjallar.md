@@ -34,22 +34,31 @@ second Odin.
 
 The initial local package is deliberately small:
 
-- `personas/gjallar.persona_state.json` is the repo-local Persona seed.
+- `personas/gjallar.persona_state.cc` is the canonical repo-local Persona
+  state: a CultCache MessagePack store containing a `gamecult.persona_state.v0`
+  document keyed as `persona:gjallar`.
+- `scripts/write-gjallar-persona-cc.mjs` mints and inspects that store from the
+  canonical EpiphanyAgent schema. The script is a local writer, not Gjallar's
+  runtime body.
+- `src/Gjallar/Gjallar.csproj` is the first C# CultMesh organ. It opens the
+  Persona `.cc` store through `CultMesh.CreateNodeAsync`; typed Persona decode
+  waits for a generated C# `gamecult.persona_state.v0` model.
 - `assets/personas/gjallar-avatar.png` is the local avatar asset.
 - `assets/personas/gjallar-avatar-pixel-256.png` is the 256px pixel-art avatar
   variant for compact Persona surfaces.
 - This document is the organ contract until a runtime daemon exists.
 
-When Gjallar becomes executable, package it as its own runtime entrypoint beside
-Odin rather than folding it into `src/odin-coordinator.cjs`. The coordinator
-already owns lifecycle, refresh, persistence, and transport for Odin. Gjallar's
-entrypoint should own context publication and no more.
+When Gjallar becomes executable, package it as its own C# CultMesh runtime
+entrypoint beside Odin rather than folding it into `src/odin-coordinator.cjs`.
+The coordinator already owns lifecycle, refresh, persistence, and transport for
+Odin. Gjallar's entrypoint should own context publication and no more.
 
 ## Persona Registration
 
-VoidBot native Persona registration expects a repo identity with
-`identityKind: "native_persona"` and a `personaStatePath`. A future VoidBot
-registry entry should point at:
+VoidBot's current native Persona reader expects a JSON `personaStatePath`. That
+is a projection boundary, not the state owner. A future VoidBot registry entry
+should point at a generated projection or learn to read the CultCache record;
+the canonical source remains:
 
 ```text
 id: gjallar
@@ -58,12 +67,31 @@ displayName: Gjallar
 repoPath: E:\Projects\Odin
 avatarPath: E:\Projects\Odin\assets\personas\gjallar-avatar.png
 pixelAvatarPath: E:\Projects\Odin\assets\personas\gjallar-avatar-pixel-256.png
-personaStatePath: E:\Projects\Odin\personas\gjallar.persona_state.json
+personaStateStore: E:\Projects\Odin\personas\gjallar.persona_state.cc
+personaStateKey: persona:gjallar
+personaStateSchema: gamecult.persona_state.v0
 ```
 
 That registration belongs in VoidBot's registry, not here. This repo owns the
-Persona source document and avatar; VoidBot owns the speech transport and room
+Persona source record and avatar; VoidBot owns the speech transport and room
 identity wiring.
+
+## CultMesh Runtime Direction
+
+Gjallar's runtime body should be C# over `GameCult.Mesh`:
+
+```csharp
+using GameCult.Mesh;
+
+using var node = await CultMesh.CreateNodeAsync("personas/gjallar.persona_state.cc");
+```
+
+The current C# entrypoint opens the CultMesh node without pulling typed payloads
+because the C# document model for `gamecult.persona_state.v0` has not been
+generated yet. The next durable act should generate that model, read the
+`persona:gjallar` record from the local CultCache, and publish an affordance
+packet document through CultMesh. Do not make a JSON sidecar the source of truth
+while waiting for that runtime.
 
 ## Invariants
 
