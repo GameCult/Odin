@@ -382,6 +382,7 @@ function buildSurface({ observedAt, docker, adb, hosts, yggdrasilServices, verse
         title: "Odin All-Seer",
         observedAt,
         summary: `${verses.length} Verses / ${verses.reduce((sum, entry) => sum + entry.services.length, 0)} services / ${activeInterfaces.length} interfaces / ${activeObservationStreams.length} live streams`,
+        layout: fullscreenLayoutIntent("odin.allseer", -100),
       },
       children: [
         pane("Coordinator", [
@@ -1078,6 +1079,24 @@ function defaultLayoutFor(entry, interfaces) {
   };
 }
 
+function fullscreenLayoutIntent(tileId, priority = -100) {
+  return {
+    tileId: stableId(tileId || "fullscreen"),
+    visible: true,
+    priority,
+    x: 0,
+    y: 0,
+    w: 4,
+    h: 4,
+    minWidth: 96,
+    minHeight: 36,
+    preferredWidth: 192,
+    preferredHeight: 48,
+    density: "comfortable",
+    viewportMode: "fullscreen",
+  };
+}
+
 function mergeLayoutIntent(existing, entry, interfaces) {
   const base = existing && typeof existing === "object"
     ? { ...existing }
@@ -1125,8 +1144,7 @@ function applyClientCommand(command) {
   const current = layout.tiles[command.providerId] || defaultLayoutFor({ providerId: command.providerId }, []);
   const next = { ...current };
   if (command.action === "focus") {
-    next.visible = true;
-    next.priority = -1;
+    Object.assign(next, fullscreenLayoutIntent(command.providerId, -100));
   } else if (command.action === "resize") {
     next.w = clampNumber((next.w || 1) + Number(command.dw || 0), 1, 4);
     next.h = clampNumber((next.h || 1) + Number(command.dh || 0), 1, 4);
