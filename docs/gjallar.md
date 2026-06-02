@@ -36,6 +36,8 @@ The initial local package is deliberately small:
 
 - `personas/gjallar.persona_state.json` is the repo-local Persona seed.
 - `assets/personas/gjallar-avatar.png` is the local avatar asset.
+- `assets/personas/gjallar-avatar-pixel-256.png` is the 256px pixel-art avatar
+  variant for compact Persona surfaces.
 - This document is the organ contract until a runtime daemon exists.
 
 When Gjallar becomes executable, package it as its own runtime entrypoint beside
@@ -55,6 +57,7 @@ repoName: Odin
 displayName: Gjallar
 repoPath: E:\Projects\Odin
 avatarPath: E:\Projects\Odin\assets\personas\gjallar-avatar.png
+pixelAvatarPath: E:\Projects\Odin\assets\personas\gjallar-avatar-pixel-256.png
 personaStatePath: E:\Projects\Odin\personas\gjallar.persona_state.json
 ```
 
