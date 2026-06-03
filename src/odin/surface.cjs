@@ -80,9 +80,14 @@ function metric(id, label, value, tone) {
 
 function verseUri(entry) {
   const providerId = String(entry.providerId || "").trim();
+  if (hasBodyPrefix(providerId)) return providerId;
   const body = sourceBody(entry.source);
   if (!body || providerId.startsWith(`${body}.`)) return providerId;
   return `${body}.${providerId}`;
+}
+
+function hasBodyPrefix(providerId) {
+  return ["starfire", "yggdrasil", "nightwing", "eve", "periwinkle", "raven"].some((body) => providerId.startsWith(`${body}.`));
 }
 
 function sourceBody(source) {

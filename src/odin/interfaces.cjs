@@ -142,16 +142,17 @@ async function fetchEveProvider(url, providerId, manifest = null) {
         const message = await readServerTextFrame(socket, 2500);
         const state = JSON.parse(message);
         if (state?.providerId === providerId) {
+          const surface = state.surface?.root ? state.surface : legacySurfaceFromNodes(state, manifest);
           return {
             providerId,
             title: state.title || manifest?.title || providerId,
             state: "active",
-            detail: `${state.surface?.root?.kind || "surface"} ${state.nodes?.length || 0} nodes`,
+            detail: `${surface?.root?.kind || "surface"} ${state.nodes?.length || 0} nodes`,
             version: state.version,
             updatedAt: state.updatedAt,
             source: url,
             manifest,
-            surface: state.surface,
+            surface,
           };
         }
       }
@@ -178,8 +179,59 @@ function dashboardUnavailable(providerId, source, detail) {
   };
 }
 
+function legacySurfaceFromNodes(state, manifest = null) {
+  const nodes = Array.isArray(state?.nodes) ? state.nodes : [];
+  if (!nodes.length) {
+    return null;
+  }
+
+  const providerId = state.providerId || manifest?.id || "legacy-provider";
+  const title = state.title || manifest?.title || providerId;
+  return {
+    schema: "gamecult.eve.surface.v1",
+    id: `legacy-${providerId}`,
+    title,
+    root: {
+      id: `legacy-root-${providerId}`,
+      kind: "dashboard",
+      props: {
+        title,
+        providerId,
+        compatibility: "legacy-dashboard-nodes",
+      },
+      children: nodes.map((node) => ({
+        id: String(node.id || node.label || "node"),
+        kind: "pane",
+        props: {
+          title: String(node.label || node.id || "node"),
+          status: String(node.health || ""),
+          providerId: node.providerId || providerId,
+          command: node.command || "",
+          endpoint: node.endpoint || "",
+        },
+        children: [
+          textElement(`${node.id || node.label || "node"}-kind`, `kind: ${node.kind || "node"}`),
+          textElement(`${node.id || node.label || "node"}-health`, `health: ${node.health || "unknown"}`),
+          node.endpoint ? textElement(`${node.id || node.label || "node"}-endpoint`, `endpoint: ${node.endpoint}`) : null,
+        ].filter(Boolean),
+      })),
+    },
+    assets: [],
+  };
+}
+
+function textElement(id, text) {
+  return {
+    id: String(id),
+    kind: "text",
+    props: { text: String(text) },
+    children: [],
+  };
+}
+
 module.exports = {
   createInterfaceDiscovery,
   dashboardUnavailable,
   fetchEveProvider,
+  legacySurfaceFromNodes,
 };
