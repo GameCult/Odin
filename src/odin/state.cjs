@@ -52,12 +52,16 @@ function createStateBuilder({ cachePath, interfaceDiscovery, layoutStore, observ
     const interfaceSummary = interfaces.map((entry) => `${entry.providerId}:${entry.state}`).join(", ");
     const voidBotDashboard = interfaceById.get("voidbot.swarm") || dashboardUnavailable("voidbot.swarm", "discovery", "not discovered");
     const mimirLiveStats = interfaceById.get("mimir.live.stats") || dashboardUnavailable("mimir.live.stats", "discovery", "not discovered");
+    const periwinkleServices = [
+      ...adbFaultServices(adb),
+      ...observationServices(observations, "periwinkle", service),
+    ];
 
     const verses = [
       verse("starfire.local", "Starfire", "coordinator", "active", ["docker", "adb", "eve-provider"], [
         service("odin", "Odin all-seer", "active", "ws://0.0.0.0:8797/eve/deck"),
         service("docker", "Docker", docker.state === "ok" ? "active" : "warn", `${docker.containers.length} running`),
-        service("adb", "Periwinkle ADB", adb.devices.length ? "active" : "waiting", adb.devices.map((device) => `${device.serial}:${device.state}`).join(", ") || adb.error || "no devices"),
+        service("adb", "ADB transport", adbState(adb), adbDetail(adb)),
         service("cultcache", "Odin CultCache", fs.existsSync(cachePath) ? "active" : "waiting", require("path").basename(cachePath)),
         service("interfaces", "Eve interfaces", interfaces.some((entry) => entry.surface?.root) ? "active" : "waiting", interfaceSummary || "no provider surfaces"),
         service("voidbot-swarm", "VoidBot Swarm", voidBotDashboard.state, voidBotDashboard.detail),
@@ -71,16 +75,13 @@ function createStateBuilder({ cachePath, interfaceDiscovery, layoutStore, observ
         service("gpu", "GTX 860M", nightwingGpu.state, nightwingGpu.detail),
       ]),
       verse("eve.ipad", "EVE", "ios-client", hostState(hosts.EVE), ["ssh", "native-eve"], hostServices("EVE", hosts.EVE)),
-      verse("periwinkle.android", "Periwinkle", "android-client", adb.devices.length ? "connected" : "waiting", ["adb", "sensor-edge"], [
-        service("adb-device", "ADB device", adb.devices.length ? "active" : "waiting", adb.devices.map((device) => `${device.serial}:${device.state}`).join(", ") || adb.error || "no devices"),
-        ...observationServices(observations, "periwinkle", service),
-      ]),
+      periwinkleServices.length ? verse("periwinkle.android", "Periwinkle", "android-client", periwinkleStatus(periwinkleServices), ["sensor-edge", "adb-transport"], periwinkleServices) : null,
       verse("raven.local", "Raven", "local-peer", hostState(hosts.Raven), ["ssh"], hostServices("Raven", hosts.Raven)),
       verse("yggdrasil.ops", "Yggdrasil", "ops-host", hostState(hosts.Yggdrasil), ["ssh", "https", "services"], [
         ...hostServices("Yggdrasil", hosts.Yggdrasil),
         ...yggdrasilServices.map((entry) => service(`systemd-${entry.name}`, entry.name, systemdState(entry.state), entry.state)),
       ]),
-    ];
+    ].filter(Boolean);
 
     return {
       type: "dashboard-state",
@@ -119,6 +120,38 @@ function verse(verseId, name, role, status, capabilities, services = []) {
 
 function service(id, name, state, detail = "") {
   return { id: stableId(id), name, state, detail: String(detail || "") };
+}
+
+function adbState(adb) {
+  if (adb.state !== "ok") return adb.state;
+  return adbFaultDevices(adb).length ? "warn" : "ok";
+}
+
+function adbDetail(adb) {
+  if (adb.error) return adb.error;
+  if (adb.devices.length === 0) return "no devices";
+  return adb.devices.map((device) => `${device.serial}:${device.state}`).join(", ");
+}
+
+function adbFaultDevices(adb) {
+  return adb.devices.filter((device) => device.state !== "device");
+}
+
+function adbFaultServices(adb) {
+  if (adb.state !== "ok") {
+    return [service("adb-transport", "ADB transport", adb.state, adbDetail(adb))];
+  }
+
+  return adbFaultDevices(adb).map((device) =>
+    service(`adb-${device.serial}`, "ADB device fault", device.state, `${device.serial}:${device.state}`),
+  );
+}
+
+function periwinkleStatus(services) {
+  if (services.some((entry) => entry.state === "active")) return "active";
+  if (services.some((entry) => entry.state === "stale")) return "stale";
+  if (services.some((entry) => entry.state === "offline" || entry.state === "unauthorized" || entry.state === "error" || entry.state === "missing")) return "warn";
+  return "waiting";
 }
 
 module.exports = {

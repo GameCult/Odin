@@ -31,7 +31,7 @@ function buildSurface({ observedAt, docker, adb, hosts, yggdrasilServices, verse
           text("observed", `observed ${observedAt}`),
           text("authority", "Odin owns Verse discovery, schema awareness, translation planning, and accepted surface publication. Renderers lower only."),
           metric("docker-count", "Docker containers", docker.containers.length, docker.state === "ok" ? "ok" : "warn"),
-          metric("adb-count", "ADB devices", adb.devices.length, adb.devices.length ? "ok" : "warn"),
+          metric("adb-count", "ADB devices", adb.devices.length, adbTone(adb)),
           metric("observation-stream-count", "Observation streams", observations.streams.length, activeObservationStreams.length ? "ok" : "warn"),
           text("observation-ledger", `observation ledger: ${observations.detail}`),
         ]),
@@ -90,9 +90,6 @@ function buildSurface({ observedAt, docker, adb, hosts, yggdrasilServices, verse
         pane("Docker", docker.containers.length
           ? docker.containers.slice(0, 10).map((container) => text(`docker-${container.name}`, `${container.name}: ${container.status} (${container.image})`))
           : [text("docker-empty", docker.error || "no running containers")]),
-        pane("Periwinkle / ADB", adb.devices.length
-          ? adb.devices.map((device) => text(`adb-${device.serial}`, `${device.serial}: ${device.state}`))
-          : [text("adb-empty", adb.error || "no devices")]),
       ],
     },
     assets: [],
@@ -127,6 +124,11 @@ function text(id, value) {
 
 function metric(id, label, value, tone) {
   return { id, kind: "metric", props: { label, text: `${label}: ${value}`, value, tone }, children: [] };
+}
+
+function adbTone(adb) {
+  if (adb.state !== "ok") return "warn";
+  return adb.devices.some((device) => device.state !== "device") ? "warn" : "ok";
 }
 
 module.exports = {
