@@ -17,7 +17,7 @@ function buildSurface({ observedAt, docker, adb, hosts, yggdrasilServices, verse
       props: {
         title: "Odin All-Seer",
         observedAt,
-        summary: `${verses.length} Verses / ${verses.reduce((sum, entry) => sum + entry.services.length, 0)} services / ${activeInterfaces.length} interfaces / ${activeObservationStreams.length} live streams`,
+        summary: `${activeInterfaces.length} Eve surfaces / ${activeObservationStreams.length} live streams`,
         layout: fullscreenLayoutIntent("odin.allseer", -100),
         presentation: {
           theme: "bifrost-pride",
@@ -27,20 +27,11 @@ function buildSurface({ observedAt, docker, adb, hosts, yggdrasilServices, verse
         },
       },
       children: [
-        pane("Coordinator", [
-          text("observed", `observed ${observedAt}`),
-          text("authority", "Odin owns Verse discovery, schema awareness, translation planning, and accepted surface publication. Renderers lower only."),
-          metric("docker-count", "Docker containers", docker.containers.length, docker.state === "ok" ? "ok" : "warn"),
-          metric("adb-count", "ADB devices", adb.devices.length, adbTone(adb)),
-          metric("observation-stream-count", "Observation streams", observations.streams.length, activeObservationStreams.length ? "ok" : "warn"),
-          text("observation-ledger", `observation ledger: ${observations.detail}`),
-        ]),
-        observationPane(observations, text),
-        ...interfaces.map((entry) => ({
+        ...activeInterfaces.map((entry) => ({
           id: `interface-${stableId(entry.providerId)}`,
           kind: "interface",
           props: {
-            title: entry.title,
+            title: verseUri(entry),
             providerId: entry.providerId,
             source: entry.source,
             status: entry.state,
@@ -49,47 +40,8 @@ function buildSurface({ observedAt, docker, adb, hosts, yggdrasilServices, verse
             updatedAt: entry.updatedAt,
             layout: mergeLayoutIntent(layout.tiles?.[entry.providerId], entry, interfaces),
           },
-          children: entry.surface?.root ? [entry.surface.root] : [
-            text(`interface-${stableId(entry.providerId)}-missing`, entry.detail || "interface unavailable"),
-          ],
+          children: [entry.surface.root],
         })),
-        ...verses.map((entry) => ({
-          id: `verse-${entry.verseId}`,
-          kind: "verse",
-          props: {
-            title: entry.name,
-            verseId: entry.verseId,
-            role: entry.role,
-            status: entry.status,
-            capabilities: entry.capabilities,
-            services: entry.services,
-          },
-          children: entry.services.map((item) => ({
-            id: `service-${entry.verseId}-${item.id}`,
-            kind: "service",
-            props: item,
-            children: [],
-          })),
-        })),
-        pane("Verses", verses.map((entry) =>
-          card(`verse-card-${entry.verseId}`, [
-            text(`verse-title-${entry.verseId}`, `${entry.name} :: ${entry.verseId}`),
-            text(`verse-status-${entry.verseId}`, `${entry.role} / ${entry.status}`),
-            text(`verse-caps-${entry.verseId}`, entry.capabilities.join(", ")),
-          ], entry.status),
-        )),
-        pane("Hosts", Object.entries(hosts).map(([name, checks]) =>
-          card(`host-${name}`, [
-            text(`host-name-${name}`, name),
-            ...checks.map((check) => text(`host-${name}-${check.name}`, `${check.name}: ${check.state}${check.detail ? ` ${check.detail}` : ""}`)),
-          ], checks.some((check) => check.state === "open" || check.state === "ok") ? "ok" : "warn"),
-        )),
-        pane("Yggdrasil Services", yggdrasilServices.map((service) =>
-          text(`ygg-${service.name}`, `${service.name}: ${service.state}`),
-        )),
-        pane("Docker", docker.containers.length
-          ? docker.containers.slice(0, 10).map((container) => text(`docker-${container.name}`, `${container.name}: ${container.status} (${container.image})`))
-          : [text("docker-empty", docker.error || "no running containers")]),
       ],
     },
     assets: [],
@@ -124,6 +76,31 @@ function text(id, value) {
 
 function metric(id, label, value, tone) {
   return { id, kind: "metric", props: { label, text: `${label}: ${value}`, value, tone }, children: [] };
+}
+
+function verseUri(entry) {
+  const providerId = String(entry.providerId || "").trim();
+  const body = sourceBody(entry.source);
+  if (!body || providerId.startsWith(`${body}.`)) return providerId;
+  return `${body}.${providerId}`;
+}
+
+function sourceBody(source) {
+  const value = String(source || "");
+  if (value.startsWith("cultmesh:")) return "starfire";
+
+  try {
+    const url = new URL(value);
+    const host = url.hostname.toLowerCase();
+    if (host === "127.0.0.1" || host === "localhost" || host === "::1" || host === "172.17.0.1" || host === "192.168.1.66") {
+      return "starfire";
+    }
+    if (host === "192.168.1.75") return "eve";
+  } catch {
+    // Unknown source strings keep the provider-owned id unchanged.
+  }
+
+  return "";
 }
 
 function adbTone(adb) {
