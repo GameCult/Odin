@@ -10,6 +10,7 @@ Odin is the central all-seer node for GameCult's CultMesh world: every Verse can
 host / device / service probes
   + Mimir device observation ledger
   + Eve/CultUI provider surfaces
+  + provider advertisements
   -> Odin observation cycle
   -> Verse-owned service records
   -> Device observation-stream records
@@ -60,7 +61,7 @@ Odin's executable body is split by ownership:
 - `src/odin/documents.cjs`: CultCache/CultMesh document definitions accepted by Odin.
 - `src/odin/probes.cjs`: local Docker/ADB/TCP probes plus named SSH service and GPU probes.
 - `src/odin/observations.cjs`: Mimir observation ledger tailing and dashboard-ready stream projection.
-- `src/odin/interfaces.cjs`: Eve provider manifest discovery, provider WebSocket fetches, and CultMesh interface bindings.
+- `src/odin/interfaces.cjs`: Eve provider manifest discovery, provider WebSocket fetches, provider advertisements, and CultMesh interface bindings.
 - `src/odin/layout.cjs`: `odin.interface_layout.v1` read/write and merge policy.
 - `src/odin/surface.cjs`: `gamecult.eve.surface.v1` tree projection.
 - `src/odin/state.cjs`: one refresh's input records into `odin.allseer` dashboard state.
@@ -93,7 +94,7 @@ Verse announcement
 - A Verse owns its own schemas and authority model; Odin indexes and translates, it does not silently rewrite local truth.
 - Device clients own sensor and media capture; Mimir owns the normalized ingest ledger; Odin owns the aggregate operator projection.
 - Translation paths must name source schema, target schema, lossiness, authority, and version.
-- Service dashboards are CultMesh/Eve/CultUI interface projections. Odin aggregates those projection graphs; it does not replace them with nameplate summaries.
+- Service presentation flows are CultMesh/Eve/CultUI interface projections. Odin aggregates those projection graphs; it does not replace them with nameplate summaries.
 - Renderers lower surfaces only. If a renderer fixes network truth, the machine is split-brained.
 - CultCache is the durable state substrate; CultNet is the wire vocabulary; CultMesh is the Verse and peer-consensus layer.
 - The Eve surface carries explicit `verse`, `service`, and `observation-stream` nodes. Compact renderers may derive visual facets from those nodes, but may not invent observation truth.
@@ -118,7 +119,7 @@ Odin is the witness for the GameCult service contract:
 ```text
 durable service state -> CultCache .cc
 shared local visibility -> CultMesh
-interactive operator surface -> Eve GUI/TUI DSL
+interactive presentation -> Eve GUI/TUI DSL
 discovery and aggregation -> Odin
 renderer bodies -> Eve clients, browser, compact TUI, native surfaces, overlays
 ```
@@ -129,12 +130,12 @@ When Odin sees a service, it should be able to answer:
 - Which typed schemas does it publish?
 - Where is its durable `.cc` state or CultCache-compatible store?
 - Which CultMesh documents or providers make it visible locally?
-- Which Eve GUI/TUI surface represents its meaningful operator interface?
+- Which Eve GUI/TUI surface represents its meaningful presentation and controls?
 - Which command boundary accepts, denies, forwards, or reconciles user intent?
 - Which fields are stale, predicted, denied, or authoritative?
 
 This is not a reporting nicety. It is how Odin prevents services from becoming
-private little islands with separate dashboards, separate state formats, and
+private little islands with separate websites, dashboards, state formats, and
 separate command languages.
 
 ## Current Service Surface
@@ -162,6 +163,18 @@ The expected provider output is Eve DSL or an equivalent
 interactive language; they are not separate dashboard products. Huginn's `.cc`
 inspection surface is the current clean example: Huginn inspects CultCache bytes
 and emits Eve DSL, while Eve or any other runtime owns presentation.
+
+Provider advertisements are the promotion path out of probing. Odin's CJS
+document set already accepts `gamecult.eve.provider_advertisement.v1` alongside
+`gamecult.eve.interface_binding.v1` and `gamecult.eve.surface_state.v1`.
+Daemons should publish advertisements that name service id, Verse id, schema
+catalog, `.cc` witnesses, Eve surface keys, command boundaries, nested Verses,
+style capabilities, freshness, and redaction policy. Once an advertisement is
+available, Odin should prefer it over LAN scans, hardcoded deck URLs, private
+layout files, or web-dashboard scraping.
+
+The canonical contract lives in
+`E:\Projects\Eve\docs\provider-advertisement-contract.md`.
 
 Odin persists operator layout intent as `odin.interface_layout.v1` under `scratch/odin/interface-layout.json` for the current Starfire body. The durable CultMesh document should replace this local file once the layout schema is promoted. Layout intents name the provider id and request focus, move, resize, or visibility changes; renderers are input devices for those intents, not local layout owners.
 

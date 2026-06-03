@@ -6,7 +6,7 @@ It is not the renderer. It is not Eve. It is not a Starfire utility script weari
 
 Odin is also the compliance witness for the GameCult service architecture:
 durable service state in CultCache `.cc`, local Verse visibility through
-CultMesh, meaningful dashboards as Eve GUI/TUI DSL, and renderers as lowerers
+CultMesh, meaningful presentation as Eve GUI/TUI DSL, and renderers as lowerers
 only.
 
 ## Rust Spine
@@ -80,6 +80,9 @@ The first executable is deliberately narrow:
 - discovers Eve deck provider manifests from known/LAN deck endpoints;
 - includes local Spotiverse on `ws://127.0.0.1:8796/eve/deck` in the known provider seed list;
 - ingests provider-owned Eve/CultUI dashboards, including `mimir.live.stats` and `voidbot.swarm`, and embeds them as Odin `interface` nodes;
+- accepts `gamecult.eve.provider_advertisement.v1` documents in CultMesh interface binding stores so daemons can announce schemas, `.cc` witnesses, surfaces, commands, nested Verses, and style capabilities without Odin scraping private dashboards;
 - persists operator tiling intent as `odin.interface_layout.v1` under ignored `scratch/odin/interface-layout.json`.
 
-The next real cut is to replace static host probes with CultNet schema discovery and CultMesh Verse peer exchange. The probe layer is an input adapter. It must not become the architecture.
+The next real cut is to make provider advertisements the primary discovery
+path. Static host probes, LAN Eve deck scans, and hardcoded deck URLs are
+compatibility input adapters. They must not become the architecture.
