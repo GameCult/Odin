@@ -9,6 +9,17 @@ durable service state in CultCache `.cc`, local Verse visibility through
 CultMesh, meaningful dashboards as Eve GUI/TUI DSL, and renderers as lowerers
 only.
 
+## Rust Spine
+
+The target Odin body is Rust-first: ingest through narrow ports, normalize into
+typed Odin records, persist through CultCache `.cc`, expose through CultMesh /
+CultNet document registries, and lower interface state through Eve/CultUI.
+
+The first Rust core lives in `crates/odin-core` and already separates typed
+documents, ingest ports, normalization, and repository persistence so unit tests
+can use mocked inputs and pipeline smokes can prove typed handoff without
+booting the whole daemon.
+
 ## Gjallar
 
 Gjallar is Odin's herald organ: the daemon/persona package that should carry

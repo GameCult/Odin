@@ -22,10 +22,39 @@ host / device / service probes
 
 This first path proves the operator surface and persistent state. It does not yet pretend to be full peer exchange.
 
+## Rust Target Spine
+
+The target Odin machine is Rust-first and typed-state-first:
+
+```text
+Verse / host / device / provider inputs
+  -> ingest ports
+  -> normalization
+  -> typed Odin records
+  -> CultMesh node
+  -> CultCache .cc persistence
+  -> CultNet/CultMesh document registry
+  -> Eve/CultUI projection and agent affordance packets
+```
+
+The first Rust core lives in `crates/odin-core`:
+
+- `documents.rs`: typed Odin records and the CultMesh document set.
+- `ports.rs`: narrow ingest traits plus clock injection for deterministic tests.
+- `pipeline.rs`: collection and normalization from input observations to typed records.
+- `repository.rs`: `OdinRepository` abstraction, in-memory mock repository, and CultMesh-backed repository.
+
+The Rust spine owns the future architecture. The CommonJS daemon remains the
+legacy operational body until each organ crosses this typed boundary.
+
 ## Runtime Body
 
 Odin's executable body is split by ownership:
 
+- `crates/odin-core`: Rust target core. Owns typed Odin documents, ingest
+  ports, normalization, and CultMesh/CultCache repository boundaries. This is
+  the replacement spine; JavaScript remains legacy runtime/probe scaffolding
+  until each organ has crossed the typed boundary.
 - `src/odin-coordinator.cjs`: process lifecycle, refresh loop, persistence, health, and transport wiring.
 - `src/odin/config.cjs`: runtime paths, seed deck URLs, intervals, and CultLib module path setup.
 - `src/odin/documents.cjs`: CultCache/CultMesh document definitions accepted by Odin.
@@ -68,6 +97,19 @@ Verse announcement
 - Renderers lower surfaces only. If a renderer fixes network truth, the machine is split-brained.
 - CultCache is the durable state substrate; CultNet is the wire vocabulary; CultMesh is the Verse and peer-consensus layer.
 - The Eve surface carries explicit `verse`, `service`, and `observation-stream` nodes. Compact renderers may derive visual facets from those nodes, but may not invent observation truth.
+- Rust organs must accept mocked inputs through narrow traits. Unit tests prove
+  local invariants; pipeline smokes prove adjacent typed handoff; full daemon
+  boots are not the only test path.
+- JSON is not state authority. It is allowed only for schema publication,
+  debugging, compatibility export, or external xenos boundaries.
+
+## Test Surfaces
+
+Current Rust verification:
+
+- `pipeline_collects_from_injected_ports`: proves ingest ports and clock injection.
+- `memory_repository_supports_fast_unit_tests`: proves repository consumers can test without CultMesh.
+- `cultmesh_repository_round_trips_typed_records`: proves typed records persist through CultMesh/CultCache and reload from `.cc`.
 
 ## Service Architecture Contract
 
