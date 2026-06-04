@@ -50,6 +50,63 @@ function createInterfaceDiscovery({
     return interfaces;
   }
 
+  async function discoverProviderAdvertisements() {
+    const {
+      interfaceBindingDefinition,
+      providerAdvertisementDefinition,
+      surfaceDefinition,
+      voidbotSwarmSnapshotDefinition,
+    } = documents;
+    if (!CultMesh || !interfaceBindingDefinition || !surfaceDefinition || !voidbotSwarmSnapshotDefinition || !providerAdvertisementDefinition) {
+      return [];
+    }
+
+    const providers = [];
+    for (const storePath of interfaceBindingStores) {
+      try {
+        if (!fs.existsSync(storePath)) {
+          continue;
+        }
+        const node = await CultMesh.createNode(storePath, {
+          documents: [
+            voidbotSwarmSnapshotDefinition,
+            providerAdvertisementDefinition,
+            interfaceBindingDefinition,
+            surfaceDefinition,
+          ],
+        });
+        const advertisements = typeof node.cache?.getAll === "function"
+          ? node.cache.getAll(providerAdvertisementDefinition)
+          : [];
+        for (const advertisement of advertisements) {
+          if (!advertisement?.providerId) {
+            continue;
+          }
+          providers.push({
+            id: advertisement.providerId,
+            title: advertisement.title || advertisement.providerId,
+            description: advertisement.description || "Provider-owned CultMesh advertisement.",
+            version: String(advertisement.version || 0),
+            endpoint: advertisement.endpoints?.[0] || advertisement.provider?.endpoint || `cultmesh:${storePath}`,
+            capabilities: advertisement.provider?.capabilities || advertisement.capabilities || [],
+            usesCultMesh: true,
+            transport: advertisement.provider?.transport || "CultMesh provider advertisement",
+            status: advertisement.status || "unknown",
+            updatedAt: advertisement.updatedAt || new Date().toISOString(),
+            source: `cultmesh:${storePath}`,
+            commandSurface: advertisement.commandSurface || null,
+          });
+        }
+      } catch {
+        // Provider advertisements are optional discovery hints; broken stores
+        // are still surfaced through interface discovery when possible.
+      }
+    }
+
+    providers.sort((left, right) => String(left.id).localeCompare(String(right.id)));
+    return providers;
+  }
+
   async function discoverCultMeshInterfaceBindings() {
     const {
       interfaceBindingDefinition,
@@ -120,6 +177,7 @@ function createInterfaceDiscovery({
   }
 
   return {
+    discoverProviderAdvertisements,
     discoverInterfaces,
     getDiscoveredDeckUrls: () => [...discoveredDeckUrls],
   };

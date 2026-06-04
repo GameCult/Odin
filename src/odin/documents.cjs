@@ -17,7 +17,7 @@ function defineOdinDocuments(defineDocumentType) {
     schemaName: "gamecult.eve.surface_state",
     schemaId: "gamecult.eve.surface_state.v1",
     schemaVersion: "gamecult.eve.surface_state.v1",
-    global: true,
+    global: false,
     name: (value) => value?.providerId || "surface",
     schema: { parse: (value) => value },
     members: [
@@ -33,7 +33,7 @@ function defineOdinDocuments(defineDocumentType) {
     schemaName: "gamecult.eve.interface_binding",
     schemaId: "gamecult.eve.interface_binding.v1",
     schemaVersion: "gamecult.eve.interface_binding.v1",
-    global: true,
+    global: false,
     name: (value) => value?.bindingId || value?.providerId || "interface",
     schema: parseObjectDocument("Eve interface binding"),
   });
@@ -42,7 +42,7 @@ function defineOdinDocuments(defineDocumentType) {
     schemaName: "gamecult.eve.provider_advertisement",
     schemaId: "gamecult.eve.provider_advertisement.v1",
     schemaVersion: "gamecult.eve.provider_advertisement.v1",
-    global: true,
+    global: false,
     name: (value) => value?.providerId || "provider",
     schema: parseObjectDocument("Eve provider advertisement"),
   });

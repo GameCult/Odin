@@ -44,14 +44,20 @@ function handleHttp(req, res, getCurrentState, getHealth) {
 }
 
 function providerCatalogFromState(state) {
+  const providers = new Map();
+  for (const provider of Array.isArray(state?.providerCatalog) ? state.providerCatalog : []) {
+    if (provider?.id) {
+      providers.set(String(provider.id), provider);
+    }
+  }
   const root = state?.surface?.root;
   const children = Array.isArray(root?.children) ? root.children : [];
-  return children
+  for (const child of children
     .filter((child) => child?.kind === "interface" && child.props?.providerId)
-    .map((child) => {
+  ) {
       const props = child.props || {};
       const embeddedRoot = Array.isArray(child.children) ? child.children[0] : null;
-      return {
+      providers.set(String(props.providerId), {
         id: String(props.providerId),
         title: String(props.title || props.providerId),
         description: String(props.detail || "Provider-owned Eve/CultUI interface discovered by Odin."),
@@ -65,8 +71,9 @@ function providerCatalogFromState(state) {
         status: props.status || "unknown",
         updatedAt: props.updatedAt || state.updatedAt,
         source: props.source || "",
-      };
-    });
+      });
+  }
+  return [...providers.values()].sort((left, right) => String(left.id).localeCompare(String(right.id)));
 }
 
 function providerCapabilities(root) {

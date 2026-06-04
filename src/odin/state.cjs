@@ -30,6 +30,7 @@ function createStateBuilder({ cachePath, interfaceDiscovery, layoutStore, observ
       selectedNodeId: "coordinator-starting",
       lutPreset: "terminal",
       nodes: [],
+      providerCatalog: [],
       surface: buildPendingSurface(message),
     };
   }
@@ -37,7 +38,7 @@ function createStateBuilder({ cachePath, interfaceDiscovery, layoutStore, observ
   async function buildState() {
     version += 1;
     const observedAt = new Date().toISOString();
-    const [docker, adb, hosts, yggdrasilServices, nightwingServices, nightwingGpu, discoveredInterfaces, observations] = await Promise.all([
+    const [docker, adb, hosts, yggdrasilServices, nightwingServices, nightwingGpu, discoveredInterfaces, providerAdvertisements, observations] = await Promise.all([
       dockerSnapshot(),
       adbSnapshot(),
       hostChecks(),
@@ -45,6 +46,7 @@ function createStateBuilder({ cachePath, interfaceDiscovery, layoutStore, observ
       remoteServices("nightwing", ["ssh", "nightwing-eve-dashboard", "nightwing-eve-browser-reference", "gamecult-visible-ops", "docker"]),
       remoteGpu("nightwing"),
       interfaceDiscovery.discoverInterfaces(),
+      interfaceDiscovery.discoverProviderAdvertisements(),
       observationSnapshot(observationLogPath, observationFreshSeconds),
     ]);
     const interfaceById = new Map(discoveredInterfaces.map((entry) => [entry.providerId, entry]));
@@ -107,6 +109,7 @@ function createStateBuilder({ cachePath, interfaceDiscovery, layoutStore, observ
         health: entry.status,
         detail: entry.capabilities.join(", "),
       })),
+      providerCatalog: providerAdvertisements,
       surface: buildSurface({ observedAt, docker, adb, hosts, yggdrasilServices, verses, interfaces, observations, layout: layoutStore.readLayout() }),
     };
   }
