@@ -6,6 +6,7 @@ pub const ODIN_SERVICE_SCHEMA: &str = "odin.service.v1";
 pub const ODIN_INTERFACE_SCHEMA: &str = "odin.interface.v1";
 pub const ODIN_OBSERVATION_STREAM_SCHEMA: &str = "odin.observation_stream.v1";
 pub const ODIN_TRANSLATION_ROUTE_SCHEMA: &str = "odin.translation_route.v1";
+pub const GJALLAR_AFFORDANCE_SCHEMA: &str = "gjallar.affordance.v1";
 
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
 #[cultcache(type = "odin.snapshot", schema = "odin.snapshot.v1")]
@@ -124,6 +125,29 @@ pub struct OdinTranslationRouteRecord {
     pub notes: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(type = "gjallar.affordance", schema = "gjallar.affordance.v1")]
+pub struct GjallarAffordanceRecord {
+    #[cultcache(key = 0)]
+    pub affordance_id: String,
+    #[cultcache(key = 1)]
+    pub source_record: String,
+    #[cultcache(key = 2)]
+    pub verse_id: Option<String>,
+    #[cultcache(key = 3)]
+    pub surface_kind: String,
+    #[cultcache(key = 4)]
+    pub action: String,
+    #[cultcache(key = 5)]
+    pub authority: String,
+    #[cultcache(key = 6)]
+    pub status: String,
+    #[cultcache(key = 7)]
+    pub provenance: String,
+    #[cultcache(key = 8)]
+    pub observed_at: String,
+}
+
 cultmesh_rs::cultmesh_documents!(OdinDocuments {
     OdinSnapshotRecord => ODIN_SNAPSHOT_SCHEMA,
     OdinVerseRecord => ODIN_VERSE_SCHEMA,
@@ -131,6 +155,7 @@ cultmesh_rs::cultmesh_documents!(OdinDocuments {
     OdinInterfaceRecord => ODIN_INTERFACE_SCHEMA,
     OdinObservationStreamRecord => ODIN_OBSERVATION_STREAM_SCHEMA,
     OdinTranslationRouteRecord => ODIN_TRANSLATION_ROUTE_SCHEMA,
+    GjallarAffordanceRecord => GJALLAR_AFFORDANCE_SCHEMA,
 });
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -141,4 +166,5 @@ pub struct OdinRecords {
     pub interfaces: Vec<OdinInterfaceRecord>,
     pub observation_streams: Vec<OdinObservationStreamRecord>,
     pub translation_routes: Vec<OdinTranslationRouteRecord>,
+    pub gjallar_affordances: Vec<GjallarAffordanceRecord>,
 }

@@ -32,6 +32,7 @@ Verse / host / device / provider inputs
   -> ingest ports
   -> normalization
   -> typed Odin records
+  -> Gjallar affordance records
   -> CultMesh node
   -> CultCache .cc persistence
   -> CultNet/CultMesh document registry
@@ -41,9 +42,12 @@ Verse / host / device / provider inputs
 The first Rust core lives in `crates/odin-core`:
 
 - `documents.rs`: typed Odin records and the CultMesh document set.
-- `ports.rs`: narrow ingest traits plus clock injection for deterministic tests.
-- `pipeline.rs`: collection and normalization from input observations to typed records.
-- `repository.rs`: `OdinRepository` abstraction, in-memory mock repository, and CultMesh-backed repository.
+- `ports.rs`: narrow ingest traits, Gjallar affordance input, plus clock
+  injection for deterministic tests.
+- `pipeline.rs`: collection and normalization from input observations to typed
+  records, including `gjallar.affordance.v1`.
+- `repository.rs`: `OdinRepository` abstraction, in-memory mock repository, and
+  CultMesh-backed repository.
 
 The Rust spine owns the future architecture. The CommonJS daemon remains the
 legacy operational body until each organ crosses this typed boundary.
@@ -53,9 +57,10 @@ legacy operational body until each organ crosses this typed boundary.
 Odin's executable body is split by ownership:
 
 - `crates/odin-core`: Rust target core. Owns typed Odin documents, ingest
-  ports, normalization, and CultMesh/CultCache repository boundaries. This is
-  the replacement spine; JavaScript remains legacy runtime/probe scaffolding
-  until each organ has crossed the typed boundary.
+  ports, Gjallar affordance records, normalization, and CultMesh/CultCache
+  repository boundaries. This is the replacement spine; JavaScript remains
+  legacy runtime/probe scaffolding until each organ has crossed the typed
+  boundary.
 - `src/odin-coordinator.cjs`: process lifecycle, refresh loop, persistence, health, and transport wiring.
 - `src/odin/config.cjs`: runtime paths, seed deck URLs, intervals, and CultLib module path setup.
 - `src/odin/documents.cjs`: CultCache/CultMesh document definitions accepted by Odin.
@@ -69,7 +74,9 @@ Odin's executable body is split by ownership:
 
 The entrypoint is not allowed to grow new probe, surface, provider, layout, or renderer policy. If a new owner is needed, name the owner and its invariant before adding code.
 
-Gjallar is the named herald organ for agent-context transmission. Its
+Gjallar is the named herald organ for agent-context transmission. In the Rust
+spine, Gjallar has a typed `gjallar.affordance.v1` record and an injected
+affordance ingest port. Its
 current package lives in `docs/gjallar.md`, `personas/gjallar.persona_state.cc`,
 `src/Gjallar/Gjallar.csproj`, `assets/personas/gjallar-avatar.png`, and
 `assets/personas/gjallar-avatar-pixel-256.png`. When it becomes executable, it
@@ -136,7 +143,9 @@ Current Rust verification:
 
 - `pipeline_collects_from_injected_ports`: proves ingest ports and clock injection.
 - `memory_repository_supports_fast_unit_tests`: proves repository consumers can test without CultMesh.
-- `cultmesh_repository_round_trips_typed_records`: proves typed records persist through CultMesh/CultCache and reload from `.cc`.
+- `cultmesh_repository_round_trips_typed_records`: proves typed records,
+  including Gjallar affordances, persist through CultMesh/CultCache and reload
+  from `.cc`.
 
 ## Service Architecture Contract
 

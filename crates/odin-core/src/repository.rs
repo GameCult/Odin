@@ -1,5 +1,6 @@
 use crate::documents::{
-    OdinDocuments, OdinRecords, OdinServiceRecord, OdinSnapshotRecord, OdinVerseRecord,
+    GjallarAffordanceRecord, OdinDocuments, OdinRecords, OdinServiceRecord, OdinSnapshotRecord,
+    OdinVerseRecord,
 };
 use anyhow::Result;
 use cultmesh_rs::{CultMesh, CultMeshNode, CultMeshNodeOptions};
@@ -38,6 +39,13 @@ impl CultMeshOdinRepository {
         self.node.get::<OdinVerseRecord>(verse_id)
     }
 
+    pub fn get_gjallar_affordance(
+        &self,
+        affordance_id: &str,
+    ) -> Result<Option<GjallarAffordanceRecord>> {
+        self.node.get::<GjallarAffordanceRecord>(affordance_id)
+    }
+
     pub fn document_binding_version(&self, document_type: &str) -> Option<String> {
         self.node
             .documents()
@@ -65,6 +73,9 @@ impl OdinRepository for CultMeshOdinRepository {
         }
         for route in &records.translation_routes {
             self.node.put(&route.route_id, route)?;
+        }
+        for affordance in &records.gjallar_affordances {
+            self.node.put(&affordance.affordance_id, affordance)?;
         }
         Ok(())
     }
@@ -96,8 +107,8 @@ mod tests {
     use crate::documents::ODIN_SERVICE_SCHEMA;
     use crate::pipeline::normalize_odin_records;
     use crate::ports::{
-        InterfaceObservation, ObservationStreamObservation, OdinInputBatch, ServiceObservation,
-        TranslationRouteObservation, VerseObservation,
+        GjallarAffordanceObservation, InterfaceObservation, ObservationStreamObservation,
+        OdinInputBatch, ServiceObservation, TranslationRouteObservation, VerseObservation,
     };
     use pretty_assertions::assert_eq;
 
@@ -144,6 +155,15 @@ mod tests {
                 version: "v1".to_string(),
                 notes: "test".to_string(),
             }],
+            gjallar_affordances: vec![GjallarAffordanceObservation {
+                source_record: "odin.service:odin".to_string(),
+                verse_id: Some("starfire.local".to_string()),
+                surface_kind: "service".to_string(),
+                action: "inspect".to_string(),
+                authority: "odin".to_string(),
+                status: "available".to_string(),
+                provenance: "unit-test".to_string(),
+            }],
         })
     }
 
@@ -179,6 +199,13 @@ mod tests {
         assert_eq!(
             reloaded.get_verse("starfire.local")?.unwrap().capabilities,
             vec!["cultmesh".to_string()]
+        );
+        assert_eq!(
+            reloaded
+                .get_gjallar_affordance("gjallar:odin.service:odin:0")?
+                .unwrap()
+                .action,
+            "inspect"
         );
         Ok(())
     }

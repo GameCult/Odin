@@ -18,7 +18,9 @@ CultNet document registries, and lower interface state through Eve/CultUI.
 The first Rust core lives in `crates/odin-core` and already separates typed
 documents, ingest ports, normalization, and repository persistence so unit tests
 can use mocked inputs and pipeline smokes can prove typed handoff without
-booting the whole daemon.
+booting the whole daemon. Gjallar is part of that spine as a typed
+`gjallar.affordance.v1` lane: it transmits Odin-owned sight into agent-ready
+affordance records without owning discovery truth.
 
 ## Gjallar
 
