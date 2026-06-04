@@ -178,6 +178,16 @@ The canonical contract lives in
 
 Odin persists operator layout intent as `odin.interface_layout.v1` under `scratch/odin/interface-layout.json` for the current Starfire body. The durable CultMesh document should replace this local file once the layout schema is promoted. Layout intents name the provider id and request focus, move, resize, or visibility changes; renderers are input devices for those intents, not local layout owners.
 
+Odin now derives dense top-level layout intent from each provider's retained
+`surface.root` tree: element count, leaf count, branch count, depth, text-cell
+pressure, and list-like branches. Provider explicit preferred sizes are capped
+at the Odin wrapper boundary unless the current intent is fullscreen, so stale
+layout files cannot keep empty panels huge. The renderer should use
+`props.tree`, `props.layout.signalWeight`, and `props.packing` to allocate space
+to nested signal, then recursively lower provider children. Flattening a
+provider surface into one log/list is a compatibility failure when the retained
+tree has children.
+
 ## Current Observation Surface
 
 Odin tails Mimir's normalized observation JSONL at `E:\Projects\Mimir\artifacts\runtime\periwinkle-cultmesh-sensors.out.log` by default. It accepts the typed CultMesh records `mimir.eve_sensor_observation.v1` and `mimir.eve_media_observation.v1`, keeps only the latest record for each `(deviceId, streamId, kind)`, and publishes those summaries as `observation-stream` nodes inside `odin.allseer`. Streams are considered active for 120 seconds by default so a compact dashboard refresh does not turn a briefly quiet sensor into false red noise.

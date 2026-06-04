@@ -198,26 +198,84 @@ function legacySurfaceFromNodes(state, manifest = null) {
         title,
         providerId,
         compatibility: "legacy-dashboard-nodes",
-      },
-      children: nodes.map((node) => ({
-        id: String(node.id || node.label || "node"),
-        kind: "pane",
-        props: {
-          title: String(node.label || node.id || "node"),
-          status: String(node.health || ""),
-          providerId: node.providerId || providerId,
-          command: node.command || "",
-          endpoint: node.endpoint || "",
+        layout: {
+          density: "dense",
+          viewportMode: "nested-scroll",
+          layoutStrategy: "legacy-node-groups",
+          preferredWidth: 96,
+          preferredHeight: 24,
+          minWidth: 36,
+          minHeight: 8,
         },
-        children: [
-          textElement(`${node.id || node.label || "node"}-kind`, `kind: ${node.kind || "node"}`),
-          textElement(`${node.id || node.label || "node"}-health`, `health: ${node.health || "unknown"}`),
-          node.endpoint ? textElement(`${node.id || node.label || "node"}-endpoint`, `endpoint: ${node.endpoint}`) : null,
-        ].filter(Boolean),
-      })),
+      },
+      children: legacyNodeGroups(nodes, providerId),
     },
     assets: [],
   };
+}
+
+function legacyNodeGroups(nodes, providerId) {
+  const groups = new Map();
+  for (const node of nodes) {
+    const kind = String(node.kind || "node");
+    const health = String(node.health || "unknown");
+    const key = `${kind}:${health}`;
+    if (!groups.has(key)) {
+      groups.set(key, { kind, health, nodes: [] });
+    }
+    groups.get(key).nodes.push(node);
+  }
+
+  return [...groups.values()]
+    .sort((left, right) => left.kind.localeCompare(right.kind) || left.health.localeCompare(right.health))
+    .map((group) => ({
+      id: `legacy-group-${stableLegacyId(providerId, group.kind, group.health)}`,
+      kind: "group",
+      props: {
+        title: `${group.kind} / ${group.health}`,
+        count: group.nodes.length,
+        density: "dense",
+      },
+      children: group.nodes
+        .sort((left, right) => String(left.id || left.label || "").localeCompare(String(right.id || right.label || "")))
+        .map((node) => legacyNodeElement(node, providerId)),
+    }));
+}
+
+function legacyNodeElement(node, providerId) {
+  const id = String(node.id || node.label || "node");
+  const title = String(node.label || node.id || "node");
+  const facts = [
+    compactFact(id, "kind", node.kind || "node"),
+    compactFact(id, "health", node.health || "unknown"),
+    node.providerId ? compactFact(id, "provider", node.providerId || providerId) : null,
+    node.endpoint ? compactFact(id, "endpoint", node.endpoint) : null,
+    node.command ? compactFact(id, "command", node.command) : null,
+  ].filter(Boolean);
+  return {
+    id,
+    kind: "card",
+    props: {
+      title,
+      status: String(node.health || ""),
+      providerId: node.providerId || providerId,
+      command: node.command || "",
+      endpoint: node.endpoint || "",
+      density: "compact",
+    },
+    children: facts,
+  };
+}
+
+function compactFact(ownerId, name, value) {
+  return textElement(`fact-${stableLegacyId(ownerId, name, value)}`, `${name}: ${value}`);
+}
+
+function stableLegacyId(...parts) {
+  return parts
+    .map((part) => String(part || "x").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, ""))
+    .filter(Boolean)
+    .join("-") || "x";
 }
 
 function textElement(id, text) {

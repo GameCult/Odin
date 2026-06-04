@@ -1,6 +1,6 @@
 "use strict";
 
-const { fullscreenLayoutIntent, mergeLayoutIntent } = require("./layout.cjs");
+const { analyzeElementTree, fullscreenLayoutIntent, mergeLayoutIntent } = require("./layout.cjs");
 const { observationPane } = require("./observations.cjs");
 const { stableId } = require("./utils.cjs");
 
@@ -27,21 +27,30 @@ function buildSurface({ observedAt, docker, adb, hosts, yggdrasilServices, verse
         },
       },
       children: [
-        ...activeInterfaces.map((entry) => ({
-          id: `interface-${stableId(entry.providerId)}`,
-          kind: "interface",
-          props: {
-            title: verseUri(entry),
-            providerId: entry.providerId,
-            source: entry.source,
-            status: entry.state,
-            detail: entry.detail,
-            version: entry.version,
-            updatedAt: entry.updatedAt,
-            layout: mergeLayoutIntent(layout.tiles?.[entry.providerId], entry, interfaces),
-          },
-          children: [entry.surface.root],
-        })),
+        ...activeInterfaces.map((entry) => {
+          const tree = analyzeElementTree(entry.surface.root);
+          return {
+            id: `interface-${stableId(entry.providerId)}`,
+            kind: "interface",
+            props: {
+              title: verseUri(entry),
+              providerId: entry.providerId,
+              source: entry.source,
+              status: entry.state,
+              detail: entry.detail,
+              version: entry.version,
+              updatedAt: entry.updatedAt,
+              layout: mergeLayoutIntent(layout.tiles?.[entry.providerId], entry, interfaces),
+              tree,
+              packing: {
+                strategy: "nested-dense-signal",
+                flattening: "forbidden-when-surface-root-has-children",
+                listPolicy: "group-or-tree; never render provider signal as a single log/list blob",
+              },
+            },
+            children: [entry.surface.root],
+          };
+        }),
       ],
     },
     assets: [],
