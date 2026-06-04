@@ -41,18 +41,18 @@ The initial local package is deliberately small:
 - `scripts/write-gjallar-persona-cc.mjs` mints and inspects that store from the
   canonical EpiphanyAgent schema. The script is a local writer, not Gjallar's
   runtime body.
-- `src/Gjallar/Gjallar.csproj` is the first C# CultMesh organ. It opens the
-  Persona `.cc` store through `CultMesh.CreateNodeAsync`; typed Persona decode
-  waits for a generated C# `gamecult.persona_state.v0` model.
+- `crates/gjallar-daemon` is Gjallar's Rust CultMesh organ. It requires the
+  Persona `.cc` source and publishes typed `gjallar.affordance.v1` records
+  through Odin's document set.
 - `assets/personas/gjallar-avatar.png` is the local avatar asset.
 - `assets/personas/gjallar-avatar-pixel-256.png` is the 256px pixel-art avatar
   variant for compact Persona surfaces.
-- This document is the organ contract until a runtime daemon exists.
+- This document is the organ contract for the runtime daemon.
 
-When Gjallar becomes executable, package it as its own C# CultMesh runtime
-entrypoint beside Odin rather than folding it into `src/odin-coordinator.cjs`.
-The coordinator already owns lifecycle, refresh, persistence, and transport for
-Odin. Gjallar's entrypoint should own context publication and no more.
+Gjallar is executable as its own Rust CultMesh runtime beside Odin. Do not fold
+it into `src/odin-coordinator.cjs`. The coordinator already owns lifecycle,
+refresh, persistence, and transport for Odin. Gjallar's entrypoint owns context
+publication and no more.
 
 ## Persona Registration
 
@@ -102,22 +102,18 @@ remaining VoidBot-local or MCP-only implementation is migration debt. MCP is a
 bridge for external agentic access, not the native affordance path for GameCult
 agents that can speak CultMesh.
 
-## CultMesh Runtime Direction
+## CultMesh Runtime Body
 
-Gjallar's runtime body should be C# over `GameCult.Mesh`:
+Gjallar's runtime body is Rust in `crates/gjallar-daemon`:
 
-```csharp
-using GameCult.Mesh;
-
-using var node = await CultMesh.CreateNodeAsync("personas/gjallar.persona_state.cc");
+```powershell
+cargo run -p gjallar-daemon --
 ```
 
-The current C# entrypoint opens the CultMesh node without pulling typed payloads
-because the C# document model for `gamecult.persona_state.v0` has not been
-generated yet. The next durable act should generate that model, read the
-`persona:gjallar` record from the local CultCache, and publish an affordance
-packet document through CultMesh. Do not make a JSON sidecar the source of truth
-while waiting for that runtime.
+The current Rust entrypoint requires the local `persona:gjallar` CultCache
+source and publishes a typed `gjallar.affordance.v1` packet through CultMesh.
+It does not decode Persona as JSON, does not own discovery truth, and does not
+pretend the Persona store is its runtime state.
 
 ## Invariants
 

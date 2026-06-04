@@ -357,6 +357,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "gjallar-daemon"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cultmesh-rs",
+ "odin-core",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"

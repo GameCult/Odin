@@ -7,7 +7,8 @@
   "scripts": {
     "gjallar:persona": "node scripts/write-gjallar-persona-cc.mjs inspect",
     "gjallar:persona:write": "node scripts/write-gjallar-persona-cc.mjs write",
-    "gjallar:build": "dotnet build src/Gjallar/Gjallar.csproj",
+    "gjallar:build": "cargo build -p gjallar-daemon",
+    "gjallar:start": "cargo run -p gjallar-daemon --",
     "idunn:build": "cargo build -p idunn-daemon",
     "idunn:start": "cargo run -p idunn-daemon --",
     "rust:test": "cargo test --workspace",

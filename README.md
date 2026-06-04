@@ -33,7 +33,7 @@ Local package surfaces:
 
 - Organ contract: `docs/gjallar.md`
 - Canonical Persona state: `personas/gjallar.persona_state.cc`
-- C# CultMesh organ: `src/Gjallar/Gjallar.csproj`
+- Rust CultMesh organ: `crates/gjallar-daemon`
 - Avatar asset: `assets/personas/gjallar-avatar.png`
 - Pixel avatar: `assets/personas/gjallar-avatar-pixel-256.png`
 

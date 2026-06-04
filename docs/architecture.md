@@ -78,10 +78,10 @@ Gjallar is the named herald organ for agent-context transmission. In the Rust
 spine, Gjallar has a typed `gjallar.affordance.v1` record and an injected
 affordance ingest port. Its
 current package lives in `docs/gjallar.md`, `personas/gjallar.persona_state.cc`,
-`src/Gjallar/Gjallar.csproj`, `assets/personas/gjallar-avatar.png`, and
-`assets/personas/gjallar-avatar-pixel-256.png`. When it becomes executable, it
-must be added as its own C# CultMesh entrypoint rather than being folded into
-Odin's coordinator. Gjallar may read Odin-owned state and emit affordance
+`crates/gjallar-daemon`, `assets/personas/gjallar-avatar.png`, and
+`assets/personas/gjallar-avatar-pixel-256.png`. It runs as its own Rust
+CultMesh entrypoint rather than being folded into Odin's coordinator. Gjallar
+may read Odin-owned state and emit affordance
 packets; it must not own the underlying registry, probe, provider, layout, or
 translation decisions.
 
