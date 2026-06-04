@@ -42,6 +42,8 @@ state.
 
 The initial local package is deliberately small:
 
+- `src/Idunn/README.md` is the user-facing introduction for developers,
+  operators, and daemon authors.
 - `src/Idunn/Idunn.csproj` is the first C# CultMesh organ.
 - `src/Idunn/Program.cs` opens or creates Idunn's local CultCache/CultMesh
   store at `scratch/idunn/idunn.keepalive.cc`.

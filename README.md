@@ -48,6 +48,7 @@ in Bifrost's Verse. Odin sees the daemons; Idunn keeps the apples from rotting.
 Local package surfaces:
 
 - Organ contract: `docs/idunn.md`
+- User README: `src/Idunn/README.md`
 - C# CultMesh organ: `src/Idunn/Idunn.csproj`
 - Runtime store: `scratch/idunn/idunn.keepalive.cc`
 - Operator escalation: Bifrost-owned CultMesh crossing; current compatibility
