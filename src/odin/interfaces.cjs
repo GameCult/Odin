@@ -74,24 +74,28 @@ function createInterfaceDiscovery({
             surfaceDefinition,
           ],
         });
-        const binding = node.get(interfaceBindingDefinition, "voidbot.swarm");
-        if (!binding?.providerId) {
-          continue;
+        const bindings = typeof node.cache?.getAll === "function"
+          ? node.cache.getAll(interfaceBindingDefinition)
+          : [node.get(interfaceBindingDefinition, "voidbot.swarm")].filter(Boolean);
+        for (const binding of bindings) {
+          if (!binding?.providerId) {
+            continue;
+          }
+          const state = node.get(surfaceDefinition, binding.providerId);
+          interfaces.push({
+            providerId: binding.providerId,
+            title: binding.title || state?.title || binding.providerId,
+            state: "active",
+            detail: `${state?.surface?.root?.kind || binding.kind || "surface"} ${state?.nodes?.length || 0} nodes via CultMesh`,
+            version: state?.version || 0,
+            updatedAt: state?.updatedAt || binding.updatedAt || new Date().toISOString(),
+            source: `cultmesh:${storePath}`,
+            manifest: binding.provider || null,
+            surface: state?.surface || binding.surface || null,
+          });
         }
-        const state = node.get(surfaceDefinition, binding.providerId);
-        interfaces.push({
-          providerId: binding.providerId,
-          title: binding.title || state?.title || binding.providerId,
-          state: "active",
-          detail: `${state?.surface?.root?.kind || binding.kind || "surface"} ${state?.nodes?.length || 0} nodes via CultMesh`,
-          version: state?.version || 0,
-          updatedAt: state?.updatedAt || binding.updatedAt || new Date().toISOString(),
-          source: `cultmesh:${storePath}`,
-          manifest: binding.provider || null,
-          surface: state?.surface || binding.surface || null,
-        });
       } catch (error) {
-        interfaces.push(dashboardUnavailable("voidbot.swarm", `cultmesh:${storePath}`, error.message));
+        interfaces.push(dashboardUnavailable(`cultmesh:${storePath}`, `cultmesh:${storePath}`, error.message));
       }
     }
     return interfaces;

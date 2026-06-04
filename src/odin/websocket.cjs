@@ -34,13 +34,58 @@ function handleHttp(req, res, getCurrentState, getHealth) {
         capabilities: ["network-status", "cultmesh-verses", "cultui-surface"],
         usesCultMesh: true,
         transport: "CultMesh durable surface + Eve WebSocket",
-      }],
+      }, ...providerCatalogFromState(currentState)],
     }));
     return;
   }
 
   res.writeHead(404, { "content-type": "text/plain" });
   res.end("not found");
+}
+
+function providerCatalogFromState(state) {
+  const root = state?.surface?.root;
+  const children = Array.isArray(root?.children) ? root.children : [];
+  return children
+    .filter((child) => child?.kind === "interface" && child.props?.providerId)
+    .map((child) => {
+      const props = child.props || {};
+      const embeddedRoot = Array.isArray(child.children) ? child.children[0] : null;
+      return {
+        id: String(props.providerId),
+        title: String(props.title || props.providerId),
+        description: String(props.detail || "Provider-owned Eve/CultUI interface discovered by Odin."),
+        version: String(props.version || 0),
+        endpoint: props.source || "/eve/deck",
+        capabilities: providerCapabilities(embeddedRoot),
+        usesCultMesh: String(props.source || "").startsWith("cultmesh:"),
+        transport: String(props.source || "").startsWith("cultmesh:")
+          ? "CultMesh Eve interface binding"
+          : "Eve WebSocket provider",
+        status: props.status || "unknown",
+        updatedAt: props.updatedAt || state.updatedAt,
+        source: props.source || "",
+      };
+    });
+}
+
+function providerCapabilities(root) {
+  const capabilities = new Set(["cultui-surface"]);
+  if (hasCommand(root)) {
+    capabilities.add("command-surface");
+  }
+  return [...capabilities];
+}
+
+function hasCommand(node) {
+  if (!node || typeof node !== "object") {
+    return false;
+  }
+  const props = node.props || {};
+  if (props.command || props.action?.command || props.action?.type) {
+    return true;
+  }
+  return Array.isArray(node.children) && node.children.some(hasCommand);
 }
 
 function handleUpgrade(req, socket, clients, getCurrentState, applyClientCommand) {
