@@ -35,7 +35,7 @@ state.
   repair, boot rehydration, and future remote worker recovery must pass through
   the same keepalive command primitive.
 - Deletion line: any keepalive loop inside Odin, Gjallar, Eve lowerers, or
-  renderer code should be cut or demoted to a probe that names Idunn as the
+  renderer code must be cut or demoted to a probe that names Idunn as the
   restart owner.
 
 ## Body
@@ -67,7 +67,7 @@ idunn.operator_escalation.v1
 - Odin remains the accepted owner of Verse and service discovery.
 - Idunn owns continuity decisions after a daemon is known.
 - Individual daemons own their work and their health publication, not their
-  surrounding lifecycle. They should be simple to kill and simple for Idunn to
+  surrounding lifecycle. They must be simple to kill and simple for Idunn to
   bring back.
 - Providers own their own command boundaries. Idunn requests restart through
   advertised authority or a named local service manager adapter.
@@ -83,9 +83,11 @@ idunn.operator_escalation.v1
 - Operator alarms use CultMesh to request Bifrost-owned operator notification.
   Bifrost is the bridge for the crossing and records the receipt. VoidBot's
   `voidbot.operator-dm` command `owner.dm.send` with payload schema
-  `gamecult.operator_dm_request.v1` is a compatibility delivery actuator until
-  the owner-DM command lives natively in Bifrost's Verse. Idunn must not learn
-  Discord token handling, DM delivery internals, or VoidBot-specific transport.
+  `gamecult.operator_dm_request.v1` is a demoted compatibility delivery
+  actuator, not the owner. The owner-DM command lives in Bifrost's Verse; any
+  still-VoidBot delivery path must be invoked by Bifrost or documented as
+  migration debt. Idunn must not learn Discord token handling, DM delivery
+  internals, or VoidBot-specific transport.
 
 ## First Runtime Direction
 
@@ -101,5 +103,5 @@ Idunn's C# runtime should grow in this order:
    VoidBot owner-DM delivery only as a demoted compatibility target.
 7. Publish an Eve/CultUI keepalive surface from Idunn-owned records.
 
-No ad hoc JSON manifest should become the live state owner. Debug projections
-are fine when they name the `.cc` record or CultMesh document behind them.
+No ad hoc JSON manifest may become the live state owner. Debug projections are
+fine when they name the `.cc` record or CultMesh document behind them.

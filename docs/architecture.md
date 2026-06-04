@@ -69,11 +69,11 @@ Odin's executable body is split by ownership:
 
 The entrypoint is not allowed to grow new probe, surface, provider, layout, or renderer policy. If a new owner is needed, name the owner and its invariant before adding code.
 
-Gjallar is the named herald organ for future agent-context transmission. Its
+Gjallar is the named herald organ for agent-context transmission. Its
 current package lives in `docs/gjallar.md`, `personas/gjallar.persona_state.cc`,
 `src/Gjallar/Gjallar.csproj`, `assets/personas/gjallar-avatar.png`, and
 `assets/personas/gjallar-avatar-pixel-256.png`. When it becomes executable, it
-should be added as its own C# CultMesh entrypoint rather than being folded into
+must be added as its own C# CultMesh entrypoint rather than being folded into
 Odin's coordinator. Gjallar may read Odin-owned state and emit affordance
 packets; it must not own the underlying registry, probe, provider, layout, or
 translation decisions.
@@ -83,24 +83,26 @@ lives in `docs/idunn.md` and `src/Idunn/Idunn.csproj`. Idunn may read
 Odin-owned service records and provider advertisements, then bring daemons up
 after reboots or crashes, watch health, emit keepalive observations, restart
 requests, denied-action records, and operator alarms. When human action is
-needed, Idunn should use CultMesh to request a Bifrost-owned operator
+needed, Idunn uses CultMesh to request a Bifrost-owned operator
 notification crossing. VoidBot's `voidbot.operator-dm` command `owner.dm.send`
-is only a compatibility delivery actuator until that command lives natively in
-Bifrost's Verse. Idunn must not own Verse discovery, schema truth, provider
-dashboards, identity grants, Discord delivery, owner-DM delivery, or renderer
-layout. Keepalive loops should move into Idunn instead of accumulating inside
-Odin's coordinator or individual daemons.
+is a demoted compatibility delivery actuator, not the owner. The target command
+lives in Bifrost's Verse; any still-VoidBot delivery path must be invoked by
+Bifrost or documented as migration debt. Idunn must not own Verse discovery,
+schema truth, provider dashboards, identity grants, Discord delivery, owner-DM
+delivery, or renderer layout. Keepalive loops belong in Idunn, not Odin's
+coordinator or individual daemons.
 
 Bifrost is the bridge for Persona speech and other public/owner-facing
-crossings. When a Persona interpreter decides a Face should speak, the accepted
-side effect should be a Bifrost CultMesh command or document that names actor,
-authority, target surface, context, policy result, and receipt path. VoidBot may
-observe Discord, preserve room cognition, moderate, and provide compatibility
-delivery while the migration is underway, but it must not remain the owner of
-swarm speech transport. VoidBot's repo search, Discord history search, archive
-lookup, and source retrieval should be native CultCache/CultMesh services; MCP
-is the bridge for external agentic access, not the native path for GameCult
-agents that already have CultMesh affordances.
+crossings. When a Persona interpreter decides a Face speaks, the accepted
+side effect is a Bifrost CultMesh command or document that names actor,
+authority, target surface, context, policy result, and receipt path. VoidBot
+observes Discord, preserves room cognition, moderates, and may provide
+compatibility delivery, but it is not the owner of swarm speech transport.
+VoidBot's repo search, Discord history search, archive lookup, and source
+retrieval are required native CultCache/CultMesh service surfaces. Any remaining
+VoidBot-local or MCP-only implementation is migration debt. MCP is the bridge
+for external agentic access, not the native path for GameCult agents that
+already have CultMesh affordances.
 
 ## Target Mechanism
 

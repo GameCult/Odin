@@ -42,8 +42,8 @@ swarm alive after Odin has accepted where each daemon lives and what authority
 path may touch it. Individual daemons publish health and command boundaries;
 Idunn brings them up after reboots or crashes, watches health, and escalates
 operator-needed failures through Bifrost's CultMesh bridge. VoidBot owner-DM
-delivery is a compatibility actuator until that command lives natively in
-Bifrost's Verse. Odin sees the daemons; Idunn keeps the apples from rotting.
+delivery is a demoted compatibility actuator, not the owner; the command belongs
+in Bifrost's Verse. Odin sees the daemons; Idunn keeps the apples from rotting.
 
 Local package surfaces:
 
