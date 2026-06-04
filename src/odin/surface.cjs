@@ -34,7 +34,8 @@ function buildSurface({ observedAt, docker, adb, hosts, yggdrasilServices, verse
             id: `interface-${stableId(entry.providerId)}`,
             kind: "interface",
             props: {
-              title: verseUri(entry),
+              title: entry.title || entry.providerId,
+              verseUri: verseUri(entry),
               providerId: entry.providerId,
               source: entry.source,
               status: entry.state,

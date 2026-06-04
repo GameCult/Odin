@@ -26,9 +26,13 @@ function buildConfig(argv) {
     .filter(Boolean);
   const observationLogPath = args.observationLogPath || path.join(repoRoot, "..", "Mimir", "artifacts", "runtime", "periwinkle-cultmesh-sensors.out.log");
   const observationFreshSeconds = Number(args.observationFreshSeconds || 120);
+  const defaultInterfaceBindingStores = [
+    path.join(repoRoot, "..", "VoidBot", ".voidbot", "status", "cultmesh", "voidbot-swarm-state.cc"),
+    path.join(repoRoot, "..", "Bifrost", ".bifrost", "provider-advertisement.cc"),
+  ].join(",");
   const interfaceBindingStores = String(
     args.interfaceBindingStore ||
-    path.join(repoRoot, "..", "VoidBot", ".voidbot", "status", "cultmesh", "voidbot-swarm-state.cc"),
+    defaultInterfaceBindingStores,
   )
     .split(",")
     .map((entry) => entry.trim())

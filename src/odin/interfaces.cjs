@@ -139,16 +139,17 @@ function createInterfaceDiscovery({
             continue;
           }
           const state = node.get(surfaceDefinition, binding.providerId);
+          const surface = state?.surface || binding.surface || null;
           interfaces.push({
             providerId: binding.providerId,
             title: binding.title || state?.title || binding.providerId,
             state: "active",
-            detail: `${state?.surface?.root?.kind || binding.kind || "surface"} ${state?.nodes?.length || 0} nodes via CultMesh`,
+            detail: `${surface?.root?.kind || binding.kind || "surface"} ${countSurfaceNodes(surface, state)} nodes via CultMesh`,
             version: state?.version || 0,
             updatedAt: state?.updatedAt || binding.updatedAt || new Date().toISOString(),
             source: `cultmesh:${storePath}`,
             manifest: binding.provider || null,
-            surface: state?.surface || binding.surface || null,
+            surface,
           });
         }
       } catch (error) {
@@ -209,7 +210,7 @@ async function fetchEveProvider(url, providerId, manifest = null) {
             providerId,
             title: state.title || manifest?.title || providerId,
             state: "active",
-            detail: `${surface?.root?.kind || "surface"} ${state.nodes?.length || 0} nodes`,
+            detail: `${surface?.root?.kind || "surface"} ${countSurfaceNodes(surface, state)} nodes`,
             version: state.version,
             updatedAt: state.updatedAt,
             source: url,
@@ -239,6 +240,31 @@ function dashboardUnavailable(providerId, source, detail) {
     manifest: null,
     surface: null,
   };
+}
+
+function countSurfaceNodes(surface, state = null) {
+  if (Array.isArray(state?.nodes)) {
+    return state.nodes.length;
+  }
+  if (!surface?.root) {
+    return 0;
+  }
+
+  let count = 0;
+  const stack = [surface.root];
+  while (stack.length > 0) {
+    const node = stack.pop();
+    if (!node || typeof node !== "object") {
+      continue;
+    }
+    count += 1;
+    if (Array.isArray(node.children)) {
+      for (const child of node.children) {
+        stack.push(child);
+      }
+    }
+  }
+  return count;
 }
 
 function legacySurfaceFromNodes(state, manifest = null) {
