@@ -21,11 +21,11 @@ state.
   local service manager state, and direct local service probes only when no
   provider advertisement exists.
 - Outputs: typed keepalive observations, restart requests, denied-action
-  records, operator alarms, owner-DM escalation requests through VoidBot, and an
+  records, operator alarms, Bifrost operator-notification requests, and an
   Eve/CultUI keepalive surface.
-- Derived state: dashboard cells, Discord speech, agent summaries, and Odin
-  service projections are notification-only views of Idunn-owned keepalive
-  records.
+- Derived state: dashboard cells, Bifrost receipts, Discord or owner-DM
+  lowerings, agent summaries, and Odin service projections are
+  notification-only views of Idunn-owned keepalive records.
 - Forbidden writers: Idunn does not decide which Verses exist, invent provider
   schemas, mutate provider dashboards, own identity/session grants, or hide
   restarts behind Odin refresh logic. Individual daemons should not carry
@@ -59,7 +59,7 @@ idunn.keepalive_decision.v1
 idunn.restart_request.v1
 idunn.restart_result.v1
 idunn.operator_alarm.v1
-idunn.owner_dm_escalation.v1
+idunn.operator_escalation.v1
 ```
 
 ## Invariants
@@ -80,10 +80,12 @@ idunn.owner_dm_escalation.v1
 - Idunn should fail closed when authority is unclear. Unknown ownership,
   repeated restart failure, missing command authority, or degraded health that
   needs a human becomes an operator alarm.
-- Operator alarms use CultMesh to request VoidBot owner notification through
-  the provider-owned `voidbot.operator-dm` command `owner.dm.send` with payload
-  schema `gamecult.operator_dm_request.v1`. Idunn must not learn Discord token
-  handling or DM delivery internals.
+- Operator alarms use CultMesh to request Bifrost-owned operator notification.
+  Bifrost is the bridge for the crossing and records the receipt. VoidBot's
+  `voidbot.operator-dm` command `owner.dm.send` with payload schema
+  `gamecult.operator_dm_request.v1` is a compatibility delivery actuator until
+  the owner-DM command lives natively in Bifrost's Verse. Idunn must not learn
+  Discord token handling, DM delivery internals, or VoidBot-specific transport.
 
 ## First Runtime Direction
 
@@ -95,7 +97,8 @@ Idunn's C# runtime should grow in this order:
 4. Emit `idunn.keepalive_decision.v1` records without acting.
 5. Add restart adapters only for named authority boundaries: local systemd,
    Windows service control, Docker, or provider-advertised commands.
-6. Add `voidbot.operator-dm` escalation for cases that need operator action.
+6. Add Bifrost operator escalation for cases that need human action, with
+   VoidBot owner-DM delivery only as a demoted compatibility target.
 7. Publish an Eve/CultUI keepalive surface from Idunn-owned records.
 
 No ad hoc JSON manifest should become the live state owner. Debug projections

@@ -41,15 +41,17 @@ Idunn is Odin's keepalive organ: the daemon package that should keep the known
 swarm alive after Odin has accepted where each daemon lives and what authority
 path may touch it. Individual daemons publish health and command boundaries;
 Idunn brings them up after reboots or crashes, watches health, and escalates
-operator-needed failures through VoidBot's CultMesh owner-DM command. Odin sees
-the daemons; Idunn keeps the apples from rotting.
+operator-needed failures through Bifrost's CultMesh bridge. VoidBot owner-DM
+delivery is a compatibility actuator until that command lives natively in
+Bifrost's Verse. Odin sees the daemons; Idunn keeps the apples from rotting.
 
 Local package surfaces:
 
 - Organ contract: `docs/idunn.md`
 - C# CultMesh organ: `src/Idunn/Idunn.csproj`
 - Runtime store: `scratch/idunn/idunn.keepalive.cc`
-- Operator escalation: `voidbot.operator-dm` command `owner.dm.send`
+- Operator escalation: Bifrost-owned CultMesh crossing; current compatibility
+  delivery may call `voidbot.operator-dm` command `owner.dm.send`
 
 ## Authority Map
 

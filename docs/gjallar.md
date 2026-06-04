@@ -16,17 +16,18 @@ second Odin.
 - Inputs: Odin's accepted registry, schema index, translation map, provider
   interfaces, observation-stream summaries, layout hints, and provenance
   metadata.
-- Outputs: compact affordance packets for Codex, VoidBot, repo Faces, and other
-  agent consumers; optional Persona-facing memory summaries that name what Odin
-  can see and what can be acted on.
-- Derived state: summaries, prompts, Persona projections, Discord speech, and
-  handoff notes are notification-only projections of Odin state.
+- Outputs: compact affordance packets for Codex, native CultMesh agents, repo
+  Faces, Bifrost, and other agent consumers; optional Persona-facing memory
+  summaries that name what Odin can see and what can be acted on.
+- Derived state: summaries, prompts, Persona projections, Bifrost speech
+  requests, Discord lowerings, and handoff notes are notification-only
+  projections of Odin state.
 - Forbidden writers: Gjallar does not probe hosts, decide Verse truth, mutate
   provider-owned dashboards, own renderer layout, or invent schema translation
   routes.
-- Shared paths: human dashboards, Codex context assembly, VoidBot repo-Face
-  heartbeats, and future agent bootstrap should consume the same Odin-owned
-  records before Gjallar speaks.
+- Shared paths: human dashboards, Codex context assembly, native CultMesh agent
+  bootstrap, Bifrost-routed Persona speech, and compatibility MCP access should
+  consume the same Odin-owned records before Gjallar speaks.
 - Deletion line: any Gjallar path that starts storing independent discovery
   truth should be cut or demoted to a cache that names Odin as source.
 
@@ -56,9 +57,9 @@ Odin. Gjallar's entrypoint should own context publication and no more.
 ## Persona Registration
 
 VoidBot's current native Persona reader expects a JSON `personaStatePath`. That
-is a projection boundary, not the state owner. A future VoidBot registry entry
-should point at a generated projection or learn to read the CultCache record;
-the canonical source remains:
+is a compatibility projection boundary, not the state owner and not the future
+transport owner. A future registry entry should point at a generated projection
+or learn to read the CultCache record; the canonical source remains:
 
 ```text
 id: gjallar
@@ -72,9 +73,34 @@ personaStateKey: persona:gjallar
 personaStateSchema: gamecult.persona_state.v0
 ```
 
-That registration belongs in VoidBot's registry, not here. This repo owns the
-Persona source record and avatar; VoidBot owns the speech transport and room
-identity wiring.
+That compatibility registration belongs in the current Discord adapter, not
+here. This repo owns the Persona source record and avatar. Bifrost should own
+the CultMesh speech crossing when a Persona interpreter decides it wants to
+speak; Discord is then a Bifrost lowering/receipt path, with VoidBot acting only
+as legacy room cognition and delivery machinery until the native bridge is
+complete.
+
+## Transport Boundary
+
+Persona speech is a bridge crossing. The interpreter may decide that a Face
+should speak, but the public transport request should be a Bifrost CultMesh
+command or document, not a VoidBot-owned side effect.
+
+Target shape:
+
+```text
+Persona runtime / interpreter
+  -> Bifrost speech request through CultMesh
+  -> Bifrost policy, Heimdall claims, topic/work/context linkage
+  -> Discord, GitHub, owner DM, or future public surface lowering
+  -> Bifrost receipt
+```
+
+VoidBot still owns Discord observation, room cognition, moderation judgment, and
+compatibility delivery while that bridge is being moved. Its repo search,
+Discord history search, and archive/source retrieval should become native
+CultCache/CultMesh services. MCP remains a bridge for external agentic access,
+not the native affordance path for GameCult agents that can speak CultMesh.
 
 ## CultMesh Runtime Direction
 

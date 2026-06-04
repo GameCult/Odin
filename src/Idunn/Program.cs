@@ -25,7 +25,7 @@ Console.WriteLine("Idunn CultMesh organ initialized.");
 Console.WriteLine($"Keepalive store: {cachePath}");
 Console.WriteLine("Provider id: idunn.keepalive");
 Console.WriteLine("Authority: daemon lifecycle, health watching, restart intent, and operator escalation for Odin-known daemons");
-Console.WriteLine("Owner escalation: CultMesh command voidbot.operator-dm owner.dm.send");
+Console.WriteLine("Owner escalation: Bifrost CultMesh bridge; VoidBot owner DM is compatibility delivery only");
 Console.WriteLine($"CultMesh server: {(options.Serve ? "started" : "disabled")}");
 Console.WriteLine("Typed keepalive records and restart adapters are the next cut.");
 
