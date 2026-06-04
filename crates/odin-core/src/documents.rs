@@ -7,6 +7,12 @@ pub const ODIN_INTERFACE_SCHEMA: &str = "odin.interface.v1";
 pub const ODIN_OBSERVATION_STREAM_SCHEMA: &str = "odin.observation_stream.v1";
 pub const ODIN_TRANSLATION_ROUTE_SCHEMA: &str = "odin.translation_route.v1";
 pub const GJALLAR_AFFORDANCE_SCHEMA: &str = "gjallar.affordance.v1";
+pub const IDUNN_DESIRED_DAEMON_SCHEMA: &str = "idunn.desired_daemon.v1";
+pub const IDUNN_DAEMON_HEALTH_SCHEMA: &str = "idunn.daemon_health.v1";
+pub const IDUNN_KEEPALIVE_DECISION_SCHEMA: &str = "idunn.keepalive_decision.v1";
+pub const IDUNN_RESTART_REQUEST_SCHEMA: &str = "idunn.restart_request.v1";
+pub const IDUNN_RESTART_RESULT_SCHEMA: &str = "idunn.restart_result.v1";
+pub const IDUNN_OPERATOR_ALARM_SCHEMA: &str = "idunn.operator_alarm.v1";
 
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
 #[cultcache(type = "odin.snapshot", schema = "odin.snapshot.v1")]
@@ -148,6 +154,111 @@ pub struct GjallarAffordanceRecord {
     pub observed_at: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(type = "idunn.desired_daemon", schema = "idunn.desired_daemon.v1")]
+pub struct IdunnDesiredDaemonRecord {
+    #[cultcache(key = 0)]
+    pub daemon_id: String,
+    #[cultcache(key = 1)]
+    pub verse_id: String,
+    #[cultcache(key = 2)]
+    pub name: String,
+    #[cultcache(key = 3)]
+    pub enabled: bool,
+    #[cultcache(key = 4)]
+    pub health_command: Option<String>,
+    #[cultcache(key = 5)]
+    pub restart_command: Option<String>,
+    #[cultcache(key = 6)]
+    pub authority: String,
+    #[cultcache(key = 7)]
+    pub max_silence_seconds: u32,
+    #[cultcache(key = 8)]
+    pub observed_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(type = "idunn.daemon_health", schema = "idunn.daemon_health.v1")]
+pub struct IdunnDaemonHealthRecord {
+    #[cultcache(key = 0)]
+    pub daemon_id: String,
+    #[cultcache(key = 1)]
+    pub state: String,
+    #[cultcache(key = 2)]
+    pub detail: String,
+    #[cultcache(key = 3)]
+    pub observed_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(
+    type = "idunn.keepalive_decision",
+    schema = "idunn.keepalive_decision.v1"
+)]
+pub struct IdunnKeepaliveDecisionRecord {
+    #[cultcache(key = 0)]
+    pub decision_id: String,
+    #[cultcache(key = 1)]
+    pub daemon_id: String,
+    #[cultcache(key = 2)]
+    pub action: String,
+    #[cultcache(key = 3)]
+    pub reason: String,
+    #[cultcache(key = 4)]
+    pub authority: String,
+    #[cultcache(key = 5)]
+    pub decided_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(type = "idunn.restart_request", schema = "idunn.restart_request.v1")]
+pub struct IdunnRestartRequestRecord {
+    #[cultcache(key = 0)]
+    pub request_id: String,
+    #[cultcache(key = 1)]
+    pub daemon_id: String,
+    #[cultcache(key = 2)]
+    pub command: String,
+    #[cultcache(key = 3)]
+    pub authority: String,
+    #[cultcache(key = 4)]
+    pub requested_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(type = "idunn.restart_result", schema = "idunn.restart_result.v1")]
+pub struct IdunnRestartResultRecord {
+    #[cultcache(key = 0)]
+    pub result_id: String,
+    #[cultcache(key = 1)]
+    pub request_id: String,
+    #[cultcache(key = 2)]
+    pub daemon_id: String,
+    #[cultcache(key = 3)]
+    pub state: String,
+    #[cultcache(key = 4)]
+    pub detail: String,
+    #[cultcache(key = 5)]
+    pub completed_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(type = "idunn.operator_alarm", schema = "idunn.operator_alarm.v1")]
+pub struct IdunnOperatorAlarmRecord {
+    #[cultcache(key = 0)]
+    pub alarm_id: String,
+    #[cultcache(key = 1)]
+    pub daemon_id: String,
+    #[cultcache(key = 2)]
+    pub severity: String,
+    #[cultcache(key = 3)]
+    pub reason: String,
+    #[cultcache(key = 4)]
+    pub escalation_target: String,
+    #[cultcache(key = 5)]
+    pub raised_at: String,
+}
+
 cultmesh_rs::cultmesh_documents!(OdinDocuments {
     OdinSnapshotRecord => ODIN_SNAPSHOT_SCHEMA,
     OdinVerseRecord => ODIN_VERSE_SCHEMA,
@@ -156,6 +267,12 @@ cultmesh_rs::cultmesh_documents!(OdinDocuments {
     OdinObservationStreamRecord => ODIN_OBSERVATION_STREAM_SCHEMA,
     OdinTranslationRouteRecord => ODIN_TRANSLATION_ROUTE_SCHEMA,
     GjallarAffordanceRecord => GJALLAR_AFFORDANCE_SCHEMA,
+    IdunnDesiredDaemonRecord => IDUNN_DESIRED_DAEMON_SCHEMA,
+    IdunnDaemonHealthRecord => IDUNN_DAEMON_HEALTH_SCHEMA,
+    IdunnKeepaliveDecisionRecord => IDUNN_KEEPALIVE_DECISION_SCHEMA,
+    IdunnRestartRequestRecord => IDUNN_RESTART_REQUEST_SCHEMA,
+    IdunnRestartResultRecord => IDUNN_RESTART_RESULT_SCHEMA,
+    IdunnOperatorAlarmRecord => IDUNN_OPERATOR_ALARM_SCHEMA,
 });
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

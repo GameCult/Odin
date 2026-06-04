@@ -40,19 +40,21 @@ state.
 
 ## Body
 
-The initial local package is deliberately small:
+Idunn now shares Odin's Rust body:
 
+- `crates/odin-core/src/idunn.rs` owns the keepalive decision engine.
+- `crates/odin-core/src/documents.rs` publishes typed Idunn CultMesh records
+  beside Odin and Gjallar records.
+- `crates/idunn-daemon` is the local keepalive actuator crate.
 - `src/Idunn/README.md` is the user-facing introduction for developers,
   operators, and daemon authors.
-- `src/Idunn/Idunn.csproj` is the first C# CultMesh organ.
-- `src/Idunn/Program.cs` opens or creates Idunn's local CultCache/CultMesh
-  store at `scratch/idunn/idunn.keepalive.cc`.
-- `npm run idunn:build` builds the organ beside `gjallar:build`.
-- `npm run idunn:start -- --serve` starts the resident keepalive process.
+- `npm run idunn:build` builds the Rust daemon.
+- `npm run idunn:start -- ...` probes a daemon, records the decision, and can
+  execute the restart command when `--execute` is present.
+- `--interval-seconds <seconds>` keeps the same probe and decision path running
+  as a resident keepalive loop.
 
-This is the organ contract and runtime foothold. It does not yet restart
-anything. The first real keepalive cut should add typed records before adding
-actuators:
+The current typed records are:
 
 ```text
 idunn.desired_daemon.v1
@@ -61,7 +63,6 @@ idunn.keepalive_decision.v1
 idunn.restart_request.v1
 idunn.restart_result.v1
 idunn.operator_alarm.v1
-idunn.operator_escalation.v1
 ```
 
 ## Invariants
@@ -93,17 +94,21 @@ idunn.operator_escalation.v1
 
 ## First Runtime Direction
 
-Idunn's C# runtime should grow in this order:
+Idunn's Rust runtime grows in this order:
 
-1. Read Odin-owned service and provider-advertisement records through CultMesh.
-2. Normalize them into `idunn.desired_daemon.v1` records.
-3. Observe freshness and process state through narrow probe ports.
-4. Emit `idunn.keepalive_decision.v1` records without acting.
-5. Add restart adapters only for named authority boundaries: local systemd,
-   Windows service control, Docker, or provider-advertised commands.
-6. Add Bifrost operator escalation for cases that need human action, with
-   VoidBot owner-DM delivery only as a demoted compatibility target.
-7. Publish an Eve/CultUI keepalive surface from Idunn-owned records.
+1. Probe one named daemon with an explicit health command, once or on a
+   resident interval.
+2. Normalize that into `idunn.desired_daemon.v1` and
+   `idunn.daemon_health.v1`.
+3. Emit `idunn.keepalive_decision.v1`.
+4. When restart authority exists, emit `idunn.restart_request.v1`.
+5. When `--execute` is present, execute the restart command and emit
+   `idunn.restart_result.v1`.
+6. When authority is missing, emit `idunn.operator_alarm.v1` targeting
+   Bifrost operator notification.
+7. Next: ingest Odin-owned service/provider advertisements directly, add named
+   adapters for Windows services, systemd, Docker, and provider-advertised
+   CultMesh commands, then publish an Eve/CultUI keepalive surface.
 
 No ad hoc JSON manifest may become the live state owner. Debug projections are
 fine when they name the `.cc` record or CultMesh document behind them.

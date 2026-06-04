@@ -51,7 +51,8 @@ Local package surfaces:
 
 - Organ contract: `docs/idunn.md`
 - User README: `src/Idunn/README.md`
-- C# CultMesh organ: `src/Idunn/Idunn.csproj`
+- Rust daemon crate: `crates/idunn-daemon`
+- Rust lifecycle logic: `crates/odin-core/src/idunn.rs`
 - Runtime store: `scratch/idunn/idunn.keepalive.cc`
 - Operator escalation: Bifrost-owned CultMesh crossing; current compatibility
   delivery may call `voidbot.operator-dm` command `owner.dm.send`

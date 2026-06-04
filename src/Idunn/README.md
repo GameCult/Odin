@@ -49,15 +49,14 @@ watchdog.
 
 ## Current State
 
-Idunn is currently a small C# CultMesh entrypoint inside the Odin repo. It can
-open or create its local keepalive CultCache/CultMesh store:
+Idunn is a Rust daemon inside Odin's Cargo workspace. It can probe one daemon,
+write desired state, health, keepalive decision, restart request, restart
+result, and operator alarm as typed CultMesh records, and execute a restart
+command when the operator explicitly gives it authority.
 
 ```text
 scratch/idunn/idunn.keepalive.cc
 ```
-
-It does not yet restart services. The current body is the runtime foothold and
-contract boundary, not the full supervisor.
 
 ## Run It
 
@@ -65,19 +64,31 @@ From `E:\Projects\Odin`:
 
 ```powershell
 npm run idunn:build
-npm run idunn:start
+npm run idunn:start -- --daemon demo --health-command "exit 0"
 ```
 
-To keep the CultMesh node resident:
+To record a failed health check and request a restart without actuating:
 
 ```powershell
-npm run idunn:start -- --serve
+npm run idunn:start -- --daemon demo --health-command "exit 1" --restart-command "echo restart demo"
+```
+
+To actually run the restart command:
+
+```powershell
+npm run idunn:start -- --daemon demo --health-command "exit 1" --restart-command "echo restart demo" --execute
+```
+
+To keep watching on a resident interval:
+
+```powershell
+npm run idunn:start -- --daemon demo --health-command "exit 0" --interval-seconds 30
 ```
 
 Optional store override:
 
 ```powershell
-npm run idunn:start -- --cache E:\path\to\idunn.keepalive.cc
+npm run idunn:start -- --daemon demo --store E:\path\to\idunn.keepalive.cc --health-command "exit 0"
 ```
 
 ## What Daemons Should Publish
@@ -93,9 +104,7 @@ Idunn should not guess private service truth. A daemon should publish:
 If that information is missing, Idunn should fail closed and create an operator
 alarm instead of improvising.
 
-## What Comes Next
-
-The next implementation cuts are typed records and real adapters:
+## Typed Records
 
 - `idunn.desired_daemon.v1`
 - `idunn.daemon_health.v1`
@@ -103,11 +112,10 @@ The next implementation cuts are typed records and real adapters:
 - `idunn.restart_request.v1`
 - `idunn.restart_result.v1`
 - `idunn.operator_alarm.v1`
-- `idunn.operator_escalation.v1`
 
-After those records exist, Idunn can add restart adapters for named authority
-boundaries such as systemd, Windows services, Docker, or provider-advertised
-CultMesh commands.
+The next cuts are direct Odin service/provider ingestion, named adapters for
+systemd, Windows services, Docker, and provider-advertised CultMesh commands,
+and a Bifrost-owned operator notification request record for alarms.
 
 ## Boundaries
 

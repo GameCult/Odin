@@ -85,8 +85,8 @@ Odin's coordinator. Gjallar may read Odin-owned state and emit affordance
 packets; it must not own the underlying registry, probe, provider, layout, or
 translation decisions.
 
-Idunn is the named keepalive organ for daemon continuity. Its current package
-lives in `docs/idunn.md` and `src/Idunn/Idunn.csproj`. Idunn may read
+Idunn is the named keepalive organ for daemon continuity. Its current Rust
+body lives in `crates/idunn-daemon` and `crates/odin-core/src/idunn.rs`. Idunn may read
 Odin-owned service records and provider advertisements, then bring daemons up
 after reboots or crashes, watch health, emit keepalive observations, restart
 requests, denied-action records, and operator alarms. When human action is

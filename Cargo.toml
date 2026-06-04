@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/idunn-daemon",
     "crates/odin-core",
 ]
 resolver = "3"
@@ -8,4 +9,3 @@ resolver = "3"
 edition = "2024"
 license = "MIT"
 publish = false
-
