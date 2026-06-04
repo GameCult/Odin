@@ -35,6 +35,22 @@ Local package surfaces:
 - Avatar asset: `assets/personas/gjallar-avatar.png`
 - Pixel avatar: `assets/personas/gjallar-avatar-pixel-256.png`
 
+## Idunn
+
+Idunn is Odin's keepalive organ: the daemon package that should keep the known
+swarm alive after Odin has accepted where each daemon lives and what authority
+path may touch it. Individual daemons publish health and command boundaries;
+Idunn brings them up after reboots or crashes, watches health, and escalates
+operator-needed failures through VoidBot's CultMesh owner-DM command. Odin sees
+the daemons; Idunn keeps the apples from rotting.
+
+Local package surfaces:
+
+- Organ contract: `docs/idunn.md`
+- C# CultMesh organ: `src/Idunn/Idunn.csproj`
+- Runtime store: `scratch/idunn/idunn.keepalive.cc`
+- Operator escalation: `voidbot.operator-dm` command `owner.dm.send`
+
 ## Authority Map
 
 - Owner: Odin owns the network-wide Verse registry, schema catalog index, translation map, and the accepted `odin.allseer` Eve surface.

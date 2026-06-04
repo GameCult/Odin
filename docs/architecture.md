@@ -78,6 +78,18 @@ Odin's coordinator. Gjallar may read Odin-owned state and emit affordance
 packets; it must not own the underlying registry, probe, provider, layout, or
 translation decisions.
 
+Idunn is the named keepalive organ for daemon continuity. Its current package
+lives in `docs/idunn.md` and `src/Idunn/Idunn.csproj`. Idunn may read
+Odin-owned service records and provider advertisements, then bring daemons up
+after reboots or crashes, watch health, emit keepalive observations, restart
+requests, denied-action records, and operator alarms. When human action is
+needed, Idunn should use CultMesh to request VoidBot's provider-owned
+`voidbot.operator-dm` command `owner.dm.send` with payload schema
+`gamecult.operator_dm_request.v1`. It must not own Verse discovery, schema
+truth, provider dashboards, identity grants, Discord delivery, or renderer
+layout. Keepalive loops should move into Idunn instead of accumulating inside
+Odin's coordinator or individual daemons.
+
 ## Target Mechanism
 
 ```text

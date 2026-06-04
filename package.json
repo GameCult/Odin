@@ -8,6 +8,8 @@
     "gjallar:persona": "node scripts/write-gjallar-persona-cc.mjs inspect",
     "gjallar:persona:write": "node scripts/write-gjallar-persona-cc.mjs write",
     "gjallar:build": "dotnet build src/Gjallar/Gjallar.csproj",
+    "idunn:build": "dotnet build src/Idunn/Idunn.csproj",
+    "idunn:start": "dotnet run --project src/Idunn/Idunn.csproj --",
     "rust:test": "cargo test --workspace",
     "check": "node scripts/check-syntax.cjs",
     "start": "node src/odin-coordinator.cjs"
