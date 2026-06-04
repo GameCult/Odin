@@ -62,7 +62,13 @@ function providerCatalogFromState(state) {
         title: String(props.title || props.providerId),
         description: String(props.detail || "Provider-owned Eve/CultUI interface discovered by Odin."),
         version: String(props.version || 0),
-        endpoint: props.source || "/eve/deck",
+        endpoint: props.cultMeshAddress || props.locatedService || props.source || "/eve/deck",
+        canonicalService: props.canonicalService || null,
+        locatedService: props.locatedService || null,
+        cultMeshAddress: props.cultMeshAddress || null,
+        endpoints: Array.isArray(props.endpoints) ? props.endpoints : [],
+        routes: Array.isArray(props.routes) ? props.routes : [],
+        transportEndpoint: transportEndpoint(props),
         capabilities: providerCapabilities(embeddedRoot),
         usesCultMesh: String(props.source || "").startsWith("cultmesh:"),
         transport: String(props.source || "").startsWith("cultmesh:")
@@ -74,6 +80,14 @@ function providerCatalogFromState(state) {
       });
   }
   return [...providers.values()].sort((left, right) => String(left.id).localeCompare(String(right.id)));
+}
+
+function transportEndpoint(props) {
+  const routes = Array.isArray(props.routes) ? props.routes : [];
+  return routes.find((route) => route?.transport === "cultnet")?.address
+    || routes.find((route) => route?.transport === "compatibility-eve-deck")?.address
+    || props.source
+    || "";
 }
 
 function providerCapabilities(root) {

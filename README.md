@@ -103,6 +103,7 @@ The first executable is deliberately narrow:
 - includes local Spotiverse on `ws://127.0.0.1:8796/eve/deck` in the known provider seed list;
 - ingests provider-owned Eve/CultUI dashboards, including `mimir.live.stats` and `voidbot.swarm`, and embeds them as Odin `interface` nodes;
 - accepts `gamecult.eve.provider_advertisement.v1` documents in CultMesh interface binding stores so daemons can announce schemas, `.cc` witnesses, surfaces, commands, nested Verses, and style capabilities without Odin scraping private dashboards;
+- preserves provider semantic addresses such as `asgard.starfire.bifrost/eve/tui` and `asgard.starfire.bifrost/eve/gui`, with CultNet routes and WebSocket bridges carried as transport metadata rather than identity;
 - persists operator tiling intent as `odin.interface_layout.v1` under ignored `scratch/odin/interface-layout.json`.
 
 The next real cut is to make provider advertisements the primary discovery

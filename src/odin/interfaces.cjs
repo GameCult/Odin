@@ -87,7 +87,16 @@ function createInterfaceDiscovery({
             title: advertisement.title || advertisement.providerId,
             description: advertisement.description || "Provider-owned CultMesh advertisement.",
             version: String(advertisement.version || 0),
-            endpoint: advertisement.endpoints?.[0] || advertisement.provider?.endpoint || `cultmesh:${storePath}`,
+            endpoint: advertisement.cultMeshAddress || advertisement.endpoints?.[0]?.address || advertisement.provider?.endpoint || `cultmesh:${storePath}`,
+            canonicalService: advertisement.canonicalService || null,
+            locatedService: advertisement.locatedService || null,
+            cultMeshAddress: advertisement.cultMeshAddress || null,
+            endpoints: advertisement.endpoints || [],
+            routes: advertisement.routes || [],
+            transportEndpoint: advertisement.routes?.find((route) => route.transport === "cultnet")?.address
+              || advertisement.routes?.find((route) => route.transport === "compatibility-eve-deck")?.address
+              || advertisement.provider?.endpoint
+              || `cultmesh:${storePath}`,
             capabilities: advertisement.provider?.capabilities || advertisement.capabilities || [],
             usesCultMesh: true,
             transport: advertisement.provider?.transport || "CultMesh provider advertisement",
@@ -149,6 +158,11 @@ function createInterfaceDiscovery({
             updatedAt: state?.updatedAt || binding.updatedAt || new Date().toISOString(),
             source: `cultmesh:${storePath}`,
             manifest: binding.provider || null,
+            canonicalService: binding.provider?.canonicalService || null,
+            locatedService: binding.provider?.locatedService || null,
+            cultMeshAddress: binding.provider?.cultMeshAddress || binding.provider?.endpoint || null,
+            endpoints: binding.provider?.endpoints || [],
+            routes: binding.provider?.routes || [],
             surface,
           });
         }

@@ -208,6 +208,30 @@ style capabilities, freshness, and redaction policy. Once an advertisement is
 available, Odin should prefer it over LAN scans, hardcoded deck URLs, private
 layout files, or web-dashboard scraping.
 
+Provider advertisements should also publish semantic CultMesh addresses in this
+shape:
+
+```text
+asgard.<machine>.<service>/<resource>
+```
+
+Examples:
+
+```text
+asgard.starfire.odin/eve/allseer
+asgard.starfire.bifrost/eve/tui
+asgard.starfire.bifrost/eve/gui
+asgard.yggdrasil.streampixels/eve/tui
+asgard.yggdrasil.streampixels/eve/gui
+```
+
+The canonical service may omit the current machine when identity should survive
+relocation, such as `asgard.bifrost`. Located service addresses name the current
+host, such as `asgard.starfire.bifrost` now and
+`asgard.yggdrasil.bifrost` after migration. CultNet routes are transport
+metadata for resolving those names. WebSocket URLs remain compatibility deck
+bridges, not native service identity.
+
 The canonical contract lives in
 `E:\Projects\Eve\docs\provider-advertisement-contract.md`.
 

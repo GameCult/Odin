@@ -36,6 +36,11 @@ function buildSurface({ observedAt, docker, adb, hosts, yggdrasilServices, verse
             props: {
               title: entry.title || entry.providerId,
               verseUri: verseUri(entry),
+              canonicalService: entry.canonicalService || "",
+              locatedService: entry.locatedService || "",
+              cultMeshAddress: entry.cultMeshAddress || "",
+              endpoints: entry.endpoints || [],
+              routes: entry.routes || [],
               providerId: entry.providerId,
               source: entry.source,
               status: entry.state,
@@ -191,6 +196,8 @@ function metric(id, label, value, tone) {
 }
 
 function verseUri(entry) {
+  if (entry.cultMeshAddress) return String(entry.cultMeshAddress);
+  if (entry.locatedService) return String(entry.locatedService);
   const providerId = String(entry.providerId || "").trim();
   if (hasBodyPrefix(providerId)) return providerId;
   const body = sourceBody(entry.source);
