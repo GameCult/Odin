@@ -5,7 +5,7 @@ const { observationPane } = require("./observations.cjs");
 const { stableId } = require("./utils.cjs");
 
 function buildSurface({ observedAt, docker, adb, hosts, yggdrasilServices, verses, interfaces, observations, layout }) {
-  const activeInterfaces = interfaces.filter((entry) => entry.surface?.root);
+  const activeInterfaces = interfaces.filter(hasOverviewSignal);
   const activeObservationStreams = observations.streams.filter((entry) => entry.state === "active");
   return {
     schema: "gamecult.eve.surface.v1",
@@ -55,6 +55,87 @@ function buildSurface({ observedAt, docker, adb, hosts, yggdrasilServices, verse
     },
     assets: [],
   };
+}
+
+function hasOverviewSignal(entry) {
+  const root = entry?.surface?.root;
+  if (!root) return false;
+
+  const providerId = String(entry.providerId || "").toLowerCase();
+  const explicit = root.props?.overview || entry.manifest?.overview;
+  if (explicit?.visible === false) return false;
+  if (explicit?.visible === true || explicit?.signal === "live-ops") return true;
+
+  const text = surfaceText(root);
+  if (providerId.includes("voidbot.swarm")) return /\bctb\b|\bs[0-9.]+\s+h[0-9.]+/i.test(text);
+  if (providerId.includes("mimir.stream.layout")) return false;
+  if (providerId.includes("spotiverse")) return spotiverseHasOverviewSignal(root, text);
+  if (providerId.includes("streampixels")) return streamPixelsHasOverviewSignal(root, text);
+  if (providerId.includes("mimir.live.stats")) return mimirHasOverviewSignal(root, text);
+
+  if (root.props?.compatibility === "legacy-dashboard-nodes") return false;
+  if (/\b(rate limit|playing:\s*none|queue:\s*empty|unavailable|not discovered)\b/i.test(text)) return false;
+  return hasMetricElement(root) || /\b(users?|viewers?|events?|traffic|ingest|throughput|latency|dropout|queue|pressure|saturation|error|fault|warning)\b/i.test(text);
+}
+
+function spotiverseHasOverviewSignal(root, text) {
+  const status = String(root.props?.status || "").toLowerCase();
+  if (status === "warn" && /\brate limit\b/i.test(text)) return false;
+  if (/\bplaying:\s*none\b/i.test(text)) return false;
+  if (/\bqueue:\s*empty|queue:\s*empty or unavailable\b/i.test(text)) return false;
+  return /\bplaying:\s*(?!none\b).+|\bqueue:\s*(?!empty\b|0\b).+|\brequests?:\s*[1-9]|\bvolume:\s*[1-9]/i.test(text);
+}
+
+function streamPixelsHasOverviewSignal(root, text) {
+  if (root.props?.compatibility === "legacy-dashboard-nodes" && !/\b(users?|viewers?|events?|traffic|ingest|throughput|latency|queue|pressure|saturation|dropped|errors?)\b/i.test(text)) {
+    return false;
+  }
+
+  return [
+    /\b(live\s*)?(users?|viewers?)\s*[:=]?\s*[1-9]/i,
+    /\bevents?(\s*traffic|\s*\/\s*s|\s*per\s*sec)?\s*[:=]?\s*[1-9]/i,
+    /\bingest\b.*\b(saturation|pressure|traffic|throughput|[1-9][0-9]*(\.[0-9]+)?)\b/i,
+    /\b(queue|backlog|pressure)\s*[:=]?\s*[1-9]/i,
+    /\b(errors?|dropped|5xx)\s*[:=]?\s*[1-9]/i,
+    /\bthroughput\s*[:=]?\s*[1-9]/i,
+  ].some((pattern) => pattern.test(text));
+}
+
+function mimirHasOverviewSignal(root, text) {
+  if (root.props?.compatibility === "legacy-dashboard-nodes") return false;
+  return [
+    /\bdropout\b.*\b[1-9]/i,
+    /\bstale\s+streams?\s*[:=]?\s*[1-9]/i,
+    /\blatency\b.*\b([2-9][0-9]{2,}|[1-9]\d+\.\d+ms)\b/i,
+    /\bconfidence\b.*\b0\.[0-4]/i,
+  ].some((pattern) => pattern.test(text));
+}
+
+function surfaceText(root) {
+  const parts = [];
+  visitSurface(root, (node) => {
+    const props = node.props || {};
+    for (const key of ["title", "label", "text", "status", "detail", "summary", "value"]) {
+      if (props[key] !== undefined && props[key] !== null) parts.push(String(props[key]));
+    }
+  });
+  return parts.join("\n");
+}
+
+function hasMetricElement(root) {
+  let found = false;
+  visitSurface(root, (node) => {
+    if (node.kind === "metric") found = true;
+  });
+  return found;
+}
+
+function visitSurface(node, visitor) {
+  if (!node || typeof node !== "object") return;
+  visitor(node);
+  for (const child of Array.isArray(node.children) ? node.children : []) {
+    visitSurface(child, visitor);
+  }
 }
 
 function buildPendingSurface(message) {
@@ -126,6 +207,7 @@ module.exports = {
   buildPendingSurface,
   buildSurface,
   card,
+  hasOverviewSignal,
   metric,
   pane,
   stack,
