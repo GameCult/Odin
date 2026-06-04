@@ -61,7 +61,7 @@ function createStateBuilder({ cachePath, interfaceDiscovery, layoutStore, observ
 
     const verses = [
       verse("starfire.local", "Starfire", "coordinator", "active", ["docker", "adb", "eve-provider"], [
-        service("odin", "Odin all-seer", "active", "ws://0.0.0.0:8797/eve/deck"),
+        service("odin", "Odin all-seer", "active", "asgard.starfire.odin/eve/tui"),
         service("docker", "Docker", docker.state === "ok" ? "active" : "warn", `${docker.containers.length} running`),
         service("adb", "ADB transport", adbState(adb), adbDetail(adb)),
         service("cultcache", "Odin CultCache", fs.existsSync(cachePath) ? "active" : "waiting", require("path").basename(cachePath)),
