@@ -218,28 +218,60 @@ function legacyNodeGroups(nodes, providerId) {
   const groups = new Map();
   for (const node of nodes) {
     const kind = String(node.kind || "node");
-    const health = String(node.health || "unknown");
-    const key = `${kind}:${health}`;
+    const key = kind;
     if (!groups.has(key)) {
-      groups.set(key, { kind, health, nodes: [] });
+      groups.set(key, { kind, nodes: [] });
     }
     groups.get(key).nodes.push(node);
   }
 
   return [...groups.values()]
-    .sort((left, right) => left.kind.localeCompare(right.kind) || left.health.localeCompare(right.health))
-    .map((group) => ({
-      id: `legacy-group-${stableLegacyId(providerId, group.kind, group.health)}`,
-      kind: "group",
-      props: {
-        title: `${group.kind} / ${group.health}`,
-        count: group.nodes.length,
-        density: "dense",
-      },
-      children: group.nodes
+    .sort((left, right) => left.kind.localeCompare(right.kind))
+    .map((group) => legacyKindGroup(group, providerId));
+}
+
+function legacyKindGroup(group, providerId) {
+  const richNodes = [];
+  const statusBuckets = new Map();
+  for (const node of group.nodes) {
+    if (hasLegacyDetails(node)) {
+      richNodes.push(node);
+      continue;
+    }
+
+    const health = String(node.health || "unknown");
+    if (!statusBuckets.has(health)) {
+      statusBuckets.set(health, []);
+    }
+    statusBuckets.get(health).push(String(node.label || node.id || "node"));
+  }
+
+  const summaries = [...statusBuckets.entries()]
+    .sort((left, right) => left[0].localeCompare(right[0]))
+    .map(([health, labels]) => textElement(
+      `legacy-summary-${stableLegacyId(providerId, group.kind, health)}`,
+      `${health}: ${labels.sort((left, right) => left.localeCompare(right)).join(", ")}`,
+    ));
+
+  return {
+    id: `legacy-group-${stableLegacyId(providerId, group.kind)}`,
+    kind: "group",
+    props: {
+      title: group.kind,
+      count: group.nodes.length,
+      density: "dense",
+    },
+    children: [
+      ...summaries,
+      ...richNodes
         .sort((left, right) => String(left.id || left.label || "").localeCompare(String(right.id || right.label || "")))
         .map((node) => legacyNodeElement(node, providerId)),
-    }));
+    ],
+  };
+}
+
+function hasLegacyDetails(node) {
+  return Boolean(node.endpoint || node.command || (node.providerId && node.providerId !== "unknown"));
 }
 
 function legacyNodeElement(node, providerId) {
