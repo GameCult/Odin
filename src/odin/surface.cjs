@@ -18,6 +18,7 @@ function buildSurface({ observedAt, docker, adb, hosts, yggdrasilServices, verse
         title: "Odin All-Seer",
         observedAt,
         summary: `${activeInterfaces.length} Eve surfaces / ${activeObservationStreams.length} live streams`,
+        marqueeText: marketMarqueeText(interfaces),
         layout: fullscreenLayoutIntent("odin.allseer", -100),
         presentation: {
           theme: "bifrost-pride",
@@ -68,6 +69,7 @@ function hasOverviewSignal(entry) {
 
   const text = surfaceText(root);
   if (providerId.includes("voidbot.swarm")) return /\bctb\b|\bs[0-9.]+\s+h[0-9.]+/i.test(text);
+  if (providerId.includes("stonks.market")) return stonksHasOverviewSignal(root, text);
   if (providerId.includes("mimir.stream.layout")) return false;
   if (providerId.includes("spotiverse")) return spotiverseHasOverviewSignal(root, text);
   if (providerId.includes("streampixels")) return streamPixelsHasOverviewSignal(root, text);
@@ -76,6 +78,25 @@ function hasOverviewSignal(entry) {
   if (root.props?.compatibility === "legacy-dashboard-nodes") return false;
   if (/\b(rate limit|playing:\s*none|queue:\s*empty|unavailable|not discovered)\b/i.test(text)) return false;
   return hasMetricElement(root) || /\b(users?|viewers?|events?|traffic|ingest|throughput|latency|dropout|queue|pressure|saturation|error|fault|warning)\b/i.test(text);
+}
+
+function stonksHasOverviewSignal(root, text) {
+  if (root.props?.overview?.visible === true) return true;
+  return /\b(Market pulse|BITCOIN|ETHEREUM|SOLANA|DOGECOIN|equities|crypto|vol|request traffic|source health)\b/i.test(text);
+}
+
+function marketMarqueeText(interfaces) {
+  const stonks = interfaces.find((entry) => String(entry.providerId || "").toLowerCase() === "stonks.market");
+  const root = stonks?.surface?.root;
+  if (!root) return "";
+  const explicit = String(root.props?.marqueeText || "").trim();
+  if (explicit) return explicit;
+  return surfaceText(root)
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => /\b(BITCOIN|ETHEREUM|SOLANA|DOGECOIN|[A-Z0-9.]{2,}\s+\$|vol|request|equities|crypto|Stooq|CoinGecko)\b/i.test(line))
+    .slice(0, 24)
+    .join(" / ");
 }
 
 function spotiverseHasOverviewSignal(root, text) {
