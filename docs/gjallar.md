@@ -1,92 +1,79 @@
 # Gjallar
 
-Gjallar is the overview composition daemon for Odin.
+Gjallar is the Nightwing-resident terminal compositor for Odin's domain.
 
 Odin is the all-seer: it accepts Verse discovery, schema catalogs, translation
-routes, provider surfaces, and observation projections. Gjallar reads that
-Odin-owned state and composes the dense overview feed that Nightwing displays.
-Nightwing should not run a bespoke dashboard brain; it should ask Gjallar what
-to draw and then lower that feed into fast terminal cells.
+routes, provider surfaces, and observation projections. Gjallar talks to Odin,
+enumerates the active provider surfaces Odin can show, and composes those
+surfaces into the live multi-scale dashboard running on Nightwing.
 
-Gjallar exists so Odin does not need to care how a pile of dashboards fits on
-one screen, and Nightwing does not need to know how Odin's world model is built.
+Gjallar exists so Odin does not need to care how a pile of provider-owned TUIs
+fits on one fast display, and provider daemons do not need to know the terminal
+body they are being lowered into.
 
 ## Authority Map
 
-- Owner: Gjallar owns overview composition for Odin sight.
-- Inputs: Odin's accepted snapshot, Verse records, service records, interface
-  records, observation stream records, translation route records, and explicit
-  operator/Nightwing display constraints.
-- Outputs: typed `gjallar.overview.v1` and `gjallar.overview_tile.v1` records:
-  overview metadata, tile ordering, density hints, source pointers, status,
-  labels, and compact detail text for Nightwing.
-- Derived state: tile priority, grouping, target rows/columns, row/column spans,
-  visual emphasis hints, and compact summaries are derived from Odin state.
+- Owner: Gjallar owns Nightwing dashboard composition, tiling, marquee, visual
+  density, framebuffer presentation, and character-level refresh behavior.
+- Inputs: Odin's Eve/CultUI deck endpoint, provider ids, provider-owned surface
+  graphs, display constraints, font choices, and operator runtime flags.
+- Outputs: the visible Nightwing framebuffer and compact Gjallar frame/status
+  telemetry.
+- Derived state: panel packing, visual weight, tile position, gutter cells,
+  marquee tape, glyph size, and frame timing are derived from Odin/provider
+  surfaces plus display constraints.
 - Forbidden writers: Gjallar does not probe hosts, accept Verse truth, mutate
-  provider-owned dashboards, own terminal glyph rendering, or invent schema
-  translation routes.
-- Shared paths: Nightwing TUI, browser previews, future compact overlays, and
-  agent summaries consume the same Gjallar overview feed when they want the
-  "everything Odin sees" view.
-- Deletion line: any Nightwing path that independently composes Odin dashboards
-  should move into Gjallar; any Gjallar path that decides discovery truth should
-  move back into Odin.
+  provider-owned dashboards, invent schema translation routes, or replace Odin's
+  provider registry.
+- Shared paths: Nightwing's physical display, local frame dumps, future compact
+  overlays, and agent-facing TUI captures should all lower the same Gjallar
+  composition behavior when they want the "everything Odin can show" view.
+- Deletion line: the old Rust `gjallar.overview` feed is not a runtime
+  authority. Any path that wants Nightwing composition belongs in `src/Gjallar`;
+  any path that decides discovery truth belongs in Odin.
 
 ## Body
 
-- `crates/gjallar-daemon` is Gjallar's Rust CultMesh daemon.
-- `crates/odin-core/src/gjallar.rs` owns the pure composition function so unit
-  tests can exercise packing decisions without booting a daemon.
-- `gjallar.overview.v1` describes the feed Nightwing asks for.
-- `gjallar.overview_tile.v1` describes each drawable tile and names its Odin
-  source record.
+- `src/Gjallar` is Gjallar's executable C# runtime.
+- `Gjallar.csproj` builds the Nightwing framebuffer compositor.
+- Gjallar consumes Odin's deck over WebSocket, defaulting to
+  `ws://192.168.1.66:8797/eve/deck` and provider `odin.allseer`.
+- The old Rust `crates/gjallar-daemon` and `gjallar.overview` records were cut
+  because they created an intermediate composition owner that did nothing Odin
+  and Gjallar's live renderer could not explain directly.
 - `assets/personas/gjallar-avatar.png` and
   `assets/personas/gjallar-avatar-pixel-256.png` remain branding assets for the
   view/persona surface.
 
-Run one composition pass from the repo root:
+Build from the repo root:
 
 ```powershell
-cargo run -p gjallar-daemon --
+dotnet build .\src\Gjallar\Gjallar.csproj
 ```
 
-By default, Gjallar reads Odin's local CultMesh store at
-`scratch/odin/odin.ccmp` and writes its feed to
-`scratch/gjallar/gjallar.overview.ccmp`.
+Publish for Nightwing:
+
+```powershell
+dotnet publish .\src\Gjallar\Gjallar.csproj -c Release -r linux-x64 --self-contained true -o .\scratch\publish\gjallar
+```
 
 ## Runtime Contract
 
 ```text
-Odin typed state
-  -> Gjallar overview composition
-  -> gjallar.overview / gjallar.overview_tile CultMesh records
-  -> Nightwing terminal lowerer
+provider-owned Eve/CultUI surfaces
+  -> Odin discovery and allseer deck
+  -> Gjallar provider enumeration, packing, marquee, and framebuffer lowering
+  -> Nightwing visible display
 ```
 
-Nightwing owns terminal speed, key handling, glyph selection, color lowering,
-and screen refresh. Gjallar owns what should be on the overview and how densely
-it should be packed. Odin owns the facts being summarized.
-
-## Current Cut
-
-The current Rust daemon has two input paths:
-
-- Preferred: read Rust typed Odin records such as `odin.snapshot.v1`,
-  `odin.service.v1`, and `odin.interface.v1` from an Odin CultMesh store.
-- Compatibility: read Odin's current CommonJS
-  `gamecult.eve.surface_state.v1` record as a raw MessagePack map, then wrap it
-  as a typed Gjallar overview tile.
-
-The compatibility path exists so Gjallar can talk to today's Odin without
-pretending the migration is complete. The next improvement is for Odin to
-publish a typed index/catalog document that Gjallar can read instead of carrying
-configured key lists.
+Nightwing is the host/body. Gjallar is the product that runs there. Odin owns
+the accepted discovery/provider view. Each daemon owns its own surface truth.
 
 ## Invariants
 
-- Odin remains the accepted owner of all-seer state.
-- Gjallar owns overview composition, not discovery truth.
-- Nightwing owns terminal lowering, not dashboard composition.
-- Every tile names the Odin source record behind it.
-- Missing Odin records disappear from the feed rather than becoming invented
-  truth.
+- Odin remains the accepted owner of all-seer discovery and provider indexing.
+- Gjallar owns display composition, not discovery truth.
+- Provider surfaces are lowered, not rewritten into status summaries.
+- Missing or invalid provider surfaces disappear or render as unavailable; they
+  do not become invented truth.
+- Frame/status telemetry observes Gjallar's rendering behavior only.

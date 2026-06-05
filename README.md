@@ -2,7 +2,7 @@
 
 Odin is the GameCult all-seer: the central CultMesh node every Verse can use to discover the other Verses, inspect schema catalogs, and find translation paths between local realities.
 
-It is not the renderer. It is not Eve. It is not a Starfire utility script wearing a bigger coat. Odin owns discovery, schema awareness, translation planning, and accepted operator surfaces. Eve and the Nightwing compact TUI lower Odin's published CultUI surface into whatever body they have.
+It is not the renderer. It is not Eve. It is not a Starfire utility script wearing a bigger coat. Odin owns discovery, schema awareness, translation planning, and accepted operator surfaces. Eve clients and Gjallar lower Odin's published CultUI surface into whatever body they have.
 
 Odin is also the compliance witness for the GameCult service architecture:
 durable service state in CultCache `.cc`, local Verse visibility through
@@ -18,22 +18,23 @@ CultNet document registries, and lower interface state through Eve/CultUI.
 The first Rust core lives in `crates/odin-core` and already separates typed
 documents, ingest ports, normalization, and repository persistence so unit tests
 can use mocked inputs and pipeline smokes can prove typed handoff without
-booting the whole daemon. Gjallar is part of that spine as the typed overview
-composition lane: it reads Odin-owned sight and publishes the compact feed that
-Nightwing lowers into terminal cells.
+booting the whole daemon. Gjallar is not part of that Rust record spine: it is
+the Nightwing-resident terminal compositor that consumes Odin's published
+Eve/CultUI deck and renders the live display.
 
 ## Gjallar
 
-Gjallar is Odin's herald display daemon: the package that turns Odin's gathered
-sight into the overview Nightwing displays. Odin sees the Verses; Gjallar
-decides how that sight is grouped, prioritized, and packed into a feed.
-Nightwing stays a thin fast terminal lowerer.
+Gjallar is the herald display daemon that runs on Nightwing. Odin sees the
+Verses, accepts provider surfaces, and publishes the `odin.allseer` deck.
+Gjallar talks to Odin, enumerates active providers, composes the multi-scale
+tiled dashboard, owns the marquee and dense character-level update behavior,
+and writes the visible framebuffer.
 
 Local package surfaces:
 
 - Organ contract: `docs/gjallar.md`
 - Branding Persona state: `personas/gjallar.persona_state.cc`
-- Rust CultMesh organ: `crates/gjallar-daemon`
+- Runtime source: `src/Gjallar`
 - Avatar asset: `assets/personas/gjallar-avatar.png`
 - Pixel avatar: `assets/personas/gjallar-avatar-pixel-256.png`
 
@@ -62,7 +63,7 @@ Local package surfaces:
 - Owner: Odin owns the network-wide Verse registry, schema catalog index, translation map, and the accepted `odin.allseer` Eve surface.
 - Inputs: CultMesh/CultNet peer announcements, schema catalog responses, local host probes, Docker/ADB host facts, SSH-reachable ops hosts, Mimir's normalized Eve observation ledger, and later direct Verse subscriptions.
 - Outputs: CultCache-backed Odin state, CultMesh documents, CultNet schema/catalog messages, and an Eve-compatible `/eve/deck` surface for dashboards.
-- Derived state: Nightwing's attached TUI, browser dashboards, and future Eve clients are projections of Odin state.
+- Derived state: Gjallar's attached Nightwing display, browser dashboards, and future Eve clients are projections of Odin state and provider-owned Eve/CultUI surfaces.
 - Forbidden writers: renderers do not probe the network or decide Verse truth; individual projects do not maintain private incompatible discovery ledgers once Odin can see them.
 - Shared paths: human dashboards, worker schedulers, Verse bootstrap code, and compact TUI views consume the same registry and schema catalog.
 - Deletion line: old per-host coordinator scripts should be deleted or reduced to deployment wrappers that start Odin.

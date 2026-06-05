@@ -35,9 +35,9 @@ Verse / host / device / provider inputs
   -> CultMesh node
   -> CultCache .cc persistence
   -> CultNet/CultMesh document registry
-  -> Gjallar overview composition
-  -> Nightwing terminal lowering
-  -> Eve/CultUI projection and compact display feeds
+  -> Odin Eve/CultUI deck projection
+  -> Gjallar Nightwing composition and framebuffer lowering
+  -> compact display feeds
 ```
 
 The first Rust core lives in `crates/odin-core`:
@@ -48,8 +48,6 @@ The first Rust core lives in `crates/odin-core`:
   Odin records.
 - `repository.rs`: `OdinRepository` abstraction, in-memory mock repository, and
   CultMesh-backed repository.
-- `gjallar.rs`: pure overview composition from Odin records to typed Gjallar
-  overview/tile records.
 
 The Rust spine owns the future architecture. The CommonJS daemon remains the
 legacy operational body until each organ crosses this typed boundary.
@@ -59,10 +57,9 @@ legacy operational body until each organ crosses this typed boundary.
 Odin's executable body is split by ownership:
 
 - `crates/odin-core`: Rust target core. Owns typed Odin documents, ingest
-  ports, Gjallar overview records, normalization, composition, and
-  CultMesh/CultCache repository boundaries. This is the replacement spine;
-  JavaScript remains legacy runtime/probe scaffolding until each organ has
-  crossed the typed boundary.
+  ports, normalization, and CultMesh/CultCache repository boundaries. This is
+  the replacement spine; JavaScript remains legacy runtime/probe scaffolding
+  until each organ has crossed the typed boundary.
 - `src/odin-coordinator.cjs`: process lifecycle, refresh loop, persistence, health, and transport wiring.
 - `src/odin/config.cjs`: runtime paths, seed deck URLs, intervals, and CultLib module path setup.
 - `src/odin/documents.cjs`: CultCache/CultMesh document definitions accepted by Odin.
@@ -76,16 +73,12 @@ Odin's executable body is split by ownership:
 
 The entrypoint is not allowed to grow new probe, surface, provider, layout, or renderer policy. If a new owner is needed, name the owner and its invariant before adding code.
 
-Gjallar is the named overview composition daemon for what Nightwing displays.
-In the Rust spine, Gjallar has typed `gjallar.overview.v1` and
-`gjallar.overview_tile.v1` records. Its package lives in
-`crates/gjallar-daemon` and `docs/gjallar.md`. It runs as its own Rust CultMesh
-entrypoint rather than being folded into Odin's coordinator or Nightwing's TUI.
-Gjallar may read Odin-owned state and emit a packed overview feed. During the
-CommonJS-to-Rust migration it may also read Odin's existing
-`gamecult.eve.surface_state.v1` compatibility record and wrap it as a Gjallar
-tile. It must not own the underlying registry, probe, provider truth, terminal
-glyph rendering, or translation decisions.
+Gjallar is the Nightwing-resident terminal compositor for what Odin can show.
+Its runtime lives in `src/Gjallar` and consumes Odin's Eve deck directly.
+Gjallar owns provider enumeration for display, panel packing, marquee behavior,
+glyph/color/framebuffer lowering, frame stats, and the multi-scale terminal
+product. It must not own the underlying registry, probe, provider truth, or
+translation decisions.
 
 Idunn is the named keepalive organ for daemon continuity. Its current Rust
 body lives in `crates/idunn-daemon` and `crates/odin-core/src/idunn.rs`. Idunn may read
@@ -145,8 +138,6 @@ Current Rust verification:
 
 - `pipeline_collects_from_injected_ports`: proves ingest ports and clock injection.
 - `memory_repository_supports_fast_unit_tests`: proves repository consumers can test without CultMesh.
-- `compose_overview_orders_dashboard_tiles_for_nightwing`: proves Gjallar can
-  turn Odin records into an ordered overview feed without daemon boot.
 - `cultmesh_repository_round_trips_typed_records`: proves typed Odin records
   persist through CultMesh/CultCache and reload from `.cc`.
 
@@ -188,11 +179,12 @@ Odin currently publishes service squares for:
 - Raven: SSH reachability.
 - Yggdrasil: SSH/HTTP/HTTPS reachability plus nginx, StreamPixels, Heimdall, Repixelizer, and Bifrost systemd state.
 
-Gjallar composes these into the compact overview feed. The Nightwing TUI lowers
-that feed into dense cells and fills surplus screen space according to
-Gjallar's tile ordering, spans, and density hints. If Nightwing starts deriving
-dashboard composition directly from Odin service records, the composition owner
-has leaked out of Gjallar.
+Gjallar consumes Odin's deck and composes these surfaces into the Nightwing
+display. Nightwing is the host/body; Gjallar is the terminal product running
+there. If Odin starts deciding framebuffer composition, the renderer owner has
+leaked upward. If individual providers start tuning themselves for Nightwing
+instead of emitting clean Eve/CultUI surfaces, provider truth has leaked
+downward.
 
 ## Current Interface Surface
 

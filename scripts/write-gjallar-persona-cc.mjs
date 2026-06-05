@@ -205,12 +205,12 @@ function buildPersonaState() {
         }),
       ],
       incubation: [
-        thought("csharp-cultmesh-body", "Promote Gjallar from doc/persona package into an executable C# CultMesh daemon after Odin's runtime state read path and affordance packet schema are clear.", {
+        thought("csharp-cultmesh-body", "Gjallar now has an executable C# Nightwing body that consumes Odin's Eve deck and renders the live multi-scale terminal dashboard.", {
           status: "active",
-          question: "Which CultMesh document should carry Gjallar's first affordance packet?",
-          actionImplication: "Build the C# daemon around CultMesh node startup and typed Persona state, not a JSON sidecar.",
+          question: "Which native CultMesh subscription should replace the current Odin WebSocket deck bridge when the protocol is ready?",
+          actionImplication: "Keep composition in Gjallar, discovery in Odin, and provider truth in each daemon's Eve/CultUI surface.",
           intensity: 0.76,
-          tags: ["csharp", "cultmesh", "runtime"],
+          tags: ["csharp", "nightwing", "runtime"],
         }),
       ],
     },
@@ -233,19 +233,19 @@ function buildPersonaState() {
     candidateActions: {
       actions: [
         {
-          id: "build-csharp-gjallar-daemon",
+          id: "promote-gjallar-native-cultmesh",
           status: "draft",
           actionType: "propose",
           readiness: "waiting",
           riskLevel: "medium",
-          target: target("runtime", "gjallar-csharp-daemon", "Gjallar C# CultMesh daemon"),
-          summary: "Implement Gjallar as its own C# CultMesh runtime once the packet schema and Odin state read path are named.",
-          rationale: "The Persona state is now a typed `.cc` record; the daemon body should use the same substrate instead of JSON.",
+          target: target("runtime", "gjallar-native-cultmesh", "Gjallar native CultMesh input path"),
+          summary: "Promote Gjallar's Odin input from the current WebSocket deck bridge to a native CultMesh subscription when the deck contract is ready.",
+          rationale: "Gjallar's C# Nightwing body exists; the remaining migration debt is the input transport, not the ownership model.",
           urgency: 0.62,
           confidence: 0.74,
           constraints: [
             "Do not fold Gjallar into Odin's CommonJS coordinator.",
-            "Do not let Gjallar own discovery, probing, rendering, or schema truth.",
+            "Do not let Gjallar own discovery, probing, provider truth, or schema truth.",
             "Use CultMesh/CultCache typed state as the runtime substrate.",
           ],
           createdAt: updatedAt,

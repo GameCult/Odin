@@ -1,6 +1,5 @@
 [workspace]
 members = [
-    "crates/gjallar-daemon",
     "crates/idunn-daemon",
     "crates/odin-core",
 ]

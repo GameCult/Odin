@@ -1,6 +1,5 @@
 use crate::documents::{
-    GjallarOverviewRecord, GjallarOverviewTileRecord, OdinDocuments, OdinRecords,
-    OdinServiceRecord, OdinSnapshotRecord, OdinVerseRecord,
+    OdinDocuments, OdinRecords, OdinServiceRecord, OdinSnapshotRecord, OdinVerseRecord,
 };
 use anyhow::Result;
 use cultmesh_rs::{CultMesh, CultMeshNode, CultMeshNodeOptions};
@@ -37,14 +36,6 @@ impl CultMeshOdinRepository {
 
     pub fn get_verse(&self, verse_id: &str) -> Result<Option<OdinVerseRecord>> {
         self.node.get::<OdinVerseRecord>(verse_id)
-    }
-
-    pub fn get_gjallar_overview(&self, overview_id: &str) -> Result<Option<GjallarOverviewRecord>> {
-        self.node.get::<GjallarOverviewRecord>(overview_id)
-    }
-
-    pub fn get_gjallar_tile(&self, tile_id: &str) -> Result<Option<GjallarOverviewTileRecord>> {
-        self.node.get::<GjallarOverviewTileRecord>(tile_id)
     }
 
     pub fn document_binding_version(&self, document_type: &str) -> Option<String> {

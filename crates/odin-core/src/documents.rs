@@ -7,8 +7,6 @@ pub const ODIN_SERVICE_SCHEMA: &str = "odin.service.v1";
 pub const ODIN_INTERFACE_SCHEMA: &str = "odin.interface.v1";
 pub const ODIN_OBSERVATION_STREAM_SCHEMA: &str = "odin.observation_stream.v1";
 pub const ODIN_TRANSLATION_ROUTE_SCHEMA: &str = "odin.translation_route.v1";
-pub const GJALLAR_OVERVIEW_SCHEMA: &str = "gjallar.overview.v1";
-pub const GJALLAR_OVERVIEW_TILE_SCHEMA: &str = "gjallar.overview_tile.v1";
 pub const EVE_SURFACE_STATE_SCHEMA: &str = "gamecult.eve.surface_state.v1";
 pub const EVE_INTERFACE_BINDING_SCHEMA: &str = "gamecult.eve.interface_binding.v1";
 pub const EVE_PROVIDER_ADVERTISEMENT_SCHEMA: &str = "gamecult.eve.provider_advertisement.v1";
@@ -135,58 +133,6 @@ pub struct OdinTranslationRouteRecord {
     pub version: String,
     #[cultcache(key = 6)]
     pub notes: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
-#[cultcache(type = "gjallar.overview", schema = "gjallar.overview.v1")]
-pub struct GjallarOverviewRecord {
-    #[cultcache(key = 0)]
-    pub overview_id: String,
-    #[cultcache(key = 1)]
-    pub source_snapshot_id: String,
-    #[cultcache(key = 2)]
-    pub title: String,
-    #[cultcache(key = 3)]
-    pub status: String,
-    #[cultcache(key = 4)]
-    pub summary: String,
-    #[cultcache(key = 5)]
-    pub tile_count: u32,
-    #[cultcache(key = 6)]
-    pub target_columns: u32,
-    #[cultcache(key = 7)]
-    pub target_rows: u32,
-    #[cultcache(key = 8)]
-    pub source_observed_at: String,
-    #[cultcache(key = 9)]
-    pub composed_at: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
-#[cultcache(type = "gjallar.overview_tile", schema = "gjallar.overview_tile.v1")]
-pub struct GjallarOverviewTileRecord {
-    #[cultcache(key = 0)]
-    pub tile_id: String,
-    #[cultcache(key = 1)]
-    pub overview_id: String,
-    #[cultcache(key = 2)]
-    pub source_record: String,
-    #[cultcache(key = 3)]
-    pub tile_kind: String,
-    #[cultcache(key = 4)]
-    pub title: String,
-    #[cultcache(key = 5)]
-    pub state: String,
-    #[cultcache(key = 6)]
-    pub detail: String,
-    #[cultcache(key = 7)]
-    pub priority: i32,
-    #[cultcache(key = 8)]
-    pub row_span: u32,
-    #[cultcache(key = 9)]
-    pub column_span: u32,
-    #[cultcache(key = 10)]
-    pub observed_at: String,
 }
 
 #[derive(Clone, Debug, PartialEq, DatabaseEntry)]
@@ -349,8 +295,6 @@ cultmesh_rs::cultmesh_documents!(OdinDocuments {
     OdinInterfaceRecord => ODIN_INTERFACE_SCHEMA,
     OdinObservationStreamRecord => ODIN_OBSERVATION_STREAM_SCHEMA,
     OdinTranslationRouteRecord => ODIN_TRANSLATION_ROUTE_SCHEMA,
-    GjallarOverviewRecord => GJALLAR_OVERVIEW_SCHEMA,
-    GjallarOverviewTileRecord => GJALLAR_OVERVIEW_TILE_SCHEMA,
     EveSurfaceStateRecord => EVE_SURFACE_STATE_SCHEMA,
     EveInterfaceBindingCompatRecord => EVE_INTERFACE_BINDING_SCHEMA,
     EveProviderAdvertisementCompatRecord => EVE_PROVIDER_ADVERTISEMENT_SCHEMA,
