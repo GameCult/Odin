@@ -17,6 +17,7 @@ internal sealed record GjallarConfig(
     string Url,
     string ProviderId,
     int RefreshHz,
+    int CatalogRefreshSeconds,
     string StatusPath,
     string FrameDumpPath,
     int Frames,
@@ -27,8 +28,9 @@ internal sealed record GjallarConfig(
     public static GjallarConfig Parse(IReadOnlyList<string> args) => new(
         StringArg(args, "--fb", "/dev/fb0"),
         StringArg(args, "--url", "ws://192.168.1.66:8797/eve/deck"),
-        StringArg(args, "--provider", "odin.allseer"),
+        StringArg(args, "--provider", ""),
         IntArg(args, "--refresh-hz", 2),
+        IntArg(args, "--catalog-refresh-seconds", 5),
         StringArg(args, "--stats-path", "/var/log/gjallar.status"),
         StringArg(args, "--frame-dump-path", ""),
         IntArg(args, "--frames", 0),
@@ -56,6 +58,7 @@ internal sealed record GjallarConfig(
 internal sealed class GjallarRenderer : IDisposable
 {
     private static readonly JsonSerializerOptions StatusJson = new() { WriteIndented = true };
+    private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNameCaseInsensitive = true };
     private readonly GjallarConfig config;
     private readonly FramebufferDevice framebuffer;
     private readonly FontAtlas fonts;
@@ -66,6 +69,10 @@ internal sealed class GjallarRenderer : IDisposable
     private int frameIndex;
     private long lastStatusTick;
     private int lastStatusFrame;
+    private int latestCatalogProviders;
+    private int latestComposedProviders;
+    private string lastReceiveStatus = "starting";
+    private string lastReceiveError = "";
     private SceneCache? sceneCache;
     private FrameTimings lastTimings;
 
@@ -132,6 +139,12 @@ internal sealed class GjallarRenderer : IDisposable
 
     private async Task ConnectReceiveLoopAsync(CancellationToken token)
     {
+        if (string.IsNullOrWhiteSpace(config.ProviderId))
+        {
+            await ConnectCatalogReceiveLoopAsync(token).ConfigureAwait(false);
+            return;
+        }
+
         var target = ProviderUri(config.Url, config.ProviderId);
         while (!token.IsCancellationRequested)
         {
@@ -139,18 +152,273 @@ internal sealed class GjallarRenderer : IDisposable
             {
                 using var socket = new ClientWebSocket();
                 await socket.ConnectAsync(target, token).ConfigureAwait(false);
+                lastReceiveStatus = $"connected:{config.ProviderId}";
+                lastReceiveError = "";
                 await ReceiveLoopAsync(socket, token).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (token.IsCancellationRequested)
             {
                 return;
             }
-            catch when (!token.IsCancellationRequested)
+            catch (Exception error) when (!token.IsCancellationRequested)
             {
+                lastReceiveStatus = $"connect-error:{config.ProviderId}";
+                lastReceiveError = error.Message;
                 await Task.Delay(TimeSpan.FromSeconds(2), token).ConfigureAwait(false);
             }
         }
     }
+
+    private async Task ConnectCatalogReceiveLoopAsync(CancellationToken token)
+    {
+        while (!token.IsCancellationRequested)
+        {
+            try
+            {
+                var catalog = await ReadProviderCatalogAsync(token).ConfigureAwait(false);
+                latestCatalogProviders = catalog.Providers.Count;
+                var states = new List<ProviderFrame>();
+                foreach (var provider in catalog.Providers.Where(IsDisplayProvider))
+                {
+                    var frame = await TryFetchProviderFrameAsync(provider, token).ConfigureAwait(false);
+                    if (frame != null)
+                    {
+                        states.Add(frame);
+                    }
+                }
+
+                Interlocked.Exchange(ref latestStateJson, BuildGjallarSurface(catalog, states));
+                latestComposedProviders = states.Count;
+                lastReceiveStatus = "catalog-composed";
+                lastReceiveError = "";
+            }
+            catch (Exception error) when (!token.IsCancellationRequested)
+            {
+                lastReceiveStatus = "catalog-error";
+                lastReceiveError = error.Message;
+                // A missed catalog pass should make the display stale, not kill the horn.
+            }
+
+            await Task.Delay(TimeSpan.FromSeconds(Math.Max(1, config.CatalogRefreshSeconds)), token).ConfigureAwait(false);
+        }
+    }
+
+    private async Task<ProviderCatalog> ReadProviderCatalogAsync(CancellationToken token)
+    {
+        using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+        var json = await client.GetStringAsync(ProviderCatalogUri(), token).ConfigureAwait(false);
+        return JsonSerializer.Deserialize<ProviderCatalog>(json, JsonOptions) ?? new ProviderCatalog([]);
+    }
+
+    private static bool IsDisplayProvider(ProviderCatalogEntry provider) =>
+        !string.IsNullOrWhiteSpace(provider.Id) &&
+        ((provider.Capabilities?.Any(static capability => string.Equals(capability, "cultui-surface", StringComparison.OrdinalIgnoreCase)) ?? false) ||
+         string.Equals(provider.Endpoint, $"/eve/deck/{Uri.EscapeDataString(provider.Id)}", StringComparison.OrdinalIgnoreCase) ||
+         string.Equals(provider.TransportEndpoint, $"/eve/deck/{Uri.EscapeDataString(provider.Id)}", StringComparison.OrdinalIgnoreCase));
+
+    private Uri ProviderCatalogUri()
+    {
+        var uri = new Uri(config.Url.Replace("ws://", "http://", StringComparison.OrdinalIgnoreCase).Replace("wss://", "https://", StringComparison.OrdinalIgnoreCase));
+        var builder = new UriBuilder(uri)
+        {
+            Path = "/eve/deck/providers",
+            Query = "",
+        };
+        return builder.Uri;
+    }
+
+    private async Task<ProviderFrame?> TryFetchProviderFrameAsync(ProviderCatalogEntry provider, CancellationToken token)
+    {
+        try
+        {
+            using var socket = new ClientWebSocket();
+            await socket.ConnectAsync(ProviderDeckUri(provider), token).ConfigureAwait(false);
+            var bytes = await ReadTextFrameAsync(socket, token).ConfigureAwait(false);
+            using var state = JsonDocument.Parse(bytes);
+            if (!state.RootElement.TryGetProperty("surface", out var surface) ||
+                !surface.TryGetProperty("root", out var root))
+            {
+                return null;
+            }
+
+            return new ProviderFrame(provider, state.RootElement.Clone(), root.Clone());
+        }
+        catch when (!token.IsCancellationRequested)
+        {
+            return ProviderFrame.Unavailable(provider);
+        }
+    }
+
+    private Uri ProviderDeckUri(ProviderCatalogEntry provider)
+    {
+        var endpoint = !string.IsNullOrWhiteSpace(provider.TransportEndpoint)
+            ? provider.TransportEndpoint
+            : provider.Endpoint;
+        if (string.IsNullOrWhiteSpace(endpoint))
+        {
+            endpoint = $"/eve/deck/{Uri.EscapeDataString(provider.Id)}";
+        }
+
+        if (Uri.TryCreate(endpoint, UriKind.Absolute, out var absolute))
+        {
+            return absolute.Scheme is "http" or "https"
+                ? new Uri(endpoint.Replace("http://", "ws://", StringComparison.OrdinalIgnoreCase).Replace("https://", "wss://", StringComparison.OrdinalIgnoreCase))
+                : absolute;
+        }
+
+        var baseUri = new Uri(config.Url);
+        var builder = new UriBuilder(baseUri)
+        {
+            Path = endpoint.StartsWith("/", StringComparison.Ordinal) ? endpoint : $"/{endpoint}",
+            Query = "",
+        };
+        return builder.Uri;
+    }
+
+    private static async Task<byte[]> ReadTextFrameAsync(ClientWebSocket socket, CancellationToken token)
+    {
+        var buffer = ArrayPool<byte>.Shared.Rent(1024 * 1024);
+        try
+        {
+            using var body = new MemoryStream();
+            WebSocketReceiveResult result;
+            do
+            {
+                result = await socket.ReceiveAsync(buffer, token).ConfigureAwait(false);
+                if (result.MessageType == WebSocketMessageType.Close)
+                {
+                    return [];
+                }
+
+                body.Write(buffer, 0, result.Count);
+            }
+            while (!result.EndOfMessage);
+
+            return result.MessageType == WebSocketMessageType.Text ? body.ToArray() : [];
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
+    }
+
+    private static byte[] BuildGjallarSurface(ProviderCatalog catalog, IReadOnlyList<ProviderFrame> frames)
+    {
+        var children = frames.Select(frame => new
+        {
+            id = $"gjallar-interface-{StableId(frame.Provider.Id)}",
+            kind = "interface",
+            props = new
+            {
+                title = frame.Provider.Title ?? frame.Provider.Id,
+                providerId = frame.Provider.Id,
+                status = frame.Provider.Status ?? "unknown",
+                source = frame.Provider.Endpoint ?? "",
+                updatedAt = frame.State.TryGetProperty("updatedAt", out var updatedAt) ? ValueString(updatedAt) : "",
+                layout = new
+                {
+                    density = "dense",
+                    viewportMode = "nested-scroll",
+                },
+            },
+            children = new[] { frame.Root },
+        }).ToArray();
+
+        var document = new
+        {
+            type = "dashboard-state",
+            schema = "gamecult.gjallar.overview.v1",
+            providerId = "gjallar.overview",
+            title = "Gjallar",
+            version = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            updatedAt = DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture),
+            providerCatalog = catalog.Providers,
+            surface = new
+            {
+                schema = "gamecult.eve.surface.v1",
+                id = "gjallar.overview.surface",
+                title = "Gjallar",
+                root = new
+                {
+                    id = "gjallar-overview-root",
+                    kind = "dashboard",
+                    props = new
+                    {
+                        title = "Gjallar",
+                        summary = $"{frames.Count} provider surfaces",
+                        marqueeText = MarqueeText(frames),
+                    },
+                    children,
+                },
+                assets = Array.Empty<object>(),
+            },
+        };
+        return JsonSerializer.SerializeToUtf8Bytes(document, JsonOptions);
+    }
+
+    private static string MarqueeText(IEnumerable<ProviderFrame> frames) =>
+        string.Join(" / ", frames
+            .Select(frame => SurfaceText(frame.Root))
+            .Where(static text => !string.IsNullOrWhiteSpace(text))
+            .Take(24));
+
+    private static string SurfaceText(JsonElement root)
+    {
+        var parts = new List<string>();
+        Visit(root, node =>
+        {
+            if (!node.TryGetProperty("props", out var props) || props.ValueKind != JsonValueKind.Object)
+            {
+                return;
+            }
+            foreach (var key in new[] { "marqueeText", "title", "text", "summary", "value" })
+            {
+                if (props.TryGetProperty(key, out var value))
+                {
+                    var text = ValueString(value);
+                    if (!string.IsNullOrWhiteSpace(text))
+                    {
+                        parts.Add(text);
+                    }
+                }
+            }
+        });
+        return string.Join(" ", parts).Trim();
+    }
+
+    private static void Visit(JsonElement node, Action<JsonElement> visitor)
+    {
+        if (node.ValueKind != JsonValueKind.Object)
+        {
+            return;
+        }
+        visitor(node);
+        if (!node.TryGetProperty("children", out var children) || children.ValueKind != JsonValueKind.Array)
+        {
+            return;
+        }
+        foreach (var child in children.EnumerateArray())
+        {
+            Visit(child, visitor);
+        }
+    }
+
+    private static string StableId(string value) =>
+        string.Join("-", value
+            .Trim()
+            .ToLowerInvariant()
+            .Split()
+            .Select(part => new string(part.Select(static ch => char.IsLetterOrDigit(ch) ? ch : '-').ToArray()).Trim('-'))
+            .Where(static part => part.Length > 0));
+
+    private static string ValueString(JsonElement value) => value.ValueKind switch
+    {
+        JsonValueKind.String => value.GetString() ?? "",
+        JsonValueKind.Number => value.ToString(),
+        JsonValueKind.True => "true",
+        JsonValueKind.False => "false",
+        _ => "",
+    };
 
     private async Task ReceiveLoopAsync(ClientWebSocket socket, CancellationToken token)
     {
@@ -264,6 +532,19 @@ internal sealed class GjallarRenderer : IDisposable
             framebuffer = new { framebuffer.Width, framebuffer.Height, bytes = framebuffer.BufferBytes },
             refreshHz = config.RefreshHz,
             measuredFps = Math.Round(measuredFps, 2),
+            receive = new
+            {
+                status = lastReceiveStatus,
+                error = lastReceiveError,
+                catalogProviders = latestCatalogProviders,
+                composedProviders = latestComposedProviders,
+                stateBytes = Volatile.Read(ref latestStateJson)?.Length ?? 0,
+            },
+            scene = new
+            {
+                panels = sceneCache?.Panels.Count ?? 0,
+                gutterCells = sceneCache?.GutterCells.Count ?? 0,
+            },
             cultMathNative = Voronoi.NativeAvailable,
             paintMs = Math.Round(paintMs, 2),
             timings = new
@@ -316,6 +597,57 @@ internal sealed class GjallarRenderer : IDisposable
 
 internal sealed record SceneCache(byte[] StateJson, IReadOnlyList<PackedPanel> Panels, IReadOnlyList<GutterCell> GutterCells, string MarqueeTape);
 internal readonly record struct FrameTimings(double CopyMs, double DecorMs, double GutterMs, double PresentMs);
+internal sealed record ProviderCatalog(IReadOnlyList<ProviderCatalogEntry> Providers);
+internal sealed record ProviderCatalogEntry(
+    string Id,
+    string? Title,
+    string? Description,
+    string? Version,
+    string? Endpoint,
+    string? TransportEndpoint,
+    IReadOnlyList<string>? Capabilities,
+    string? Status,
+    string? UpdatedAt);
+
+internal sealed record ProviderFrame(ProviderCatalogEntry Provider, JsonElement State, JsonElement Root)
+{
+    public static ProviderFrame Unavailable(ProviderCatalogEntry provider)
+    {
+        var document = JsonDocument.Parse(JsonSerializer.Serialize(new
+        {
+            type = "dashboard-state",
+            providerId = provider.Id,
+            title = provider.Title ?? provider.Id,
+            updatedAt = DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture),
+            surface = new
+            {
+                root = new
+                {
+                    id = $"unavailable-{provider.Id}",
+                    kind = "pane",
+                    props = new
+                    {
+                        title = provider.Title ?? provider.Id,
+                        status = "unavailable",
+                    },
+                    children = new[]
+                    {
+                        new
+                        {
+                            id = $"unavailable-detail-{provider.Id}",
+                            kind = "text",
+                            props = new { text = "provider surface unavailable" },
+                            children = Array.Empty<object>(),
+                        },
+                    },
+                },
+            },
+        }));
+        var state = document.RootElement.Clone();
+        var root = document.RootElement.GetProperty("surface").GetProperty("root").Clone();
+        return new ProviderFrame(provider, state, root);
+    }
+}
 
 internal sealed class FrameDocument
 {

@@ -25,16 +25,7 @@ function handleHttp(req, res, getCurrentState, getHealth) {
   if (req.url === "/eve/deck/providers") {
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({
-      providers: [{
-        id: currentState.providerId,
-        title: currentState.title,
-        description: "Odin central coordinator for GameCult Verse discovery, schema awareness, translation, and network status.",
-        version: String(currentState.version),
-        endpoint: "/eve/deck",
-        capabilities: ["network-status", "cultmesh-verses", "cultui-surface"],
-        usesCultMesh: true,
-        transport: "CultMesh durable surface + Eve WebSocket",
-      }, ...providerCatalogFromState(currentState)],
+      providers: providerCatalogFromState(currentState),
     }));
     return;
   }
@@ -57,23 +48,24 @@ function providerCatalogFromState(state) {
   ) {
       const props = child.props || {};
       const embeddedRoot = Array.isArray(child.children) ? child.children[0] : null;
-      providers.set(String(props.providerId), {
-        id: String(props.providerId),
+      const providerId = String(props.providerId);
+      providers.set(providerId, {
+        id: providerId,
         title: String(props.title || props.providerId),
         description: String(props.detail || "Provider-owned Eve/CultUI interface discovered by Odin."),
         version: String(props.version || 0),
-        endpoint: props.cultMeshAddress || props.locatedService || props.source || "/eve/deck",
+        endpoint: `/eve/deck/${encodeURIComponent(providerId)}`,
         canonicalService: props.canonicalService || null,
         locatedService: props.locatedService || null,
         cultMeshAddress: props.cultMeshAddress || null,
         endpoints: Array.isArray(props.endpoints) ? props.endpoints : [],
         routes: Array.isArray(props.routes) ? props.routes : [],
-        transportEndpoint: transportEndpoint(props),
+        transportEndpoint: `/eve/deck/${encodeURIComponent(providerId)}`,
         capabilities: providerCapabilities(embeddedRoot),
         usesCultMesh: String(props.source || "").startsWith("cultmesh:"),
         transport: String(props.source || "").startsWith("cultmesh:")
-          ? "CultMesh Eve interface binding"
-          : "Eve WebSocket provider",
+          ? "Odin provider proxy from CultMesh Eve interface binding"
+          : "Odin provider proxy from Eve WebSocket provider",
         status: props.status || "unknown",
         updatedAt: props.updatedAt || state.updatedAt,
         source: props.source || "",
@@ -131,11 +123,141 @@ function handleUpgrade(req, socket, clients, getCurrentState, applyClientCommand
     "Connection: Upgrade\r\n" +
     `Sec-WebSocket-Accept: ${accept}\r\n\r\n`,
   );
+  socket.odinRequestUrl = req.url;
   clients.add(socket);
-  sendFrame(socket, 0x1, Buffer.from(JSON.stringify(getCurrentState()), "utf8"));
+  sendFrame(socket, 0x1, Buffer.from(JSON.stringify(stateForRequest(getCurrentState(), req.url)), "utf8"));
   socket.on("data", (chunk) => handleClientFrame(socket, chunk, clients, applyClientCommand));
   socket.on("close", () => clients.delete(socket));
   socket.on("error", () => clients.delete(socket));
+}
+
+function stateForRequest(currentState, requestUrl) {
+  const providerId = providerIdFromDeckUrl(requestUrl);
+  if (!providerId) {
+    return odinCatalogState(currentState);
+  }
+  const providerState = providerStateFromCurrentState(currentState, providerId);
+  return providerState || unavailableProviderState(providerId, "provider not present in Odin catalog");
+}
+
+function providerIdFromDeckUrl(requestUrl) {
+  const path = String(requestUrl || "").split("?")[0].replace(/\/+$/, "");
+  if (path === "/eve/deck") {
+    return "";
+  }
+  const prefix = "/eve/deck/";
+  if (!path.startsWith(prefix)) {
+    return "";
+  }
+  return decodeURIComponent(path.slice(prefix.length));
+}
+
+function odinCatalogState(currentState) {
+  const providers = providerCatalogFromState(currentState);
+  return {
+    type: "dashboard-state",
+    schema: "gamecult.odin.provider_catalog.v1",
+    providerId: "odin.providers",
+    title: "Odin Provider Catalog",
+    version: currentState.version,
+    updatedAt: currentState.updatedAt,
+    providerCatalog: providers,
+    surface: {
+      schema: "gamecult.eve.surface.v1",
+      id: "odin.provider-catalog.surface",
+      title: "Odin Provider Catalog",
+      root: {
+        id: "odin-provider-catalog-root",
+        kind: "dashboard",
+        props: {
+          title: "Odin Providers",
+          summary: `${providers.length} provider surfaces discovered`,
+        },
+        children: providers.map((provider) => ({
+          id: `provider-${stableSurfaceId(provider.id)}`,
+          kind: "text",
+          props: {
+            text: `${provider.id} ${provider.status || "unknown"} ${provider.title || ""}`.trim(),
+            providerId: provider.id,
+          },
+          children: [],
+        })),
+      },
+      assets: [],
+    },
+  };
+}
+
+function providerStateFromCurrentState(currentState, providerId) {
+  const child = providerInterfaceChild(currentState, providerId);
+  if (!child) {
+    return null;
+  }
+  const props = child.props || {};
+  const root = Array.isArray(child.children) ? child.children[0] : null;
+  if (!root) {
+    return null;
+  }
+  return {
+    type: "dashboard-state",
+    schema: "gamecult.eve.provider_surface_proxy.v1",
+    providerId,
+    title: props.title || providerId,
+    version: props.version || currentState.version,
+    updatedAt: props.updatedAt || currentState.updatedAt,
+    surface: {
+      schema: "gamecult.eve.surface.v1",
+      id: `proxied-${providerId}`,
+      title: props.title || providerId,
+      root,
+      assets: [],
+    },
+  };
+}
+
+function providerInterfaceChild(currentState, providerId) {
+  const root = currentState?.surface?.root;
+  const children = Array.isArray(root?.children) ? root.children : [];
+  return children.find((child) => child?.kind === "interface" && String(child.props?.providerId || "") === providerId);
+}
+
+function unavailableProviderState(providerId, detail) {
+  return {
+    type: "dashboard-state",
+    schema: "gamecult.eve.provider_surface_proxy.v1",
+    providerId,
+    title: providerId,
+    version: 0,
+    updatedAt: new Date().toISOString(),
+    surface: {
+      schema: "gamecult.eve.surface.v1",
+      id: `unavailable-${stableSurfaceId(providerId)}`,
+      title: providerId,
+      root: {
+        id: `unavailable-${stableSurfaceId(providerId)}-root`,
+        kind: "pane",
+        props: {
+          title: providerId,
+          status: "unavailable",
+        },
+        children: [{
+          id: `unavailable-${stableSurfaceId(providerId)}-detail`,
+          kind: "text",
+          props: { text: detail },
+          children: [],
+        }],
+      },
+      assets: [],
+    },
+  };
+}
+
+function stableSurfaceId(value) {
+  return String(value || "provider")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "") || "provider";
 }
 
 function handleClientFrame(socket, chunk, clients, applyClientCommand) {
@@ -158,9 +280,9 @@ function handleClientFrame(socket, chunk, clients, applyClientCommand) {
 }
 
 function broadcastState(clients, state) {
-  const payload = Buffer.from(JSON.stringify(state), "utf8");
   for (const client of [...clients]) {
     try {
+      const payload = Buffer.from(JSON.stringify(stateForRequest(state, client.odinRequestUrl || "/eve/deck")), "utf8");
       sendFrame(client, 0x1, payload);
     } catch {
       clients.delete(client);

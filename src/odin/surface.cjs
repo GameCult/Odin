@@ -15,16 +15,16 @@ function buildSurface({ observedAt, docker, adb, hosts, yggdrasilServices, verse
       id: "network-root",
       kind: "dashboard",
       props: {
-        title: "Odin All-Seer",
+        title: "Odin Provider Catalog",
         observedAt,
         summary: `${activeInterfaces.length} Eve surfaces / ${activeObservationStreams.length} live streams`,
         marqueeText: marketMarqueeText(interfaces),
-        layout: fullscreenLayoutIntent("odin.allseer", -100),
+        layout: fullscreenLayoutIntent("odin.providers", -100),
         presentation: {
           theme: "bifrost-pride",
           frame: "animated-rainbow",
           dividerMotion: "bifrost-rainbow-dance",
-          intent: "Nightwing Odin Overview should render with an animated rainbow frame and dancing dividers; renderer owns lowering, Odin owns truth.",
+          intent: "Odin preserves provider-owned surfaces for catalog/proxy access; Gjallar owns Nightwing overview composition and lowering.",
         },
       },
       children: [

@@ -25,7 +25,7 @@ Eve/CultUI deck and renders the live display.
 ## Gjallar
 
 Gjallar is the herald display daemon that runs on Nightwing. Odin sees the
-Verses, accepts provider surfaces, and publishes the `odin.allseer` deck.
+Verses, accepts provider surfaces, and publishes the `odin.providers` catalog.
 Gjallar talks to Odin, enumerates active providers, composes the multi-scale
 tiled dashboard, owns the marquee and dense character-level update behavior,
 and writes the visible framebuffer.
@@ -60,7 +60,7 @@ Local package surfaces:
 
 ## Authority Map
 
-- Owner: Odin owns the network-wide Verse registry, schema catalog index, translation map, and the accepted `odin.allseer` Eve surface.
+- Owner: Odin owns the network-wide Verse registry, schema catalog index, translation map, and accepted provider catalog/proxy surfaces.
 - Inputs: CultMesh/CultNet peer announcements, schema catalog responses, local host probes, Docker/ADB host facts, SSH-reachable ops hosts, Mimir's normalized Eve observation ledger, and later direct Verse subscriptions.
 - Outputs: CultCache-backed Odin state, CultMesh documents, CultNet schema/catalog messages, and an Eve-compatible `/eve/deck` surface for dashboards.
 - Derived state: Gjallar's attached Nightwing display, browser dashboards, and future Eve clients are projections of Odin state and provider-owned Eve/CultUI surfaces.
@@ -93,7 +93,7 @@ State and logs live under ignored `scratch/odin/`.
 
 The first executable is deliberately narrow:
 
-- publishes provider `odin.allseer`;
+- publishes provider catalog `odin.providers`;
 - writes the latest surface to `scratch/odin/latest-surface.json`;
 - persists the same document through local CultMesh/CultCache when `CultLib` packages are available at `E:\Projects\CultLib\packages`;
 - observes Starfire Docker, Periwinkle ADB, Nightwing services/GPU, Raven, EVE, and Yggdrasil reachability;

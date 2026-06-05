@@ -36,8 +36,8 @@ body they are being lowered into.
 
 - `src/Gjallar` is Gjallar's executable C# runtime.
 - `Gjallar.csproj` builds the Nightwing framebuffer compositor.
-- Gjallar consumes Odin's deck over WebSocket, defaulting to
-  `ws://192.168.1.66:8797/eve/deck` and provider `odin.allseer`.
+- Gjallar consumes Odin's provider catalog over HTTP/WebSocket, defaulting to
+  `ws://192.168.1.66:8797/eve/deck` with no fixed provider id.
 - The old Rust `crates/gjallar-daemon` and `gjallar.overview` records were cut
   because they created an intermediate composition owner that did nothing Odin
   and Gjallar's live renderer could not explain directly.
@@ -61,7 +61,7 @@ dotnet publish .\src\Gjallar\Gjallar.csproj -c Release -r linux-x64 --self-conta
 
 ```text
 provider-owned Eve/CultUI surfaces
-  -> Odin discovery and allseer deck
+  -> Odin discovery and provider catalog/proxy surfaces
   -> Gjallar provider enumeration, packing, marquee, and framebuffer lowering
   -> Nightwing visible display
 ```

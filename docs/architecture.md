@@ -68,7 +68,7 @@ Odin's executable body is split by ownership:
 - `src/odin/interfaces.cjs`: Eve provider manifest discovery, provider WebSocket fetches, provider advertisements, and CultMesh interface bindings.
 - `src/odin/layout.cjs`: `odin.interface_layout.v1` read/write and merge policy.
 - `src/odin/surface.cjs`: `gamecult.eve.surface.v1` tree projection.
-- `src/odin/state.cjs`: one refresh's input records into `odin.allseer` dashboard state.
+- `src/odin/state.cjs`: one refresh's input records into Odin's provider catalog/proxy state.
 - `src/odin/websocket.cjs`: Eve deck HTTP/WebSocket serving and client WebSocket helpers.
 
 The entrypoint is not allowed to grow new probe, surface, provider, layout, or renderer policy. If a new owner is needed, name the owner and its invariant before adding code.
@@ -217,7 +217,7 @@ asgard.<machine>.<service>/<resource>
 Examples:
 
 ```text
-asgard.starfire.odin/eve/allseer
+asgard.starfire.odin/eve/providers
 asgard.starfire.bifrost/eve/tui
 asgard.starfire.bifrost/eve/gui
 asgard.yggdrasil.streampixels/eve/tui
@@ -248,7 +248,7 @@ tree has children.
 
 ## Current Observation Surface
 
-Odin tails Mimir's normalized observation JSONL at `E:\Projects\Mimir\artifacts\runtime\periwinkle-cultmesh-sensors.out.log` by default. It accepts the typed CultMesh records `mimir.eve_sensor_observation.v1` and `mimir.eve_media_observation.v1`, keeps only the latest record for each `(deviceId, streamId, kind)`, and publishes those summaries as `observation-stream` nodes inside `odin.allseer`. Streams are considered active for 120 seconds by default so a compact dashboard refresh does not turn a briefly quiet sensor into false red noise.
+Odin tails Mimir's normalized observation JSONL at `E:\Projects\Mimir\artifacts\runtime\periwinkle-cultmesh-sensors.out.log` by default. It accepts the typed CultMesh records `mimir.eve_sensor_observation.v1` and `mimir.eve_media_observation.v1`, keeps only the latest record for each `(deviceId, streamId, kind)`, and publishes those summaries as provider-catalog observation records. Streams are considered active for 120 seconds by default so a compact dashboard refresh does not turn a briefly quiet sensor into false red noise.
 
 This is an ingest projection, not a new capture authority. Device clients still own capture, Mimir still owns the evidence ledger, and Odin only publishes the dashboard-ready state that the Eve GUI and Nightwing TUI lower.
 
