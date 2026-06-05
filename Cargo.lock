@@ -361,8 +361,11 @@ name = "gjallar-daemon"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "cultcache-rs",
  "cultmesh-rs",
  "odin-core",
+ "rmp-serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -522,6 +525,7 @@ dependencies = [
  "cultnet-rs",
  "pretty_assertions",
  "serde",
+ "serde_json",
  "tempfile",
 ]
 

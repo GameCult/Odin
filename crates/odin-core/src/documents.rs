@@ -1,4 +1,5 @@
 use cultcache_rs::DatabaseEntry;
+use serde_json::Value;
 
 pub const ODIN_SNAPSHOT_SCHEMA: &str = "odin.snapshot.v1";
 pub const ODIN_VERSE_SCHEMA: &str = "odin.verse.v1";
@@ -6,7 +7,12 @@ pub const ODIN_SERVICE_SCHEMA: &str = "odin.service.v1";
 pub const ODIN_INTERFACE_SCHEMA: &str = "odin.interface.v1";
 pub const ODIN_OBSERVATION_STREAM_SCHEMA: &str = "odin.observation_stream.v1";
 pub const ODIN_TRANSLATION_ROUTE_SCHEMA: &str = "odin.translation_route.v1";
-pub const GJALLAR_AFFORDANCE_SCHEMA: &str = "gjallar.affordance.v1";
+pub const GJALLAR_OVERVIEW_SCHEMA: &str = "gjallar.overview.v1";
+pub const GJALLAR_OVERVIEW_TILE_SCHEMA: &str = "gjallar.overview_tile.v1";
+pub const EVE_SURFACE_STATE_SCHEMA: &str = "gamecult.eve.surface_state.v1";
+pub const EVE_INTERFACE_BINDING_SCHEMA: &str = "gamecult.eve.interface_binding.v1";
+pub const EVE_PROVIDER_ADVERTISEMENT_SCHEMA: &str = "gamecult.eve.provider_advertisement.v1";
+pub const VOIDBOT_SWARM_STATE_SNAPSHOT_SCHEMA: &str = "voidbot.swarm_state_snapshot.v1";
 pub const IDUNN_DESIRED_DAEMON_SCHEMA: &str = "idunn.desired_daemon.v1";
 pub const IDUNN_DAEMON_HEALTH_SCHEMA: &str = "idunn.daemon_health.v1";
 pub const IDUNN_KEEPALIVE_DECISION_SCHEMA: &str = "idunn.keepalive_decision.v1";
@@ -132,26 +138,103 @@ pub struct OdinTranslationRouteRecord {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
-#[cultcache(type = "gjallar.affordance", schema = "gjallar.affordance.v1")]
-pub struct GjallarAffordanceRecord {
+#[cultcache(type = "gjallar.overview", schema = "gjallar.overview.v1")]
+pub struct GjallarOverviewRecord {
     #[cultcache(key = 0)]
-    pub affordance_id: String,
+    pub overview_id: String,
     #[cultcache(key = 1)]
-    pub source_record: String,
+    pub source_snapshot_id: String,
     #[cultcache(key = 2)]
-    pub verse_id: Option<String>,
+    pub title: String,
     #[cultcache(key = 3)]
-    pub surface_kind: String,
-    #[cultcache(key = 4)]
-    pub action: String,
-    #[cultcache(key = 5)]
-    pub authority: String,
-    #[cultcache(key = 6)]
     pub status: String,
+    #[cultcache(key = 4)]
+    pub summary: String,
+    #[cultcache(key = 5)]
+    pub tile_count: u32,
+    #[cultcache(key = 6)]
+    pub target_columns: u32,
     #[cultcache(key = 7)]
-    pub provenance: String,
+    pub target_rows: u32,
     #[cultcache(key = 8)]
+    pub source_observed_at: String,
+    #[cultcache(key = 9)]
+    pub composed_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(type = "gjallar.overview_tile", schema = "gjallar.overview_tile.v1")]
+pub struct GjallarOverviewTileRecord {
+    #[cultcache(key = 0)]
+    pub tile_id: String,
+    #[cultcache(key = 1)]
+    pub overview_id: String,
+    #[cultcache(key = 2)]
+    pub source_record: String,
+    #[cultcache(key = 3)]
+    pub tile_kind: String,
+    #[cultcache(key = 4)]
+    pub title: String,
+    #[cultcache(key = 5)]
+    pub state: String,
+    #[cultcache(key = 6)]
+    pub detail: String,
+    #[cultcache(key = 7)]
+    pub priority: i32,
+    #[cultcache(key = 8)]
+    pub row_span: u32,
+    #[cultcache(key = 9)]
+    pub column_span: u32,
+    #[cultcache(key = 10)]
     pub observed_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, DatabaseEntry)]
+#[cultcache(
+    type = "gamecult.eve.surface_state",
+    schema = "gamecult.eve.surface_state.v1"
+)]
+pub struct EveSurfaceStateRecord {
+    #[cultcache(key = 0)]
+    pub provider_id: String,
+    #[cultcache(key = 1)]
+    pub title: String,
+    #[cultcache(key = 2)]
+    pub version: i64,
+    #[cultcache(key = 3)]
+    pub updated_at: String,
+    #[cultcache(key = 4)]
+    pub surface: Value,
+}
+
+#[derive(Clone, Debug, PartialEq, DatabaseEntry)]
+#[cultcache(
+    type = "gamecult.eve.interface_binding",
+    schema = "gamecult.eve.interface_binding.v1"
+)]
+pub struct EveInterfaceBindingCompatRecord {
+    #[cultcache(key = 0)]
+    pub value: Value,
+}
+
+#[derive(Clone, Debug, PartialEq, DatabaseEntry)]
+#[cultcache(
+    type = "gamecult.eve.provider_advertisement",
+    schema = "gamecult.eve.provider_advertisement.v1"
+)]
+pub struct EveProviderAdvertisementCompatRecord {
+    #[cultcache(key = 0)]
+    pub value: Value,
+}
+
+#[derive(Clone, Debug, PartialEq, DatabaseEntry)]
+#[cultcache(
+    type = "voidbot.swarm_state_snapshot",
+    schema = "voidbot.swarm_state_snapshot.v1"
+)]
+pub struct VoidBotSwarmStateSnapshotCompatRecord {
+    #[cultcache(key = 0)]
+    pub value: Value,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
@@ -266,7 +349,12 @@ cultmesh_rs::cultmesh_documents!(OdinDocuments {
     OdinInterfaceRecord => ODIN_INTERFACE_SCHEMA,
     OdinObservationStreamRecord => ODIN_OBSERVATION_STREAM_SCHEMA,
     OdinTranslationRouteRecord => ODIN_TRANSLATION_ROUTE_SCHEMA,
-    GjallarAffordanceRecord => GJALLAR_AFFORDANCE_SCHEMA,
+    GjallarOverviewRecord => GJALLAR_OVERVIEW_SCHEMA,
+    GjallarOverviewTileRecord => GJALLAR_OVERVIEW_TILE_SCHEMA,
+    EveSurfaceStateRecord => EVE_SURFACE_STATE_SCHEMA,
+    EveInterfaceBindingCompatRecord => EVE_INTERFACE_BINDING_SCHEMA,
+    EveProviderAdvertisementCompatRecord => EVE_PROVIDER_ADVERTISEMENT_SCHEMA,
+    VoidBotSwarmStateSnapshotCompatRecord => VOIDBOT_SWARM_STATE_SNAPSHOT_SCHEMA,
     IdunnDesiredDaemonRecord => IDUNN_DESIRED_DAEMON_SCHEMA,
     IdunnDaemonHealthRecord => IDUNN_DAEMON_HEALTH_SCHEMA,
     IdunnKeepaliveDecisionRecord => IDUNN_KEEPALIVE_DECISION_SCHEMA,
@@ -283,5 +371,4 @@ pub struct OdinRecords {
     pub interfaces: Vec<OdinInterfaceRecord>,
     pub observation_streams: Vec<OdinObservationStreamRecord>,
     pub translation_routes: Vec<OdinTranslationRouteRecord>,
-    pub gjallar_affordances: Vec<GjallarAffordanceRecord>,
 }

@@ -1,31 +1,29 @@
 use crate::documents::{
-    GjallarAffordanceRecord, OdinInterfaceRecord, OdinObservationStreamRecord, OdinRecords,
-    OdinServiceRecord, OdinSnapshotRecord, OdinTranslationRouteRecord, OdinVerseRecord,
+    OdinInterfaceRecord, OdinObservationStreamRecord, OdinRecords, OdinServiceRecord,
+    OdinSnapshotRecord, OdinTranslationRouteRecord, OdinVerseRecord,
 };
 use crate::ports::{
-    Clock, GjallarAffordanceIngest, InterfaceIngest, ObservationStreamIngest, OdinInputBatch,
-    ServiceIngest, TranslationRouteIngest, VerseIngest,
+    Clock, InterfaceIngest, ObservationStreamIngest, OdinInputBatch, ServiceIngest,
+    TranslationRouteIngest, VerseIngest,
 };
 use anyhow::Result;
 
-pub struct OdinIngestPipeline<V, S, I, O, T, G, C> {
+pub struct OdinIngestPipeline<V, S, I, O, T, C> {
     verses: V,
     services: S,
     interfaces: I,
     streams: O,
     translations: T,
-    gjallar: G,
     clock: C,
 }
 
-impl<V, S, I, O, T, G, C> OdinIngestPipeline<V, S, I, O, T, G, C>
+impl<V, S, I, O, T, C> OdinIngestPipeline<V, S, I, O, T, C>
 where
     V: VerseIngest,
     S: ServiceIngest,
     I: InterfaceIngest,
     O: ObservationStreamIngest,
     T: TranslationRouteIngest,
-    G: GjallarAffordanceIngest,
     C: Clock,
 {
     pub fn new(
@@ -34,7 +32,6 @@ where
         interfaces: I,
         streams: O,
         translations: T,
-        gjallar: G,
         clock: C,
     ) -> Self {
         Self {
@@ -43,7 +40,6 @@ where
             interfaces,
             streams,
             translations,
-            gjallar,
             clock,
         }
     }
@@ -57,7 +53,6 @@ where
             interfaces: self.interfaces.observe_interfaces()?,
             observation_streams: self.streams.observe_streams()?,
             translation_routes: self.translations.observe_translation_routes()?,
-            gjallar_affordances: self.gjallar.observe_gjallar_affordances()?,
         })
     }
 }
@@ -139,23 +134,6 @@ pub fn normalize_odin_records(input: OdinInputBatch) -> OdinRecords {
         })
         .collect::<Vec<_>>();
 
-    let gjallar_affordances = input
-        .gjallar_affordances
-        .into_iter()
-        .enumerate()
-        .map(|(index, entry)| GjallarAffordanceRecord {
-            affordance_id: format!("gjallar:{}:{}", entry.source_record, index),
-            source_record: entry.source_record,
-            verse_id: entry.verse_id,
-            surface_kind: entry.surface_kind,
-            action: entry.action,
-            authority: entry.authority,
-            status: entry.status,
-            provenance: entry.provenance,
-            observed_at: input.observed_at.clone(),
-        })
-        .collect::<Vec<_>>();
-
     let snapshot = OdinSnapshotRecord {
         snapshot_id: "latest".to_string(),
         observed_at: input.observed_at,
@@ -173,7 +151,6 @@ pub fn normalize_odin_records(input: OdinInputBatch) -> OdinRecords {
         interfaces,
         observation_streams,
         translation_routes,
-        gjallar_affordances,
     }
 }
 
@@ -181,9 +158,8 @@ pub fn normalize_odin_records(input: OdinInputBatch) -> OdinRecords {
 mod tests {
     use super::*;
     use crate::ports::{
-        FixedClock, GjallarAffordanceObservation, InterfaceObservation,
-        ObservationStreamObservation, ServiceObservation, TranslationRouteObservation,
-        VerseObservation,
+        FixedClock, InterfaceObservation, ObservationStreamObservation, ServiceObservation,
+        TranslationRouteObservation, VerseObservation,
     };
     use anyhow::Result;
     use pretty_assertions::assert_eq;
@@ -255,24 +231,9 @@ mod tests {
         }
     }
 
-    impl GjallarAffordanceIngest for MockIngest {
-        fn observe_gjallar_affordances(&self) -> Result<Vec<GjallarAffordanceObservation>> {
-            Ok(vec![GjallarAffordanceObservation {
-                source_record: "odin.service:odin".to_string(),
-                verse_id: Some("starfire.local".to_string()),
-                surface_kind: "service".to_string(),
-                action: "inspect".to_string(),
-                authority: "odin".to_string(),
-                status: "available".to_string(),
-                provenance: "unit-test".to_string(),
-            }])
-        }
-    }
-
     #[test]
     fn pipeline_collects_from_injected_ports() -> Result<()> {
         let pipeline = OdinIngestPipeline::new(
-            MockIngest,
             MockIngest,
             MockIngest,
             MockIngest,
@@ -293,10 +254,6 @@ mod tests {
         assert_eq!(
             records.translation_routes[0].route_id,
             "mimir.eve_sensor_observation.v1=>odin.observation_stream.v1"
-        );
-        assert_eq!(
-            records.gjallar_affordances[0].affordance_id,
-            "gjallar:odin.service:odin:0"
         );
         Ok(())
     }

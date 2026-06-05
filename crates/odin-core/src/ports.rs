@@ -49,17 +49,6 @@ pub struct TranslationRouteObservation {
     pub notes: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct GjallarAffordanceObservation {
-    pub source_record: String,
-    pub verse_id: Option<String>,
-    pub surface_kind: String,
-    pub action: String,
-    pub authority: String,
-    pub status: String,
-    pub provenance: String,
-}
-
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct OdinInputBatch {
     pub observed_at: String,
@@ -69,7 +58,6 @@ pub struct OdinInputBatch {
     pub interfaces: Vec<InterfaceObservation>,
     pub observation_streams: Vec<ObservationStreamObservation>,
     pub translation_routes: Vec<TranslationRouteObservation>,
-    pub gjallar_affordances: Vec<GjallarAffordanceObservation>,
 }
 
 pub trait VerseIngest {
@@ -90,10 +78,6 @@ pub trait ObservationStreamIngest {
 
 pub trait TranslationRouteIngest {
     fn observe_translation_routes(&self) -> Result<Vec<TranslationRouteObservation>>;
-}
-
-pub trait GjallarAffordanceIngest {
-    fn observe_gjallar_affordances(&self) -> Result<Vec<GjallarAffordanceObservation>>;
 }
 
 pub trait Clock {

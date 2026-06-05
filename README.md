@@ -18,21 +18,21 @@ CultNet document registries, and lower interface state through Eve/CultUI.
 The first Rust core lives in `crates/odin-core` and already separates typed
 documents, ingest ports, normalization, and repository persistence so unit tests
 can use mocked inputs and pipeline smokes can prove typed handoff without
-booting the whole daemon. Gjallar is part of that spine as a typed
-`gjallar.affordance.v1` lane: it transmits Odin-owned sight into agent-ready
-affordance records without owning discovery truth.
+booting the whole daemon. Gjallar is part of that spine as the typed overview
+composition lane: it reads Odin-owned sight and publishes the compact feed that
+Nightwing lowers into terminal cells.
 
 ## Gjallar
 
-Gjallar is Odin's herald organ: the daemon/persona package that should carry
-Odin's gathered sight into agent context. Odin sees the Verses; Gjallar
-transmits the usable tapestry of affordances without becoming the owner of
-discovery, probing, rendering, or schema truth.
+Gjallar is Odin's herald display daemon: the package that turns Odin's gathered
+sight into the overview Nightwing displays. Odin sees the Verses; Gjallar
+decides how that sight is grouped, prioritized, and packed into a feed.
+Nightwing stays a thin fast terminal lowerer.
 
 Local package surfaces:
 
 - Organ contract: `docs/gjallar.md`
-- Canonical Persona state: `personas/gjallar.persona_state.cc`
+- Branding Persona state: `personas/gjallar.persona_state.cc`
 - Rust CultMesh organ: `crates/gjallar-daemon`
 - Avatar asset: `assets/personas/gjallar-avatar.png`
 - Pixel avatar: `assets/personas/gjallar-avatar-pixel-256.png`
