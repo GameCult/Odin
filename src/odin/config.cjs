@@ -57,8 +57,8 @@ function buildConfig(argv) {
 
 function loadCultRuntime() {
   try {
-    const { CultMesh } = require("cultmesh-ts/dist/index.js");
-    const { defineDocumentType } = require("cultcache-ts/dist/index.js");
+    const { CultMesh } = require("cultmesh-ts");
+    const { defineDocumentType } = require("cultcache-ts");
     return { CultMesh, defineDocumentType, error: null };
   } catch (error) {
     return { CultMesh: null, defineDocumentType: null, error };

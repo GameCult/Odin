@@ -11,7 +11,7 @@ const {
   SingleFileMessagePackBackingStore,
   defineDocumentType,
   inspectCultCacheBytes,
-} = createRequire(import.meta.url)("E:/Projects/CultLib/packages/cultcache-ts/dist/index.js");
+} = createRequire("E:/Projects/CultLib/packages/cultcache-ts/package.json")("cultcache-ts");
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const schemaPath = "E:/Projects/EpiphanyAgent/schemas/cultnet/gamecult.persona_state.v0.schema.json";
