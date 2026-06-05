@@ -19,8 +19,8 @@ The first Rust core lives in `crates/odin-core` and already separates typed
 documents, ingest ports, normalization, and repository persistence so unit tests
 can use mocked inputs and pipeline smokes can prove typed handoff without
 booting the whole daemon. Gjallar is not part of that Rust record spine: it is
-the Nightwing-resident terminal compositor that consumes Odin's published
-Eve/CultUI deck and renders the live display.
+the Nightwing-resident terminal compositor in `E:\Projects\Gjallar` that
+consumes Odin's published Eve/CultUI deck and renders the live display.
 
 ## Gjallar
 
@@ -34,7 +34,7 @@ Local package surfaces:
 
 - Organ contract: `docs/gjallar.md`
 - Branding Persona state: `personas/gjallar.persona_state.cc`
-- Runtime source: `src/Gjallar`
+- Runtime source: `E:\Projects\Gjallar`
 - Avatar asset: `assets/personas/gjallar-avatar.png`
 - Pixel avatar: `assets/personas/gjallar-avatar-pixel-256.png`
 

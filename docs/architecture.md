@@ -74,7 +74,8 @@ Odin's executable body is split by ownership:
 The entrypoint is not allowed to grow new probe, surface, provider, layout, or renderer policy. If a new owner is needed, name the owner and its invariant before adding code.
 
 Gjallar is the Nightwing-resident terminal compositor for what Odin can show.
-Its runtime lives in `src/Gjallar` and consumes Odin's Eve deck directly.
+Its runtime lives in `E:\Projects\Gjallar` and consumes Odin's Eve deck
+directly.
 Gjallar owns provider enumeration for display, panel packing, marquee behavior,
 glyph/color/framebuffer lowering, frame stats, and the multi-scale terminal
 product. It must not own the underlying registry, probe, provider truth, or

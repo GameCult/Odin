@@ -29,12 +29,12 @@ body they are being lowered into.
   overlays, and agent-facing TUI captures should all lower the same Gjallar
   composition behavior when they want the "everything Odin can show" view.
 - Deletion line: the old Rust `gjallar.overview` feed is not a runtime
-  authority. Any path that wants Nightwing composition belongs in `src/Gjallar`;
-  any path that decides discovery truth belongs in Odin.
+  authority. Any path that wants Nightwing composition belongs in
+  `E:\Projects\Gjallar`; any path that decides discovery truth belongs in Odin.
 
 ## Body
 
-- `src/Gjallar` is Gjallar's executable C# runtime.
+- `E:\Projects\Gjallar` is Gjallar's executable C# runtime repo.
 - `Gjallar.csproj` builds the Nightwing framebuffer compositor.
 - Gjallar consumes Odin's provider catalog over HTTP/WebSocket, defaulting to
   `ws://192.168.1.66:8797/eve/deck` with no fixed provider id.
@@ -48,13 +48,13 @@ body they are being lowered into.
 Build from the repo root:
 
 ```powershell
-dotnet build .\src\Gjallar\Gjallar.csproj
+dotnet build E:\Projects\Gjallar\src\Gjallar\Gjallar.csproj
 ```
 
 Publish for Nightwing:
 
 ```powershell
-dotnet publish .\src\Gjallar\Gjallar.csproj -c Release -r linux-x64 --self-contained true -o .\scratch\publish\gjallar
+dotnet publish E:\Projects\Gjallar\src\Gjallar\Gjallar.csproj -c Release -r linux-x64 --self-contained true -o E:\Projects\Gjallar\scratch\publish\gjallar
 ```
 
 ## Runtime Contract
