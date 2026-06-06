@@ -211,6 +211,40 @@ function localIpv4Prefixes() {
 }
 
 async function fetchEveProvider(url, providerId, manifest = null) {
+  const direct = await fetchEveProviderDirect(providerDeckUrl(url, providerId), providerId, manifest);
+  if (direct.state === "active") {
+    return direct;
+  }
+
+  const broker = await fetchEveProviderViaBroker(url, providerId, manifest);
+  if (broker.state === "active") {
+    return broker;
+  }
+
+  return broker.detail ? broker : direct;
+}
+
+async function fetchEveProviderDirect(url, providerId, manifest = null) {
+  try {
+    const socket = await openWebSocket(url);
+    try {
+      for (let index = 0; index < 3; index += 1) {
+        const message = await readServerTextFrame(socket, 1000);
+        const state = JSON.parse(message);
+        if (state?.providerId === providerId) {
+          return activeProviderInterface(url, providerId, state, manifest);
+        }
+      }
+      return dashboardUnavailable(providerId, url, "direct provider stream did not publish matching state");
+    } finally {
+      socket.destroy();
+    }
+  } catch (error) {
+    return dashboardUnavailable(providerId, url, error.message);
+  }
+}
+
+async function fetchEveProviderViaBroker(url, providerId, manifest = null) {
   try {
     const socket = await openWebSocket(url);
     try {
@@ -219,18 +253,7 @@ async function fetchEveProvider(url, providerId, manifest = null) {
         const message = await readServerTextFrame(socket, 2500);
         const state = JSON.parse(message);
         if (state?.providerId === providerId) {
-          const surface = state.surface?.root ? state.surface : legacySurfaceFromNodes(state, manifest);
-          return {
-            providerId,
-            title: state.title || manifest?.title || providerId,
-            state: "active",
-            detail: `${surface?.root?.kind || "surface"} ${countSurfaceNodes(surface, state)} nodes`,
-            version: state.version,
-            updatedAt: state.updatedAt,
-            source: url,
-            manifest,
-            surface,
-          };
+          return activeProviderInterface(url, providerId, state, manifest);
         }
       }
       return dashboardUnavailable(providerId, url, "provider did not publish matching state");
@@ -240,6 +263,28 @@ async function fetchEveProvider(url, providerId, manifest = null) {
   } catch (error) {
     return dashboardUnavailable(providerId, url, error.message);
   }
+}
+
+function activeProviderInterface(source, providerId, state, manifest = null) {
+  const surface = state.surface?.root ? state.surface : legacySurfaceFromNodes(state, manifest);
+  return {
+    providerId,
+    title: state.title || manifest?.title || providerId,
+    state: "active",
+    detail: `${surface?.root?.kind || "surface"} ${countSurfaceNodes(surface, state)} nodes`,
+    version: state.version,
+    updatedAt: state.updatedAt,
+    source,
+    manifest,
+    surface,
+  };
+}
+
+function providerDeckUrl(url, providerId) {
+  const deck = new URL(url);
+  deck.pathname = `/eve/deck/${encodeURIComponent(providerId)}`;
+  deck.search = "";
+  return deck.toString();
 }
 
 function dashboardUnavailable(providerId, source, detail) {

@@ -343,7 +343,7 @@ function openWebSocket(url) {
         return;
       }
       socket.off("data", onHandshake);
-      socket.unshift(buffer.subarray(marker + 4));
+      socket.odinPendingData = buffer.subarray(marker + 4);
       resolve(socket);
     });
     socket.on("timeout", () => {
@@ -373,7 +373,8 @@ function sendClientFrame(socket, textValue) {
 
 function readServerTextFrame(socket, timeoutMs) {
   return new Promise((resolve, reject) => {
-    let buffer = Buffer.alloc(0);
+    let buffer = socket.odinPendingData || Buffer.alloc(0);
+    socket.odinPendingData = null;
     const timer = setTimeout(() => cleanup(new Error("timed out waiting for dashboard frame")), timeoutMs);
     function cleanup(error, value) {
       clearTimeout(timer);
@@ -395,6 +396,13 @@ function readServerTextFrame(socket, timeoutMs) {
     }
     socket.on("data", onData);
     socket.on("error", onError);
+    const frame = tryReadFrame(buffer);
+    if (frame) {
+      buffer = buffer.subarray(frame.consumed);
+      socket.odinPendingData = buffer.length ? buffer : null;
+      if (frame.opcode === 0x1) cleanup(null, frame.payload.toString("utf8"));
+      if (frame.opcode === 0x8) cleanup(new Error("dashboard websocket closed"));
+    }
   });
 }
 

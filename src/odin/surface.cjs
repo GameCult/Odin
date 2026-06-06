@@ -5,7 +5,7 @@ const { observationPane } = require("./observations.cjs");
 const { stableId } = require("./utils.cjs");
 
 function buildSurface({ observedAt, docker, adb, hosts, yggdrasilServices, verses, interfaces, observations, layout }) {
-  const activeInterfaces = interfaces.filter(hasOverviewSignal);
+  const activeInterfaces = interfaces.filter((entry) => entry?.surface?.root);
   const activeObservationStreams = observations.streams.filter((entry) => entry.state === "active");
   return {
     schema: "gamecult.eve.surface.v1",
@@ -45,6 +45,7 @@ function buildSurface({ observedAt, docker, adb, hosts, yggdrasilServices, verse
               source: entry.source,
               status: entry.state,
               detail: entry.detail,
+              overviewSignal: hasOverviewSignal(entry),
               version: entry.version,
               updatedAt: entry.updatedAt,
               layout: mergeLayoutIntent(layout.tiles?.[entry.providerId], entry, interfaces),
@@ -94,13 +95,26 @@ function stonksHasOverviewSignal(root, text) {
 function marketMarqueeText(interfaces) {
   const stonks = interfaces.find((entry) => String(entry.providerId || "").toLowerCase() === "stonks.market");
   const root = stonks?.surface?.root;
-  if (!root) return "";
+  if (!root) return generalMarqueeText(interfaces);
   const explicit = String(root.props?.marqueeText || "").trim();
   if (explicit) return explicit;
   return surfaceText(root)
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter((line) => /\b(BITCOIN|ETHEREUM|SOLANA|DOGECOIN|[A-Z0-9.]{2,}\s+\$|vol|request|equities|crypto|Stooq|CoinGecko)\b/i.test(line))
+    .slice(0, 24)
+    .join(" / ");
+}
+
+function generalMarqueeText(interfaces) {
+  return interfaces
+    .filter((entry) => entry?.surface?.root && entry.state === "active")
+    .flatMap((entry) => surfaceText(entry.surface.root)
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => `${entry.title || entry.providerId}: ${line}`))
+    .filter((line) => !/\b(unavailable|not discovered|playing:\s*none|queue:\s*empty)\b/i.test(line))
     .slice(0, 24)
     .join(" / ");
 }
