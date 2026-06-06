@@ -67,6 +67,7 @@ Odin's executable body is split by ownership:
 - `src/odin/observations.cjs`: Mimir observation ledger tailing and dashboard-ready stream projection.
 - `src/odin/interfaces.cjs`: Eve provider manifest discovery, provider WebSocket fetches, provider advertisements, and CultMesh interface bindings.
 - `src/odin/layout.cjs`: `odin.interface_layout.v1` read/write and merge policy.
+- `src/odin/marquee.cjs`: canonical marquee tape assembly from Stonks securities and ordered VoidBot poem lines.
 - `src/odin/surface.cjs`: `gamecult.eve.surface.v1` tree projection.
 - `src/odin/state.cjs`: one refresh's input records into Odin's provider catalog/proxy state.
 - `src/odin/websocket.cjs`: Eve deck HTTP/WebSocket serving and client WebSocket helpers.
@@ -76,9 +77,10 @@ The entrypoint is not allowed to grow new probe, surface, provider, layout, or r
 Gjallar is the Nightwing-resident terminal compositor for what Odin can show.
 Its runtime lives in `E:\Projects\Gjallar` and consumes Odin's Eve deck
 directly.
-Gjallar owns provider enumeration for display, panel packing, marquee behavior,
-glyph/color/framebuffer lowering, frame stats, and the multi-scale terminal
-product. It must not own the underlying registry, probe, provider truth, or
+Odin owns canonical marquee content; Gjallar owns provider enumeration for
+display, panel packing, marquee lowering, glyph/color/framebuffer lowering,
+frame stats, and the multi-scale terminal product. It must not own the
+underlying registry, probe, provider truth, canonical marquee content, or
 translation decisions.
 
 Idunn is the named keepalive organ for daemon continuity. Its current Rust

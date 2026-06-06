@@ -27,8 +27,9 @@ consumes Odin's published Eve/CultUI deck and renders the live display.
 Gjallar is the herald display daemon that runs on Nightwing. Odin sees the
 Verses, accepts provider surfaces, and publishes the `odin.providers` catalog.
 Gjallar talks to Odin, enumerates active providers, composes the multi-scale
-tiled dashboard, owns the marquee and dense character-level update behavior,
-and writes the visible framebuffer.
+tiled dashboard, lowers Odin's canonical marquee tape into continuous gutter
+text, owns dense character-level update behavior, and writes the visible
+framebuffer.
 
 Local package surfaces:
 

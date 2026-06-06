@@ -26,6 +26,8 @@ function buildConfig(argv) {
     .filter(Boolean);
   const observationLogPath = args.observationLogPath || path.join(repoRoot, "..", "Mimir", "artifacts", "runtime", "periwinkle-cultmesh-sensors.out.log");
   const observationFreshSeconds = Number(args.observationFreshSeconds || 120);
+  const gamecultTextDocumentStorePath = args.gamecultTextDocumentStorePath || path.join(repoRoot, "..", "VoidBot", ".voidbot", "private", "gamecult-text-documents.cc");
+  const stonksStateUrl = args.stonksStateUrl || "http://127.0.0.1:8802/market/state";
   const defaultInterfaceBindingStores = [
     path.join(repoRoot, "..", "VoidBot", ".voidbot", "status", "cultmesh", "voidbot-swarm-state.cc"),
     path.join(repoRoot, "..", "Bifrost", ".bifrost", "provider-advertisement.cc"),
@@ -41,6 +43,7 @@ function buildConfig(argv) {
   return {
     args,
     cachePath,
+    gamecultTextDocumentStorePath,
     host,
     interfaceBindingStores,
     intervalMs,
@@ -51,6 +54,7 @@ function buildConfig(argv) {
     repoRoot,
     seedDeckUrls,
     stateDir,
+    stonksStateUrl,
     surfaceKey: "surface:gamecult.network.status",
   };
 }

@@ -29,10 +29,12 @@ const interfaceDiscovery = createInterfaceDiscovery({
 });
 const stateBuilder = createStateBuilder({
   cachePath: config.cachePath,
+  gamecultTextDocumentStorePath: config.gamecultTextDocumentStorePath,
   interfaceDiscovery,
   layoutStore,
   observationFreshSeconds: config.observationFreshSeconds,
   observationLogPath: config.observationLogPath,
+  stonksStateUrl: config.stonksStateUrl,
 });
 
 let meshNodePromise = null;

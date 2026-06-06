@@ -13,10 +13,11 @@ const {
   remoteServices,
   systemdState,
 } = require("./probes.cjs");
+const { buildMarqueeText } = require("./marquee.cjs");
 const { buildPendingSurface, buildSurface } = require("./surface.cjs");
 const { stableId } = require("./utils.cjs");
 
-function createStateBuilder({ cachePath, interfaceDiscovery, layoutStore, observationFreshSeconds, observationLogPath }) {
+function createStateBuilder({ cachePath, gamecultTextDocumentStorePath, interfaceDiscovery, layoutStore, observationFreshSeconds, observationLogPath, stonksStateUrl }) {
   let version = 0;
 
   function buildPendingState(message) {
@@ -51,6 +52,7 @@ function createStateBuilder({ cachePath, interfaceDiscovery, layoutStore, observ
     ]);
     const interfaceById = new Map(discoveredInterfaces.map((entry) => [entry.providerId, entry]));
     const interfaces = [...interfaceById.values()];
+    const marqueeText = await buildMarqueeText({ interfaces, textDocumentStorePath: gamecultTextDocumentStorePath, stonksStateUrl });
     const interfaceSummary = interfaces.map((entry) => `${entry.providerId}:${entry.state}`).join(", ");
     const voidBotDashboard = interfaceById.get("voidbot.swarm") || dashboardUnavailable("voidbot.swarm", "discovery", "not discovered");
     const mimirLiveStats = interfaceById.get("mimir.live.stats") || dashboardUnavailable("mimir.live.stats", "discovery", "not discovered");
@@ -110,7 +112,7 @@ function createStateBuilder({ cachePath, interfaceDiscovery, layoutStore, observ
         detail: entry.capabilities.join(", "),
       })),
       providerCatalog: providerAdvertisements,
-      surface: buildSurface({ observedAt, docker, adb, hosts, yggdrasilServices, verses, interfaces, observations, layout: layoutStore.readLayout() }),
+      surface: buildSurface({ observedAt, docker, adb, hosts, yggdrasilServices, verses, interfaces, observations, layout: layoutStore.readLayout(), marqueeText }),
     };
   }
 

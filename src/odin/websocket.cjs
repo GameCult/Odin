@@ -25,6 +25,7 @@ function handleHttp(req, res, getCurrentState, getHealth) {
   if (req.url === "/eve/deck/providers") {
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({
+      marqueeText: String(currentState?.surface?.root?.props?.marqueeText || ""),
       providers: providerCatalogFromState(currentState),
     }));
     return;
@@ -179,6 +180,7 @@ function odinCatalogState(currentState) {
         props: {
           title: "Odin Providers",
           summary: `${providers.length} provider surfaces discovered`,
+          marqueeText: String(currentState?.surface?.root?.props?.marqueeText || ""),
         },
         children: providers.map((provider) => ({
           id: `provider-${stableSurfaceId(provider.id)}`,
