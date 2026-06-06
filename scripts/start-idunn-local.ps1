@@ -40,6 +40,13 @@ $watchdogs = @(
     Restart = $null
   },
   [pscustomobject]@{
+    Id = "stonks"
+    Name = "Stonks market pulse"
+    Verse = "starfire.local"
+    Health = "$repoRoot\scripts\health-stonks.cmd"
+    Restart = "$repoRoot\scripts\restart-stonks.cmd"
+  },
+  [pscustomobject]@{
     Id = "nightwing-gjallar"
     Name = "Nightwing Gjallar framebuffer compositor"
     Verse = "nightwing.local"

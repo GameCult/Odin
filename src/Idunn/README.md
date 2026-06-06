@@ -73,9 +73,9 @@ Install the local Starfire boot watchdogs:
 .\scripts\install-idunn-startup.ps1
 ```
 
-That task starts Idunn loops for Odin and the Nightwing display services at
-user logon. The current Mimir dashboard is observed but not restarted until its
-restart authority is named.
+That task starts Idunn loops for Odin, Stonks, and the Nightwing display
+services at user logon. The current Mimir dashboard is observed but not
+restarted until its restart authority is named.
 
 To record a failed health check and request a restart without actuating:
 
