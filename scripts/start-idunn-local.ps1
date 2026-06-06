@@ -29,35 +29,35 @@ $watchdogs = @(
     Id = "odin"
     Name = "Odin all-seer"
     Verse = "starfire.local"
-    Health = "curl.exe -fsS http://127.0.0.1:8797/health >NUL"
+    Health = "$repoRoot\scripts\health-odin.cmd"
     Restart = "$repoRoot\scripts\restart-odin.cmd"
   },
   [pscustomobject]@{
     Id = "mimir-eve-dashboard"
     Name = "Mimir Eve dashboard"
     Verse = "starfire.local"
-    Health = "curl.exe -fsS http://127.0.0.1:8795/health >NUL"
+    Health = "$repoRoot\scripts\health-mimir-eve-dashboard.cmd"
     Restart = $null
   },
   [pscustomobject]@{
     Id = "nightwing-gjallar"
     Name = "Nightwing Gjallar framebuffer compositor"
     Verse = "nightwing.local"
-    Health = "ssh -o BatchMode=yes -o ConnectTimeout=5 nightwing `"systemctl is-active --quiet gjallar.service`""
+    Health = "$repoRoot\scripts\health-nightwing-gjallar.cmd"
     Restart = "$repoRoot\scripts\restart-nightwing-gjallar.cmd"
   },
   [pscustomobject]@{
     Id = "nightwing-eve-dashboard"
     Name = "Nightwing Eve dashboard broker"
     Verse = "nightwing.local"
-    Health = "ssh -o BatchMode=yes -o ConnectTimeout=5 nightwing `"systemctl is-active --quiet nightwing-eve-dashboard.service`""
+    Health = "$repoRoot\scripts\health-nightwing-eve-dashboard.cmd"
     Restart = "$repoRoot\scripts\restart-nightwing-eve-dashboard.cmd"
   },
   [pscustomobject]@{
     Id = "nightwing-eve-browser-reference"
     Name = "Nightwing Eve browser reference"
     Verse = "nightwing.local"
-    Health = "ssh -o BatchMode=yes -o ConnectTimeout=5 nightwing `"systemctl is-active --quiet nightwing-eve-browser-reference.service`""
+    Health = "$repoRoot\scripts\health-nightwing-eve-browser-reference.cmd"
     Restart = "$repoRoot\scripts\restart-nightwing-eve-browser-reference.cmd"
   }
 )
