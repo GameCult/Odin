@@ -30,6 +30,13 @@ function handleHttp(req, res, getCurrentState, getHealth) {
     return;
   }
 
+  const providerId = providerIdFromDeckUrl(req.url);
+  if (providerId) {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify(stateForRequest(currentState, req.url)));
+    return;
+  }
+
   res.writeHead(404, { "content-type": "text/plain" });
   res.end("not found");
 }
