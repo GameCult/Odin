@@ -47,6 +47,14 @@ $watchdogs = @(
     Restart = "$repoRoot\scripts\restart-stonks.cmd"
   },
   [pscustomobject]@{
+    Id = "voidbot"
+    Name = "VoidBot local stack"
+    Verse = "starfire.local"
+    Health = "$repoRoot\scripts\health-voidbot.cmd"
+    Restart = "$repoRoot\scripts\restart-voidbot.cmd"
+    IntervalSeconds = 300
+  },
+  [pscustomobject]@{
     Id = "nightwing-gjallar"
     Name = "Nightwing Gjallar framebuffer compositor"
     Verse = "nightwing.local"
@@ -111,7 +119,7 @@ function Start-Watchdog {
       "--verse", $Watchdog.Verse,
       "--store", $storePath,
       "--health-command", $Watchdog.Health,
-      "--interval-seconds", "$IntervalSeconds"
+      "--interval-seconds", "$(if ($Watchdog.PSObject.Properties['IntervalSeconds']) { $Watchdog.IntervalSeconds } else { $IntervalSeconds })"
     )
   if (-not [string]::IsNullOrWhiteSpace($Watchdog.Restart)) {
     $arguments += @("--restart-command", $Watchdog.Restart, "--execute")

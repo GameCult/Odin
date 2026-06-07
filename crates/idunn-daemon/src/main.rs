@@ -1,8 +1,8 @@
 use anyhow::{Context, Result, anyhow};
 use cultmesh_rs::{CultMesh, CultMeshNodeOptions};
 use odin_core::{
-    IdunnDaemonHealthRecord, IdunnDesiredDaemonRecord, IdunnRestartResultRecord, OdinDocuments,
-    plan_keepalive,
+    IdunnDaemonHealthRecord, IdunnDesiredDaemonRecord, IdunnOperatorAlarmRecord,
+    IdunnRestartResultRecord, OdinDocuments, plan_keepalive,
 };
 use std::env;
 use std::path::PathBuf;
@@ -82,6 +82,14 @@ fn run_cycle(options: &Options) -> Result<()> {
                 "Idunn restart {} for {}: {}",
                 result.state, result.daemon_id, result.detail
             );
+            if result.state != "succeeded" {
+                let alarm = restart_failure_alarm(&result, &now);
+                node.put(&alarm.alarm_id, &alarm)?;
+                println!(
+                    "Idunn raised operator alarm for {} through {}: {}",
+                    alarm.daemon_id, alarm.escalation_target, alarm.reason
+                );
+            }
         } else {
             println!(
                 "Idunn requested restart for {} but did not execute it. Pass --execute to actuate.",
@@ -104,6 +112,23 @@ fn run_cycle(options: &Options) -> Result<()> {
     );
     println!("CultMesh store: {}", options.store_path.display());
     Ok(())
+}
+
+fn restart_failure_alarm(
+    result: &IdunnRestartResultRecord,
+    raised_at: &str,
+) -> IdunnOperatorAlarmRecord {
+    IdunnOperatorAlarmRecord {
+        alarm_id: format!("alarm:restart-failed:{}:{}", result.daemon_id, raised_at),
+        daemon_id: result.daemon_id.clone(),
+        severity: "operator-action-required".to_string(),
+        reason: format!(
+            "restart command failed for request {}: {}",
+            result.request_id, result.detail
+        ),
+        escalation_target: "bifrost.operator-notification".to_string(),
+        raised_at: raised_at.to_string(),
+    }
 }
 
 impl Options {

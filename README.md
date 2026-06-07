@@ -56,6 +56,8 @@ Local package surfaces:
 - Rust daemon crate: `crates/idunn-daemon`
 - Rust lifecycle logic: `crates/odin-core/src/idunn.rs`
 - Runtime store: `scratch/idunn/idunn.keepalive.cc`
+- Local VoidBot keepalive: `scripts\health-voidbot.cmd` and
+  `scripts\restart-voidbot.cmd`
 - Operator escalation: Bifrost-owned CultMesh crossing; current compatibility
   delivery may call `voidbot.operator-dm` command `owner.dm.send`
 

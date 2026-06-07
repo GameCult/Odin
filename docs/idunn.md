@@ -48,6 +48,8 @@ Idunn now shares Odin's Rust body:
 - `crates/idunn-daemon` is the local keepalive actuator crate.
 - `src/Idunn/README.md` is the user-facing introduction for developers,
   operators, and daemon authors.
+- `scripts/start-idunn-local.ps1` starts resident local watchdogs, including
+  VoidBot through `health-voidbot.cmd` and `restart-voidbot.cmd`.
 - `npm run idunn:build` builds the Rust daemon.
 - `npm run idunn:start -- ...` probes a daemon, records the decision, and can
   execute the restart command when `--execute` is present.
