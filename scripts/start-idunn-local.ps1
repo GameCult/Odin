@@ -56,6 +56,13 @@ $watchdogs = @(
     IntervalSeconds = 300
   },
   [pscustomobject]@{
+    Id = "raven-capture-mux"
+    Name = "Raven capture mux"
+    Verse = "raven.local"
+    Health = "$repoRoot\scripts\health-raven-capture-mux.cmd"
+    Restart = "$repoRoot\scripts\restart-raven-capture-mux.cmd"
+  },
+  [pscustomobject]@{
     Id = "nightwing-gjallar"
     Name = "Nightwing Gjallar framebuffer compositor"
     Verse = "nightwing.local"

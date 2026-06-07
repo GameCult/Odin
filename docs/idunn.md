@@ -49,7 +49,9 @@ Idunn now shares Odin's Rust body:
 - `src/Idunn/README.md` is the user-facing introduction for developers,
   operators, and daemon authors.
 - `scripts/start-idunn-local.ps1` starts resident local watchdogs, including
-  VoidBot through `health-voidbot.cmd` and `restart-voidbot.cmd`.
+  VoidBot through `health-voidbot.cmd` and `restart-voidbot.cmd`, and Raven's
+  capture mux through `health-raven-capture-mux.cmd` and
+  `restart-raven-capture-mux.cmd`.
 - `scripts/notify-idunn-operator-alarm.ps1` is the local operator crossing:
   Idunn invokes it only after raising an operator alarm, and it asks Bifrost to
   publish a typed `gamecult.operator_dm_request.v1` CultMesh command document
@@ -102,6 +104,10 @@ idunn.operator_alarm.v1
   environment variables to `E:\Projects\Bifrost\tools\operator-notification.mjs
   publish-idunn-alarm`. Bifrost publishes the typed CultMesh command document;
   Idunn only decides that an alarm exists.
+- Raven capture continuity is a remote keepalive path. Idunn probes
+  `http://127.0.0.1:8801/health` through SSH to Raven's WireGuard address
+  `10.77.0.4` and restarts through Mimir's `start-raven-daemon.ps1` with
+  Mimir and OBS SRT targets declared separately.
 
 ## First Runtime Direction
 
