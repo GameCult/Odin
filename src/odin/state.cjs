@@ -17,7 +17,7 @@ const { buildMarqueeText } = require("./marquee.cjs");
 const { buildPendingSurface, buildSurface } = require("./surface.cjs");
 const { stableId } = require("./utils.cjs");
 
-function createStateBuilder({ cachePath, gamecultTextDocumentStorePath, interfaceDiscovery, layoutStore, observationFreshSeconds, observationLogPath, stonksStateUrl }) {
+function createStateBuilder({ cachePath, gamecultTextDocumentStorePath, interfaceDiscovery, layoutStore, observationFreshSeconds, observationLogPath, stonksBurstSize, stonksStateUrl }) {
   let version = 0;
 
   function buildPendingState(message) {
@@ -52,7 +52,7 @@ function createStateBuilder({ cachePath, gamecultTextDocumentStorePath, interfac
     ]);
     const interfaceById = new Map(discoveredInterfaces.map((entry) => [entry.providerId, entry]));
     const interfaces = [...interfaceById.values()];
-    const marqueeText = await buildMarqueeText({ interfaces, textDocumentStorePath: gamecultTextDocumentStorePath, stonksStateUrl });
+    const marqueeText = await buildMarqueeText({ interfaces, textDocumentStorePath: gamecultTextDocumentStorePath, stonksBurstSize, stonksStateUrl });
     const interfaceSummary = interfaces.map((entry) => `${entry.providerId}:${entry.state}`).join(", ");
     const voidBotDashboard = interfaceById.get("voidbot.swarm") || dashboardUnavailable("voidbot.swarm", "discovery", "not discovered");
     const mimirLiveStats = interfaceById.get("mimir.live.stats") || dashboardUnavailable("mimir.live.stats", "discovery", "not discovered");

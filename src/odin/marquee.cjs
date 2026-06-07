@@ -22,12 +22,12 @@ const textDocumentSetDefinition = defineDocumentType({
   },
 });
 
-async function buildMarqueeText({ interfaces, textDocumentStorePath, stonksStateUrl }) {
-  const [securities, poetry] = await Promise.all([
+async function buildMarqueeText({ interfaces, textDocumentStorePath, stonksBurstSize = 8, stonksStateUrl }) {
+  const [securities, stanzas] = await Promise.all([
     stonksSegments({ interfaces, stonksStateUrl }),
-    poetrySegments(textDocumentStorePath),
+    poetryStanzas(textDocumentStorePath),
   ]);
-  return interweave(securities, poetry).join(" / ");
+  return stanzaBurstTape(stanzas, securities, stonksBurstSize).join(" / ");
 }
 
 async function stonksSegments({ interfaces, stonksStateUrl }) {
@@ -60,7 +60,7 @@ async function stonksSegmentsFromSnapshot(stonksStateUrl) {
   }
 }
 
-async function poetrySegments(textDocumentStorePath) {
+async function poetryStanzas(textDocumentStorePath) {
   if (!textDocumentStorePath || !fs.existsSync(textDocumentStorePath)) return [];
   try {
     const cache = CultCache.builder()
@@ -69,22 +69,44 @@ async function poetrySegments(textDocumentStorePath) {
       .build();
     await cache.pullAllBackingStores();
     const documentSet = cache.getGlobal(textDocumentSetDefinition);
-    return array(documentSet?.documents)
-      .flatMap((document) => array(document.lines))
-      .filter((line) => !isStanzaMarker(line))
-      .map((line) => array(line).join(" / ").replace(/\s+/g, " ").trim())
-      .filter(Boolean);
+    return array(documentSet?.documents).flatMap(documentStanzas);
   } catch {
     return [];
   }
 }
 
-function interweave(securities, poetry) {
+function documentStanzas(document) {
+  const stanzas = [];
+  let stanza = [];
+  for (const line of array(document?.lines)) {
+    if (isStanzaMarker(line)) {
+      pushStanza(stanzas, stanza);
+      stanza = [];
+      continue;
+    }
+
+    const text = array(line).join(" / ").replace(/\s+/g, " ").trim();
+    if (text) stanza.push(text);
+  }
+  pushStanza(stanzas, stanza);
+  return stanzas;
+}
+
+function pushStanza(stanzas, stanza) {
+  if (stanza.length) stanzas.push(stanza.join(" / "));
+}
+
+function stanzaBurstTape(stanzas, securities, burstSize) {
   const output = [];
-  const count = Math.max(securities.length, poetry.length);
-  for (let index = 0; index < count; index += 1) {
-    if (securities[index]) output.push(securities[index]);
-    if (poetry[index]) output.push(poetry[index]);
+  const stonkBurstSize = Math.max(1, Number(burstSize) || 8);
+  const stanzaList = stanzas.length ? stanzas : [];
+  const securityList = securities.length ? securities : [];
+  const cycles = Math.max(stanzaList.length, securityList.length ? Math.ceil(securityList.length / stonkBurstSize) : 0);
+  for (let index = 0; index < cycles; index += 1) {
+    if (stanzaList.length) output.push(stanzaList[index % stanzaList.length]);
+    for (let offset = 0; offset < stonkBurstSize && securityList.length; offset += 1) {
+      output.push(securityList[(index * stonkBurstSize + offset) % securityList.length]);
+    }
   }
   return output;
 }

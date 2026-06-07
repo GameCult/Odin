@@ -34,6 +34,7 @@ const stateBuilder = createStateBuilder({
   layoutStore,
   observationFreshSeconds: config.observationFreshSeconds,
   observationLogPath: config.observationLogPath,
+  stonksBurstSize: config.stonksBurstSize,
   stonksStateUrl: config.stonksStateUrl,
 });
 
