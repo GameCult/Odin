@@ -7,6 +7,7 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $idunnExe = Join-Path $repoRoot "target\debug\idunn.exe"
+$operatorAlarmCommand = Join-Path $repoRoot "scripts\notify-idunn-operator-alarm.cmd"
 $logDir = Join-Path $StateDir "logs"
 $pidDir = Join-Path $StateDir "pids"
 
@@ -123,6 +124,9 @@ function Start-Watchdog {
     )
   if (-not [string]::IsNullOrWhiteSpace($Watchdog.Restart)) {
     $arguments += @("--restart-command", $Watchdog.Restart, "--execute")
+  }
+  if (Test-Path -LiteralPath $operatorAlarmCommand) {
+    $arguments += @("--operator-alarm-command", $operatorAlarmCommand)
   }
   $startInfo.Arguments = Join-WindowsArguments -Arguments $arguments
 

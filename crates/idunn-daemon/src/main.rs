@@ -19,6 +19,7 @@ struct Options {
     name: String,
     health_command: Option<String>,
     restart_command: Option<String>,
+    operator_alarm_command: Option<String>,
     enabled: bool,
     execute: bool,
     interval_seconds: Option<u64>,
@@ -89,6 +90,7 @@ fn run_cycle(options: &Options) -> Result<()> {
                     "Idunn raised operator alarm for {} through {}: {}",
                     alarm.daemon_id, alarm.escalation_target, alarm.reason
                 );
+                run_operator_alarm_command(&options, &alarm);
             }
         } else {
             println!(
@@ -104,6 +106,7 @@ fn run_cycle(options: &Options) -> Result<()> {
             "Idunn raised operator alarm for {} through {}: {}",
             alarm.daemon_id, alarm.escalation_target, alarm.reason
         );
+        run_operator_alarm_command(options, alarm);
     }
 
     println!(
@@ -140,6 +143,7 @@ impl Options {
             name: String::new(),
             health_command: None,
             restart_command: None,
+            operator_alarm_command: None,
             enabled: true,
             execute: false,
             interval_seconds: None,
@@ -157,6 +161,10 @@ impl Options {
                 }
                 "--restart-command" => {
                     options.restart_command = Some(take_value(&mut args, "--restart-command")?)
+                }
+                "--operator-alarm-command" => {
+                    options.operator_alarm_command =
+                        Some(take_value(&mut args, "--operator-alarm-command")?)
                 }
                 "--disabled" => options.enabled = false,
                 "--execute" => options.execute = true,
@@ -269,6 +277,52 @@ fn run_shell(command: &str) -> Result<std::process::Output> {
     .with_context(|| format!("running command {command:?}"))
 }
 
+fn run_operator_alarm_command(options: &Options, alarm: &IdunnOperatorAlarmRecord) {
+    let Some(command) = options.operator_alarm_command.as_deref() else {
+        return;
+    };
+    if command.trim().is_empty() {
+        return;
+    }
+
+    let mut process = if cfg!(windows) {
+        let mut process = Command::new("cmd");
+        process.arg("/C").arg(command);
+        process
+    } else {
+        let mut process = Command::new("sh");
+        process.arg("-c").arg(command);
+        process
+    };
+
+    let output = process
+        .env("IDUNN_ALARM_ID", &alarm.alarm_id)
+        .env("IDUNN_ALARM_DAEMON_ID", &alarm.daemon_id)
+        .env("IDUNN_ALARM_SEVERITY", &alarm.severity)
+        .env("IDUNN_ALARM_REASON", &alarm.reason)
+        .env("IDUNN_ALARM_ESCALATION_TARGET", &alarm.escalation_target)
+        .env("IDUNN_ALARM_RAISED_AT", &alarm.raised_at)
+        .output();
+
+    match output {
+        Ok(output) if output.status.success() => {
+            println!("Idunn operator alarm command completed for {}.", alarm.daemon_id);
+        }
+        Ok(output) => {
+            eprintln!(
+                "Idunn operator alarm command failed for {} with {}.",
+                alarm.daemon_id, output.status
+            );
+        }
+        Err(error) => {
+            eprintln!(
+                "Idunn operator alarm command could not run for {}: {}",
+                alarm.daemon_id, error
+            );
+        }
+    }
+}
+
 fn timestamp() -> Result<String> {
     let seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -278,5 +332,5 @@ fn timestamp() -> Result<String> {
 }
 
 fn help_text() -> &'static str {
-    "Usage: idunn --daemon <id> [--name <name>] [--verse <verse>] [--store <path>] [--health-command <command>] [--restart-command <command>] [--execute] [--interval-seconds <seconds>]\n\nIdunn probes one daemon, writes typed CultMesh records, and executes restart only when --execute is present."
+    "Usage: idunn --daemon <id> [--name <name>] [--verse <verse>] [--store <path>] [--health-command <command>] [--restart-command <command>] [--operator-alarm-command <command>] [--execute] [--interval-seconds <seconds>]\n\nIdunn probes one daemon, writes typed CultMesh records, executes restart only when --execute is present, and may invoke an operator alarm bridge command only after an alarm is raised."
 }

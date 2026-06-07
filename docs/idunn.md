@@ -50,6 +50,10 @@ Idunn now shares Odin's Rust body:
   operators, and daemon authors.
 - `scripts/start-idunn-local.ps1` starts resident local watchdogs, including
   VoidBot through `health-voidbot.cmd` and `restart-voidbot.cmd`.
+- `scripts/notify-idunn-operator-alarm.ps1` is the local operator crossing:
+  Idunn invokes it only after raising an operator alarm, and it asks Bifrost to
+  publish a typed `gamecult.operator_dm_request.v1` CultMesh command document
+  instead of learning Discord delivery itself.
 - `npm run idunn:build` builds the Rust daemon.
 - `npm run idunn:start -- ...` probes a daemon, records the decision, and can
   execute the restart command when `--execute` is present.
@@ -93,6 +97,11 @@ idunn.operator_alarm.v1
   still-VoidBot delivery path must be invoked by Bifrost or documented as
   migration debt. Idunn must not learn Discord token handling, DM delivery
   internals, or VoidBot-specific transport.
+- In the current local bridge, `--operator-alarm-command` invokes
+  `notify-idunn-operator-alarm.cmd`, which forwards `IDUNN_ALARM_*`
+  environment variables to `E:\Projects\Bifrost\tools\operator-notification.mjs
+  publish-idunn-alarm`. Bifrost publishes the typed CultMesh command document;
+  Idunn only decides that an alarm exists.
 
 ## First Runtime Direction
 

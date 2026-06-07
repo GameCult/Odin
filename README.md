@@ -59,7 +59,9 @@ Local package surfaces:
 - Local VoidBot keepalive: `scripts\health-voidbot.cmd` and
   `scripts\restart-voidbot.cmd`
 - Operator escalation: Bifrost-owned CultMesh crossing; current compatibility
-  delivery may call `voidbot.operator-dm` command `owner.dm.send`
+  delivery calls `scripts\notify-idunn-operator-alarm.ps1`, which asks Bifrost
+  to publish a typed `gamecult.operator_dm_request.v1` CultMesh command document
+  only after Idunn raises an alarm
 
 ## Authority Map
 
