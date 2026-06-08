@@ -2,8 +2,7 @@ param(
   [string] $RavenHost = "raven",
   [string] $MuninnExe = "C:\Meta\Odin\Muninn\muninn.exe",
   [string] $StorePath = "C:\Meta\Odin\state\muninn.telemetry.cc",
-  [string] $RemoteObsCatalogPath = "C:\Meta\Odin\state\muninn-obs-streams.tsv",
-  [string] $LocalObsCatalogPath = "C:\Meta\Odin\state\muninn-obs-streams.tsv"
+  [string] $LocalStorePath = "C:\Meta\Odin\state\muninn.telemetry.cc"
 )
 
 $ErrorActionPreference = "Stop"
@@ -26,11 +25,11 @@ $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($remoteSc
 & ssh.exe -o BatchMode=yes -o ConnectTimeout=5 $RavenHost "powershell.exe -NoProfile -EncodedCommand $encoded"
 $healthExit = $LASTEXITCODE
 if ($healthExit -eq 0) {
-  $localParent = Split-Path -Parent $LocalObsCatalogPath
+  $localParent = Split-Path -Parent $LocalStorePath
   if (-not [string]::IsNullOrWhiteSpace($localParent)) {
     New-Item -ItemType Directory -Force -Path $localParent | Out-Null
   }
-  & ssh.exe -o BatchMode=yes -o ConnectTimeout=5 $RavenHost "cmd /c type $RemoteObsCatalogPath" |
-    Set-Content -Encoding UTF8 -LiteralPath $LocalObsCatalogPath
+  $remoteStore = "$RavenHost`:$StorePath"
+  & scp.exe $remoteStore "$LocalStorePath" | Out-Null
 }
 exit $healthExit

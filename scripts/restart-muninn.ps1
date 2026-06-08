@@ -2,9 +2,8 @@ param(
   [string] $RavenHost = "raven",
   [string] $MuninnExe = "C:\Meta\Odin\Muninn\muninn.exe",
   [string] $StorePath = "C:\Meta\Odin\state\muninn.telemetry.cc",
-  [string] $ObsCatalogPath = "C:\Meta\Odin\state\muninn-obs-streams.tsv",
   [string] $LogRoot = "C:\Meta\Odin\logs\muninn",
-  [string] $LocalObsCatalogPath = "C:\Meta\Odin\state\muninn-obs-streams.tsv"
+  [string] $LocalStorePath = "C:\Meta\Odin\state\muninn.telemetry.cc"
 )
 
 $ErrorActionPreference = "Stop"
@@ -26,7 +25,7 @@ New-Item -ItemType Directory -Force -Path (Split-Path -Parent "$StorePath") | Ou
 `$lines = @(
   "@echo off",
   "cd /d ""`$muninnDir""",
-  """$MuninnExe"" serve --store ""$StorePath"" --obs-catalog ""$ObsCatalogPath"" --log-root ""$LogRoot"" --host raven --interval-seconds 15 1>>""$LogRoot\muninn-serve.out.log"" 2>>""$LogRoot\muninn-serve.err.log"""
+  """$MuninnExe"" serve --store ""$StorePath"" --log-root ""$LogRoot"" --host raven --interval-seconds 15 1>>""$LogRoot\muninn-serve.out.log"" 2>>""$LogRoot\muninn-serve.err.log"""
 )
 Set-Content -LiteralPath `$launcher -Value `$lines -Encoding ASCII
 cmd /c "schtasks /Delete /TN GameCult-Muninn /F 2>NUL"
@@ -40,6 +39,6 @@ $restartExit = $LASTEXITCODE
 if ($restartExit -eq 0) {
   Start-Sleep -Seconds 2
   $healthScript = Join-Path $PSScriptRoot "health-muninn.ps1"
-  & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $healthScript -RavenHost $RavenHost -MuninnExe $MuninnExe -StorePath $StorePath -RemoteObsCatalogPath $ObsCatalogPath -LocalObsCatalogPath $LocalObsCatalogPath
+  & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $healthScript -RavenHost $RavenHost -MuninnExe $MuninnExe -StorePath $StorePath -LocalStorePath $LocalStorePath
 }
 exit $restartExit

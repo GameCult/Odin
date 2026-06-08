@@ -2,7 +2,6 @@ param(
   [string] $RavenHost = "raven",
   [string] $MuninnExe = "C:\Meta\Odin\Muninn\muninn.exe",
   [string] $StorePath = "C:\Meta\Odin\state\muninn.telemetry.cc",
-  [string] $ObsCatalogPath = "C:\Meta\Odin\state\muninn-obs-streams.tsv",
   [string] $LoopbackScript = "C:\Meta\Odin\Muninn\scripts\wasapi-loopback-capture.ps1",
   [string] $LogRoot = "C:\Meta\Odin\logs\muninn",
   [string] $Ffmpeg = "C:\Users\Madman's Lullaby\AppData\Local\Microsoft\WinGet\Links\ffmpeg.exe",
@@ -33,7 +32,7 @@ Get-CimInstance Win32_Process |
 `$lines = @(
   "@echo off",
   "cd /d ""`$muninnDir""",
-  """$MuninnExe"" activate --store ""$StorePath"" --obs-catalog ""$ObsCatalogPath"" --host raven --stream muninn.raven.av.srt --target-host ""$TargetHost"" --port $Port --obs-target-host ""$ObsTargetHost"" --obs-port $ObsPort --audio-device ""$AudioDevice"" --ffmpeg ""$Ffmpeg"" --loopback-script ""$LoopbackScript"" --log-root ""$LogRoot"" 1>>""$LogRoot\muninn-activate.out.log"" 2>>""$LogRoot\muninn-activate.err.log"""
+  """$MuninnExe"" activate --store ""$StorePath"" --host raven --stream muninn.raven.av.srt --target-host ""$TargetHost"" --port $Port --obs-target-host ""$ObsTargetHost"" --obs-port $ObsPort --audio-device ""$AudioDevice"" --ffmpeg ""$Ffmpeg"" --loopback-script ""$LoopbackScript"" --log-root ""$LogRoot"" 1>>""$LogRoot\muninn-activate.out.log"" 2>>""$LogRoot\muninn-activate.err.log"""
 )
 Set-Content -LiteralPath `$launcher -Value `$lines -Encoding ASCII
 cmd /c "schtasks /Delete /TN GameCult-Muninn-Activate /F 2>NUL"

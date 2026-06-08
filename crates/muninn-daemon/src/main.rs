@@ -1,6 +1,9 @@
 use anyhow::{Context, Result, anyhow};
 use cultmesh_rs::{CultMesh, CultMeshNodeOptions};
-use odin_core::{MuninnCaptureStreamRecord, MuninnTelemetrySurfaceRecord, OdinDocuments};
+use odin_core::{
+    MuninnCaptureStreamRecord, MuninnObsStreamCatalogRecord, MuninnTelemetrySurfaceRecord,
+    OdinDocuments,
+};
 use std::env;
 use std::fs;
 use std::path::PathBuf;
@@ -37,7 +40,6 @@ struct Options {
     ffmpeg_path: String,
     loopback_script: PathBuf,
     log_root: PathBuf,
-    obs_catalog_path: PathBuf,
     interval_seconds: Option<u64>,
 }
 
@@ -163,7 +165,7 @@ fn publish_surface(
     state: &str,
     active_streams: &[String],
 ) -> Result<()> {
-    write_obs_catalog_idle(options)?;
+    publish_obs_catalog_idle(node, options)?;
     let record = MuninnTelemetrySurfaceRecord {
         surface_id: options.surface_id.clone(),
         host_id: options.host_id.clone(),
@@ -211,7 +213,7 @@ fn publish_stream(
     restart_count: u32,
     detail: &str,
 ) -> Result<()> {
-    write_obs_catalog_active(options, plan, state)?;
+    publish_obs_catalog_active(node, options, plan, state)?;
     let record = MuninnCaptureStreamRecord {
         stream_id: options.stream_id.clone(),
         host_id: options.host_id.clone(),
@@ -238,45 +240,58 @@ fn publish_stream(
     Ok(())
 }
 
-fn write_obs_catalog_idle(options: &Options) -> Result<()> {
-    if let Some(parent) = options.obs_catalog_path.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
-    }
-    let mut lines = vec![
-        "# stream_id\tlabel\turl\tstate".to_string(),
-        format!(
-            "{}\t{} screen and loopback A/V\t\tactivation-required",
-            options.stream_id, options.host_id
-        ),
-    ];
+fn publish_obs_catalog_idle(node: &mut cultmesh_rs::CultMeshNode, options: &Options) -> Result<()> {
+    let mut stream_ids = vec![options.stream_id.clone()];
+    let mut labels = vec![format!("{} screen and loopback A/V", options.host_id)];
+    let mut urls = vec![String::new()];
+    let mut states = vec!["activation-required".to_string()];
     for source in available_sources(options) {
-        lines.push(format!(
-            "{}:{}\t{}\t\taffordance",
-            options.surface_id, source, source
-        ));
+        stream_ids.push(format!("{}:{}", options.surface_id, source));
+        labels.push(source);
+        urls.push(String::new());
+        states.push("affordance".to_string());
     }
-    fs::write(&options.obs_catalog_path, lines.join("\r\n") + "\r\n")
-        .with_context(|| format!("writing {}", options.obs_catalog_path.display()))
+    publish_obs_catalog(node, options, stream_ids, labels, urls, states)
 }
 
-fn write_obs_catalog_active(options: &Options, plan: &MuxPlan, state: &str) -> Result<()> {
-    if let Some(parent) = options.obs_catalog_path.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
-    }
-    let mut lines = vec!["# stream_id\tlabel\turl\tstate".to_string()];
+fn publish_obs_catalog_active(
+    node: &mut cultmesh_rs::CultMeshNode,
+    options: &Options,
+    plan: &MuxPlan,
+    state: &str,
+) -> Result<()> {
+    let mut stream_ids = Vec::new();
+    let mut labels = Vec::new();
+    let mut urls = Vec::new();
+    let mut states = Vec::new();
     for (index, target) in plan.targets.iter().enumerate() {
-        lines.push(format!(
-            "{}:{}\t{} A/V target {}\t{}\t{}",
-            options.stream_id,
-            index,
-            options.host_id,
-            index + 1,
-            target,
-            state
-        ));
+        stream_ids.push(format!("{}:{}", options.stream_id, index));
+        labels.push(format!("{} A/V target {}", options.host_id, index + 1));
+        urls.push(target.clone());
+        states.push(state.to_string());
     }
-    fs::write(&options.obs_catalog_path, lines.join("\r\n") + "\r\n")
-        .with_context(|| format!("writing {}", options.obs_catalog_path.display()))
+    publish_obs_catalog(node, options, stream_ids, labels, urls, states)
+}
+
+fn publish_obs_catalog(
+    node: &mut cultmesh_rs::CultMeshNode,
+    options: &Options,
+    stream_ids: Vec<String>,
+    labels: Vec<String>,
+    urls: Vec<String>,
+    states: Vec<String>,
+) -> Result<()> {
+    let record = MuninnObsStreamCatalogRecord {
+        catalog_id: "muninn.obs.streams".to_string(),
+        host_id: options.host_id.clone(),
+        stream_ids,
+        labels,
+        urls,
+        states,
+        updated_at: timestamp()?,
+    };
+    node.put("obs", &record)?;
+    Ok(())
 }
 
 fn health_check(options: &Options) -> Result<()> {
@@ -465,7 +480,6 @@ impl Options {
             ffmpeg_path: "ffmpeg".to_string(),
             loopback_script: PathBuf::from("scripts/wasapi-loopback-capture.ps1"),
             log_root: PathBuf::from("C:/Meta/Odin/logs/muninn"),
-            obs_catalog_path: PathBuf::from("C:/Meta/Odin/state/muninn-obs-streams.tsv"),
             interval_seconds: None,
         };
 
@@ -511,10 +525,6 @@ impl Options {
                 }
                 "--log-root" => {
                     options.log_root = PathBuf::from(take_value(&mut args, "--log-root")?)
-                }
-                "--obs-catalog" => {
-                    options.obs_catalog_path =
-                        PathBuf::from(take_value(&mut args, "--obs-catalog")?)
                 }
                 "--interval-seconds" => {
                     options.interval_seconds = Some(

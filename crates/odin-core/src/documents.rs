@@ -19,6 +19,7 @@ pub const IDUNN_RESTART_RESULT_SCHEMA: &str = "idunn.restart_result.v1";
 pub const IDUNN_OPERATOR_ALARM_SCHEMA: &str = "idunn.operator_alarm.v1";
 pub const MUNINN_TELEMETRY_SURFACE_SCHEMA: &str = "muninn.telemetry_surface.v1";
 pub const MUNINN_CAPTURE_STREAM_SCHEMA: &str = "muninn.capture_stream.v1";
+pub const MUNINN_OBS_STREAM_CATALOG_SCHEMA: &str = "muninn.obs_stream_catalog.v1";
 
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
 #[cultcache(type = "odin.snapshot", schema = "odin.snapshot.v1")]
@@ -347,6 +348,28 @@ pub struct MuninnTelemetrySurfaceRecord {
     pub updated_at: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(
+    type = "muninn.obs_stream_catalog",
+    schema = "muninn.obs_stream_catalog.v1"
+)]
+pub struct MuninnObsStreamCatalogRecord {
+    #[cultcache(key = 0)]
+    pub catalog_id: String,
+    #[cultcache(key = 1)]
+    pub host_id: String,
+    #[cultcache(key = 2)]
+    pub stream_ids: Vec<String>,
+    #[cultcache(key = 3)]
+    pub labels: Vec<String>,
+    #[cultcache(key = 4)]
+    pub urls: Vec<String>,
+    #[cultcache(key = 5)]
+    pub states: Vec<String>,
+    #[cultcache(key = 6)]
+    pub updated_at: String,
+}
+
 cultmesh_rs::cultmesh_documents!(OdinDocuments {
     OdinSnapshotRecord => ODIN_SNAPSHOT_SCHEMA,
     OdinVerseRecord => ODIN_VERSE_SCHEMA,
@@ -366,6 +389,7 @@ cultmesh_rs::cultmesh_documents!(OdinDocuments {
     IdunnOperatorAlarmRecord => IDUNN_OPERATOR_ALARM_SCHEMA,
     MuninnTelemetrySurfaceRecord => MUNINN_TELEMETRY_SURFACE_SCHEMA,
     MuninnCaptureStreamRecord => MUNINN_CAPTURE_STREAM_SCHEMA,
+    MuninnObsStreamCatalogRecord => MUNINN_OBS_STREAM_CATALOG_SCHEMA,
 });
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
