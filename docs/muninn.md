@@ -29,6 +29,17 @@ muninn --health --store C:\Meta\Odin\state\muninn.telemetry.cc
 surface fresh without starting FFmpeg, screen capture, microphone capture, or
 loopback capture.
 
+Muninn also writes an OBS compatibility catalog by default:
+
+```text
+C:\Meta\Odin\state\muninn-obs-streams.tsv
+```
+
+That TSV is a lowering of Muninn's typed state for OBS source property lists. It
+is not the authority; the `.cc` CultMesh store is. On Starfire,
+`health-muninn.ps1` syncs Raven's catalog to the same local path so the OBS
+plugin can read it without learning Raven SSH or CultCache internals.
+
 Activation is explicit:
 
 ```powershell

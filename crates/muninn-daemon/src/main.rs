@@ -37,6 +37,7 @@ struct Options {
     ffmpeg_path: String,
     loopback_script: PathBuf,
     log_root: PathBuf,
+    obs_catalog_path: PathBuf,
     interval_seconds: Option<u64>,
 }
 
@@ -162,6 +163,7 @@ fn publish_surface(
     state: &str,
     active_streams: &[String],
 ) -> Result<()> {
+    write_obs_catalog_idle(options)?;
     let record = MuninnTelemetrySurfaceRecord {
         surface_id: options.surface_id.clone(),
         host_id: options.host_id.clone(),
@@ -209,6 +211,7 @@ fn publish_stream(
     restart_count: u32,
     detail: &str,
 ) -> Result<()> {
+    write_obs_catalog_active(options, plan, state)?;
     let record = MuninnCaptureStreamRecord {
         stream_id: options.stream_id.clone(),
         host_id: options.host_id.clone(),
@@ -233,6 +236,47 @@ fn publish_stream(
     node.put("latest-stream", &record)?;
     node.put(&record.stream_id, &record)?;
     Ok(())
+}
+
+fn write_obs_catalog_idle(options: &Options) -> Result<()> {
+    if let Some(parent) = options.obs_catalog_path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let mut lines = vec![
+        "# stream_id\tlabel\turl\tstate".to_string(),
+        format!(
+            "{}\t{} screen and loopback A/V\t\tactivation-required",
+            options.stream_id, options.host_id
+        ),
+    ];
+    for source in available_sources(options) {
+        lines.push(format!(
+            "{}:{}\t{}\t\taffordance",
+            options.surface_id, source, source
+        ));
+    }
+    fs::write(&options.obs_catalog_path, lines.join("\r\n") + "\r\n")
+        .with_context(|| format!("writing {}", options.obs_catalog_path.display()))
+}
+
+fn write_obs_catalog_active(options: &Options, plan: &MuxPlan, state: &str) -> Result<()> {
+    if let Some(parent) = options.obs_catalog_path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let mut lines = vec!["# stream_id\tlabel\turl\tstate".to_string()];
+    for (index, target) in plan.targets.iter().enumerate() {
+        lines.push(format!(
+            "{}:{}\t{} A/V target {}\t{}\t{}",
+            options.stream_id,
+            index,
+            options.host_id,
+            index + 1,
+            target,
+            state
+        ));
+    }
+    fs::write(&options.obs_catalog_path, lines.join("\r\n") + "\r\n")
+        .with_context(|| format!("writing {}", options.obs_catalog_path.display()))
 }
 
 fn health_check(options: &Options) -> Result<()> {
@@ -421,6 +465,7 @@ impl Options {
             ffmpeg_path: "ffmpeg".to_string(),
             loopback_script: PathBuf::from("scripts/wasapi-loopback-capture.ps1"),
             log_root: PathBuf::from("C:/Meta/Odin/logs/muninn"),
+            obs_catalog_path: PathBuf::from("C:/Meta/Odin/state/muninn-obs-streams.tsv"),
             interval_seconds: None,
         };
 
@@ -466,6 +511,10 @@ impl Options {
                 }
                 "--log-root" => {
                     options.log_root = PathBuf::from(take_value(&mut args, "--log-root")?)
+                }
+                "--obs-catalog" => {
+                    options.obs_catalog_path =
+                        PathBuf::from(take_value(&mut args, "--obs-catalog")?)
                 }
                 "--interval-seconds" => {
                     options.interval_seconds = Some(
