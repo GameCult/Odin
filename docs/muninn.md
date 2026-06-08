@@ -49,3 +49,14 @@ Activation is explicit:
 That Raven activation starts the requested screen and Realtek loopback stream
 and publishes `muninn.capture_stream.v1`. Mimir and OBS are stream consumers;
 they do not own Muninn.
+
+The deployed loopback helper must accept Muninn's command contract:
+
+```powershell
+wasapi-loopback-capture.ps1 -Output stdout -Device Realtek -SampleRate 48000 -Channels 2
+```
+
+`stdout` is an alias for binary standard output, and `Device` is the requested
+render-device hint. Current helper builds may ignore the hint and use the
+default render endpoint, but they must accept the argument so Muninn's generated
+mux command remains executable.
