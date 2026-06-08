@@ -306,7 +306,10 @@ fn run_operator_alarm_command(options: &Options, alarm: &IdunnOperatorAlarmRecor
 
     match output {
         Ok(output) if output.status.success() => {
-            println!("Idunn operator alarm command completed for {}.", alarm.daemon_id);
+            println!(
+                "Idunn operator alarm command completed for {}.",
+                alarm.daemon_id
+            );
         }
         Ok(output) => {
             eprintln!(

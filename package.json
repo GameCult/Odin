@@ -11,6 +11,8 @@
     "gjallar:start": "cargo run -p gjallar-daemon --",
     "idunn:build": "cargo build -p idunn-daemon",
     "idunn:start": "cargo run -p idunn-daemon --",
+    "muninn:build": "cargo build -p muninn-daemon",
+    "muninn:start": "cargo run -p muninn-daemon --",
     "rust:test": "cargo test --workspace",
     "check": "node scripts/check-syntax.cjs",
     "start": "node src/odin-coordinator.cjs"

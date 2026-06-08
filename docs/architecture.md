@@ -97,8 +97,24 @@ schema truth, provider dashboards, identity grants, Discord delivery, owner-DM
 delivery, or renderer layout. Keepalive loops belong in Idunn, not Odin's
 coordinator or individual daemons.
 
+Muninn is the portable local telemetry Verse assembler. Its Rust body lives in
+`crates/muninn-daemon` and publishes `muninn.telemetry_surface.v1` through
+CultMesh/CultCache. Muninn may run on Raven, Nightwing, Starfire, or any future
+device body. It names locally accessible telemetry affordances: screen capture,
+loopback audio, microphones, cameras, and future sensors. Muninn does not start
+expensive capture streams merely because the daemon is alive. The default
+`serve` posture publishes an idle typed surface; explicit activation, such as
+`muninn activate` for Raven A/V over SRT, is the only path that starts FFmpeg,
+WASAPI loopback, video capture, or similar resource-consuming workers.
+
+Muninn owns local telemetry discovery and stream activation boundaries. It does
+not own Mimir's normalized ingest ledger, OBS rendering, Gjallar composition,
+Odin discovery truth, or Idunn keepalive policy. Active stream records such as
+`muninn.capture_stream.v1` are evidence of requested streams, not permission for
+startup to burn capture resources.
+
 Bifrost is the bridge for Persona speech and other public/owner-facing
-crossings. When a Persona interpreter decides a Face speaks, the accepted
+crossings. When a Persona interpreter decides a Persona speaks, the accepted
 side effect is a Bifrost CultMesh command or document that names actor,
 authority, target surface, context, policy result, and receipt path. VoidBot
 observes Discord, preserves room cognition, moderates, and may provide
@@ -124,6 +140,8 @@ Verse announcement
 - Odin owns the accepted registry of known Verses.
 - A Verse owns its own schemas and authority model; Odin indexes and translates, it does not silently rewrite local truth.
 - Device clients own sensor and media capture; Mimir owns the normalized ingest ledger; Odin owns the aggregate operator projection.
+- Muninn advertises local telemetry affordances cheaply and starts capture only
+  after an explicit activation request.
 - Translation paths must name source schema, target schema, lossiness, authority, and version.
 - Service presentation flows are CultMesh/Eve/CultUI interface projections. Odin aggregates those projection graphs; it does not replace them with nameplate summaries.
 - Renderers lower surfaces only. If a renderer fixes network truth, the machine is split-brained.

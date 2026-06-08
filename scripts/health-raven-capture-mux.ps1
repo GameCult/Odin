@@ -1,9 +1,7 @@
 param(
-  [string] $RavenHost = "10.77.0.4",
-  [string] $HealthUrl = "http://127.0.0.1:8801/health"
+  [string] $RavenHost = "raven"
 )
 
-$ErrorActionPreference = "Stop"
-
-& ssh.exe -o BatchMode=yes -o ConnectTimeout=5 $RavenHost "curl.exe -fsS $HealthUrl >NUL"
+$script = Join-Path $PSScriptRoot "health-muninn.ps1"
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script -RavenHost $RavenHost
 exit $LASTEXITCODE

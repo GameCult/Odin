@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/idunn-daemon",
+    "crates/muninn-daemon",
     "crates/odin-core",
 ]
 resolver = "3"

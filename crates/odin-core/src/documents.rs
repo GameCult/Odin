@@ -17,6 +17,8 @@ pub const IDUNN_KEEPALIVE_DECISION_SCHEMA: &str = "idunn.keepalive_decision.v1";
 pub const IDUNN_RESTART_REQUEST_SCHEMA: &str = "idunn.restart_request.v1";
 pub const IDUNN_RESTART_RESULT_SCHEMA: &str = "idunn.restart_result.v1";
 pub const IDUNN_OPERATOR_ALARM_SCHEMA: &str = "idunn.operator_alarm.v1";
+pub const MUNINN_TELEMETRY_SURFACE_SCHEMA: &str = "muninn.telemetry_surface.v1";
+pub const MUNINN_CAPTURE_STREAM_SCHEMA: &str = "muninn.capture_stream.v1";
 
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
 #[cultcache(type = "odin.snapshot", schema = "odin.snapshot.v1")]
@@ -288,6 +290,63 @@ pub struct IdunnOperatorAlarmRecord {
     pub raised_at: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(type = "muninn.capture_stream", schema = "muninn.capture_stream.v1")]
+pub struct MuninnCaptureStreamRecord {
+    #[cultcache(key = 0)]
+    pub stream_id: String,
+    #[cultcache(key = 1)]
+    pub host_id: String,
+    #[cultcache(key = 2)]
+    pub state: String,
+    #[cultcache(key = 3)]
+    pub video_source: String,
+    #[cultcache(key = 4)]
+    pub audio_source: String,
+    #[cultcache(key = 5)]
+    pub transport: String,
+    #[cultcache(key = 6)]
+    pub targets: Vec<String>,
+    #[cultcache(key = 7)]
+    pub command_witness: String,
+    #[cultcache(key = 8)]
+    pub supervisor_pid: Option<u32>,
+    #[cultcache(key = 9)]
+    pub mux_pid: Option<u32>,
+    #[cultcache(key = 10)]
+    pub restart_count: u32,
+    #[cultcache(key = 11)]
+    pub detail: String,
+    #[cultcache(key = 12)]
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(
+    type = "muninn.telemetry_surface",
+    schema = "muninn.telemetry_surface.v1"
+)]
+pub struct MuninnTelemetrySurfaceRecord {
+    #[cultcache(key = 0)]
+    pub surface_id: String,
+    #[cultcache(key = 1)]
+    pub host_id: String,
+    #[cultcache(key = 2)]
+    pub state: String,
+    #[cultcache(key = 3)]
+    pub available_sources: Vec<String>,
+    #[cultcache(key = 4)]
+    pub stream_affordances: Vec<String>,
+    #[cultcache(key = 5)]
+    pub active_streams: Vec<String>,
+    #[cultcache(key = 6)]
+    pub activation_authority: String,
+    #[cultcache(key = 7)]
+    pub detail: String,
+    #[cultcache(key = 8)]
+    pub updated_at: String,
+}
+
 cultmesh_rs::cultmesh_documents!(OdinDocuments {
     OdinSnapshotRecord => ODIN_SNAPSHOT_SCHEMA,
     OdinVerseRecord => ODIN_VERSE_SCHEMA,
@@ -305,6 +364,8 @@ cultmesh_rs::cultmesh_documents!(OdinDocuments {
     IdunnRestartRequestRecord => IDUNN_RESTART_REQUEST_SCHEMA,
     IdunnRestartResultRecord => IDUNN_RESTART_RESULT_SCHEMA,
     IdunnOperatorAlarmRecord => IDUNN_OPERATOR_ALARM_SCHEMA,
+    MuninnTelemetrySurfaceRecord => MUNINN_TELEMETRY_SURFACE_SCHEMA,
+    MuninnCaptureStreamRecord => MUNINN_CAPTURE_STREAM_SCHEMA,
 });
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

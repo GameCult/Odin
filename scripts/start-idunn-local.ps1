@@ -56,11 +56,11 @@ $watchdogs = @(
     IntervalSeconds = 300
   },
   [pscustomobject]@{
-    Id = "raven-capture-mux"
-    Name = "Raven capture mux"
+    Id = "muninn"
+    Name = "Muninn telemetry Verse assembler"
     Verse = "raven.local"
-    Health = "$repoRoot\scripts\health-raven-capture-mux.cmd"
-    Restart = "$repoRoot\scripts\restart-raven-capture-mux.cmd"
+    Health = "$repoRoot\scripts\health-muninn.cmd"
+    Restart = "$repoRoot\scripts\restart-muninn.cmd"
   },
   [pscustomobject]@{
     Id = "nightwing-gjallar"
