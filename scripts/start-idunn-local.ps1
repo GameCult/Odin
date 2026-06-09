@@ -63,6 +63,13 @@ $watchdogs = @(
     Restart = "$repoRoot\scripts\restart-muninn.cmd"
   },
   [pscustomobject]@{
+    Id = "idunn-swarm-deployment-coverage"
+    Name = "Idunn swarm deployment coverage"
+    Verse = "starfire.local"
+    Health = "$repoRoot\scripts\health-idunn-swarm-deployment-coverage.cmd"
+    Restart = $null
+  },
+  [pscustomobject]@{
     Id = "nightwing-gjallar"
     Name = "Nightwing Gjallar framebuffer compositor"
     Verse = "nightwing.local"

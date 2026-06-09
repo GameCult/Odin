@@ -53,6 +53,13 @@ Idunn now shares Odin's Rust body:
   through `health-muninn.cmd` and `restart-muninn.cmd`, and Nightwing Gjallar
   through `health-nightwing-gjallar.cmd`,
   `deploy-nightwing-gjallar.cmd`, and `restart-nightwing-gjallar.cmd`.
+- `scripts/idunn-deployment-targets.ps1` is the current swarm deployment target
+  catalog. Every known deployable target is either `enforced`, `blocked`,
+  `external-owned`, or `not-runtime` with an explicit reason.
+- `scripts/health-idunn-swarm-deployment-coverage.ps1` is the coverage probe
+  that fails when the target catalog becomes incoherent. The local Idunn
+  launcher runs it as `idunn-swarm-deployment-coverage` so missing deploy
+  ownership becomes a watched operational fault.
 - `scripts/notify-idunn-operator-alarm.ps1` is the local operator crossing:
   Idunn invokes it only after raising an operator alarm, and it asks Bifrost to
   publish a typed `gamecult.operator_dm_request.v1` CultMesh command document
@@ -124,6 +131,12 @@ idunn.operator_alarm.v1
   revision, writes `gamecult.gjallar.deployment_manifest.v1`, restarts
   `gjallar.service`, and leaves deployment request/result records in its
   keepalive `.cc`.
+- Swarm-wide deployment ownership means Idunn owns the target catalog and the
+  freshness contract for the repo swarm. It does not mean Idunn invents deploy
+  authority for every repo immediately. A target without a safe noninteractive
+  deploy command must remain `blocked` or `external-owned` with the missing
+  authority named until a wrapper can produce a deployment manifest and route
+  through Idunn's typed deployment request/result path.
 
 ## First Runtime Direction
 

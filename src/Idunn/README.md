@@ -79,6 +79,11 @@ That task starts Idunn loops for Odin, Stonks, and the Nightwing display
 services at user logon. The current Mimir dashboard is observed but not
 restarted until its restart authority is named.
 
+It also starts `idunn-swarm-deployment-coverage`, which watches the deployment
+target catalog in `scripts/idunn-deployment-targets.ps1`. A repo/service is not
+allowed to vanish into shrug-space: it is either enforced by Idunn, explicitly
+blocked with the missing authority named, external-owned, or not a runtime.
+
 To record a failed health check and request a restart without actuating:
 
 ```powershell
@@ -116,6 +121,17 @@ Idunn should not guess private service truth. A daemon should publish:
 
 If that information is missing, Idunn should fail closed and create an operator
 alarm instead of improvising.
+
+For the repo swarm, deployment ownership begins with catalog coverage. Use:
+
+```powershell
+.\scripts\show-idunn-deployment-targets.ps1
+.\scripts\health-idunn-swarm-deployment-coverage.cmd
+```
+
+The first fully enforced target is Nightwing Gjallar. Other targets remain
+blocked or external-owned until their deployment commands can produce manifests
+and run safely through Idunn.
 
 ## Typed Records
 
