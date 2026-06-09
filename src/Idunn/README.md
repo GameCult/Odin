@@ -21,10 +21,11 @@ lifecycle machinery.
 Idunn centralizes that lifecycle work:
 
 - start known daemons after machine boot;
+- ensure deployed daemon artifacts match the desired target revision;
 - restart daemons after crashes;
 - watch health and freshness signals;
 - avoid restarting services when authority is unclear;
-- record every restart request and result as typed state;
+- record every deployment/restart request and result as typed state;
 - escalate to an operator through Bifrost when human action is needed.
 
 The desired shape is simple:
@@ -50,9 +51,10 @@ watchdog.
 ## Current State
 
 Idunn is a Rust daemon inside Odin's Cargo workspace. It can probe one daemon,
-write desired state, health, keepalive decision, restart request, restart
-result, and operator alarm as typed CultMesh records, and execute a restart
-command when the operator explicitly gives it authority.
+write desired state, health, keepalive decision, deployment request,
+deployment result, restart request, restart result, and operator alarm as typed
+CultMesh records, and execute deploy/restart commands when the operator
+explicitly gives it authority.
 
 ```text
 scratch/idunn/idunn.keepalive.cc
@@ -80,13 +82,13 @@ restarted until its restart authority is named.
 To record a failed health check and request a restart without actuating:
 
 ```powershell
-npm run idunn:start -- --daemon demo --health-command "exit 1" --restart-command "echo restart demo"
+npm run idunn:start -- --daemon demo --health-command "exit 1" --deploy-command "echo deploy demo" --restart-command "echo restart demo"
 ```
 
 To actually run the restart command:
 
 ```powershell
-npm run idunn:start -- --daemon demo --health-command "exit 1" --restart-command "echo restart demo" --execute
+npm run idunn:start -- --daemon demo --health-command "exit 1" --deploy-command "echo deploy demo" --restart-command "echo restart demo" --execute
 ```
 
 To keep watching on a resident interval:
@@ -108,6 +110,7 @@ Idunn should not guess private service truth. A daemon should publish:
 - its service id and Verse id;
 - where its durable `.cc` state or witness lives;
 - a health or freshness signal;
+- the command boundary for deployment or artifact refresh, if one exists;
 - the command boundary for restart or recovery, if one exists;
 - what operator action is needed when automatic recovery is unsafe.
 
@@ -119,6 +122,8 @@ alarm instead of improvising.
 - `idunn.desired_daemon.v1`
 - `idunn.daemon_health.v1`
 - `idunn.keepalive_decision.v1`
+- `idunn.deployment_request.v1`
+- `idunn.deployment_result.v1`
 - `idunn.restart_request.v1`
 - `idunn.restart_result.v1`
 - `idunn.operator_alarm.v1`

@@ -67,6 +67,7 @@ $watchdogs = @(
     Name = "Nightwing Gjallar framebuffer compositor"
     Verse = "nightwing.local"
     Health = "$repoRoot\scripts\health-nightwing-gjallar.cmd"
+    Deploy = "$repoRoot\scripts\deploy-nightwing-gjallar.cmd"
     Restart = "$repoRoot\scripts\restart-nightwing-gjallar.cmd"
   },
   [pscustomobject]@{
@@ -129,8 +130,17 @@ function Start-Watchdog {
       "--health-command", $Watchdog.Health,
       "--interval-seconds", "$(if ($Watchdog.PSObject.Properties['IntervalSeconds']) { $Watchdog.IntervalSeconds } else { $IntervalSeconds })"
     )
+  $shouldExecute = $false
+  if (-not [string]::IsNullOrWhiteSpace($Watchdog.Deploy)) {
+    $arguments += @("--deploy-command", $Watchdog.Deploy)
+    $shouldExecute = $true
+  }
   if (-not [string]::IsNullOrWhiteSpace($Watchdog.Restart)) {
-    $arguments += @("--restart-command", $Watchdog.Restart, "--execute")
+    $arguments += @("--restart-command", $Watchdog.Restart)
+    $shouldExecute = $true
+  }
+  if ($shouldExecute) {
+    $arguments += @("--execute")
   }
   if (Test-Path -LiteralPath $operatorAlarmCommand) {
     $arguments += @("--operator-alarm-command", $operatorAlarmCommand)

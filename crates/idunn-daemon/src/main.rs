@@ -1,8 +1,8 @@
 use anyhow::{Context, Result, anyhow};
 use cultmesh_rs::{CultMesh, CultMeshNodeOptions};
 use odin_core::{
-    IdunnDaemonHealthRecord, IdunnDesiredDaemonRecord, IdunnOperatorAlarmRecord,
-    IdunnRestartResultRecord, OdinDocuments, plan_keepalive,
+    IdunnDaemonHealthRecord, IdunnDeploymentResultRecord, IdunnDesiredDaemonRecord,
+    IdunnOperatorAlarmRecord, IdunnRestartResultRecord, OdinDocuments, plan_keepalive,
 };
 use std::env;
 use std::path::PathBuf;
@@ -18,6 +18,7 @@ struct Options {
     verse_id: String,
     name: String,
     health_command: Option<String>,
+    deploy_command: Option<String>,
     restart_command: Option<String>,
     operator_alarm_command: Option<String>,
     enabled: bool,
@@ -53,6 +54,7 @@ fn run_cycle(options: &Options) -> Result<()> {
         enabled: options.enabled,
         health_command: options.health_command.clone(),
         restart_command: options.restart_command.clone(),
+        deploy_command: options.deploy_command.clone(),
         authority: "idunn.local-command".to_string(),
         max_silence_seconds: 60,
         observed_at: now.clone(),
@@ -73,6 +75,32 @@ fn run_cycle(options: &Options) -> Result<()> {
     node.put(&desired.daemon_id, &desired)?;
     node.put(&health.daemon_id, &health)?;
     node.put(&plan.decision.decision_id, &plan.decision)?;
+
+    if let Some(request) = &plan.deployment_request {
+        node.put(&request.request_id, request)?;
+        if options.execute {
+            let result = run_deployment(request, &now);
+            node.put(&result.result_id, &result)?;
+            println!(
+                "Idunn deployment {} for {}: {}",
+                result.state, result.daemon_id, result.detail
+            );
+            if result.state != "succeeded" {
+                let alarm = deployment_failure_alarm(&result, &now);
+                node.put(&alarm.alarm_id, &alarm)?;
+                println!(
+                    "Idunn raised operator alarm for {} through {}: {}",
+                    alarm.daemon_id, alarm.escalation_target, alarm.reason
+                );
+                run_operator_alarm_command(&options, &alarm);
+            }
+        } else {
+            println!(
+                "Idunn requested deployment for {} but did not execute it. Pass --execute to actuate.",
+                request.daemon_id
+            );
+        }
+    }
 
     if let Some(request) = &plan.restart_request {
         node.put(&request.request_id, request)?;
@@ -134,6 +162,23 @@ fn restart_failure_alarm(
     }
 }
 
+fn deployment_failure_alarm(
+    result: &IdunnDeploymentResultRecord,
+    raised_at: &str,
+) -> IdunnOperatorAlarmRecord {
+    IdunnOperatorAlarmRecord {
+        alarm_id: format!("alarm:deployment-failed:{}:{}", result.daemon_id, raised_at),
+        daemon_id: result.daemon_id.clone(),
+        severity: "operator-action-required".to_string(),
+        reason: format!(
+            "deployment command failed for request {}: {}",
+            result.request_id, result.detail
+        ),
+        escalation_target: "bifrost.operator-notification".to_string(),
+        raised_at: raised_at.to_string(),
+    }
+}
+
 impl Options {
     fn parse(args: impl Iterator<Item = String>) -> Result<Self> {
         let mut options = Options {
@@ -142,6 +187,7 @@ impl Options {
             verse_id: "local".to_string(),
             name: String::new(),
             health_command: None,
+            deploy_command: None,
             restart_command: None,
             operator_alarm_command: None,
             enabled: true,
@@ -158,6 +204,9 @@ impl Options {
                 "--name" => options.name = take_value(&mut args, "--name")?,
                 "--health-command" => {
                     options.health_command = Some(take_value(&mut args, "--health-command")?)
+                }
+                "--deploy-command" => {
+                    options.deploy_command = Some(take_value(&mut args, "--deploy-command")?)
                 }
                 "--restart-command" => {
                     options.restart_command = Some(take_value(&mut args, "--restart-command")?)
@@ -268,6 +317,39 @@ fn run_restart(
     }
 }
 
+fn run_deployment(
+    request: &odin_core::IdunnDeploymentRequestRecord,
+    requested_at: &str,
+) -> IdunnDeploymentResultRecord {
+    let result_id = format!("result:{}", request.request_id);
+    match run_shell(&request.command) {
+        Ok(output) if output.status.success() => IdunnDeploymentResultRecord {
+            result_id,
+            request_id: request.request_id.clone(),
+            daemon_id: request.daemon_id.clone(),
+            state: "succeeded".to_string(),
+            detail: "deployment command exited successfully".to_string(),
+            completed_at: requested_at.to_string(),
+        },
+        Ok(output) => IdunnDeploymentResultRecord {
+            result_id,
+            request_id: request.request_id.clone(),
+            daemon_id: request.daemon_id.clone(),
+            state: "failed".to_string(),
+            detail: format!("deployment command exited with {}", output.status),
+            completed_at: requested_at.to_string(),
+        },
+        Err(error) => IdunnDeploymentResultRecord {
+            result_id,
+            request_id: request.request_id.clone(),
+            daemon_id: request.daemon_id.clone(),
+            state: "failed".to_string(),
+            detail: format!("deployment command could not run: {error}"),
+            completed_at: requested_at.to_string(),
+        },
+    }
+}
+
 fn run_shell(command: &str) -> Result<std::process::Output> {
     if cfg!(windows) {
         Command::new("cmd").arg("/C").arg(command).output()
@@ -335,5 +417,5 @@ fn timestamp() -> Result<String> {
 }
 
 fn help_text() -> &'static str {
-    "Usage: idunn --daemon <id> [--name <name>] [--verse <verse>] [--store <path>] [--health-command <command>] [--restart-command <command>] [--operator-alarm-command <command>] [--execute] [--interval-seconds <seconds>]\n\nIdunn probes one daemon, writes typed CultMesh records, executes restart only when --execute is present, and may invoke an operator alarm bridge command only after an alarm is raised."
+    "Usage: idunn --daemon <id> [--name <name>] [--verse <verse>] [--store <path>] [--health-command <command>] [--deploy-command <command>] [--restart-command <command>] [--operator-alarm-command <command>] [--execute] [--interval-seconds <seconds>]\n\nIdunn probes one daemon, writes typed CultMesh records, executes deployment or restart only when --execute is present, and may invoke an operator alarm bridge command only after an alarm is raised."
 }

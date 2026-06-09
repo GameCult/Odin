@@ -1,11 +1,12 @@
 use crate::documents::{
-    IdunnDaemonHealthRecord, IdunnDesiredDaemonRecord, IdunnKeepaliveDecisionRecord,
-    IdunnOperatorAlarmRecord, IdunnRestartRequestRecord,
+    IdunnDaemonHealthRecord, IdunnDeploymentRequestRecord, IdunnDesiredDaemonRecord,
+    IdunnKeepaliveDecisionRecord, IdunnOperatorAlarmRecord, IdunnRestartRequestRecord,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IdunnPlan {
     pub decision: IdunnKeepaliveDecisionRecord,
+    pub deployment_request: Option<IdunnDeploymentRequestRecord>,
     pub restart_request: Option<IdunnRestartRequestRecord>,
     pub operator_alarm: Option<IdunnOperatorAlarmRecord>,
 }
@@ -21,6 +22,7 @@ pub fn plan_keepalive(
     if !desired.enabled {
         return IdunnPlan {
             decision: decision(&decision_id, desired, "noop", "daemon is disabled", &now),
+            deployment_request: None,
             restart_request: None,
             operator_alarm: None,
         };
@@ -29,9 +31,34 @@ pub fn plan_keepalive(
     if is_healthy(&health.state) {
         return IdunnPlan {
             decision: decision(&decision_id, desired, "observe", "daemon is healthy", &now),
+            deployment_request: None,
             restart_request: None,
             operator_alarm: None,
         };
+    }
+
+    if let Some(command) = desired.deploy_command.as_deref() {
+        if !command.trim().is_empty() {
+            let request_id = format!("deploy:{}:{}", desired.daemon_id, now);
+            return IdunnPlan {
+                decision: decision(
+                    &decision_id,
+                    desired,
+                    "deploy",
+                    &format!("health is {}; deployment authority is available", health.state),
+                    &now,
+                ),
+                deployment_request: Some(IdunnDeploymentRequestRecord {
+                    request_id,
+                    daemon_id: desired.daemon_id.clone(),
+                    command: command.to_string(),
+                    authority: desired.authority.clone(),
+                    requested_at: now,
+                }),
+                restart_request: None,
+                operator_alarm: None,
+            };
+        }
     }
 
     match desired.restart_command.as_deref() {
@@ -52,6 +79,7 @@ pub fn plan_keepalive(
                     authority: desired.authority.clone(),
                     requested_at: now,
                 }),
+                deployment_request: None,
                 operator_alarm: None,
             }
         }
@@ -63,6 +91,7 @@ pub fn plan_keepalive(
             );
             IdunnPlan {
                 decision: decision(&decision_id, desired, "alarm", &reason, &now),
+                deployment_request: None,
                 restart_request: None,
                 operator_alarm: Some(IdunnOperatorAlarmRecord {
                     alarm_id,
@@ -116,6 +145,7 @@ mod tests {
             authority: "idunn.local-command".to_string(),
             max_silence_seconds: 60,
             observed_at: "2026-06-04T00:00:00Z".to_string(),
+            deploy_command: None,
         }
     }
 
@@ -137,6 +167,7 @@ mod tests {
         );
 
         assert_eq!(plan.decision.action, "observe");
+        assert!(plan.deployment_request.is_none());
         assert!(plan.restart_request.is_none());
         assert!(plan.operator_alarm.is_none());
     }
@@ -150,7 +181,20 @@ mod tests {
         );
 
         assert_eq!(plan.decision.action, "restart");
+        assert!(plan.deployment_request.is_none());
         assert_eq!(plan.restart_request.unwrap().command, "npm start");
+        assert!(plan.operator_alarm.is_none());
+    }
+
+    #[test]
+    fn unhealthy_daemon_with_deploy_authority_requests_deployment_before_restart() {
+        let mut desired = desired(Some("systemctl restart gjallar"));
+        desired.deploy_command = Some("deploy gjallar".to_string());
+        let plan = plan_keepalive(&desired, &health("failed"), "2026-06-04T00:00:02Z");
+
+        assert_eq!(plan.decision.action, "deploy");
+        assert_eq!(plan.deployment_request.unwrap().command, "deploy gjallar");
+        assert!(plan.restart_request.is_none());
         assert!(plan.operator_alarm.is_none());
     }
 
@@ -159,6 +203,7 @@ mod tests {
         let plan = plan_keepalive(&desired(None), &health("failed"), "2026-06-04T00:00:02Z");
 
         assert_eq!(plan.decision.action, "alarm");
+        assert!(plan.deployment_request.is_none());
         assert!(plan.restart_request.is_none());
         assert_eq!(
             plan.operator_alarm.unwrap().escalation_target,

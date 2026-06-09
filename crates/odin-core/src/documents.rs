@@ -16,6 +16,8 @@ pub const IDUNN_DAEMON_HEALTH_SCHEMA: &str = "idunn.daemon_health.v1";
 pub const IDUNN_KEEPALIVE_DECISION_SCHEMA: &str = "idunn.keepalive_decision.v1";
 pub const IDUNN_RESTART_REQUEST_SCHEMA: &str = "idunn.restart_request.v1";
 pub const IDUNN_RESTART_RESULT_SCHEMA: &str = "idunn.restart_result.v1";
+pub const IDUNN_DEPLOYMENT_REQUEST_SCHEMA: &str = "idunn.deployment_request.v1";
+pub const IDUNN_DEPLOYMENT_RESULT_SCHEMA: &str = "idunn.deployment_result.v1";
 pub const IDUNN_OPERATOR_ALARM_SCHEMA: &str = "idunn.operator_alarm.v1";
 pub const MUNINN_TELEMETRY_SURFACE_SCHEMA: &str = "muninn.telemetry_surface.v1";
 pub const MUNINN_CAPTURE_STREAM_SCHEMA: &str = "muninn.capture_stream.v1";
@@ -207,6 +209,8 @@ pub struct IdunnDesiredDaemonRecord {
     pub max_silence_seconds: u32,
     #[cultcache(key = 8)]
     pub observed_at: String,
+    #[cultcache(key = 9)]
+    pub deploy_command: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
@@ -260,6 +264,41 @@ pub struct IdunnRestartRequestRecord {
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
 #[cultcache(type = "idunn.restart_result", schema = "idunn.restart_result.v1")]
 pub struct IdunnRestartResultRecord {
+    #[cultcache(key = 0)]
+    pub result_id: String,
+    #[cultcache(key = 1)]
+    pub request_id: String,
+    #[cultcache(key = 2)]
+    pub daemon_id: String,
+    #[cultcache(key = 3)]
+    pub state: String,
+    #[cultcache(key = 4)]
+    pub detail: String,
+    #[cultcache(key = 5)]
+    pub completed_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(
+    type = "idunn.deployment_request",
+    schema = "idunn.deployment_request.v1"
+)]
+pub struct IdunnDeploymentRequestRecord {
+    #[cultcache(key = 0)]
+    pub request_id: String,
+    #[cultcache(key = 1)]
+    pub daemon_id: String,
+    #[cultcache(key = 2)]
+    pub command: String,
+    #[cultcache(key = 3)]
+    pub authority: String,
+    #[cultcache(key = 4)]
+    pub requested_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(type = "idunn.deployment_result", schema = "idunn.deployment_result.v1")]
+pub struct IdunnDeploymentResultRecord {
     #[cultcache(key = 0)]
     pub result_id: String,
     #[cultcache(key = 1)]
@@ -386,6 +425,8 @@ cultmesh_rs::cultmesh_documents!(OdinDocuments {
     IdunnKeepaliveDecisionRecord => IDUNN_KEEPALIVE_DECISION_SCHEMA,
     IdunnRestartRequestRecord => IDUNN_RESTART_REQUEST_SCHEMA,
     IdunnRestartResultRecord => IDUNN_RESTART_RESULT_SCHEMA,
+    IdunnDeploymentRequestRecord => IDUNN_DEPLOYMENT_REQUEST_SCHEMA,
+    IdunnDeploymentResultRecord => IDUNN_DEPLOYMENT_RESULT_SCHEMA,
     IdunnOperatorAlarmRecord => IDUNN_OPERATOR_ALARM_SCHEMA,
     MuninnTelemetrySurfaceRecord => MUNINN_TELEMETRY_SURFACE_SCHEMA,
     MuninnCaptureStreamRecord => MUNINN_CAPTURE_STREAM_SCHEMA,
