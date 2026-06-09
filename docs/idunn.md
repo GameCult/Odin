@@ -53,6 +53,11 @@ Idunn now shares Odin's Rust body:
   through `health-muninn.cmd` and `restart-muninn.cmd`, and Nightwing Gjallar
   through `health-nightwing-gjallar.cmd`,
   `deploy-nightwing-gjallar.cmd`, and `restart-nightwing-gjallar.cmd`.
+- `scripts/deploy-yggdrasil-source-app.ps1` and
+  `scripts/health-yggdrasil-source-app.ps1` are the generic Yggdrasil source
+  artifact lane. They package committed local `HEAD` with `git archive`, run
+  the existing ops-owned deploy/check scripts on Yggdrasil, and stamp a remote
+  `gamecult.idunn.deployment_manifest.v1` only after the remote check passes.
 - `scripts/idunn-deployment-targets.ps1` is the current swarm deployment target
   catalog. Every known deployable target is either `enforced`, `blocked`,
   `external-owned`, or `not-runtime` with an explicit reason.
@@ -137,6 +142,13 @@ idunn.operator_alarm.v1
   deploy command must remain `blocked` or `external-owned` with the missing
   authority named until a wrapper can produce a deployment manifest and route
   through Idunn's typed deployment request/result path.
+- Yggdrasil Heimdall, repixelizer, and StreamPixels are enforced through the
+  generic source artifact lane and their existing `gamecult-ops` runbooks.
+  Bifrost is explicitly blocked as of 2026-06-09: committed Bifrost `HEAD`
+  expects `UserAccounts.HeimdallAccountId`, while Yggdrasil's production
+  database lacks that column and EF reports no pending migration. Idunn must
+  not claim Bifrost deployment freshness until Bifrost owns that schema
+  migration path.
 
 ## First Runtime Direction
 

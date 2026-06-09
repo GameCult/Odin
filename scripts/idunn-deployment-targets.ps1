@@ -1,5 +1,4 @@
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$opsRoot = "E:\Projects\gamecult-ops"
 
 $IdunnDeploymentTargets = @(
   [pscustomobject]@{
@@ -19,12 +18,12 @@ $IdunnDeploymentTargets = @(
     Repo = "Bifrost"
     LocalPath = "E:\Projects\Bifrost"
     Host = "yggdrasil"
-    Service = "bifrost.service/bifrost-web"
+    Service = "bifrost.service"
     Status = "blocked"
-    Health = "$opsRoot\scripts\check-bifrost-alpha.sh"
-    Deploy = "$opsRoot\scripts\deploy-bifrost-container.ps1"
+    Health = $null
+    Deploy = $null
     Restart = $null
-    Reason = "Deploy authority exists in gamecult-ops, but desired image digest/tag is not yet published as an Idunn deployment target record."
+    Reason = "Committed Bifrost HEAD currently expects UserAccounts.HeimdallAccountId, but Yggdrasil's production database lacks that column and EF reports no pending migration. Idunn must not enforce Bifrost freshness until the Bifrost schema migration path is fixed."
   },
   [pscustomobject]@{
     Id = "yggdrasil-streampixels"
@@ -32,11 +31,11 @@ $IdunnDeploymentTargets = @(
     LocalPath = "E:\Projects\StreamPixels"
     Host = "yggdrasil"
     Service = "streampixels-service/streampixels-web"
-    Status = "blocked"
-    Health = "$opsRoot\scripts\check-streampixels-preview.sh"
-    Deploy = "$opsRoot\scripts\deploy-streampixels-preview.sh"
+    Status = "enforced"
+    Health = "$repoRoot\scripts\health-yggdrasil-streampixels.cmd"
+    Deploy = "$repoRoot\scripts\deploy-yggdrasil-streampixels.cmd"
     Restart = $null
-    Reason = "Deploy script is remote-root/runbook shaped and needs a committed artifact manifest plus Idunn-safe wrapper before automatic execution."
+    Reason = "Idunn packages committed local StreamPixels HEAD, runs the existing ops deploy/check scripts, and verifies the remote manifest."
   },
   [pscustomobject]@{
     Id = "yggdrasil-heimdall"
@@ -44,11 +43,11 @@ $IdunnDeploymentTargets = @(
     LocalPath = "E:\Projects\Heimdall"
     Host = "yggdrasil"
     Service = "heimdall.service"
-    Status = "blocked"
-    Health = "$opsRoot\scripts\check-heimdall.sh"
-    Deploy = "$opsRoot\scripts\deploy-heimdall.sh"
+    Status = "enforced"
+    Health = "$repoRoot\scripts\health-yggdrasil-heimdall.cmd"
+    Deploy = "$repoRoot\scripts\deploy-yggdrasil-heimdall.cmd"
     Restart = $null
-    Reason = "Deploy script uses a workstation-built source tarball; Idunn needs a manifest-producing wrapper before automatic execution."
+    Reason = "Idunn packages committed local Heimdall HEAD, runs the existing ops deploy/check scripts, and verifies the remote manifest."
   },
   [pscustomobject]@{
     Id = "yggdrasil-repixelizer"
@@ -56,11 +55,11 @@ $IdunnDeploymentTargets = @(
     LocalPath = "E:\Projects\repixelizer"
     Host = "yggdrasil"
     Service = "repixelizer-gui.service"
-    Status = "blocked"
-    Health = "$opsRoot\scripts\check-repixelizer-gui.sh"
-    Deploy = "$opsRoot\scripts\deploy-repixelizer-gui.sh"
+    Status = "enforced"
+    Health = "$repoRoot\scripts\health-yggdrasil-repixelizer.cmd"
+    Deploy = "$repoRoot\scripts\deploy-yggdrasil-repixelizer.cmd"
     Restart = $null
-    Reason = "Deploy script uses a committed source tarball and Python environment mutation; Idunn needs an artifact manifest wrapper before automatic execution."
+    Reason = "Idunn packages committed local repixelizer HEAD, runs the existing ops deploy/check scripts, and verifies the remote manifest."
   },
   [pscustomobject]@{
     Id = "github-pages-gamecult-site"

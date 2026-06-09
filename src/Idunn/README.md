@@ -75,9 +75,10 @@ Install the local Starfire boot watchdogs:
 .\scripts\install-idunn-startup.ps1
 ```
 
-That task starts Idunn loops for Odin, Stonks, and the Nightwing display
-services at user logon. The current Mimir dashboard is observed but not
-restarted until its restart authority is named.
+That task starts Idunn loops for Odin, Stonks, the enforced Yggdrasil source
+artifact targets, and the Nightwing display services at user logon. The current
+Mimir dashboard is observed but not restarted until its restart authority is
+named.
 
 It also starts `idunn-swarm-deployment-coverage`, which watches the deployment
 target catalog in `scripts/idunn-deployment-targets.ps1`. A repo/service is not
@@ -129,9 +130,11 @@ For the repo swarm, deployment ownership begins with catalog coverage. Use:
 .\scripts\health-idunn-swarm-deployment-coverage.cmd
 ```
 
-The first fully enforced target is Nightwing Gjallar. Other targets remain
-blocked or external-owned until their deployment commands can produce manifests
-and run safely through Idunn.
+The enforced targets are Nightwing Gjallar plus the Yggdrasil source artifact
+lanes whose ops runbooks can produce and verify deployment manifests. Bifrost
+is blocked until its production database migration path is coherent; mobile
+device installs remain blocked at their physical approval boundaries; GitHub
+Pages remains external-owned.
 
 ## Typed Records
 

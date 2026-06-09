@@ -70,6 +70,30 @@ $watchdogs = @(
     Restart = $null
   },
   [pscustomobject]@{
+    Id = "yggdrasil-heimdall"
+    Name = "Yggdrasil Heimdall"
+    Verse = "yggdrasil.local"
+    Health = "$repoRoot\scripts\health-yggdrasil-heimdall.cmd"
+    Deploy = "$repoRoot\scripts\deploy-yggdrasil-heimdall.cmd"
+    IntervalSeconds = 300
+  },
+  [pscustomobject]@{
+    Id = "yggdrasil-repixelizer"
+    Name = "Yggdrasil Repixelizer"
+    Verse = "yggdrasil.local"
+    Health = "$repoRoot\scripts\health-yggdrasil-repixelizer.cmd"
+    Deploy = "$repoRoot\scripts\deploy-yggdrasil-repixelizer.cmd"
+    IntervalSeconds = 300
+  },
+  [pscustomobject]@{
+    Id = "yggdrasil-streampixels"
+    Name = "Yggdrasil StreamPixels"
+    Verse = "yggdrasil.local"
+    Health = "$repoRoot\scripts\health-yggdrasil-streampixels.cmd"
+    Deploy = "$repoRoot\scripts\deploy-yggdrasil-streampixels.cmd"
+    IntervalSeconds = 300
+  },
+  [pscustomobject]@{
     Id = "nightwing-gjallar"
     Name = "Nightwing Gjallar framebuffer compositor"
     Verse = "nightwing.local"
