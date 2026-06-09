@@ -1,0 +1,15 @@
+[package]
+name = "idunn-daemon"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "idunn"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+cultmesh-rs = { path = "E:/Projects/EpiphanyAgent/vendor/cultmesh-rs" }
+odin-core = { path = "../odin-core" }

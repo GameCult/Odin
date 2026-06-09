@@ -5,11 +5,19 @@
   "description": "GameCult all-seer: CultMesh Verse discovery, schema awareness, translation, and Eve surface publication.",
   "type": "commonjs",
   "scripts": {
-    "check": "node --check src/odin-coordinator.cjs",
+    "gjallar:persona": "node scripts/write-gjallar-persona-cc.mjs inspect",
+    "gjallar:persona:write": "node scripts/write-gjallar-persona-cc.mjs write",
+    "gjallar:build": "cargo build -p gjallar-daemon",
+    "gjallar:start": "cargo run -p gjallar-daemon --",
+    "idunn:build": "cargo build -p idunn-daemon",
+    "idunn:start": "cargo run -p idunn-daemon --",
+    "muninn:build": "cargo build -p muninn-daemon",
+    "muninn:start": "cargo run -p muninn-daemon --",
+    "rust:test": "cargo test --workspace",
+    "check": "node scripts/check-syntax.cjs",
     "start": "node src/odin-coordinator.cjs"
   },
   "engines": {
     "node": ">=20"
   }
 }
-

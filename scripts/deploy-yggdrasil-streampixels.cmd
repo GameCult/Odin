@@ -1,0 +1,2 @@
+@echo off
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File E:\Projects\Odin\scripts\deploy-yggdrasil-source-app.ps1 -AppId yggdrasil-streampixels -RepoRoot E:\Projects\StreamPixels -AppUser streampixels -RemoteAppHome /srv/streampixels -RemoteTarballName streampixels-source.tar -DeployScript E:\Projects\gamecult-ops\scripts\deploy-streampixels-preview.sh -CheckScript E:\Projects\gamecult-ops\scripts\check-streampixels-preview.sh

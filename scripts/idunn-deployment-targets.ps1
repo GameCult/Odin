@@ -1,0 +1,100 @@
+$repoRoot = Split-Path -Parent $PSScriptRoot
+
+$IdunnDeploymentTargets = @(
+  [pscustomobject]@{
+    Id = "nightwing-gjallar"
+    Repo = "Gjallar"
+    LocalPath = "E:\Projects\Gjallar"
+    Host = "nightwing"
+    Service = "gjallar.service"
+    Status = "enforced"
+    Health = "$repoRoot\scripts\health-nightwing-gjallar.cmd"
+    Deploy = "$repoRoot\scripts\deploy-nightwing-gjallar.cmd"
+    Restart = "$repoRoot\scripts\restart-nightwing-gjallar.cmd"
+    Reason = "Nightwing framebuffer compositor has a committed artifact manifest and automatic Idunn deploy lane."
+  },
+  [pscustomobject]@{
+    Id = "yggdrasil-bifrost"
+    Repo = "Bifrost"
+    LocalPath = "E:\Projects\Bifrost"
+    Host = "yggdrasil"
+    Service = "bifrost.service"
+    Status = "blocked"
+    Health = $null
+    Deploy = $null
+    Restart = $null
+    Reason = "Committed Bifrost HEAD currently expects UserAccounts.HeimdallAccountId, but Yggdrasil's production database lacks that column and EF reports no pending migration. Idunn must not enforce Bifrost freshness until the Bifrost schema migration path is fixed."
+  },
+  [pscustomobject]@{
+    Id = "yggdrasil-streampixels"
+    Repo = "StreamPixels"
+    LocalPath = "E:\Projects\StreamPixels"
+    Host = "yggdrasil"
+    Service = "streampixels-service/streampixels-web"
+    Status = "enforced"
+    Health = "$repoRoot\scripts\health-yggdrasil-streampixels.cmd"
+    Deploy = "$repoRoot\scripts\deploy-yggdrasil-streampixels.cmd"
+    Restart = $null
+    Reason = "Idunn packages committed local StreamPixels HEAD, runs the existing ops deploy/check scripts, and verifies the remote manifest."
+  },
+  [pscustomobject]@{
+    Id = "yggdrasil-heimdall"
+    Repo = "Heimdall"
+    LocalPath = "E:\Projects\Heimdall"
+    Host = "yggdrasil"
+    Service = "heimdall.service"
+    Status = "enforced"
+    Health = "$repoRoot\scripts\health-yggdrasil-heimdall.cmd"
+    Deploy = "$repoRoot\scripts\deploy-yggdrasil-heimdall.cmd"
+    Restart = $null
+    Reason = "Idunn packages committed local Heimdall HEAD, runs the existing ops deploy/check scripts, and verifies the remote manifest."
+  },
+  [pscustomobject]@{
+    Id = "yggdrasil-repixelizer"
+    Repo = "repixelizer"
+    LocalPath = "E:\Projects\repixelizer"
+    Host = "yggdrasil"
+    Service = "repixelizer-gui.service"
+    Status = "enforced"
+    Health = "$repoRoot\scripts\health-yggdrasil-repixelizer.cmd"
+    Deploy = "$repoRoot\scripts\deploy-yggdrasil-repixelizer.cmd"
+    Restart = $null
+    Reason = "Idunn packages committed local repixelizer HEAD, runs the existing ops deploy/check scripts, and verifies the remote manifest."
+  },
+  [pscustomobject]@{
+    Id = "github-pages-gamecult-site"
+    Repo = "gamecult-site"
+    LocalPath = "E:\Projects\gamecult-site"
+    Host = "github-pages"
+    Service = "gamecult.org/www"
+    Status = "external-owned"
+    Health = $null
+    Deploy = $null
+    Restart = $null
+    Reason = "GitHub Actions/Pages owns deployment freshness; Idunn should ingest workflow/deployment status before claiming automatic deploy authority."
+  },
+  [pscustomobject]@{
+    Id = "eve-ipad-evecanvas"
+    Repo = "Eve"
+    LocalPath = "E:\Projects\Eve"
+    Host = "eve-ipad"
+    Service = "org.gamecult.evecanvas"
+    Status = "blocked"
+    Health = $null
+    Deploy = $null
+    Restart = $null
+    Reason = "Jailbroken iPad native app deployment exists only as an operator runbook; no safe noninteractive Idunn deploy command yet."
+  },
+  [pscustomobject]@{
+    Id = "periwinkle-eve-android"
+    Repo = "Eve"
+    LocalPath = "E:\Projects\Eve"
+    Host = "periwinkle"
+    Service = "Eve Android proof APK"
+    Status = "blocked"
+    Health = $null
+    Deploy = $null
+    Restart = $null
+    Reason = "Android USB install requires on-device approval; Idunn must not claim automatic deploy authority until that boundary is solved."
+  }
+)
