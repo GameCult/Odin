@@ -113,6 +113,13 @@ Odin discovery truth, or Idunn keepalive policy. Active stream records such as
 `muninn.capture_stream.v1` are evidence of requested streams, not permission for
 startup to burn capture resources.
 
+Move optical marker extraction belongs to Muninn because it is sensor stream
+exposure, not Mimir fusion or Odin registry truth. The native helper lives at
+`crates/muninn-move-tracker`; Muninn may publish per-frame candidates as
+`muninn.move_marker_candidate.v1`. Mimir consumes those candidate streams into
+tracking buffers and later fusion. Odin indexes the schema and projection
+surface only.
+
 Bifrost is the bridge for Persona speech and other public/owner-facing
 crossings. When a Persona interpreter decides a Persona speaks, the accepted
 side effect is a Bifrost CultMesh command or document that names actor,

@@ -2,6 +2,7 @@
 members = [
     "crates/idunn-daemon",
     "crates/muninn-daemon",
+    "crates/muninn-move-tracker",
     "crates/odin-core",
 ]
 resolver = "3"

@@ -12,8 +12,8 @@ microphones, cameras, and future sensors.
   and explicit activation of requested local streams.
 - Inputs: cheap local probes, operator or Verse activation requests, and local
   capture tools such as FFmpeg or WASAPI helpers.
-- Outputs: `muninn.telemetry_surface.v1` and active `muninn.capture_stream.v1`
-  records.
+- Outputs: `muninn.telemetry_surface.v1`, active `muninn.capture_stream.v1`,
+  and Move optical `muninn.move_marker_candidate.v1` records.
 - Forbidden writers: daemon startup, Idunn keepalive, Mimir ingest, OBS, Odin,
   Gjallar, and renderer bodies must not start capture by implication.
 
@@ -60,3 +60,16 @@ wasapi-loopback-capture.ps1 -Output stdout -Device Realtek -SampleRate 48000 -Ch
 render-device hint. Current helper builds may ignore the hint and use the
 default render endpoint, but they must accept the argument so Muninn's generated
 mux command remains executable.
+
+## Move Marker Candidates
+
+`crates/muninn-move-tracker` is Muninn's native/Rust PS Move optical candidate
+extractor. It owns dispatch planning, FFI, configuration validation, a CPU
+mirror, and the HLSL 16px-tile luma reduction shader. It emits marker
+candidates only: weighted centroid, radius, area, peak/mean luma, and score for
+one camera frame.
+
+Muninn owns publishing those candidates as `muninn.move_marker_candidate.v1`.
+Mimir is a consumer of the resulting sensor stream. Odin may discover and
+project the schema, but Odin does not own raw capture, candidate extraction,
+calibration, triangulation, IMU fusion, prediction, or final 6DoF pose.

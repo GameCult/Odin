@@ -1,0 +1,11 @@
+[package]
+name = "muninn-move-tracker"
+version = "0.1.0"
+edition = "2024"
+description = "Muninn-owned Rust orchestration and CPU mirror for PS Move marker candidate extraction"
+
+[lib]
+name = "muninn_move_tracker"
+crate-type = ["rlib", "cdylib", "staticlib"]
+
+[dependencies]
