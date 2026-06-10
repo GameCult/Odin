@@ -5,3 +5,5 @@ obj/
 target/
 *.log
 *.pid
+artifacts/
+**/artifacts/
