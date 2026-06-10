@@ -2,6 +2,8 @@
 // One thread group owns one image tile. The shader emits at most one bright
 // marker candidate per 16px tile; Rust owns dispatch sizing and downstream ranking.
 
+#include "CultMath.hlsl"
+
 struct MoveSphereCandidate
 {
     uint2 sourceIdHash;
@@ -83,7 +85,7 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
         {
             float area = (float)gArea;
             float tilePixels = (float)(tileSize * tileSize);
-            float areaScore = min(1.0, area / tilePixels);
+            float areaScore = cultmath_saturate(area / tilePixels);
             float brightnessScore = (float)gPeak / 255.0;
 
             MoveSphereCandidate candidate;

@@ -3,6 +3,9 @@
 Muninn owns PS Move sensor stream exposure. This crate is Muninn's first native
 optical marker candidate extractor: Rust owns orchestration, FFI, validation,
 and the CPU mirror; the compute shader owns the parallel image reduction stage.
+The shader includes CultMath's canonical HLSL mirror, so shader compilation must
+add `E:\Projects\CultMath\shaders` or the packaged CultMath shader content to
+the include path.
 
 This crate deliberately stops at per-frame marker candidates. Final pose,
 stereo triangulation, controller association, IMU fusion, prediction, and
