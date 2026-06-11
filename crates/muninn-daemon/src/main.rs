@@ -468,6 +468,7 @@ fn tick_move_light_commands(
     Ok(())
 }
 
+#[cfg(test)]
 fn execute_move_light_command(
     command: MuninnMoveLightCommandRecord,
     writer: &mut impl MoveLightWriter,
