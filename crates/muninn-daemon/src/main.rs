@@ -25,6 +25,7 @@ enum Mode {
     DryRun,
     RequestMoveLight,
     MoveLightStatus,
+    MoveStateStatus,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -112,6 +113,7 @@ fn main() -> Result<()> {
         Mode::Health => health_check(&options),
         Mode::RequestMoveLight => request_move_light(options),
         Mode::MoveLightStatus => move_light_status(options),
+        Mode::MoveStateStatus => move_state_status(options),
         Mode::DryRun => {
             let plan = build_mux_plan(&options, "dry-run".to_string());
             println!("{}", plan.command_line);
@@ -775,6 +777,42 @@ fn move_light_status(options: Options) -> Result<()> {
     Ok(())
 }
 
+fn move_state_status(options: Options) -> Result<()> {
+    let node = open_node(&options, "muninn-move-state-status")?;
+    let mut states = node.cache().get_all::<MuninnMoveControllerStateRecord>()?;
+    states.retain(|state| state.host_id == options.host_id);
+    if !options.move_id.trim().is_empty() {
+        states.retain(|state| state.move_id == options.move_id);
+    }
+    states.sort_by(|a, b| {
+        a.stream_id
+            .cmp(&b.stream_id)
+            .then(a.sequence.cmp(&b.sequence))
+    });
+    if states.is_empty() {
+        println!(
+            "No Muninn Move controller state records found for host {}.",
+            options.host_id
+        );
+        return Ok(());
+    }
+    for state in states {
+        println!(
+            "{} seq={} move={} buttons=[{}] trigger={:.3} accel={:?} gyro={:?} battery={:.3} observed={}",
+            state.stream_id,
+            state.sequence,
+            state.move_id,
+            state.buttons.join(","),
+            state.trigger_value,
+            state.accelerometer_xyz,
+            state.gyroscope_xyz,
+            state.battery01,
+            state.observed_at
+        );
+    }
+    Ok(())
+}
+
 fn build_move_light_command(options: &Options) -> Result<MuninnMoveLightCommandRecord> {
     parse_move_colors(&options.move_colors)?;
     if options.hidraw_path.trim().is_empty() {
@@ -988,6 +1026,7 @@ impl Options {
                 "activate" => options.mode = Mode::Activate,
                 "request-move-light" => options.mode = Mode::RequestMoveLight,
                 "move-light-status" => options.mode = Mode::MoveLightStatus,
+                "move-state-status" => options.mode = Mode::MoveStateStatus,
                 "--health" => options.mode = Mode::Health,
                 "--dry-run" => options.mode = Mode::DryRun,
                 "--store" => options.store_path = PathBuf::from(take_value(&mut args, "--store")?),
@@ -1090,7 +1129,7 @@ fn timestamp_ns() -> Result<i64> {
 }
 
 fn help_text() -> &'static str {
-    "Usage: muninn [serve|activate|request-move-light|move-light-status] [--store <path>] [--target-host <host>] [--port <port>] [--obs-target-host <host>] [--obs-port <port>] [--loopback-script <path>] [--ffmpeg <path>] [--move-state <move-id>=<hidraw-path>] [--dry-run] [--health]\n\nMuninn is Odin's portable telemetry Verse assembler. serve publishes cheap typed telemetry affordances and optional source-local Move controller state; activate starts an explicitly requested local stream; request-move-light publishes a typed Move light command for Muninn serve to execute; move-light-status reads typed command receipts."
+    "Usage: muninn [serve|activate|request-move-light|move-light-status|move-state-status] [--store <path>] [--target-host <host>] [--port <port>] [--obs-target-host <host>] [--obs-port <port>] [--loopback-script <path>] [--ffmpeg <path>] [--move-state <move-id>=<hidraw-path>] [--dry-run] [--health]\n\nMuninn is Odin's portable telemetry Verse assembler. serve publishes cheap typed telemetry affordances and optional source-local Move controller state; activate starts an explicitly requested local stream; request-move-light publishes a typed Move light command for Muninn serve to execute; move-light-status reads typed command receipts; move-state-status reads typed controller-state records."
 }
 
 fn parse_move_state_source(value: &str) -> Result<MoveStateSource> {
@@ -1299,6 +1338,26 @@ mod tests {
         assert_eq!(options.mode, Mode::MoveLightStatus);
         assert_eq!(options.host_id, "nightwing");
         assert_eq!(options.command_id.as_deref(), Some("cmd-1"));
+    }
+
+    #[test]
+    fn move_state_status_accepts_move_filter() {
+        let options = Options::parse(
+            [
+                "move-state-status",
+                "--host",
+                "nightwing",
+                "--move",
+                "move-usb",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap();
+
+        assert_eq!(options.mode, Mode::MoveStateStatus);
+        assert_eq!(options.host_id, "nightwing");
+        assert_eq!(options.move_id, "move-usb");
     }
 
     #[test]
