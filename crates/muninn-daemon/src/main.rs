@@ -10,7 +10,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Mode {
@@ -59,6 +59,14 @@ struct MuxPlan {
     targets: Vec<String>,
 }
 
+struct ActiveMoveLightCommand {
+    command: MuninnMoveLightCommandRecord,
+    colors: Vec<(u8, u8, u8)>,
+    step_index: usize,
+    repeats_done: u32,
+    next_write_at: Instant,
+}
+
 trait ProcessSpawner {
     fn spawn_mux(&self, plan: &MuxPlan) -> Result<Child>;
 }
@@ -97,16 +105,22 @@ fn main() -> Result<()> {
 
 fn serve(options: Options) -> Result<()> {
     ensure_state_dirs(&options)?;
+    let mut active_move_lights = Vec::new();
 
     loop {
         let mut node = open_node(&options, "muninn-daemon")?;
-        process_move_light_commands(&mut node, &options, &mut HidMoveLightWriter)?;
+        register_move_light_commands(&mut node, &options, &mut active_move_lights)?;
+        tick_move_light_commands(&mut node, &mut active_move_lights, &mut HidMoveLightWriter)?;
         publish_surface(&mut node, &options, "idle", &[])?;
-        if let Some(interval) = options.interval_seconds {
-            thread::sleep(Duration::from_secs(interval));
-        } else {
+        if options.interval_seconds.is_none() && active_move_lights.is_empty() {
             return Ok(());
         }
+        let sleep = if active_move_lights.is_empty() {
+            Duration::from_secs(options.interval_seconds.unwrap_or(15))
+        } else {
+            Duration::from_millis(250)
+        };
+        thread::sleep(sleep);
     }
 }
 
@@ -325,27 +339,131 @@ impl MoveLightWriter for HidMoveLightWriter {
     }
 }
 
-fn process_move_light_commands(
+fn register_move_light_commands(
     node: &mut cultmesh_rs::CultMeshNode,
     options: &Options,
-    writer: &mut impl MoveLightWriter,
+    active: &mut Vec<ActiveMoveLightCommand>,
 ) -> Result<()> {
     let commands = node.cache().get_all::<MuninnMoveLightCommandRecord>()?;
     for command in commands {
-        if command.host_id != options.host_id || command.state != "pending" {
+        if command.host_id != options.host_id {
+            continue;
+        }
+        if command.state != "pending"
+            && !(command.state == "running"
+                && !active
+                    .iter()
+                    .any(|active| active.command.command_id == command.command_id))
+        {
             continue;
         }
 
+        let active_command = match prepare_move_light_command(command.clone()) {
+            Ok(active_command) => active_command,
+            Err(error) => {
+                let command_id = command.command_id.clone();
+                node.put(&command_id, &command_failed(command, &error.to_string())?)?;
+                continue;
+            }
+        };
         let running = MuninnMoveLightCommandRecord {
             state: "running".to_string(),
-            detail: "Muninn is writing local PS Move HID reports.".to_string(),
+            detail: "Muninn is refreshing local PS Move HID reports.".to_string(),
             updated_at: timestamp()?,
             ..command.clone()
         };
         node.put(&running.command_id, &running)?;
+        active.push(ActiveMoveLightCommand {
+            command: running,
+            ..active_command
+        });
+    }
+    Ok(())
+}
 
-        let result = execute_move_light_command(running, writer)?;
-        node.put(&result.command_id, &result)?;
+fn prepare_move_light_command(
+    command: MuninnMoveLightCommandRecord,
+) -> Result<ActiveMoveLightCommand> {
+    let colors = parse_move_colors(&command.colors)?;
+    if command.hidraw_path.trim().is_empty() {
+        return Err(anyhow!("hidraw_path is required"));
+    }
+    if command.repeat_count == 0 {
+        return Err(anyhow!("repeat_count must be greater than zero"));
+    }
+    if command.repeat_count > 86_400 {
+        return Err(anyhow!("repeat_count must be 86400 or less"));
+    }
+    if command.durations_ms.len() != colors.len() {
+        return Err(anyhow!(
+            "durations_ms must contain one duration for each color"
+        ));
+    }
+    if command
+        .durations_ms
+        .iter()
+        .any(|duration| *duration > 60_000)
+    {
+        return Err(anyhow!("durations_ms values must be 60000 or less"));
+    }
+
+    Ok(ActiveMoveLightCommand {
+        command,
+        colors,
+        step_index: 0,
+        repeats_done: 0,
+        next_write_at: Instant::now(),
+    })
+}
+
+fn tick_move_light_commands(
+    node: &mut cultmesh_rs::CultMeshNode,
+    active: &mut Vec<ActiveMoveLightCommand>,
+    writer: &mut impl MoveLightWriter,
+) -> Result<()> {
+    let now = Instant::now();
+    let mut index = 0;
+    while index < active.len() {
+        if active[index].next_write_at > now {
+            index += 1;
+            continue;
+        }
+
+        let command_id = active[index].command.command_id.clone();
+        let (red, green, blue) = active[index].colors[active[index].step_index];
+        let report = [0x06, 0, red, green, blue, 0, 0, 0, 0];
+        if let Err(error) = writer.write_report(&active[index].command.hidraw_path, &report) {
+            let failed = command_failed(active[index].command.clone(), &format!("{error:#}"))?;
+            node.put(&command_id, &failed)?;
+            active.remove(index);
+            continue;
+        }
+
+        let duration_ms = active[index].command.durations_ms[active[index].step_index];
+        active[index].step_index += 1;
+        if active[index].step_index >= active[index].colors.len() {
+            active[index].step_index = 0;
+            active[index].repeats_done += 1;
+        }
+
+        if active[index].repeats_done >= active[index].command.repeat_count {
+            let completed = MuninnMoveLightCommandRecord {
+                state: "completed".to_string(),
+                detail: format!(
+                    "wrote {} PS Move light step(s) for {} repeat(s)",
+                    active[index].colors.len(),
+                    active[index].command.repeat_count
+                ),
+                updated_at: timestamp()?,
+                ..active[index].command.clone()
+            };
+            node.put(&command_id, &completed)?;
+            active.remove(index);
+        } else {
+            active[index].next_write_at =
+                now + Duration::from_millis(u64::from(duration_ms.max(1)));
+            index += 1;
+        }
     }
     Ok(())
 }
@@ -354,40 +472,18 @@ fn execute_move_light_command(
     command: MuninnMoveLightCommandRecord,
     writer: &mut impl MoveLightWriter,
 ) -> Result<MuninnMoveLightCommandRecord> {
-    let colors = match parse_move_colors(&command.colors) {
-        Ok(colors) => colors,
+    let active = match prepare_move_light_command(command.clone()) {
+        Ok(active) => active,
         Err(error) => return command_failed(command, &error.to_string()),
     };
-    if command.hidraw_path.trim().is_empty() {
-        return command_failed(command, "hidraw_path is required");
-    }
-    if command.repeat_count == 0 {
-        return command_failed(command, "repeat_count must be greater than zero");
-    }
-    if command.repeat_count > 1024 {
-        return command_failed(command, "repeat_count must be 1024 or less");
-    }
-    if command.durations_ms.len() != colors.len() {
-        return command_failed(
-            command,
-            "durations_ms must contain one duration for each color",
-        );
-    }
-    if command
-        .durations_ms
-        .iter()
-        .any(|duration| *duration > 60_000)
-    {
-        return command_failed(command, "durations_ms values must be 60000 or less");
-    }
 
-    for _ in 0..command.repeat_count {
-        for (index, (red, green, blue)) in colors.iter().copied().enumerate() {
+    for _ in 0..active.command.repeat_count {
+        for (index, (red, green, blue)) in active.colors.iter().copied().enumerate() {
             let report = [0x06, 0, red, green, blue, 0, 0, 0, 0];
-            if let Err(error) = writer.write_report(&command.hidraw_path, &report) {
-                return command_failed(command, &format!("{error:#}"));
+            if let Err(error) = writer.write_report(&active.command.hidraw_path, &report) {
+                return command_failed(active.command, &format!("{error:#}"));
             }
-            let duration_ms = command.durations_ms[index];
+            let duration_ms = active.command.durations_ms[index];
             if duration_ms > 0 {
                 thread::sleep(Duration::from_millis(u64::from(duration_ms)));
             }
@@ -398,11 +494,11 @@ fn execute_move_light_command(
         state: "completed".to_string(),
         detail: format!(
             "wrote {} PS Move light step(s) for {} repeat(s)",
-            colors.len(),
-            command.repeat_count
+            active.colors.len(),
+            active.command.repeat_count
         ),
         updated_at: timestamp()?,
-        ..command
+        ..active.command
     })
 }
 
