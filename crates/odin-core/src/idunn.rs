@@ -45,7 +45,10 @@ pub fn plan_keepalive(
                     &decision_id,
                     desired,
                     "deploy",
-                    &format!("health is {}; deployment authority is available", health.state),
+                    &format!(
+                        "health is {}; deployment authority is available",
+                        health.state
+                    ),
                     &now,
                 ),
                 deployment_request: Some(IdunnDeploymentRequestRecord {

@@ -45,14 +45,13 @@ Idunn now shares Odin's Rust body:
 - `crates/odin-core/src/idunn.rs` owns the keepalive decision engine.
 - `crates/odin-core/src/documents.rs` publishes typed Idunn CultMesh records
   beside Odin and Gjallar records.
-- `crates/idunn-daemon` is the local keepalive actuator crate.
+- `crates/idunn-daemon` is the local keepalive actuator crate and now owns the
+  resident Starfire-local swarm scheduler.
 - `src/Idunn/README.md` is the user-facing introduction for developers,
   operators, and daemon authors.
-- `scripts/start-idunn-local.ps1` starts resident local watchdogs, including
-  VoidBot through `health-voidbot.cmd` and `restart-voidbot.cmd`, Muninn
-  through `health-muninn.cmd` and `restart-muninn.cmd`, and Nightwing Gjallar
-  through `health-nightwing-gjallar.cmd`,
-  `deploy-nightwing-gjallar.cmd`, and `restart-nightwing-gjallar.cmd`.
+- `scripts/start-idunn-local.ps1` is now a narrow bootstrap wrapper: it ensures
+  one `idunn.exe` process is alive, checks the shared keepalive store for
+  staleness, and lets Rust own the target catalog and per-target scheduling.
 - `scripts/deploy-yggdrasil-source-app.ps1` and
   `scripts/health-yggdrasil-source-app.ps1` are the generic Yggdrasil source
   artifact lane. They package committed local `HEAD` with `git archive`, run
@@ -70,10 +69,10 @@ Idunn now shares Odin's Rust body:
   publish a typed `gamecult.operator_dm_request.v1` CultMesh command document
   instead of learning Discord delivery itself.
 - `npm run idunn:build` builds the Rust daemon.
-- `npm run idunn:start -- ...` probes a daemon, records the decision, and can
-  execute the restart command when `--execute` is present.
-- `--interval-seconds <seconds>` keeps the same probe and decision path running
-  as a resident keepalive loop.
+- `npm run idunn:start -- ...` still supports the narrow one-daemon probe path
+  for manual use.
+- `npm run idunn:start -- --swarm-profile starfire-local --repo-root E:\Projects\Odin --execute`
+  runs the singular local swarm supervisor.
 
 The current typed records are:
 
@@ -150,26 +149,26 @@ idunn.operator_alarm.v1
   not claim Bifrost deployment freshness until Bifrost owns that schema
   migration path.
 
-## First Runtime Direction
+## Runtime Direction
 
-Idunn's Rust runtime grows in this order:
+Idunn's current Rust runtime now has two postures:
 
-1. Probe one named daemon with an explicit health command, once or on a
-   resident interval.
-2. Normalize that into `idunn.desired_daemon.v1` and
-   `idunn.daemon_health.v1`.
-3. Emit `idunn.keepalive_decision.v1`.
-4. When deploy authority exists, emit `idunn.deployment_request.v1`.
-5. When `--execute` is present, execute the deploy command and emit
-   `idunn.deployment_result.v1`.
-6. When restart authority exists, emit `idunn.restart_request.v1`.
-7. When `--execute` is present, execute the restart command and emit
-   `idunn.restart_result.v1`.
-8. When authority is missing, emit `idunn.operator_alarm.v1` targeting
-   Bifrost operator notification.
-9. Next: ingest Odin-owned service/provider advertisements directly, add named
-   adapters for Windows services, systemd, Docker, and provider-advertised
-   CultMesh commands, then publish an Eve/CultUI keepalive surface.
+1. One-daemon manual mode for focused probes and explicit local testing.
+2. One-process swarm mode for the Starfire-local continuity graph.
+
+The local swarm mode owns:
+
+1. the built-in Starfire-local target catalog;
+2. one in-process schedule per target instead of one watchdog process per target;
+3. shared typed keepalive records in one CultMesh store;
+4. deploy/restart/alarm execution through the same Rust decision engine;
+5. recovery of fast local targets like Odin without waiting behind slow remote
+   Yggdrasil checks.
+
+Next: ingest Odin-owned service/provider advertisements directly, promote the
+target catalog out of hardcoded bootstrap data, add named adapters for Windows
+services, systemd, Docker, and provider-advertised CultMesh commands, then
+publish an Eve/CultUI keepalive surface.
 
 No ad hoc JSON manifest may become the live state owner. Debug projections are
 fine when they name the `.cc` record or CultMesh document behind them.

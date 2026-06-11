@@ -6,61 +6,127 @@ use odin_core::{
 };
 use std::env;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::Duration;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Debug)]
-struct Options {
-    store_path: PathBuf,
+struct DaemonTarget {
     daemon_id: String,
     verse_id: String,
     name: String,
     health_command: Option<String>,
     deploy_command: Option<String>,
     restart_command: Option<String>,
-    operator_alarm_command: Option<String>,
     enabled: bool,
+    interval_seconds: u64,
+}
+
+#[derive(Clone, Debug)]
+struct CommonOptions {
+    store_path: PathBuf,
+    operator_alarm_command: Option<String>,
     execute: bool,
-    interval_seconds: Option<u64>,
+    command_timeout_seconds: u64,
+}
+
+#[derive(Clone, Debug)]
+enum Mode {
+    Single(DaemonTarget),
+    Swarm(SwarmOptions),
+}
+
+#[derive(Clone, Debug)]
+struct SwarmOptions {
+    profile: String,
+    repo_root: PathBuf,
+}
+
+#[derive(Clone, Debug)]
+struct Options {
+    common: CommonOptions,
+    mode: Mode,
 }
 
 fn main() -> Result<()> {
     let options = Options::parse(env::args().skip(1))?;
 
-    if let Some(parent) = options.store_path.parent() {
+    if let Some(parent) = options.common.store_path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
     }
 
-    if let Some(interval_seconds) = options.interval_seconds {
-        loop {
-            run_cycle(&options)?;
-            thread::sleep(Duration::from_secs(interval_seconds));
+    match &options.mode {
+        Mode::Single(target) => run_target_cycle(target, &options.common),
+        Mode::Swarm(swarm) => run_swarm(swarm, &options.common),
+    }
+}
+
+fn run_swarm(options: &SwarmOptions, common: &CommonOptions) -> Result<()> {
+    let targets = swarm_targets(options)?;
+    if targets.is_empty() {
+        return Err(anyhow!(
+            "Idunn swarm profile {} resolved to no targets",
+            options.profile
+        ));
+    }
+
+    println!(
+        "Idunn swarm profile {} starting with {} targets.",
+        options.profile,
+        targets.len()
+    );
+    println!("CultMesh store: {}", common.store_path.display());
+
+    let mut workers = Vec::with_capacity(targets.len());
+    for target in targets {
+        let worker_common = common.clone();
+        workers.push(thread::spawn(move || {
+            run_target_loop(target, worker_common)
+        }));
+    }
+
+    for worker in workers {
+        match worker.join() {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => return Err(error),
+            Err(_) => return Err(anyhow!("Idunn swarm worker thread panicked")),
         }
     }
 
-    run_cycle(&options)
+    Ok(())
 }
 
-fn run_cycle(options: &Options) -> Result<()> {
+fn run_target_loop(target: DaemonTarget, options: CommonOptions) -> Result<()> {
+    loop {
+        if let Err(error) = run_target_cycle(&target, &options) {
+            eprintln!(
+                "Idunn swarm target {} cycle failed: {}",
+                target.daemon_id, error
+            );
+        }
+        thread::sleep(Duration::from_secs(target.interval_seconds));
+    }
+}
+
+fn run_target_cycle(target: &DaemonTarget, options: &CommonOptions) -> Result<()> {
     let now = timestamp()?;
 
     let desired = IdunnDesiredDaemonRecord {
-        daemon_id: options.daemon_id.clone(),
-        verse_id: options.verse_id.clone(),
-        name: options.name.clone(),
-        enabled: options.enabled,
-        health_command: options.health_command.clone(),
-        restart_command: options.restart_command.clone(),
-        deploy_command: options.deploy_command.clone(),
+        daemon_id: target.daemon_id.clone(),
+        verse_id: target.verse_id.clone(),
+        name: target.name.clone(),
+        enabled: target.enabled,
+        health_command: target.health_command.clone(),
+        restart_command: target.restart_command.clone(),
+        deploy_command: target.deploy_command.clone(),
         authority: "idunn.local-command".to_string(),
         max_silence_seconds: 60,
         observed_at: now.clone(),
     };
 
-    let health = probe_health(&options, &now);
+    let health = probe_health(target, options.command_timeout_seconds, &now);
     let plan = plan_keepalive(&desired, &health, now.clone());
 
     let mut node = CultMesh::create_node(
@@ -79,7 +145,7 @@ fn run_cycle(options: &Options) -> Result<()> {
     if let Some(request) = &plan.deployment_request {
         node.put(&request.request_id, request)?;
         if options.execute {
-            let result = run_deployment(request, &now);
+            let result = run_deployment(request, &now, options.command_timeout_seconds);
             node.put(&result.result_id, &result)?;
             println!(
                 "Idunn deployment {} for {}: {}",
@@ -92,7 +158,7 @@ fn run_cycle(options: &Options) -> Result<()> {
                     "Idunn raised operator alarm for {} through {}: {}",
                     alarm.daemon_id, alarm.escalation_target, alarm.reason
                 );
-                run_operator_alarm_command(&options, &alarm);
+                run_operator_alarm_command(options, &alarm);
             }
         } else {
             println!(
@@ -105,7 +171,7 @@ fn run_cycle(options: &Options) -> Result<()> {
     if let Some(request) = &plan.restart_request {
         node.put(&request.request_id, request)?;
         if options.execute {
-            let result = run_restart(request, &now);
+            let result = run_restart(request, &now, options.command_timeout_seconds);
             node.put(&result.result_id, &result)?;
             println!(
                 "Idunn restart {} for {}: {}",
@@ -118,7 +184,7 @@ fn run_cycle(options: &Options) -> Result<()> {
                     "Idunn raised operator alarm for {} through {}: {}",
                     alarm.daemon_id, alarm.escalation_target, alarm.reason
                 );
-                run_operator_alarm_command(&options, &alarm);
+                run_operator_alarm_command(options, &alarm);
             }
         } else {
             println!(
@@ -141,8 +207,148 @@ fn run_cycle(options: &Options) -> Result<()> {
         "Idunn decision for {}: {} ({})",
         plan.decision.daemon_id, plan.decision.action, plan.decision.reason
     );
-    println!("CultMesh store: {}", options.store_path.display());
     Ok(())
+}
+
+fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
+    let repo_root = options.repo_root.display().to_string();
+    let script = |name: &str| format!(r"{}\scripts\{}", repo_root, name);
+
+    match options.profile.as_str() {
+        "starfire-local" => Ok(vec![
+            DaemonTarget {
+                daemon_id: "odin".to_string(),
+                verse_id: "starfire.local".to_string(),
+                name: "Odin all-seer".to_string(),
+                health_command: Some(script("health-odin.cmd")),
+                deploy_command: None,
+                restart_command: Some(script("restart-odin.cmd")),
+                enabled: true,
+                interval_seconds: 30,
+            },
+            DaemonTarget {
+                daemon_id: "mimir-eve-dashboard".to_string(),
+                verse_id: "starfire.local".to_string(),
+                name: "Mimir Eve dashboard".to_string(),
+                health_command: Some(script("health-mimir-eve-dashboard.cmd")),
+                deploy_command: None,
+                restart_command: None,
+                enabled: true,
+                interval_seconds: 30,
+            },
+            DaemonTarget {
+                daemon_id: "stonks".to_string(),
+                verse_id: "starfire.local".to_string(),
+                name: "Stonks market pulse".to_string(),
+                health_command: Some(script("health-stonks.cmd")),
+                deploy_command: None,
+                restart_command: Some(script("restart-stonks.cmd")),
+                enabled: true,
+                interval_seconds: 30,
+            },
+            DaemonTarget {
+                daemon_id: "voidbot".to_string(),
+                verse_id: "starfire.local".to_string(),
+                name: "VoidBot local stack".to_string(),
+                health_command: Some(script("health-voidbot.cmd")),
+                deploy_command: None,
+                restart_command: Some(script("restart-voidbot.cmd")),
+                enabled: true,
+                interval_seconds: 300,
+            },
+            DaemonTarget {
+                daemon_id: "muninn".to_string(),
+                verse_id: "raven.local".to_string(),
+                name: "Muninn telemetry Verse assembler".to_string(),
+                health_command: Some(script("health-muninn.cmd")),
+                deploy_command: None,
+                restart_command: Some(script("restart-muninn.cmd")),
+                enabled: true,
+                interval_seconds: 30,
+            },
+            DaemonTarget {
+                daemon_id: "idunn-swarm-deployment-coverage".to_string(),
+                verse_id: "starfire.local".to_string(),
+                name: "Idunn swarm deployment coverage".to_string(),
+                health_command: Some(script("health-idunn-swarm-deployment-coverage.cmd")),
+                deploy_command: None,
+                restart_command: None,
+                enabled: true,
+                interval_seconds: 30,
+            },
+            DaemonTarget {
+                daemon_id: "yggdrasil-heimdall".to_string(),
+                verse_id: "yggdrasil.local".to_string(),
+                name: "Yggdrasil Heimdall".to_string(),
+                health_command: Some(script("health-yggdrasil-heimdall.cmd")),
+                deploy_command: Some(script("deploy-yggdrasil-heimdall.cmd")),
+                restart_command: None,
+                enabled: true,
+                interval_seconds: 300,
+            },
+            DaemonTarget {
+                daemon_id: "yggdrasil-repixelizer".to_string(),
+                verse_id: "yggdrasil.local".to_string(),
+                name: "Yggdrasil Repixelizer".to_string(),
+                health_command: Some(script("health-yggdrasil-repixelizer.cmd")),
+                deploy_command: Some(script("deploy-yggdrasil-repixelizer.cmd")),
+                restart_command: None,
+                enabled: true,
+                interval_seconds: 300,
+            },
+            DaemonTarget {
+                daemon_id: "yggdrasil-streampixels".to_string(),
+                verse_id: "yggdrasil.local".to_string(),
+                name: "Yggdrasil StreamPixels".to_string(),
+                health_command: Some(script("health-yggdrasil-streampixels.cmd")),
+                deploy_command: Some(script("deploy-yggdrasil-streampixels.cmd")),
+                restart_command: None,
+                enabled: true,
+                interval_seconds: 300,
+            },
+            DaemonTarget {
+                daemon_id: "nightwing-gjallar".to_string(),
+                verse_id: "nightwing.local".to_string(),
+                name: "Nightwing Gjallar framebuffer compositor".to_string(),
+                health_command: Some(script("health-nightwing-gjallar.cmd")),
+                deploy_command: Some(script("deploy-nightwing-gjallar.cmd")),
+                restart_command: Some(script("restart-nightwing-gjallar.cmd")),
+                enabled: true,
+                interval_seconds: 30,
+            },
+            DaemonTarget {
+                daemon_id: "nightwing-muninn".to_string(),
+                verse_id: "nightwing.local".to_string(),
+                name: "Nightwing Muninn telemetry and Move HID daemon".to_string(),
+                health_command: Some(script("health-nightwing-muninn.cmd")),
+                deploy_command: None,
+                restart_command: Some(script("restart-nightwing-muninn.cmd")),
+                enabled: true,
+                interval_seconds: 30,
+            },
+            DaemonTarget {
+                daemon_id: "nightwing-eve-dashboard".to_string(),
+                verse_id: "nightwing.local".to_string(),
+                name: "Nightwing Eve dashboard broker".to_string(),
+                health_command: Some(script("health-nightwing-eve-dashboard.cmd")),
+                deploy_command: None,
+                restart_command: Some(script("restart-nightwing-eve-dashboard.cmd")),
+                enabled: true,
+                interval_seconds: 30,
+            },
+            DaemonTarget {
+                daemon_id: "nightwing-eve-browser-reference".to_string(),
+                verse_id: "nightwing.local".to_string(),
+                name: "Nightwing Eve browser reference".to_string(),
+                health_command: Some(script("health-nightwing-eve-browser-reference.cmd")),
+                deploy_command: None,
+                restart_command: Some(script("restart-nightwing-eve-browser-reference.cmd")),
+                enabled: true,
+                interval_seconds: 30,
+            },
+        ]),
+        other => Err(anyhow!("unknown Idunn swarm profile: {other}")),
+    }
 }
 
 fn restart_failure_alarm(
@@ -181,49 +387,59 @@ fn deployment_failure_alarm(
 
 impl Options {
     fn parse(args: impl Iterator<Item = String>) -> Result<Self> {
-        let mut options = Options {
-            store_path: PathBuf::from("scratch/idunn/idunn.keepalive.cc"),
-            daemon_id: String::new(),
-            verse_id: "local".to_string(),
-            name: String::new(),
-            health_command: None,
-            deploy_command: None,
-            restart_command: None,
-            operator_alarm_command: None,
-            enabled: true,
-            execute: false,
-            interval_seconds: None,
-        };
+        let mut store_path = PathBuf::from("scratch/idunn/idunn.keepalive.cc");
+        let mut operator_alarm_command = None;
+        let mut execute = false;
+        let mut command_timeout_seconds = 30;
+        let mut daemon_id = None;
+        let mut verse_id = "local".to_string();
+        let mut name = None;
+        let mut health_command = None;
+        let mut deploy_command = None;
+        let mut restart_command = None;
+        let mut enabled = true;
+        let mut interval_seconds = None;
+        let mut swarm_profile = None;
+        let mut repo_root = env::current_dir().context("determining current directory")?;
 
         let mut args = args.peekable();
         while let Some(arg) = args.next() {
             match arg.as_str() {
-                "--store" => options.store_path = PathBuf::from(take_value(&mut args, "--store")?),
-                "--daemon" => options.daemon_id = take_value(&mut args, "--daemon")?,
-                "--verse" => options.verse_id = take_value(&mut args, "--verse")?,
-                "--name" => options.name = take_value(&mut args, "--name")?,
+                "--store" => store_path = PathBuf::from(take_value(&mut args, "--store")?),
+                "--daemon" => daemon_id = Some(take_value(&mut args, "--daemon")?),
+                "--verse" => verse_id = take_value(&mut args, "--verse")?,
+                "--name" => name = Some(take_value(&mut args, "--name")?),
                 "--health-command" => {
-                    options.health_command = Some(take_value(&mut args, "--health-command")?)
+                    health_command = Some(take_value(&mut args, "--health-command")?)
                 }
                 "--deploy-command" => {
-                    options.deploy_command = Some(take_value(&mut args, "--deploy-command")?)
+                    deploy_command = Some(take_value(&mut args, "--deploy-command")?)
                 }
                 "--restart-command" => {
-                    options.restart_command = Some(take_value(&mut args, "--restart-command")?)
+                    restart_command = Some(take_value(&mut args, "--restart-command")?)
                 }
                 "--operator-alarm-command" => {
-                    options.operator_alarm_command =
+                    operator_alarm_command =
                         Some(take_value(&mut args, "--operator-alarm-command")?)
                 }
-                "--disabled" => options.enabled = false,
-                "--execute" => options.execute = true,
+                "--disabled" => enabled = false,
+                "--execute" => execute = true,
                 "--interval-seconds" => {
-                    options.interval_seconds = Some(
+                    interval_seconds = Some(
                         take_value(&mut args, "--interval-seconds")?
                             .parse()
                             .context("--interval-seconds must be a positive integer")?,
                     )
                 }
+                "--command-timeout-seconds" => {
+                    command_timeout_seconds = take_value(&mut args, "--command-timeout-seconds")?
+                        .parse()
+                        .context("--command-timeout-seconds must be a positive integer")?
+                }
+                "--swarm-profile" => {
+                    swarm_profile = Some(take_value(&mut args, "--swarm-profile")?)
+                }
+                "--repo-root" => repo_root = PathBuf::from(take_value(&mut args, "--repo-root")?),
                 "--help" | "-h" => return Err(anyhow!(help_text())),
                 other => {
                     return Err(anyhow!(
@@ -234,17 +450,52 @@ impl Options {
             }
         }
 
-        if options.daemon_id.trim().is_empty() {
-            return Err(anyhow!("--daemon is required\n\n{}", help_text()));
-        }
-        if options.name.trim().is_empty() {
-            options.name = options.daemon_id.clone();
-        }
-        if options.interval_seconds == Some(0) {
-            return Err(anyhow!("--interval-seconds must be greater than zero"));
+        if command_timeout_seconds == 0 {
+            return Err(anyhow!(
+                "--command-timeout-seconds must be greater than zero"
+            ));
         }
 
-        Ok(options)
+        let common = CommonOptions {
+            store_path,
+            operator_alarm_command,
+            execute,
+            command_timeout_seconds,
+        };
+
+        let mode = match (swarm_profile, daemon_id) {
+            (Some(profile), None) => Mode::Swarm(SwarmOptions { profile, repo_root }),
+            (Some(_), Some(_)) => {
+                return Err(anyhow!(
+                    "use either --swarm-profile or --daemon, not both\n\n{}",
+                    help_text()
+                ));
+            }
+            (None, Some(daemon_id)) => {
+                let interval_seconds = interval_seconds.unwrap_or(30);
+                if interval_seconds == 0 {
+                    return Err(anyhow!("--interval-seconds must be greater than zero"));
+                }
+                Mode::Single(DaemonTarget {
+                    daemon_id: daemon_id.clone(),
+                    verse_id,
+                    name: name.unwrap_or(daemon_id),
+                    health_command,
+                    deploy_command,
+                    restart_command,
+                    enabled,
+                    interval_seconds,
+                })
+            }
+            (None, None) => {
+                return Err(anyhow!(
+                    "either --daemon or --swarm-profile is required\n\n{}",
+                    help_text()
+                ));
+            }
+        };
+
+        Ok(Self { common, mode })
     }
 }
 
@@ -253,30 +504,34 @@ fn take_value(args: &mut impl Iterator<Item = String>, name: &str) -> Result<Str
         .ok_or_else(|| anyhow!("{name} requires a value"))
 }
 
-fn probe_health(options: &Options, observed_at: &str) -> IdunnDaemonHealthRecord {
-    match &options.health_command {
-        Some(command) => match run_shell(command) {
+fn probe_health(
+    target: &DaemonTarget,
+    command_timeout_seconds: u64,
+    observed_at: &str,
+) -> IdunnDaemonHealthRecord {
+    match &target.health_command {
+        Some(command) => match run_shell(command, command_timeout_seconds) {
             Ok(output) if output.status.success() => IdunnDaemonHealthRecord {
-                daemon_id: options.daemon_id.clone(),
+                daemon_id: target.daemon_id.clone(),
                 state: "active".to_string(),
                 detail: "health command exited successfully".to_string(),
                 observed_at: observed_at.to_string(),
             },
             Ok(output) => IdunnDaemonHealthRecord {
-                daemon_id: options.daemon_id.clone(),
+                daemon_id: target.daemon_id.clone(),
                 state: "failed".to_string(),
                 detail: format!("health command exited with {}", output.status),
                 observed_at: observed_at.to_string(),
             },
             Err(error) => IdunnDaemonHealthRecord {
-                daemon_id: options.daemon_id.clone(),
+                daemon_id: target.daemon_id.clone(),
                 state: "failed".to_string(),
                 detail: format!("health command could not run: {error}"),
                 observed_at: observed_at.to_string(),
             },
         },
         None => IdunnDaemonHealthRecord {
-            daemon_id: options.daemon_id.clone(),
+            daemon_id: target.daemon_id.clone(),
             state: "unknown".to_string(),
             detail: "no health command was provided".to_string(),
             observed_at: observed_at.to_string(),
@@ -287,9 +542,10 @@ fn probe_health(options: &Options, observed_at: &str) -> IdunnDaemonHealthRecord
 fn run_restart(
     request: &odin_core::IdunnRestartRequestRecord,
     requested_at: &str,
+    command_timeout_seconds: u64,
 ) -> IdunnRestartResultRecord {
     let result_id = format!("result:{}", request.request_id);
-    match run_shell(&request.command) {
+    match run_shell(&request.command, command_timeout_seconds) {
         Ok(output) if output.status.success() => IdunnRestartResultRecord {
             result_id,
             request_id: request.request_id.clone(),
@@ -320,9 +576,10 @@ fn run_restart(
 fn run_deployment(
     request: &odin_core::IdunnDeploymentRequestRecord,
     requested_at: &str,
+    command_timeout_seconds: u64,
 ) -> IdunnDeploymentResultRecord {
     let result_id = format!("result:{}", request.request_id);
-    match run_shell(&request.command) {
+    match run_shell(&request.command, command_timeout_seconds) {
         Ok(output) if output.status.success() => IdunnDeploymentResultRecord {
             result_id,
             request_id: request.request_id.clone(),
@@ -350,16 +607,26 @@ fn run_deployment(
     }
 }
 
-fn run_shell(command: &str) -> Result<std::process::Output> {
-    if cfg!(windows) {
-        Command::new("cmd").arg("/C").arg(command).output()
+fn run_shell(command: &str, timeout_seconds: u64) -> Result<std::process::Output> {
+    let mut process = if cfg!(windows) {
+        let mut process = Command::new("cmd");
+        process.arg("/C").arg(command);
+        process
     } else {
-        Command::new("sh").arg("-c").arg(command).output()
-    }
-    .with_context(|| format!("running command {command:?}"))
+        let mut process = Command::new("sh");
+        process.arg("-c").arg(command);
+        process
+    };
+
+    let child = process
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("running command {command:?}"))?;
+    wait_for_child_with_timeout(child, Duration::from_secs(timeout_seconds), command)
 }
 
-fn run_operator_alarm_command(options: &Options, alarm: &IdunnOperatorAlarmRecord) {
+fn run_operator_alarm_command(options: &CommonOptions, alarm: &IdunnOperatorAlarmRecord) {
     let Some(command) = options.operator_alarm_command.as_deref() else {
         return;
     };
@@ -384,27 +651,72 @@ fn run_operator_alarm_command(options: &Options, alarm: &IdunnOperatorAlarmRecor
         .env("IDUNN_ALARM_REASON", &alarm.reason)
         .env("IDUNN_ALARM_ESCALATION_TARGET", &alarm.escalation_target)
         .env("IDUNN_ALARM_RAISED_AT", &alarm.raised_at)
-        .output();
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn();
 
     match output {
-        Ok(output) if output.status.success() => {
-            println!(
-                "Idunn operator alarm command completed for {}.",
-                alarm.daemon_id
-            );
-        }
-        Ok(output) => {
-            eprintln!(
-                "Idunn operator alarm command failed for {} with {}.",
-                alarm.daemon_id, output.status
-            );
-        }
+        Ok(child) => match wait_for_child_with_timeout(
+            child,
+            Duration::from_secs(options.command_timeout_seconds),
+            command,
+        ) {
+            Ok(output) if output.status.success() => {
+                println!(
+                    "Idunn operator alarm command completed for {}.",
+                    alarm.daemon_id
+                );
+            }
+            Ok(output) => {
+                eprintln!(
+                    "Idunn operator alarm command failed for {} with {}.",
+                    alarm.daemon_id, output.status
+                );
+            }
+            Err(error) => {
+                eprintln!(
+                    "Idunn operator alarm command could not run for {}: {}",
+                    alarm.daemon_id, error
+                );
+            }
+        },
         Err(error) => {
             eprintln!(
                 "Idunn operator alarm command could not run for {}: {}",
                 alarm.daemon_id, error
             );
         }
+    }
+}
+
+fn wait_for_child_with_timeout(
+    mut child: Child,
+    timeout: Duration,
+    command: &str,
+) -> Result<std::process::Output> {
+    let started_at = Instant::now();
+
+    loop {
+        if child
+            .try_wait()
+            .with_context(|| format!("waiting on command {command:?}"))?
+            .is_some()
+        {
+            return child
+                .wait_with_output()
+                .with_context(|| format!("collecting output for command {command:?}"));
+        }
+
+        if started_at.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait_with_output();
+            return Err(anyhow!(
+                "command timed out after {} seconds: {command:?}",
+                timeout.as_secs()
+            ));
+        }
+
+        thread::sleep(Duration::from_millis(100));
     }
 }
 
@@ -417,5 +729,5 @@ fn timestamp() -> Result<String> {
 }
 
 fn help_text() -> &'static str {
-    "Usage: idunn --daemon <id> [--name <name>] [--verse <verse>] [--store <path>] [--health-command <command>] [--deploy-command <command>] [--restart-command <command>] [--operator-alarm-command <command>] [--execute] [--interval-seconds <seconds>]\n\nIdunn probes one daemon, writes typed CultMesh records, executes deployment or restart only when --execute is present, and may invoke an operator alarm bridge command only after an alarm is raised."
+    "Usage: idunn --daemon <id> [--name <name>] [--verse <verse>] [--store <path>] [--health-command <command>] [--deploy-command <command>] [--restart-command <command>] [--operator-alarm-command <command>] [--execute] [--interval-seconds <seconds>] [--command-timeout-seconds <seconds>] [--repo-root <path>] [--swarm-profile <profile>]\n\nIdunn can run one manual daemon probe lane with --daemon, or one built-in swarm supervisor with --swarm-profile starfire-local."
 }

@@ -1,5 +1,5 @@
 param(
-  [int] $IntervalSeconds = 30,
+  [int] $StaleAfterSeconds = 120,
   [string] $StateDir = "E:\Projects\Odin\scratch\idunn"
 )
 
@@ -8,10 +8,12 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $idunnExe = Join-Path $repoRoot "target\debug\idunn.exe"
 $operatorAlarmCommand = Join-Path $repoRoot "scripts\notify-idunn-operator-alarm.cmd"
-$logDir = Join-Path $StateDir "logs"
-$pidDir = Join-Path $StateDir "pids"
+$pidPath = Join-Path $StateDir "idunn.pid"
+$storePath = Join-Path $StateDir "idunn.keepalive.cc"
+$outLog = Join-Path $StateDir "idunn.out.log"
+$errLog = Join-Path $StateDir "idunn.err.log"
 
-New-Item -ItemType Directory -Force -Path $StateDir, $logDir, $pidDir | Out-Null
+New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
 
 if (-not (Test-Path -LiteralPath $idunnExe)) {
   Push-Location -LiteralPath $repoRoot
@@ -25,167 +27,86 @@ if (-not (Test-Path -LiteralPath $idunnExe)) {
   }
 }
 
-$watchdogs = @(
-  [pscustomobject]@{
-    Id = "odin"
-    Name = "Odin all-seer"
-    Verse = "starfire.local"
-    Health = "$repoRoot\scripts\health-odin.cmd"
-    Restart = "$repoRoot\scripts\restart-odin.cmd"
-  },
-  [pscustomobject]@{
-    Id = "mimir-eve-dashboard"
-    Name = "Mimir Eve dashboard"
-    Verse = "starfire.local"
-    Health = "$repoRoot\scripts\health-mimir-eve-dashboard.cmd"
-    Restart = $null
-  },
-  [pscustomobject]@{
-    Id = "stonks"
-    Name = "Stonks market pulse"
-    Verse = "starfire.local"
-    Health = "$repoRoot\scripts\health-stonks.cmd"
-    Restart = "$repoRoot\scripts\restart-stonks.cmd"
-  },
-  [pscustomobject]@{
-    Id = "voidbot"
-    Name = "VoidBot local stack"
-    Verse = "starfire.local"
-    Health = "$repoRoot\scripts\health-voidbot.cmd"
-    Restart = "$repoRoot\scripts\restart-voidbot.cmd"
-    IntervalSeconds = 300
-  },
-  [pscustomobject]@{
-    Id = "muninn"
-    Name = "Muninn telemetry Verse assembler"
-    Verse = "raven.local"
-    Health = "$repoRoot\scripts\health-muninn.cmd"
-    Restart = "$repoRoot\scripts\restart-muninn.cmd"
-  },
-  [pscustomobject]@{
-    Id = "idunn-swarm-deployment-coverage"
-    Name = "Idunn swarm deployment coverage"
-    Verse = "starfire.local"
-    Health = "$repoRoot\scripts\health-idunn-swarm-deployment-coverage.cmd"
-    Restart = $null
-  },
-  [pscustomobject]@{
-    Id = "yggdrasil-heimdall"
-    Name = "Yggdrasil Heimdall"
-    Verse = "yggdrasil.local"
-    Health = "$repoRoot\scripts\health-yggdrasil-heimdall.cmd"
-    Deploy = "$repoRoot\scripts\deploy-yggdrasil-heimdall.cmd"
-    IntervalSeconds = 300
-  },
-  [pscustomobject]@{
-    Id = "yggdrasil-repixelizer"
-    Name = "Yggdrasil Repixelizer"
-    Verse = "yggdrasil.local"
-    Health = "$repoRoot\scripts\health-yggdrasil-repixelizer.cmd"
-    Deploy = "$repoRoot\scripts\deploy-yggdrasil-repixelizer.cmd"
-    IntervalSeconds = 300
-  },
-  [pscustomobject]@{
-    Id = "yggdrasil-streampixels"
-    Name = "Yggdrasil StreamPixels"
-    Verse = "yggdrasil.local"
-    Health = "$repoRoot\scripts\health-yggdrasil-streampixels.cmd"
-    Deploy = "$repoRoot\scripts\deploy-yggdrasil-streampixels.cmd"
-    IntervalSeconds = 300
-  },
-  [pscustomobject]@{
-    Id = "nightwing-gjallar"
-    Name = "Nightwing Gjallar framebuffer compositor"
-    Verse = "nightwing.local"
-    Health = "$repoRoot\scripts\health-nightwing-gjallar.cmd"
-    Deploy = "$repoRoot\scripts\deploy-nightwing-gjallar.cmd"
-    Restart = "$repoRoot\scripts\restart-nightwing-gjallar.cmd"
-  },
-  [pscustomobject]@{
-    Id = "nightwing-eve-dashboard"
-    Name = "Nightwing Eve dashboard broker"
-    Verse = "nightwing.local"
-    Health = "$repoRoot\scripts\health-nightwing-eve-dashboard.cmd"
-    Restart = "$repoRoot\scripts\restart-nightwing-eve-dashboard.cmd"
-  },
-  [pscustomobject]@{
-    Id = "nightwing-eve-browser-reference"
-    Name = "Nightwing Eve browser reference"
-    Verse = "nightwing.local"
-    Health = "$repoRoot\scripts\health-nightwing-eve-browser-reference.cmd"
-    Restart = "$repoRoot\scripts\restart-nightwing-eve-browser-reference.cmd"
-  }
-)
+function Test-IdunnSupervisorHealthy {
+  param(
+    [string] $PidPath,
+    [string] $StorePath,
+    [int] $StaleAfterSeconds
+  )
 
-function Test-LivePid {
-  param([string] $Path)
-  if (-not (Test-Path -LiteralPath $Path)) {
+  if (-not (Test-Path -LiteralPath $PidPath)) {
     return $false
   }
-  $pidText = (Get-Content -LiteralPath $Path -Raw).Trim()
+
+  $pidText = (Get-Content -LiteralPath $PidPath -Raw).Trim()
   if ($pidText -notmatch "^\d+$") {
-    Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $PidPath -Force -ErrorAction SilentlyContinue
     return $false
   }
+
   $process = Get-Process -Id ([int] $pidText) -ErrorAction SilentlyContinue
   if ($null -eq $process) {
-    Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $PidPath -Force -ErrorAction SilentlyContinue
     return $false
   }
-  return $true
+
+  if (Test-Path -LiteralPath $StorePath) {
+    $storeAgeSeconds = ([DateTime]::UtcNow - (Get-Item -LiteralPath $StorePath).LastWriteTimeUtc).TotalSeconds
+    if ($storeAgeSeconds -le $StaleAfterSeconds) {
+      return $true
+    }
+
+    Write-Host "Idunn swarm store is stale ($([math]::Round($storeAgeSeconds))s old). Restarting supervisor."
+  } else {
+    $processAgeSeconds = ([DateTime]::UtcNow - $process.StartTime.ToUniversalTime()).TotalSeconds
+    if ($processAgeSeconds -le $StaleAfterSeconds) {
+      return $true
+    }
+
+    Write-Host "Idunn supervisor never wrote $StorePath within $StaleAfterSeconds seconds. Restarting supervisor."
+  }
+
+  Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $PidPath -Force -ErrorAction SilentlyContinue
+  return $false
 }
 
-function Start-Watchdog {
-  param($Watchdog)
-
-  $pidPath = Join-Path $pidDir "$($Watchdog.Id).pid"
-  if (Test-LivePid -Path $pidPath) {
-    Write-Host "Idunn watchdog already running for $($Watchdog.Id)."
-    return
-  }
-
-  $storePath = Join-Path $StateDir "$($Watchdog.Id).keepalive.cc"
-
-  $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
-  $startInfo.FileName = $idunnExe
-  $startInfo.WorkingDirectory = $repoRoot
-  $startInfo.UseShellExecute = $false
-  $startInfo.CreateNoWindow = $true
-  $startInfo.RedirectStandardOutput = $false
-  $startInfo.RedirectStandardError = $false
-  $arguments = @(
-      "--daemon", $Watchdog.Id,
-      "--name", $Watchdog.Name,
-      "--verse", $Watchdog.Verse,
-      "--store", $storePath,
-      "--health-command", $Watchdog.Health,
-      "--interval-seconds", "$(if ($Watchdog.PSObject.Properties['IntervalSeconds']) { $Watchdog.IntervalSeconds } else { $IntervalSeconds })"
-    )
-  $shouldExecute = $false
-  if (-not [string]::IsNullOrWhiteSpace($Watchdog.Deploy)) {
-    $arguments += @("--deploy-command", $Watchdog.Deploy)
-    $shouldExecute = $true
-  }
-  if (-not [string]::IsNullOrWhiteSpace($Watchdog.Restart)) {
-    $arguments += @("--restart-command", $Watchdog.Restart)
-    $shouldExecute = $true
-  }
-  if ($shouldExecute) {
-    $arguments += @("--execute")
-  }
-  if (Test-Path -LiteralPath $operatorAlarmCommand) {
-    $arguments += @("--operator-alarm-command", $operatorAlarmCommand)
-  }
-  $startInfo.Arguments = Join-WindowsArguments -Arguments $arguments
-
-  $process = [System.Diagnostics.Process]::new()
-  $process.StartInfo = $startInfo
-  [void] $process.Start()
-  $process.Id | Set-Content -Encoding ASCII -LiteralPath $pidPath
-
-  Write-Host "Started Idunn watchdog $($Watchdog.Id) as PID $($process.Id)."
-  Write-Host "  store: $storePath"
+if (Test-IdunnSupervisorHealthy -PidPath $pidPath -StorePath $storePath -StaleAfterSeconds $StaleAfterSeconds) {
+  Write-Host "Idunn swarm supervisor already running."
+  return
 }
+
+$arguments = @(
+  "--swarm-profile", "starfire-local",
+  "--repo-root", $repoRoot,
+  "--store", $storePath,
+  "--command-timeout-seconds", "30",
+  "--execute"
+)
+
+if (Test-Path -LiteralPath $operatorAlarmCommand) {
+  $arguments += @("--operator-alarm-command", $operatorAlarmCommand)
+}
+
+$process = Start-Process -FilePath $idunnExe `
+  -ArgumentList $arguments `
+  -WorkingDirectory $repoRoot `
+  -WindowStyle Hidden `
+  -PassThru `
+  -RedirectStandardOutput $outLog `
+  -RedirectStandardError $errLog
+$process.Id | Set-Content -Encoding ASCII -LiteralPath $pidPath
+
+Start-Sleep -Seconds 2
+if ($process.HasExited) {
+  $detail = ""
+  if (Test-Path -LiteralPath $outLog) { $detail += Get-Content -Raw -LiteralPath $outLog }
+  if (Test-Path -LiteralPath $errLog) { $detail += Get-Content -Raw -LiteralPath $errLog }
+  throw "Idunn swarm supervisor exited immediately with code $($process.ExitCode).`n$detail"
+}
+
+Write-Host "Started Idunn swarm supervisor as PID $($process.Id)."
+Write-Host "  store: $storePath"
 
 function ConvertTo-WindowsArgument {
   param([string] $Value)
@@ -198,8 +119,4 @@ function ConvertTo-WindowsArgument {
 function Join-WindowsArguments {
   param([object[]] $Arguments)
   return (($Arguments | ForEach-Object { ConvertTo-WindowsArgument -Value ([string] $_) }) -join " ")
-}
-
-foreach ($watchdog in $watchdogs) {
-  Start-Watchdog -Watchdog $watchdog
 }

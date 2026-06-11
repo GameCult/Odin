@@ -116,7 +116,12 @@ recreates the `GameCult-Muninn` scheduled task and writes
 `-WindowStyle Hidden` and redirects logs under `C:\Meta\Odin\logs\muninn`.
 The `.cmd` file must not be the long-lived foreground process.
 
-Nightwing runs Muninn as the user service `gamecult-muninn.service`. The binary
-is installed at `/home/metacrat/.local/bin/muninn`, the store lives at
+Nightwing Muninn is kept alive by the single Idunn supervisor through the
+`nightwing-muninn` daemon target. Idunn learns that target through Odin's typed
+daemon surface and invokes `scripts/health-nightwing-muninn.ps1` and
+`scripts/restart-nightwing-muninn.ps1`; those scripts are health/restart
+actuators only, not lifecycle owners. The binary is installed at
+`/home/metacrat/.local/bin/muninn`, the store lives at
 `/home/metacrat/.local/state/gamecult/muninn/muninn.telemetry.cc`, and the
-service command uses `--host nightwing --interval-seconds 15`.
+restart actuator launches `serve --host nightwing --interval-seconds 15` with
+PID and logs under `/home/metacrat/.local/state/gamecult/muninn`.

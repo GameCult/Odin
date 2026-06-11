@@ -50,11 +50,12 @@ watchdog.
 
 ## Current State
 
-Idunn is a Rust daemon inside Odin's Cargo workspace. It can probe one daemon,
-write desired state, health, keepalive decision, deployment request,
-deployment result, restart request, restart result, and operator alarm as typed
-CultMesh records, and execute deploy/restart commands when the operator
-explicitly gives it authority.
+Idunn is a Rust daemon inside Odin's Cargo workspace. The live local runtime is
+one long-lived `idunn.exe` process that owns the whole Starfire-local swarm:
+Odin, local adjunct daemons, the Yggdrasil deploy lanes, and the Nightwing
+display services. Each target keeps its own interval, health command, and
+deploy/restart authority, but the scheduler and continuity witness now belong
+to one Rust process instead of a PowerShell-herded pile of one-daemon workers.
 
 ```text
 scratch/idunn/idunn.keepalive.cc
@@ -69,16 +70,17 @@ npm run idunn:build
 npm run idunn:start -- --daemon demo --health-command "exit 0"
 ```
 
-Install the local Starfire boot watchdogs:
+Install the local Starfire boot watchdog:
 
 ```powershell
 .\scripts\install-idunn-startup.ps1
 ```
 
-That task starts Idunn loops for Odin, Stonks, the enforced Yggdrasil source
-artifact targets, and the Nightwing display services at user logon. The current
-Mimir dashboard is observed but not restarted until its restart authority is
-named.
+That task starts one `idunn.exe` swarm supervisor at user logon. The Rust
+runtime owns the target catalog for Odin, Stonks, Muninn, the enforced
+Yggdrasil source artifact lanes, and the Nightwing display services. The
+current Mimir dashboard is observed but not restarted until its restart
+authority is named.
 
 It also starts `idunn-swarm-deployment-coverage`, which watches the deployment
 target catalog in `scripts/idunn-deployment-targets.ps1`. A repo/service is not
@@ -101,6 +103,12 @@ To keep watching on a resident interval:
 
 ```powershell
 npm run idunn:start -- --daemon demo --health-command "exit 0" --interval-seconds 30
+```
+
+To run the built-in Starfire-local swarm profile directly:
+
+```powershell
+npm run idunn:start -- --swarm-profile starfire-local --repo-root E:\Projects\Odin --execute
 ```
 
 Optional store override:
@@ -147,9 +155,10 @@ Pages remains external-owned.
 - `idunn.restart_result.v1`
 - `idunn.operator_alarm.v1`
 
-The next cuts are direct Odin service/provider ingestion, named adapters for
-systemd, Windows services, Docker, and provider-advertised CultMesh commands,
-and a Bifrost-owned operator notification request record for alarms.
+The next cuts are promoting the built-in target catalog into Odin-ingested
+service/provider records, adding named adapters for systemd, Windows services,
+Docker, and provider-advertised CultMesh commands, and replacing the local
+operator alarm bridge with a fully Bifrost-owned notification request record.
 
 ## Boundaries
 
