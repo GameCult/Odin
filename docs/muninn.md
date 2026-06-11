@@ -79,18 +79,19 @@ own raw capture, candidate extraction, calibration, triangulation, IMU fusion,
 prediction, or final 6DoF pose. Muninn does not synthesize wand pose; it
 reports what the local body saw and read from USB.
 
-On Linux hidraw hosts, enable the controller-state feed by passing one or more
-Move sources to `serve`:
+On Linux hosts, enable the controller-state feed by passing one or more Move
+joystick sources to `serve`:
 
 ```bash
 muninn serve \
   --store ~/.local/state/gamecult/muninn/muninn.telemetry.cc \
   --host nightwing \
-  --move-state move-usb=/dev/hidraw1
+  --move-state move-usb=/dev/input/by-id/usb-Sony_Computer_Entertainment_Motion_Controller-joystick
 ```
 
-The published IMU values are raw HID report counts. Mimir owns calibration,
-unit conversion, fusion, prediction, and resolved pose publication.
+The published values are raw Linux joystick/HID counts. Mimir owns calibration,
+axis interpretation, unit conversion, fusion, prediction, and resolved pose
+publication. Hidraw remains the local output path for LED reports.
 
 ## Move Light Commands
 
@@ -141,5 +142,6 @@ actuators only, not lifecycle owners. The binary is installed at
 `/home/metacrat/.local/bin/muninn`, the store lives at
 `/home/metacrat/.local/state/gamecult/muninn/muninn.telemetry.cc`, and the
 restart actuator launches `serve --host nightwing --interval-seconds 15` with
-`--move-state move-usb=/dev/hidraw1`, PID, and logs under
+`--move-state move-usb=/dev/input/by-id/usb-Sony_Computer_Entertainment_Motion_Controller-joystick`,
+PID, and logs under
 `/home/metacrat/.local/state/gamecult/muninn`.

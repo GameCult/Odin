@@ -83,6 +83,15 @@ struct ActiveMoveLightCommand {
 struct ActiveMoveStateSource {
     source: MoveStateSource,
     sequence: u64,
+    joystick_axes: [i16; 16],
+    joystick_buttons: [bool; 32],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct JoystickEvent {
+    event_type: u8,
+    number: u8,
+    value: i16,
 }
 
 trait ProcessSpawner {
@@ -132,6 +141,8 @@ fn serve(options: Options) -> Result<()> {
         .map(|source| ActiveMoveStateSource {
             source,
             sequence: 0,
+            joystick_axes: [0; 16],
+            joystick_buttons: [false; 32],
         })
         .collect();
 
@@ -379,6 +390,7 @@ impl MoveLightWriter for HidMoveLightWriter {
 
 trait MoveControllerStateReader {
     fn read_report(&mut self, hidraw_path: &str) -> Result<Option<Vec<u8>>>;
+    fn read_joystick_events(&mut self, joystick_path: &str) -> Result<Vec<JoystickEvent>>;
 }
 
 struct HidMoveControllerStateReader;
@@ -413,6 +425,44 @@ impl MoveControllerStateReader for HidMoveControllerStateReader {
             "PS Move controller state HID reads are currently implemented for Unix hidraw paths"
         ))
     }
+
+    #[cfg(unix)]
+    fn read_joystick_events(&mut self, joystick_path: &str) -> Result<Vec<JoystickEvent>> {
+        let mut device = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(joystick_path)
+            .with_context(|| format!("opening PS Move joystick input path {joystick_path}"))?;
+        let mut events = Vec::new();
+        loop {
+            let mut report = [0u8; 8];
+            match device.read_exact(&mut report) {
+                Ok(()) => events.push(JoystickEvent {
+                    event_type: report[6],
+                    number: report[7],
+                    value: i16::from_le_bytes([report[4], report[5]]),
+                }),
+                Err(error) if error.kind() == ErrorKind::WouldBlock => break,
+                Err(error) if error.kind() == ErrorKind::UnexpectedEof => break,
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("reading PS Move joystick event from {joystick_path}")
+                    });
+                }
+            }
+        }
+        Ok(events)
+    }
+
+    #[cfg(not(unix))]
+    fn read_joystick_events(&mut self, joystick_path: &str) -> Result<Vec<JoystickEvent>> {
+        if joystick_path.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        Err(anyhow!(
+            "PS Move controller state joystick reads are currently implemented for Unix input paths"
+        ))
+    }
 }
 
 fn publish_move_controller_states(
@@ -422,18 +472,51 @@ fn publish_move_controller_states(
     reader: &mut impl MoveControllerStateReader,
 ) -> Result<()> {
     for state in active {
-        let Some(report) = reader.read_report(&state.source.hidraw_path)? else {
-            continue;
+        let record = if is_joystick_path(&state.source.hidraw_path) {
+            let events = reader.read_joystick_events(&state.source.hidraw_path)?;
+            if events.is_empty() {
+                continue;
+            }
+            for event in events {
+                match event.event_type & 0x7f {
+                    0x01 => {
+                        if let Some(button) = state.joystick_buttons.get_mut(event.number as usize)
+                        {
+                            *button = event.value != 0;
+                        }
+                    }
+                    0x02 => {
+                        if let Some(axis) = state.joystick_axes.get_mut(event.number as usize) {
+                            *axis = event.value;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            state.sequence = state.sequence.saturating_add(1);
+            build_move_controller_state_record_from_joystick(
+                options,
+                &state.source,
+                state.sequence,
+                state.joystick_axes,
+                state.joystick_buttons,
+                timestamp_ns()?,
+                timestamp()?,
+            )
+        } else {
+            let Some(report) = reader.read_report(&state.source.hidraw_path)? else {
+                continue;
+            };
+            state.sequence = state.sequence.saturating_add(1);
+            build_move_controller_state_record(
+                options,
+                &state.source,
+                state.sequence,
+                &report,
+                timestamp_ns()?,
+                timestamp()?,
+            )
         };
-        state.sequence = state.sequence.saturating_add(1);
-        let record = build_move_controller_state_record(
-            options,
-            &state.source,
-            state.sequence,
-            &report,
-            timestamp_ns()?,
-            timestamp()?,
-        );
         node.put(&record.stream_id, &record)?;
         node.put(
             &format!("{}:{}", record.stream_id, record.sequence),
@@ -441,6 +524,10 @@ fn publish_move_controller_states(
         )?;
     }
     Ok(())
+}
+
+fn is_joystick_path(path: &str) -> bool {
+    path.contains("/dev/input/js") || path.contains("-joystick")
 }
 
 fn build_move_controller_state_record(
@@ -480,6 +567,71 @@ fn build_move_controller_state_record(
         battery01: move_battery01(report.get(12).copied().unwrap_or_default()),
         observed_at,
     }
+}
+
+fn build_move_controller_state_record_from_joystick(
+    options: &Options,
+    source: &MoveStateSource,
+    sequence: u64,
+    axes: [i16; 16],
+    buttons: [bool; 32],
+    source_timestamp_ns: i64,
+    observed_at: String,
+) -> MuninnMoveControllerStateRecord {
+    MuninnMoveControllerStateRecord {
+        stream_id: format!(
+            "{}:{}:move-controller-state",
+            options.host_id, source.move_id
+        ),
+        host_id: options.host_id.clone(),
+        move_id: source.move_id.clone(),
+        sequence,
+        source_timestamp_ns,
+        accelerometer_xyz: vec![axes[0] as f32, axes[1] as f32, axes[2] as f32],
+        gyroscope_xyz: vec![axes[3] as f32, axes[4] as f32, axes[5] as f32],
+        magnetometer_xyz: vec![axes[6] as f32, axes[7] as f32, axes[8] as f32],
+        trigger_value: axis_to_unit(axes[2]),
+        buttons: joystick_button_names(buttons),
+        battery01: f32::NAN,
+        observed_at,
+    }
+}
+
+fn joystick_button_names(buttons: [bool; 32]) -> Vec<String> {
+    [
+        (0, "select"),
+        (1, "l3"),
+        (2, "r3"),
+        (3, "start"),
+        (4, "up"),
+        (5, "right"),
+        (6, "down"),
+        (7, "left"),
+        (8, "l2"),
+        (9, "r2"),
+        (10, "l1"),
+        (11, "r1"),
+        (12, "triangle"),
+        (13, "circle"),
+        (14, "cross"),
+        (15, "square"),
+        (16, "ps"),
+        (17, "move"),
+        (18, "trigger"),
+    ]
+    .iter()
+    .filter_map(|(index, name)| {
+        if buttons.get(*index).copied().unwrap_or(false) {
+            Some((*name).to_string())
+        } else {
+            None
+        }
+    })
+    .collect()
+}
+
+fn axis_to_unit(value: i16) -> f32 {
+    ((value as f32 + 32768.0) / 65535.0).clamp(0.0, 1.0)
 }
 
 fn move_button_names(report: &[u8]) -> Vec<String> {
