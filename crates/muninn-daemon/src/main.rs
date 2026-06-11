@@ -19,6 +19,7 @@ enum Mode {
     Health,
     DryRun,
     RequestMoveLight,
+    MoveLightStatus,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -48,6 +49,7 @@ struct Options {
     move_colors: Vec<String>,
     move_durations_ms: Vec<u32>,
     move_repeat_count: u32,
+    command_id: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -84,6 +86,7 @@ fn main() -> Result<()> {
         Mode::Activate => activate(options, CmdSpawner),
         Mode::Health => health_check(&options),
         Mode::RequestMoveLight => request_move_light(options),
+        Mode::MoveLightStatus => move_light_status(options),
         Mode::DryRun => {
             let plan = build_mux_plan(&options, "dry-run".to_string());
             println!("{}", plan.command_line);
@@ -466,6 +469,32 @@ fn request_move_light(options: Options) -> Result<()> {
     Ok(())
 }
 
+fn move_light_status(options: Options) -> Result<()> {
+    let node = open_node(&options, "muninn-move-light-status")?;
+    let mut commands = node.cache().get_all::<MuninnMoveLightCommandRecord>()?;
+    commands.retain(|command| command.host_id == options.host_id);
+    if let Some(command_id) = options.command_id.as_deref() {
+        commands.retain(|command| command.command_id == command_id);
+    }
+    commands.sort_by(|left, right| left.command_id.cmp(&right.command_id));
+
+    if commands.is_empty() {
+        println!(
+            "No Muninn Move light commands found for {}.",
+            options.host_id
+        );
+        return Ok(());
+    }
+
+    for command in commands {
+        println!(
+            "{} {} {} {} {}",
+            command.command_id, command.host_id, command.move_id, command.state, command.detail
+        );
+    }
+    Ok(())
+}
+
 fn build_move_light_command(options: &Options) -> Result<MuninnMoveLightCommandRecord> {
     parse_move_colors(&options.move_colors)?;
     if options.hidraw_path.trim().is_empty() {
@@ -668,6 +697,7 @@ impl Options {
             move_colors: Vec::new(),
             move_durations_ms: Vec::new(),
             move_repeat_count: 1,
+            command_id: None,
         };
 
         let mut args = args.peekable();
@@ -676,6 +706,7 @@ impl Options {
                 "serve" => options.mode = Mode::Serve,
                 "activate" => options.mode = Mode::Activate,
                 "request-move-light" => options.mode = Mode::RequestMoveLight,
+                "move-light-status" => options.mode = Mode::MoveLightStatus,
                 "--health" => options.mode = Mode::Health,
                 "--dry-run" => options.mode = Mode::DryRun,
                 "--store" => options.store_path = PathBuf::from(take_value(&mut args, "--store")?),
@@ -732,6 +763,7 @@ impl Options {
                         .parse()
                         .context("--repeat-count must be a positive integer")?
                 }
+                "--command" => options.command_id = Some(take_value(&mut args, "--command")?),
                 "--help" | "-h" => return Err(anyhow!(help_text())),
                 other => {
                     return Err(anyhow!(
@@ -763,7 +795,7 @@ fn timestamp() -> Result<String> {
 }
 
 fn help_text() -> &'static str {
-    "Usage: muninn [serve|activate|request-move-light] [--store <path>] [--target-host <host>] [--port <port>] [--obs-target-host <host>] [--obs-port <port>] [--loopback-script <path>] [--ffmpeg <path>] [--dry-run] [--health]\n\nMuninn is Odin's portable telemetry Verse assembler. serve publishes cheap typed telemetry affordances; activate starts an explicitly requested local stream; request-move-light publishes a typed Move light command for Muninn serve to execute."
+    "Usage: muninn [serve|activate|request-move-light|move-light-status] [--store <path>] [--target-host <host>] [--port <port>] [--obs-target-host <host>] [--obs-port <port>] [--loopback-script <path>] [--ffmpeg <path>] [--dry-run] [--health]\n\nMuninn is Odin's portable telemetry Verse assembler. serve publishes cheap typed telemetry affordances; activate starts an explicitly requested local stream; request-move-light publishes a typed Move light command for Muninn serve to execute; move-light-status reads typed command receipts."
 }
 
 #[cfg(test)]
@@ -933,5 +965,25 @@ mod tests {
         assert_eq!(command.colors, vec!["#35ff6c"]);
         assert_eq!(command.durations_ms, vec![0]);
         assert_eq!(command.state, "pending");
+    }
+
+    #[test]
+    fn move_light_status_accepts_command_filter() {
+        let options = Options::parse(
+            [
+                "move-light-status",
+                "--host",
+                "nightwing",
+                "--command",
+                "cmd-1",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap();
+
+        assert_eq!(options.mode, Mode::MoveLightStatus);
+        assert_eq!(options.host_id, "nightwing");
+        assert_eq!(options.command_id.as_deref(), Some("cmd-1"));
     }
 }

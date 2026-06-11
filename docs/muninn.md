@@ -94,9 +94,13 @@ muninn request-move-light \
   --host nightwing \
   --move move-usb \
   --hidraw /dev/hidraw1 \
-  --color '#35ff6c' \
+  --color 35ff6c \
   --duration-ms 0 \
   --repeat-count 1
+
+muninn move-light-status \
+  --store ~/.local/state/gamecult/muninn/muninn.telemetry.cc \
+  --host nightwing
 ```
 
 Idunn keeps the Muninn daemon alive. Idunn does not learn a Move-specific
