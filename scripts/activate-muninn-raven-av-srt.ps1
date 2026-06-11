@@ -47,10 +47,10 @@ if (`$obsArgs -like " --no-obs-target") {
 `$arguments += @("--audio-device", "$AudioDevice", "--ffmpeg", "$Ffmpeg", "--loopback-script", "$LoopbackScript", "--log-root", "$LogRoot")
 `$encodedArguments = (`$arguments | ConvertTo-Json -Compress)
 `$psLines = @(
-  "`$ErrorActionPreference = ""Stop""",
-  "`$arguments = '$encodedArguments' | ConvertFrom-Json",
-  "`$process = Start-Process -FilePath ""$MuninnExe"" -ArgumentList `$arguments -WorkingDirectory ""`$muninnDir"" -WindowStyle Hidden -PassThru -RedirectStandardOutput ""$LogRoot\muninn-activate.out.log"" -RedirectStandardError ""$LogRoot\muninn-activate.err.log""",
-  "`$process.Id | Set-Content -Encoding ASCII -LiteralPath ""`$pidPath"""
+  '`$ErrorActionPreference = "Stop"',
+  '`$arguments = ''$encodedArguments'' | ConvertFrom-Json',
+  '`$process = Start-Process -FilePath "$MuninnExe" -ArgumentList `$arguments -WindowStyle Hidden -PassThru -RedirectStandardOutput "$LogRoot\muninn-activate.out.log" -RedirectStandardError "$LogRoot\muninn-activate.err.log"',
+  '`$process.Id | Set-Content -Encoding ASCII -LiteralPath "$LogRoot\muninn-activate.pid"'
 )
 Set-Content -LiteralPath `$psLauncher -Value `$psLines -Encoding ASCII
 `$lines = @(

@@ -25,9 +25,9 @@ New-Item -ItemType Directory -Force -Path (Split-Path -Parent "$StorePath") | Ou
 `$psLauncher = Join-Path `$muninnDir "start-muninn-serve.ps1"
 `$pidPath = Join-Path "$LogRoot" "muninn-serve.pid"
 `$psLines = @(
-  "`$ErrorActionPreference = ""Stop""",
-  "`$process = Start-Process -FilePath ""$MuninnExe"" -ArgumentList @(""serve"", ""--store"", ""$StorePath"", ""--log-root"", ""$LogRoot"", ""--host"", ""raven"", ""--interval-seconds"", ""15"") -WorkingDirectory ""`$muninnDir"" -WindowStyle Hidden -PassThru -RedirectStandardOutput ""$LogRoot\muninn-serve.out.log"" -RedirectStandardError ""$LogRoot\muninn-serve.err.log""",
-  "`$process.Id | Set-Content -Encoding ASCII -LiteralPath ""`$pidPath"""
+  '`$ErrorActionPreference = "Stop"',
+  '`$process = Start-Process -FilePath "$MuninnExe" -ArgumentList @("serve", "--store", "$StorePath", "--log-root", "$LogRoot", "--host", "raven", "--interval-seconds", "15") -WindowStyle Hidden -PassThru -RedirectStandardOutput "$LogRoot\muninn-serve.out.log" -RedirectStandardError "$LogRoot\muninn-serve.err.log"',
+  '`$process.Id | Set-Content -Encoding ASCII -LiteralPath "$LogRoot\muninn-serve.pid"'
 )
 Set-Content -LiteralPath `$psLauncher -Value `$psLines -Encoding ASCII
 `$lines = @(
