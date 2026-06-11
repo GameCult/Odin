@@ -85,6 +85,20 @@ whose `host_id` matches the local Muninn host, writes PS Move HID report `0x06`
 to the command's `hidraw_path`, and updates the same command record to
 `running`, `completed`, or `failed`.
 
+For operator smoke and bring-up, `request-move-light` writes that typed command
+into the local Muninn store without touching HID directly:
+
+```bash
+muninn request-move-light \
+  --store ~/.local/state/gamecult/muninn/muninn.telemetry.cc \
+  --host nightwing \
+  --move move-usb \
+  --hidraw /dev/hidraw1 \
+  --color '#35ff6c' \
+  --duration-ms 0 \
+  --repeat-count 1
+```
+
 Idunn keeps the Muninn daemon alive. Idunn does not learn a Move-specific
 watcher, and Mimir does not write HID directly except through temporary smoke
 scripts used to prove hardware behavior before a Muninn daemon is available.

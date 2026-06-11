@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use cultmesh_rs::{CultMesh, CultMeshNodeOptions};
 use odin_core::{
     MuninnCaptureStreamRecord, MuninnMoveLightCommandRecord, MuninnObsStreamCatalogRecord,
@@ -18,6 +18,7 @@ enum Mode {
     Activate,
     Health,
     DryRun,
+    RequestMoveLight,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -42,6 +43,11 @@ struct Options {
     loopback_script: PathBuf,
     log_root: PathBuf,
     interval_seconds: Option<u64>,
+    move_id: String,
+    hidraw_path: String,
+    move_colors: Vec<String>,
+    move_durations_ms: Vec<u32>,
+    move_repeat_count: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -77,6 +83,7 @@ fn main() -> Result<()> {
         Mode::Serve => serve(options),
         Mode::Activate => activate(options, CmdSpawner),
         Mode::Health => health_check(&options),
+        Mode::RequestMoveLight => request_move_light(options),
         Mode::DryRun => {
             let plan = build_mux_plan(&options, "dry-run".to_string());
             println!("{}", plan.command_line);
@@ -447,6 +454,48 @@ fn health_check(options: &Options) -> Result<()> {
     }
 }
 
+fn request_move_light(options: Options) -> Result<()> {
+    ensure_state_dirs(&options)?;
+    let mut node = open_node(&options, "muninn-move-light-request")?;
+    let command = build_move_light_command(&options)?;
+    node.put(&command.command_id, &command)?;
+    println!(
+        "Published Muninn Move light command {} for {} on {}.",
+        command.command_id, command.move_id, command.host_id
+    );
+    Ok(())
+}
+
+fn build_move_light_command(options: &Options) -> Result<MuninnMoveLightCommandRecord> {
+    parse_move_colors(&options.move_colors)?;
+    if options.hidraw_path.trim().is_empty() {
+        return Err(anyhow!("--hidraw is required for request-move-light"));
+    }
+    if options.move_repeat_count == 0 {
+        return Err(anyhow!("--repeat-count must be greater than zero"));
+    }
+    if options.move_durations_ms.len() != options.move_colors.len() {
+        return Err(anyhow!(
+            "--duration-ms must be provided once for each --color"
+        ));
+    }
+
+    let now = timestamp()?;
+    Ok(MuninnMoveLightCommandRecord {
+        command_id: format!("{}:{}:move-light:{}", options.host_id, options.move_id, now),
+        host_id: options.host_id.clone(),
+        move_id: options.move_id.clone(),
+        hidraw_path: options.hidraw_path.clone(),
+        colors: options.move_colors.clone(),
+        durations_ms: options.move_durations_ms.clone(),
+        repeat_count: options.move_repeat_count,
+        authority: "muninn.operator-request".to_string(),
+        state: "pending".to_string(),
+        detail: "operator requested a typed Move light command".to_string(),
+        updated_at: now,
+    })
+}
+
 fn build_mux_plan(options: &Options, timestamp: String) -> MuxPlan {
     let command_file = options.log_root.join(format!("muninn-{timestamp}.cmd"));
     let targets = build_targets(options);
@@ -614,6 +663,11 @@ impl Options {
             loopback_script: PathBuf::from("scripts/wasapi-loopback-capture.ps1"),
             log_root: PathBuf::from("C:/Meta/Odin/logs/muninn"),
             interval_seconds: None,
+            move_id: "move-usb".to_string(),
+            hidraw_path: String::new(),
+            move_colors: Vec::new(),
+            move_durations_ms: Vec::new(),
+            move_repeat_count: 1,
         };
 
         let mut args = args.peekable();
@@ -621,6 +675,7 @@ impl Options {
             match arg.as_str() {
                 "serve" => options.mode = Mode::Serve,
                 "activate" => options.mode = Mode::Activate,
+                "request-move-light" => options.mode = Mode::RequestMoveLight,
                 "--health" => options.mode = Mode::Health,
                 "--dry-run" => options.mode = Mode::DryRun,
                 "--store" => options.store_path = PathBuf::from(take_value(&mut args, "--store")?),
@@ -666,6 +721,17 @@ impl Options {
                             .context("--interval-seconds must be a positive integer")?,
                     )
                 }
+                "--move" => options.move_id = take_value(&mut args, "--move")?,
+                "--hidraw" => options.hidraw_path = take_value(&mut args, "--hidraw")?,
+                "--color" => options.move_colors.push(take_value(&mut args, "--color")?),
+                "--duration-ms" => options
+                    .move_durations_ms
+                    .push(take_value(&mut args, "--duration-ms")?.parse()?),
+                "--repeat-count" => {
+                    options.move_repeat_count = take_value(&mut args, "--repeat-count")?
+                        .parse()
+                        .context("--repeat-count must be a positive integer")?
+                }
                 "--help" | "-h" => return Err(anyhow!(help_text())),
                 other => {
                     return Err(anyhow!(
@@ -697,7 +763,7 @@ fn timestamp() -> Result<String> {
 }
 
 fn help_text() -> &'static str {
-    "Usage: muninn [serve|activate] [--store <path>] [--target-host <host>] [--port <port>] [--obs-target-host <host>] [--obs-port <port>] [--loopback-script <path>] [--ffmpeg <path>] [--dry-run] [--health]\n\nMuninn is Odin's portable telemetry Verse assembler. serve publishes cheap typed telemetry affordances; activate starts an explicitly requested local stream."
+    "Usage: muninn [serve|activate|request-move-light] [--store <path>] [--target-host <host>] [--port <port>] [--obs-target-host <host>] [--obs-port <port>] [--loopback-script <path>] [--ffmpeg <path>] [--dry-run] [--health]\n\nMuninn is Odin's portable telemetry Verse assembler. serve publishes cheap typed telemetry affordances; activate starts an explicitly requested local stream; request-move-light publishes a typed Move light command for Muninn serve to execute."
 }
 
 #[cfg(test)]
@@ -789,11 +855,9 @@ mod tests {
         let sources = available_sources(&options);
 
         assert!(sources.iter().any(|source| source.starts_with("screen:")));
-        assert!(
-            sources
-                .iter()
-                .any(|source| source.starts_with("audio-loopback:"))
-        );
+        assert!(sources
+            .iter()
+            .any(|source| source.starts_with("audio-loopback:")));
     }
 
     #[test]
@@ -838,5 +902,36 @@ mod tests {
         assert_eq!(result.state, "failed");
         assert!(result.detail.contains("expected #rrggbb"));
         assert!(writer.writes.is_empty());
+    }
+
+    #[test]
+    fn request_move_light_builds_pending_typed_command() {
+        let options = Options::parse(
+            [
+                "request-move-light",
+                "--host",
+                "nightwing",
+                "--move",
+                "move-usb",
+                "--hidraw",
+                "/dev/hidraw1",
+                "--color",
+                "#35ff6c",
+                "--duration-ms",
+                "0",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap();
+
+        let command = build_move_light_command(&options).unwrap();
+
+        assert_eq!(command.host_id, "nightwing");
+        assert_eq!(command.move_id, "move-usb");
+        assert_eq!(command.hidraw_path, "/dev/hidraw1");
+        assert_eq!(command.colors, vec!["#35ff6c"]);
+        assert_eq!(command.durations_ms, vec![0]);
+        assert_eq!(command.state, "pending");
     }
 }
