@@ -257,6 +257,16 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 interval_seconds: 300,
             },
             DaemonTarget {
+                daemon_id: "weksa".to_string(),
+                verse_id: "starfire.local".to_string(),
+                name: "Weksa intent and utterance lowering service".to_string(),
+                health_command: Some(script("health-weksa.cmd")),
+                deploy_command: None,
+                restart_command: Some(script("restart-weksa.cmd")),
+                enabled: true,
+                interval_seconds: 60,
+            },
+            DaemonTarget {
                 daemon_id: "muninn".to_string(),
                 verse_id: "raven.local".to_string(),
                 name: "Muninn telemetry Verse assembler".to_string(),
