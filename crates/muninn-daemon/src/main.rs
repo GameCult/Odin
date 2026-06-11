@@ -1,8 +1,8 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use cultmesh_rs::{CultMesh, CultMeshNodeOptions};
 use odin_core::{
-    MuninnCaptureStreamRecord, MuninnMoveLightCommandRecord, MuninnObsStreamCatalogRecord,
-    MuninnTelemetrySurfaceRecord, OdinDocuments,
+    MuninnCaptureStreamRecord, MuninnMoveControllerStateRecord, MuninnMoveLightCommandRecord,
+    MuninnObsStreamCatalogRecord, MuninnTelemetrySurfaceRecord, OdinDocuments,
 };
 use std::env;
 use std::fs;
@@ -11,6 +11,11 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+#[cfg(unix)]
+use std::io::{ErrorKind, Read};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Mode {
@@ -50,6 +55,13 @@ struct Options {
     move_durations_ms: Vec<u32>,
     move_repeat_count: u32,
     command_id: Option<String>,
+    move_state_sources: Vec<MoveStateSource>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MoveStateSource {
+    move_id: String,
+    hidraw_path: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -65,6 +77,11 @@ struct ActiveMoveLightCommand {
     step_index: usize,
     repeats_done: u32,
     next_write_at: Instant,
+}
+
+struct ActiveMoveStateSource {
+    source: MoveStateSource,
+    sequence: u64,
 }
 
 trait ProcessSpawner {
@@ -106,19 +123,37 @@ fn main() -> Result<()> {
 fn serve(options: Options) -> Result<()> {
     ensure_state_dirs(&options)?;
     let mut active_move_lights = Vec::new();
+    let mut active_move_states: Vec<ActiveMoveStateSource> = options
+        .move_state_sources
+        .iter()
+        .cloned()
+        .map(|source| ActiveMoveStateSource {
+            source,
+            sequence: 0,
+        })
+        .collect();
 
     loop {
         let mut node = open_node(&options, "muninn-daemon")?;
         register_move_light_commands(&mut node, &options, &mut active_move_lights)?;
         tick_move_light_commands(&mut node, &mut active_move_lights, &mut HidMoveLightWriter)?;
+        publish_move_controller_states(
+            &mut node,
+            &options,
+            &mut active_move_states,
+            &mut HidMoveControllerStateReader,
+        )?;
         publish_surface(&mut node, &options, "idle", &[])?;
-        if options.interval_seconds.is_none() && active_move_lights.is_empty() {
+        if options.interval_seconds.is_none()
+            && active_move_lights.is_empty()
+            && active_move_states.is_empty()
+        {
             return Ok(());
         }
-        let sleep = if active_move_lights.is_empty() {
-            Duration::from_secs(options.interval_seconds.unwrap_or(15))
-        } else {
+        let sleep = if !active_move_lights.is_empty() || !active_move_states.is_empty() {
             Duration::from_millis(250)
+        } else {
+            Duration::from_secs(options.interval_seconds.unwrap_or(15))
         };
         thread::sleep(sleep);
     }
@@ -201,6 +236,7 @@ fn publish_surface(
             "screen.capture.ddagrab".to_string(),
             "audio.loopback.wasapi".to_string(),
             "psmove.light.command".to_string(),
+            "psmove.controller.state".to_string(),
             "audio.input.enumeration.pending".to_string(),
             "video.input.enumeration.pending".to_string(),
         ],
@@ -337,6 +373,153 @@ impl MoveLightWriter for HidMoveLightWriter {
             .write_all(report)
             .with_context(|| format!("writing PS Move HID report to {hidraw_path}"))
     }
+}
+
+trait MoveControllerStateReader {
+    fn read_report(&mut self, hidraw_path: &str) -> Result<Option<Vec<u8>>>;
+}
+
+struct HidMoveControllerStateReader;
+
+impl MoveControllerStateReader for HidMoveControllerStateReader {
+    #[cfg(unix)]
+    fn read_report(&mut self, hidraw_path: &str) -> Result<Option<Vec<u8>>> {
+        let mut device = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(hidraw_path)
+            .with_context(|| format!("opening PS Move HID input path {hidraw_path}"))?;
+        let mut report = vec![0u8; 64];
+        match device.read(&mut report) {
+            Ok(0) => Ok(None),
+            Ok(count) => {
+                report.truncate(count);
+                Ok(Some(report))
+            }
+            Err(error) if error.kind() == ErrorKind::WouldBlock => Ok(None),
+            Err(error) => Err(error)
+                .with_context(|| format!("reading PS Move HID input report from {hidraw_path}")),
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn read_report(&mut self, hidraw_path: &str) -> Result<Option<Vec<u8>>> {
+        if hidraw_path.trim().is_empty() {
+            return Ok(None);
+        }
+        Err(anyhow!(
+            "PS Move controller state HID reads are currently implemented for Unix hidraw paths"
+        ))
+    }
+}
+
+fn publish_move_controller_states(
+    node: &mut cultmesh_rs::CultMeshNode,
+    options: &Options,
+    active: &mut [ActiveMoveStateSource],
+    reader: &mut impl MoveControllerStateReader,
+) -> Result<()> {
+    for state in active {
+        let Some(report) = reader.read_report(&state.source.hidraw_path)? else {
+            continue;
+        };
+        state.sequence = state.sequence.saturating_add(1);
+        let record = build_move_controller_state_record(
+            options,
+            &state.source,
+            state.sequence,
+            &report,
+            timestamp_ns()?,
+            timestamp()?,
+        );
+        node.put(&record.stream_id, &record)?;
+        node.put(
+            &format!("{}:{}", record.stream_id, record.sequence),
+            &record,
+        )?;
+    }
+    Ok(())
+}
+
+fn build_move_controller_state_record(
+    options: &Options,
+    source: &MoveStateSource,
+    sequence: u64,
+    report: &[u8],
+    source_timestamp_ns: i64,
+    observed_at: String,
+) -> MuninnMoveControllerStateRecord {
+    MuninnMoveControllerStateRecord {
+        stream_id: format!(
+            "{}:{}:move-controller-state",
+            options.host_id, source.move_id
+        ),
+        host_id: options.host_id.clone(),
+        move_id: source.move_id.clone(),
+        sequence,
+        source_timestamp_ns,
+        accelerometer_xyz: vec![
+            read_le_i16(report, 19) as f32,
+            read_le_i16(report, 21) as f32,
+            read_le_i16(report, 23) as f32,
+        ],
+        gyroscope_xyz: vec![
+            read_le_i16(report, 25) as f32,
+            read_le_i16(report, 27) as f32,
+            read_le_i16(report, 29) as f32,
+        ],
+        magnetometer_xyz: vec![
+            read_le_i16(report, 31) as f32,
+            read_le_i16(report, 33) as f32,
+            read_le_i16(report, 35) as f32,
+        ],
+        trigger_value: report.get(6).copied().unwrap_or_default() as f32 / 255.0,
+        buttons: move_button_names(report),
+        battery01: move_battery01(report.get(12).copied().unwrap_or_default()),
+        observed_at,
+    }
+}
+
+fn move_button_names(report: &[u8]) -> Vec<String> {
+    let bits = report.get(1).copied().unwrap_or_default() as u32
+        | ((report.get(2).copied().unwrap_or_default() as u32) << 8)
+        | ((report.get(3).copied().unwrap_or_default() as u32) << 16);
+    [
+        (1 << 4, "triangle"),
+        (1 << 5, "circle"),
+        (1 << 6, "cross"),
+        (1 << 7, "square"),
+        (1 << 8, "select"),
+        (1 << 11, "start"),
+        (1 << 16, "ps"),
+        (1 << 19, "move"),
+        (1 << 20, "trigger"),
+    ]
+    .iter()
+    .filter_map(|(mask, name)| {
+        if bits & mask != 0 {
+            Some((*name).to_string())
+        } else {
+            None
+        }
+    })
+    .collect()
+}
+
+fn move_battery01(value: u8) -> f32 {
+    match value {
+        0x00..=0x05 => value as f32 / 5.0,
+        0xee | 0xef => 1.0,
+        _ => f32::NAN,
+    }
+}
+
+fn read_le_i16(report: &[u8], offset: usize) -> i16 {
+    let Some(lo) = report.get(offset).copied() else {
+        return 0;
+    };
+    let hi = report.get(offset + 1).copied().unwrap_or_default();
+    i16::from_le_bytes([lo, hi])
 }
 
 fn register_move_light_commands(
@@ -795,6 +978,7 @@ impl Options {
             move_durations_ms: Vec::new(),
             move_repeat_count: 1,
             command_id: None,
+            move_state_sources: Vec::new(),
         };
 
         let mut args = args.peekable();
@@ -851,6 +1035,12 @@ impl Options {
                 }
                 "--move" => options.move_id = take_value(&mut args, "--move")?,
                 "--hidraw" => options.hidraw_path = take_value(&mut args, "--hidraw")?,
+                "--move-state" => {
+                    let value = take_value(&mut args, "--move-state")?;
+                    options
+                        .move_state_sources
+                        .push(parse_move_state_source(&value)?);
+                }
                 "--color" => options.move_colors.push(take_value(&mut args, "--color")?),
                 "--duration-ms" => options
                     .move_durations_ms
@@ -891,8 +1081,33 @@ fn timestamp() -> Result<String> {
     Ok(format!("unix-{seconds}"))
 }
 
+fn timestamp_ns() -> Result<i64> {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before Unix epoch")?
+        .as_nanos();
+    i64::try_from(nanos).context("system timestamp does not fit i64 nanoseconds")
+}
+
 fn help_text() -> &'static str {
-    "Usage: muninn [serve|activate|request-move-light|move-light-status] [--store <path>] [--target-host <host>] [--port <port>] [--obs-target-host <host>] [--obs-port <port>] [--loopback-script <path>] [--ffmpeg <path>] [--dry-run] [--health]\n\nMuninn is Odin's portable telemetry Verse assembler. serve publishes cheap typed telemetry affordances; activate starts an explicitly requested local stream; request-move-light publishes a typed Move light command for Muninn serve to execute; move-light-status reads typed command receipts."
+    "Usage: muninn [serve|activate|request-move-light|move-light-status] [--store <path>] [--target-host <host>] [--port <port>] [--obs-target-host <host>] [--obs-port <port>] [--loopback-script <path>] [--ffmpeg <path>] [--move-state <move-id>=<hidraw-path>] [--dry-run] [--health]\n\nMuninn is Odin's portable telemetry Verse assembler. serve publishes cheap typed telemetry affordances and optional source-local Move controller state; activate starts an explicitly requested local stream; request-move-light publishes a typed Move light command for Muninn serve to execute; move-light-status reads typed command receipts."
+}
+
+fn parse_move_state_source(value: &str) -> Result<MoveStateSource> {
+    let Some((move_id, hidraw_path)) = value.split_once('=') else {
+        return Err(anyhow!(
+            "--move-state must be formatted as <move-id>=<hidraw-path>"
+        ));
+    };
+    if move_id.trim().is_empty() || hidraw_path.trim().is_empty() {
+        return Err(anyhow!(
+            "--move-state requires non-empty move id and hidraw path"
+        ));
+    }
+    Ok(MoveStateSource {
+        move_id: move_id.to_string(),
+        hidraw_path: hidraw_path.to_string(),
+    })
 }
 
 #[cfg(test)]
@@ -984,9 +1199,11 @@ mod tests {
         let sources = available_sources(&options);
 
         assert!(sources.iter().any(|source| source.starts_with("screen:")));
-        assert!(sources
-            .iter()
-            .any(|source| source.starts_with("audio-loopback:")));
+        assert!(
+            sources
+                .iter()
+                .any(|source| source.starts_with("audio-loopback:"))
+        );
     }
 
     #[test]
@@ -1082,5 +1299,73 @@ mod tests {
         assert_eq!(options.mode, Mode::MoveLightStatus);
         assert_eq!(options.host_id, "nightwing");
         assert_eq!(options.command_id.as_deref(), Some("cmd-1"));
+    }
+
+    #[test]
+    fn serve_accepts_move_state_sources() {
+        let options = Options::parse(
+            [
+                "serve",
+                "--host",
+                "nightwing",
+                "--move-state",
+                "move-usb=/dev/hidraw1",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap();
+
+        assert_eq!(
+            options.move_state_sources,
+            vec![MoveStateSource {
+                move_id: "move-usb".to_string(),
+                hidraw_path: "/dev/hidraw1".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn move_controller_state_projects_raw_hid_report() {
+        let options = Options::parse(
+            ["serve", "--host", "nightwing"]
+                .into_iter()
+                .map(String::from),
+        )
+        .unwrap();
+        let source = MoveStateSource {
+            move_id: "move-usb".to_string(),
+            hidraw_path: "/dev/hidraw1".to_string(),
+        };
+        let mut report = vec![0u8; 64];
+        report[1] = 0b1111_0000;
+        report[2] = 0b0000_1001;
+        report[3] = 0b0001_1000;
+        report[6] = 128;
+        report[12] = 4;
+        report[19..21].copy_from_slice(&123i16.to_le_bytes());
+        report[21..23].copy_from_slice(&(-456i16).to_le_bytes());
+        report[23..25].copy_from_slice(&789i16.to_le_bytes());
+        report[25..27].copy_from_slice(&11i16.to_le_bytes());
+        report[27..29].copy_from_slice(&22i16.to_le_bytes());
+        report[29..31].copy_from_slice(&33i16.to_le_bytes());
+
+        let record = build_move_controller_state_record(
+            &options,
+            &source,
+            42,
+            &report,
+            123_456,
+            "unix-1".to_string(),
+        );
+
+        assert_eq!(record.stream_id, "nightwing:move-usb:move-controller-state");
+        assert_eq!(record.sequence, 42);
+        assert_eq!(record.accelerometer_xyz, vec![123.0, -456.0, 789.0]);
+        assert_eq!(record.gyroscope_xyz, vec![11.0, 22.0, 33.0]);
+        assert!(record.buttons.contains(&"triangle".to_string()));
+        assert!(record.buttons.contains(&"trigger".to_string()));
+        assert!((record.trigger_value - (128.0 / 255.0)).abs() < f32::EPSILON);
+        assert!((record.battery01 - 0.8).abs() < f32::EPSILON);
     }
 }

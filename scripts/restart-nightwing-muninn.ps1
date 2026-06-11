@@ -3,6 +3,7 @@ param(
   [string] $MuninnExe = "/home/metacrat/.local/bin/muninn",
   [string] $StorePath = "/home/metacrat/.local/state/gamecult/muninn/muninn.telemetry.cc",
   [string] $LogRoot = "/home/metacrat/.local/state/gamecult/muninn",
+  [string] $MoveState = "move-usb=/dev/hidraw1",
   [int] $IntervalSeconds = 15
 )
 
@@ -26,6 +27,7 @@ nohup '$MuninnExe' serve \
   --store '$StorePath' \
   --log-root '$LogRoot' \
   --host nightwing \
+  --move-state '$MoveState' \
   --interval-seconds '$IntervalSeconds' \
   > '$LogRoot/muninn-serve.out.log' \
   2> '$LogRoot/muninn-serve.err.log' \
