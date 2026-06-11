@@ -23,6 +23,7 @@ pub const MUNINN_TELEMETRY_SURFACE_SCHEMA: &str = "muninn.telemetry_surface.v1";
 pub const MUNINN_CAPTURE_STREAM_SCHEMA: &str = "muninn.capture_stream.v1";
 pub const MUNINN_OBS_STREAM_CATALOG_SCHEMA: &str = "muninn.obs_stream_catalog.v1";
 pub const MUNINN_MOVE_MARKER_CANDIDATE_SCHEMA: &str = "muninn.move_marker_candidate.v1";
+pub const MUNINN_MOVE_LIGHT_COMMAND_SCHEMA: &str = "muninn.move_light_command.v1";
 
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
 #[cultcache(type = "odin.snapshot", schema = "odin.snapshot.v1")]
@@ -451,6 +452,36 @@ pub struct MuninnMoveMarkerCandidateRecord {
     pub observed_at: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(
+    type = "muninn.move_light_command",
+    schema = "muninn.move_light_command.v1"
+)]
+pub struct MuninnMoveLightCommandRecord {
+    #[cultcache(key = 0)]
+    pub command_id: String,
+    #[cultcache(key = 1)]
+    pub host_id: String,
+    #[cultcache(key = 2)]
+    pub move_id: String,
+    #[cultcache(key = 3)]
+    pub hidraw_path: String,
+    #[cultcache(key = 4)]
+    pub colors: Vec<String>,
+    #[cultcache(key = 5)]
+    pub durations_ms: Vec<u32>,
+    #[cultcache(key = 6)]
+    pub repeat_count: u32,
+    #[cultcache(key = 7)]
+    pub authority: String,
+    #[cultcache(key = 8)]
+    pub state: String,
+    #[cultcache(key = 9)]
+    pub detail: String,
+    #[cultcache(key = 10)]
+    pub updated_at: String,
+}
+
 cultmesh_rs::cultmesh_documents!(OdinDocuments {
     OdinSnapshotRecord => ODIN_SNAPSHOT_SCHEMA,
     OdinVerseRecord => ODIN_VERSE_SCHEMA,
@@ -474,6 +505,7 @@ cultmesh_rs::cultmesh_documents!(OdinDocuments {
     MuninnCaptureStreamRecord => MUNINN_CAPTURE_STREAM_SCHEMA,
     MuninnObsStreamCatalogRecord => MUNINN_OBS_STREAM_CATALOG_SCHEMA,
     MuninnMoveMarkerCandidateRecord => MUNINN_MOVE_MARKER_CANDIDATE_SCHEMA,
+    MuninnMoveLightCommandRecord => MUNINN_MOVE_LIGHT_COMMAND_SCHEMA,
 });
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

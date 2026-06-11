@@ -1,11 +1,12 @@
 use anyhow::{Context, Result, anyhow};
 use cultmesh_rs::{CultMesh, CultMeshNodeOptions};
 use odin_core::{
-    MuninnCaptureStreamRecord, MuninnObsStreamCatalogRecord, MuninnTelemetrySurfaceRecord,
-    OdinDocuments,
+    MuninnCaptureStreamRecord, MuninnMoveLightCommandRecord, MuninnObsStreamCatalogRecord,
+    MuninnTelemetrySurfaceRecord, OdinDocuments,
 };
 use std::env;
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::thread;
@@ -86,9 +87,10 @@ fn main() -> Result<()> {
 
 fn serve(options: Options) -> Result<()> {
     ensure_state_dirs(&options)?;
-    let mut node = open_node(&options, "muninn-daemon")?;
 
     loop {
+        let mut node = open_node(&options, "muninn-daemon")?;
+        process_move_light_commands(&mut node, &options, &mut HidMoveLightWriter)?;
         publish_surface(&mut node, &options, "idle", &[])?;
         if let Some(interval) = options.interval_seconds {
             thread::sleep(Duration::from_secs(interval));
@@ -174,6 +176,7 @@ fn publish_surface(
         stream_affordances: vec![
             "screen.capture.ddagrab".to_string(),
             "audio.loopback.wasapi".to_string(),
+            "psmove.light.command".to_string(),
             "audio.input.enumeration.pending".to_string(),
             "video.input.enumeration.pending".to_string(),
         ],
@@ -292,6 +295,136 @@ fn publish_obs_catalog(
     };
     node.put("obs", &record)?;
     Ok(())
+}
+
+trait MoveLightWriter {
+    fn write_report(&mut self, hidraw_path: &str, report: &[u8]) -> Result<()>;
+}
+
+struct HidMoveLightWriter;
+
+impl MoveLightWriter for HidMoveLightWriter {
+    fn write_report(&mut self, hidraw_path: &str, report: &[u8]) -> Result<()> {
+        let mut device = fs::OpenOptions::new()
+            .write(true)
+            .open(hidraw_path)
+            .with_context(|| format!("opening PS Move HID path {hidraw_path}"))?;
+        device
+            .write_all(report)
+            .with_context(|| format!("writing PS Move HID report to {hidraw_path}"))
+    }
+}
+
+fn process_move_light_commands(
+    node: &mut cultmesh_rs::CultMeshNode,
+    options: &Options,
+    writer: &mut impl MoveLightWriter,
+) -> Result<()> {
+    let commands = node.cache().get_all::<MuninnMoveLightCommandRecord>()?;
+    for command in commands {
+        if command.host_id != options.host_id || command.state != "pending" {
+            continue;
+        }
+
+        let running = MuninnMoveLightCommandRecord {
+            state: "running".to_string(),
+            detail: "Muninn is writing local PS Move HID reports.".to_string(),
+            updated_at: timestamp()?,
+            ..command.clone()
+        };
+        node.put(&running.command_id, &running)?;
+
+        let result = execute_move_light_command(running, writer)?;
+        node.put(&result.command_id, &result)?;
+    }
+    Ok(())
+}
+
+fn execute_move_light_command(
+    command: MuninnMoveLightCommandRecord,
+    writer: &mut impl MoveLightWriter,
+) -> Result<MuninnMoveLightCommandRecord> {
+    let colors = match parse_move_colors(&command.colors) {
+        Ok(colors) => colors,
+        Err(error) => return command_failed(command, &error.to_string()),
+    };
+    if command.hidraw_path.trim().is_empty() {
+        return command_failed(command, "hidraw_path is required");
+    }
+    if command.repeat_count == 0 {
+        return command_failed(command, "repeat_count must be greater than zero");
+    }
+    if command.repeat_count > 1024 {
+        return command_failed(command, "repeat_count must be 1024 or less");
+    }
+    if command.durations_ms.len() != colors.len() {
+        return command_failed(
+            command,
+            "durations_ms must contain one duration for each color",
+        );
+    }
+    if command
+        .durations_ms
+        .iter()
+        .any(|duration| *duration > 60_000)
+    {
+        return command_failed(command, "durations_ms values must be 60000 or less");
+    }
+
+    for _ in 0..command.repeat_count {
+        for (index, (red, green, blue)) in colors.iter().copied().enumerate() {
+            let report = [0x06, 0, red, green, blue, 0, 0, 0, 0];
+            if let Err(error) = writer.write_report(&command.hidraw_path, &report) {
+                return command_failed(command, &format!("{error:#}"));
+            }
+            let duration_ms = command.durations_ms[index];
+            if duration_ms > 0 {
+                thread::sleep(Duration::from_millis(u64::from(duration_ms)));
+            }
+        }
+    }
+
+    Ok(MuninnMoveLightCommandRecord {
+        state: "completed".to_string(),
+        detail: format!(
+            "wrote {} PS Move light step(s) for {} repeat(s)",
+            colors.len(),
+            command.repeat_count
+        ),
+        updated_at: timestamp()?,
+        ..command
+    })
+}
+
+fn command_failed(
+    command: MuninnMoveLightCommandRecord,
+    detail: &str,
+) -> Result<MuninnMoveLightCommandRecord> {
+    Ok(MuninnMoveLightCommandRecord {
+        state: "failed".to_string(),
+        detail: detail.to_string(),
+        updated_at: timestamp()?,
+        ..command
+    })
+}
+
+fn parse_move_colors(colors: &[String]) -> Result<Vec<(u8, u8, u8)>> {
+    if colors.is_empty() {
+        return Err(anyhow!("colors must contain at least one #rrggbb value"));
+    }
+    colors.iter().map(|color| parse_move_color(color)).collect()
+}
+
+fn parse_move_color(color: &str) -> Result<(u8, u8, u8)> {
+    let trimmed = color.trim();
+    let text = trimmed.strip_prefix('#').unwrap_or(trimmed);
+    if text.len() != 6 || !text.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err(anyhow!("invalid color {color:?}; expected #rrggbb"));
+    }
+    let red = u8::from_str_radix(&text[0..2], 16)?;
+    let green = u8::from_str_radix(&text[2..4], 16)?;
+    let blue = u8::from_str_radix(&text[4..6], 16)?;
+    Ok((red, green, blue))
 }
 
 fn health_check(options: &Options) -> Result<()> {
@@ -571,6 +704,34 @@ fn help_text() -> &'static str {
 mod tests {
     use super::*;
 
+    #[derive(Default)]
+    struct RecordingMoveLightWriter {
+        writes: Vec<(String, Vec<u8>)>,
+    }
+
+    impl MoveLightWriter for RecordingMoveLightWriter {
+        fn write_report(&mut self, hidraw_path: &str, report: &[u8]) -> Result<()> {
+            self.writes.push((hidraw_path.to_string(), report.to_vec()));
+            Ok(())
+        }
+    }
+
+    fn pending_move_light_command() -> MuninnMoveLightCommandRecord {
+        MuninnMoveLightCommandRecord {
+            command_id: "cmd-1".to_string(),
+            host_id: "raven".to_string(),
+            move_id: "move-1".to_string(),
+            hidraw_path: "/dev/hidraw3".to_string(),
+            colors: vec!["#ff4008".to_string()],
+            durations_ms: vec![0],
+            repeat_count: 1,
+            authority: "mimir.structured-light".to_string(),
+            state: "pending".to_string(),
+            detail: "test".to_string(),
+            updated_at: "unix-0".to_string(),
+        }
+    }
+
     #[test]
     fn serve_is_default_and_does_not_activate_streams() {
         let options = Options::parse([].into_iter()).unwrap();
@@ -633,5 +794,49 @@ mod tests {
                 .iter()
                 .any(|source| source.starts_with("audio-loopback:"))
         );
+    }
+
+    #[test]
+    fn move_light_command_writes_ps_move_led_report() {
+        let command = pending_move_light_command();
+        let mut writer = RecordingMoveLightWriter::default();
+
+        let result = execute_move_light_command(command, &mut writer).unwrap();
+
+        assert_eq!(result.state, "completed");
+        assert_eq!(writer.writes.len(), 1);
+        assert_eq!(writer.writes[0].0, "/dev/hidraw3");
+        assert_eq!(writer.writes[0].1, vec![0x06, 0, 255, 64, 8, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn move_light_command_rejects_duration_shape_mismatch() {
+        let command = MuninnMoveLightCommandRecord {
+            colors: vec!["#ff0000".to_string(), "#00ff00".to_string()],
+            durations_ms: vec![0],
+            ..pending_move_light_command()
+        };
+        let mut writer = RecordingMoveLightWriter::default();
+
+        let result = execute_move_light_command(command, &mut writer).unwrap();
+
+        assert_eq!(result.state, "failed");
+        assert!(result.detail.contains("durations_ms"));
+        assert!(writer.writes.is_empty());
+    }
+
+    #[test]
+    fn move_light_command_rejects_invalid_color() {
+        let command = MuninnMoveLightCommandRecord {
+            colors: vec!["blue".to_string()],
+            ..pending_move_light_command()
+        };
+        let mut writer = RecordingMoveLightWriter::default();
+
+        let result = execute_move_light_command(command, &mut writer).unwrap();
+
+        assert_eq!(result.state, "failed");
+        assert!(result.detail.contains("expected #rrggbb"));
+        assert!(writer.writes.is_empty());
     }
 }

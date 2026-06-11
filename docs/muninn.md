@@ -25,9 +25,10 @@ muninn serve --store C:\Meta\Odin\state\muninn.telemetry.cc --interval-seconds 1
 muninn --health --store C:\Meta\Odin\state\muninn.telemetry.cc
 ```
 
-`serve` is cheap and idle. It publishes affordances and keeps the local Verse
-surface fresh without starting FFmpeg, screen capture, microphone capture, or
-loopback capture.
+`serve` is cheap and idle. It publishes affordances, consumes addressed pending
+`muninn.move_light_command.v1` records, and keeps the local Verse surface fresh
+without starting FFmpeg, screen capture, microphone capture, or loopback
+capture.
 
 Muninn also writes an OBS stream catalog as typed CultCache state inside:
 
@@ -73,3 +74,17 @@ Muninn owns publishing those candidates as `muninn.move_marker_candidate.v1`.
 Mimir is a consumer of the resulting sensor stream. Odin may discover and
 project the schema, but Odin does not own raw capture, candidate extraction,
 calibration, triangulation, IMU fusion, prediction, or final 6DoF pose.
+
+## Move Light Commands
+
+Muninn is also the local output owner for USB-attached PS Moves. When Mimir
+wants structured light pulses for calibration or tracking, it publishes a typed
+`muninn.move_light_command.v1` command over CultNet/CultMesh to the Muninn
+daemon on the host that owns the Move. `serve` consumes `pending` commands
+whose `host_id` matches the local Muninn host, writes PS Move HID report `0x06`
+to the command's `hidraw_path`, and updates the same command record to
+`running`, `completed`, or `failed`.
+
+Idunn keeps the Muninn daemon alive. Idunn does not learn a Move-specific
+watcher, and Mimir does not write HID directly except through temporary smoke
+scripts used to prove hardware behavior before a Muninn daemon is available.
