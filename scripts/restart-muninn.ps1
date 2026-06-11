@@ -22,14 +22,22 @@ New-Item -ItemType Directory -Force -Path "$LogRoot" | Out-Null
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent "$StorePath") | Out-Null
 `$muninnDir = Split-Path -Parent "$MuninnExe"
 `$launcher = Join-Path `$muninnDir "start-muninn-serve.cmd"
+`$psLauncher = Join-Path `$muninnDir "start-muninn-serve.ps1"
+`$pidPath = Join-Path "$LogRoot" "muninn-serve.pid"
+`$psLines = @(
+  "`$ErrorActionPreference = ""Stop""",
+  "`$process = Start-Process -FilePath ""$MuninnExe"" -ArgumentList @(""serve"", ""--store"", ""$StorePath"", ""--log-root"", ""$LogRoot"", ""--host"", ""raven"", ""--interval-seconds"", ""15"") -WorkingDirectory ""`$muninnDir"" -WindowStyle Hidden -PassThru -RedirectStandardOutput ""$LogRoot\muninn-serve.out.log"" -RedirectStandardError ""$LogRoot\muninn-serve.err.log""",
+  "`$process.Id | Set-Content -Encoding ASCII -LiteralPath ""`$pidPath"""
+)
+Set-Content -LiteralPath `$psLauncher -Value `$psLines -Encoding ASCII
 `$lines = @(
   "@echo off",
   "cd /d ""`$muninnDir""",
-  """$MuninnExe"" serve --store ""$StorePath"" --log-root ""$LogRoot"" --host raven --interval-seconds 15 1>>""$LogRoot\muninn-serve.out.log"" 2>>""$LogRoot\muninn-serve.err.log"""
+  "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""`$psLauncher"""
 )
 Set-Content -LiteralPath `$launcher -Value `$lines -Encoding ASCII
 cmd /c "schtasks /Delete /TN GameCult-Muninn /F 2>NUL"
-cmd /c schtasks /Create /TN GameCult-Muninn /SC ONCE /ST 23:59 /TR `$launcher /IT /RL HIGHEST /F
+cmd /c schtasks /Create /TN GameCult-Muninn /SC ONCE /ST 23:59 /TR `$launcher /RL HIGHEST /F
 cmd /c schtasks /Run /TN GameCult-Muninn
 "@
 

@@ -11,5 +11,5 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
-cultmesh-rs = { path = "E:/Projects/EpiphanyAgent/vendor/cultmesh-rs" }
+cultmesh-rs = { path = "../../vendor/cultmesh-rs" }
 odin-core = { path = "../odin-core" }

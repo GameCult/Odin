@@ -1,0 +1,19 @@
+[package]
+name = "cultmesh-rs"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "cultmesh_rs"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1"
+cultcache-rs = { path = "../cultcache-rs" }
+cultnet-rs = { path = "../cultnet-rs" }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+pretty_assertions = "1.4.1"
+tempfile = "3"

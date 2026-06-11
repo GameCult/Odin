@@ -30,20 +30,37 @@ Get-CimInstance Win32_Process |
   ForEach-Object { taskkill.exe /PID `$_.ProcessId /T /F | Out-Null }
 `$muninnDir = Split-Path -Parent "$MuninnExe"
 `$launcher = Join-Path `$muninnDir "activate-raven-av-srt.cmd"
+`$psLauncher = Join-Path `$muninnDir "activate-raven-av-srt.ps1"
+`$pidPath = Join-Path "$LogRoot" "muninn-activate.pid"
 `$obsArgs = ""
 if (-not [bool]::Parse("$($NoObsTarget.IsPresent)") -and -not ("$TargetHost" -eq "$ObsTargetHost" -and $Port -eq $ObsPort)) {
   `$obsArgs = " --obs-target-host ""$ObsTargetHost"" --obs-port $ObsPort"
 } else {
   `$obsArgs = " --no-obs-target"
 }
+`$arguments = @("activate", "--store", "$StorePath", "--host", "raven", "--stream", "muninn.raven.av.srt", "--target-host", "$TargetHost", "--port", "$Port")
+if (`$obsArgs -like " --no-obs-target") {
+  `$arguments += "--no-obs-target"
+} else {
+  `$arguments += @("--obs-target-host", "$ObsTargetHost", "--obs-port", "$ObsPort")
+}
+`$arguments += @("--audio-device", "$AudioDevice", "--ffmpeg", "$Ffmpeg", "--loopback-script", "$LoopbackScript", "--log-root", "$LogRoot")
+`$encodedArguments = (`$arguments | ConvertTo-Json -Compress)
+`$psLines = @(
+  "`$ErrorActionPreference = ""Stop""",
+  "`$arguments = '$encodedArguments' | ConvertFrom-Json",
+  "`$process = Start-Process -FilePath ""$MuninnExe"" -ArgumentList `$arguments -WorkingDirectory ""`$muninnDir"" -WindowStyle Hidden -PassThru -RedirectStandardOutput ""$LogRoot\muninn-activate.out.log"" -RedirectStandardError ""$LogRoot\muninn-activate.err.log""",
+  "`$process.Id | Set-Content -Encoding ASCII -LiteralPath ""`$pidPath"""
+)
+Set-Content -LiteralPath `$psLauncher -Value `$psLines -Encoding ASCII
 `$lines = @(
   "@echo off",
   "cd /d ""`$muninnDir""",
-  """$MuninnExe"" activate --store ""$StorePath"" --host raven --stream muninn.raven.av.srt --target-host ""$TargetHost"" --port $Port`$obsArgs --audio-device ""$AudioDevice"" --ffmpeg ""$Ffmpeg"" --loopback-script ""$LoopbackScript"" --log-root ""$LogRoot"" 1>>""$LogRoot\muninn-activate.out.log"" 2>>""$LogRoot\muninn-activate.err.log"""
+  "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""`$psLauncher"""
 )
 Set-Content -LiteralPath `$launcher -Value `$lines -Encoding ASCII
 cmd /c "schtasks /Delete /TN GameCult-Muninn-Activate /F 2>NUL"
-cmd /c schtasks /Create /TN GameCult-Muninn-Activate /SC ONCE /ST 23:59 /TR `$launcher /IT /RL HIGHEST /F
+cmd /c schtasks /Create /TN GameCult-Muninn-Activate /SC ONCE /ST 23:59 /TR `$launcher /RL HIGHEST /F
 cmd /c schtasks /Run /TN GameCult-Muninn-Activate
 "@
 

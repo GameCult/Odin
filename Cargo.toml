@@ -6,6 +6,11 @@ members = [
     "crates/odin-core",
 ]
 resolver = "3"
+exclude = [
+    "vendor/cultcache-rs",
+    "vendor/cultmesh-rs",
+    "vendor/cultnet-rs",
+]
 
 [workspace.package]
 edition = "2024"
