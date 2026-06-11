@@ -88,3 +88,17 @@ to the command's `hidraw_path`, and updates the same command record to
 Idunn keeps the Muninn daemon alive. Idunn does not learn a Move-specific
 watcher, and Mimir does not write HID directly except through temporary smoke
 scripts used to prove hardware behavior before a Muninn daemon is available.
+
+## Host Deployments
+
+Raven runs Muninn from `C:\Meta\Odin\Muninn`. `scripts/restart-muninn.ps1`
+recreates the `GameCult-Muninn` scheduled task and writes
+`start-muninn-serve.cmd` as a short trampoline into
+`start-muninn-serve.ps1`; the PowerShell launcher starts `muninn.exe` with
+`-WindowStyle Hidden` and redirects logs under `C:\Meta\Odin\logs\muninn`.
+The `.cmd` file must not be the long-lived foreground process.
+
+Nightwing runs Muninn as the user service `gamecult-muninn.service`. The binary
+is installed at `/home/metacrat/.local/bin/muninn`, the store lives at
+`/home/metacrat/.local/state/gamecult/muninn/muninn.telemetry.cc`, and the
+service command uses `--host nightwing --interval-seconds 15`.
