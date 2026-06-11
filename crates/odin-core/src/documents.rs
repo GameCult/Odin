@@ -23,6 +23,7 @@ pub const MUNINN_TELEMETRY_SURFACE_SCHEMA: &str = "muninn.telemetry_surface.v1";
 pub const MUNINN_CAPTURE_STREAM_SCHEMA: &str = "muninn.capture_stream.v1";
 pub const MUNINN_OBS_STREAM_CATALOG_SCHEMA: &str = "muninn.obs_stream_catalog.v1";
 pub const MUNINN_MOVE_MARKER_CANDIDATE_SCHEMA: &str = "muninn.move_marker_candidate.v1";
+pub const MUNINN_MOVE_CONTROLLER_STATE_SCHEMA: &str = "muninn.move_controller_state.v1";
 pub const MUNINN_MOVE_LIGHT_COMMAND_SCHEMA: &str = "muninn.move_light_command.v1";
 
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
@@ -452,6 +453,38 @@ pub struct MuninnMoveMarkerCandidateRecord {
     pub observed_at: String,
 }
 
+#[derive(Clone, Debug, PartialEq, DatabaseEntry)]
+#[cultcache(
+    type = "muninn.move_controller_state",
+    schema = "muninn.move_controller_state.v1"
+)]
+pub struct MuninnMoveControllerStateRecord {
+    #[cultcache(key = 0)]
+    pub stream_id: String,
+    #[cultcache(key = 1)]
+    pub host_id: String,
+    #[cultcache(key = 2)]
+    pub move_id: String,
+    #[cultcache(key = 3)]
+    pub sequence: u64,
+    #[cultcache(key = 4)]
+    pub source_timestamp_ns: i64,
+    #[cultcache(key = 5)]
+    pub accelerometer_xyz: Vec<f32>,
+    #[cultcache(key = 6)]
+    pub gyroscope_xyz: Vec<f32>,
+    #[cultcache(key = 7)]
+    pub magnetometer_xyz: Vec<f32>,
+    #[cultcache(key = 8)]
+    pub trigger_value: f32,
+    #[cultcache(key = 9)]
+    pub buttons: Vec<String>,
+    #[cultcache(key = 10)]
+    pub battery01: f32,
+    #[cultcache(key = 11)]
+    pub observed_at: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
 #[cultcache(
     type = "muninn.move_light_command",
@@ -505,6 +538,7 @@ cultmesh_rs::cultmesh_documents!(OdinDocuments {
     MuninnCaptureStreamRecord => MUNINN_CAPTURE_STREAM_SCHEMA,
     MuninnObsStreamCatalogRecord => MUNINN_OBS_STREAM_CATALOG_SCHEMA,
     MuninnMoveMarkerCandidateRecord => MUNINN_MOVE_MARKER_CANDIDATE_SCHEMA,
+    MuninnMoveControllerStateRecord => MUNINN_MOVE_CONTROLLER_STATE_SCHEMA,
     MuninnMoveLightCommandRecord => MUNINN_MOVE_LIGHT_COMMAND_SCHEMA,
 });
 

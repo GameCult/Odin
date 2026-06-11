@@ -71,9 +71,13 @@ candidates only: weighted centroid, radius, area, peak/mean luma, and score for
 one camera frame.
 
 Muninn owns publishing those candidates as `muninn.move_marker_candidate.v1`.
-Mimir is a consumer of the resulting sensor stream. Odin may discover and
-project the schema, but Odin does not own raw capture, candidate extraction,
-calibration, triangulation, IMU fusion, prediction, or final 6DoF pose.
+Muninn also publishes USB controller facts as
+`muninn.move_controller_state.v1`: accelerometer, gyro, magnetometer, button,
+trigger, battery, sequence, and source timestamp. Mimir is the consumer of both
+sensor streams. Odin may discover and project the schemas, but Odin does not
+own raw capture, candidate extraction, calibration, triangulation, IMU fusion,
+prediction, or final 6DoF pose. Muninn does not synthesize wand pose; it
+reports what the local body saw and read from USB.
 
 ## Move Light Commands
 
