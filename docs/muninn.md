@@ -13,8 +13,8 @@ microphones, cameras, and future sensors.
 - Inputs: cheap local probes, operator or Verse activation requests, and local
   capture tools such as FFmpeg or WASAPI helpers.
 - Outputs: `muninn.telemetry_surface.v1`, active `muninn.capture_stream.v1`,
-  Move receipt records, and a CultMesh bytes stream carrying live Move evidence
-  frames for Mimir.
+  Quest access records, Move receipt records, and a CultMesh bytes stream
+  carrying live Move evidence frames for Mimir.
 - Forbidden writers: daemon startup, Idunn keepalive, Mimir ingest, OBS, Odin,
   Gjallar, and renderer bodies must not start capture by implication.
 
@@ -51,6 +51,52 @@ Activation is explicit:
 That Raven activation starts the requested screen and Realtek loopback stream
 and publishes `muninn.capture_stream.v1`. Mimir and OBS are stream consumers;
 they do not own Muninn.
+
+## Quest Access And Unity Return Video
+
+Quest hardware attached to Starfire is a Muninn local telemetry surface, not a
+Mimir-owned preflight. Enable it by running Muninn on Starfire with ADB probing:
+
+```powershell
+muninn serve `
+  --store C:\Meta\Odin\state\muninn.telemetry.cc `
+  --host starfire `
+  --quest-adb `
+  --quest-serial 1WMHHB68PG1515
+```
+
+When `adb devices -l` reports the Quest as `device`, Muninn publishes
+`muninn.quest_access.v1` at `quest-access` and
+`muninn:<host>:quest-access:<serial>`. The record advertises:
+
+- `muninn:<host>:quest-input`: Quest buttons/analog/controller input once a
+  Quest/OpenXR witness is running.
+- `muninn:<host>:quest-poses`: headset and controller poses from that same
+  witness.
+- `muninn:<host>:quest-warped-video-input`: warp-corrected video frames that
+  Brokkr can route from Starfire Unity editor play mode toward the Quest device.
+
+ADB authorization proves local USB access only. It does not by itself expose
+OpenXR poses or accept video frames. A Quest/OpenXR witness still owns headset
+runtime sampling, while Brokkr owns the Unity editor adapter that sends
+warp-corrected play-mode frames to Muninn's advertised Quest video input.
+
+Read the current record with:
+
+```powershell
+muninn quest-access-status --store C:\Meta\Odin\state\muninn.telemetry.cc
+```
+
+For Starfire's local Quest-attached daemon, Idunn supervises the
+`starfire-muninn` target through:
+
+```powershell
+E:\Projects\Odin\scripts\restart-starfire-muninn.cmd
+E:\Projects\Odin\scripts\health-starfire-muninn.cmd
+```
+
+The restart script launches Muninn hidden with `--host starfire --quest-adb`
+and stores state in `C:\Meta\Odin\state\starfire.muninn.telemetry.cc`.
 
 The deployed loopback helper must accept Muninn's command contract:
 

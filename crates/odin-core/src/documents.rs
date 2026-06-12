@@ -25,6 +25,7 @@ pub const MUNINN_OBS_STREAM_CATALOG_SCHEMA: &str = "muninn.obs_stream_catalog.v1
 pub const MUNINN_MOVE_MARKER_CANDIDATE_SCHEMA: &str = "muninn.move_marker_candidate.v1";
 pub const MUNINN_MOVE_CONTROLLER_STATE_SCHEMA: &str = "muninn.move_controller_state.v1";
 pub const MUNINN_MOVE_LIGHT_COMMAND_SCHEMA: &str = "muninn.move_light_command.v1";
+pub const MUNINN_QUEST_ACCESS_SCHEMA: &str = "muninn.quest_access.v1";
 
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
 #[cultcache(type = "odin.snapshot", schema = "odin.snapshot.v1")]
@@ -515,6 +516,41 @@ pub struct MuninnMoveLightCommandRecord {
     pub updated_at: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(type = "muninn.quest_access", schema = "muninn.quest_access.v1")]
+pub struct MuninnQuestAccessRecord {
+    #[cultcache(key = 0)]
+    pub access_id: String,
+    #[cultcache(key = 1)]
+    pub host_id: String,
+    #[cultcache(key = 2)]
+    pub serial: String,
+    #[cultcache(key = 3)]
+    pub connection_state: String,
+    #[cultcache(key = 4)]
+    pub product: String,
+    #[cultcache(key = 5)]
+    pub model: String,
+    #[cultcache(key = 6)]
+    pub device: String,
+    #[cultcache(key = 7)]
+    pub transport_id: String,
+    #[cultcache(key = 8)]
+    pub input_stream_id: String,
+    #[cultcache(key = 9)]
+    pub pose_stream_id: String,
+    #[cultcache(key = 10)]
+    pub video_input_stream_id: String,
+    #[cultcache(key = 11)]
+    pub video_input_transport: String,
+    #[cultcache(key = 12)]
+    pub state: String,
+    #[cultcache(key = 13)]
+    pub detail: String,
+    #[cultcache(key = 14)]
+    pub observed_at: String,
+}
+
 cultmesh_rs::cultmesh_documents!(OdinDocuments {
     OdinSnapshotRecord => ODIN_SNAPSHOT_SCHEMA,
     OdinVerseRecord => ODIN_VERSE_SCHEMA,
@@ -540,6 +576,7 @@ cultmesh_rs::cultmesh_documents!(OdinDocuments {
     MuninnMoveMarkerCandidateRecord => MUNINN_MOVE_MARKER_CANDIDATE_SCHEMA,
     MuninnMoveControllerStateRecord => MUNINN_MOVE_CONTROLLER_STATE_SCHEMA,
     MuninnMoveLightCommandRecord => MUNINN_MOVE_LIGHT_COMMAND_SCHEMA,
+    MuninnQuestAccessRecord => MUNINN_QUEST_ACCESS_SCHEMA,
 });
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

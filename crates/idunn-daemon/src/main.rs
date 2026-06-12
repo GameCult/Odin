@@ -267,6 +267,16 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 interval_seconds: 60,
             },
             DaemonTarget {
+                daemon_id: "starfire-muninn".to_string(),
+                verse_id: "starfire.local".to_string(),
+                name: "Starfire Muninn telemetry and Quest access daemon".to_string(),
+                health_command: Some(script("health-starfire-muninn.cmd")),
+                deploy_command: None,
+                restart_command: Some(script("restart-starfire-muninn.cmd")),
+                enabled: true,
+                interval_seconds: 30,
+            },
+            DaemonTarget {
                 daemon_id: "muninn".to_string(),
                 verse_id: "raven.local".to_string(),
                 name: "Muninn telemetry Verse assembler".to_string(),

@@ -5,7 +5,8 @@ use cultmesh_rs::{
 };
 use odin_core::{
     MuninnCaptureStreamRecord, MuninnMoveControllerStateRecord, MuninnMoveLightCommandRecord,
-    MuninnObsStreamCatalogRecord, MuninnTelemetrySurfaceRecord, OdinDocuments,
+    MuninnObsStreamCatalogRecord, MuninnQuestAccessRecord, MuninnTelemetrySurfaceRecord,
+    OdinDocuments,
 };
 use serde::Serialize;
 use std::env;
@@ -30,6 +31,7 @@ enum Mode {
     RequestMoveLight,
     MoveLightStatus,
     MoveStateStatus,
+    QuestAccessStatus,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -65,6 +67,11 @@ struct Options {
     move_evidence_verse_id: String,
     move_evidence_ring_slots: usize,
     move_evidence_slot_bytes: usize,
+    quest_adb: bool,
+    quest_serial: Option<String>,
+    quest_input_stream_id: Option<String>,
+    quest_pose_stream_id: Option<String>,
+    quest_video_input_stream_id: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -143,6 +150,7 @@ fn main() -> Result<()> {
         Mode::RequestMoveLight => request_move_light(options),
         Mode::MoveLightStatus => move_light_status(options),
         Mode::MoveStateStatus => move_state_status(options),
+        Mode::QuestAccessStatus => quest_access_status(options),
         Mode::DryRun => {
             let plan = build_mux_plan(&options, "dry-run".to_string());
             println!("{}", plan.command_line);
@@ -178,6 +186,7 @@ fn serve(options: Options) -> Result<()> {
             &mut HidMoveControllerStateReader,
             move_evidence_stream.as_mut(),
         )?;
+        publish_quest_access_if_requested(&mut node, &options)?;
         publish_surface(&mut node, &options, "idle", &[])?;
         if options.interval_seconds.is_none()
             && active_move_lights.is_empty()
@@ -279,6 +288,9 @@ fn publish_surface(
             "audio.loopback.wasapi".to_string(),
             "psmove.light.command".to_string(),
             "psmove.controller.state".to_string(),
+            "quest.usb.access".to_string(),
+            "quest.input.openxr.witness".to_string(),
+            "quest.video.warp_corrected_input".to_string(),
             "audio.input.enumeration.pending".to_string(),
             "video.input.enumeration.pending".to_string(),
         ],
@@ -297,7 +309,7 @@ fn publish_surface(
 }
 
 fn available_sources(options: &Options) -> Vec<String> {
-    vec![
+    let mut sources = vec![
         format!("screen:ddagrab:output_idx={}", options.ddagrab_output_index),
         format!(
             "audio-loopback:wasapi:{}:{}ch@{}",
@@ -305,7 +317,19 @@ fn available_sources(options: &Options) -> Vec<String> {
         ),
         "sensor:microphone:enumeration-pending".to_string(),
         "sensor:camera:enumeration-pending".to_string(),
-    ]
+    ];
+    if options.quest_adb {
+        sources.push(format!(
+            "sensor:quest:adb:{}",
+            options
+                .quest_serial
+                .as_deref()
+                .unwrap_or("any-authorized-quest")
+        ));
+    } else {
+        sources.push("sensor:quest:adb:activation-required".to_string());
+    }
+    sources
 }
 
 fn publish_stream(
@@ -988,6 +1012,169 @@ fn parse_move_color(color: &str) -> Result<(u8, u8, u8)> {
     Ok((red, green, blue))
 }
 
+fn publish_quest_access_if_requested(
+    node: &mut cultmesh_rs::CultMeshNode,
+    options: &Options,
+) -> Result<()> {
+    if !options.quest_adb {
+        return Ok(());
+    }
+
+    let record = probe_quest_access(options)?;
+    node.put("quest-access", &record)?;
+    node.put(&record.access_id, &record)?;
+    Ok(())
+}
+
+fn probe_quest_access(options: &Options) -> Result<MuninnQuestAccessRecord> {
+    let output = Command::new("adb")
+        .args(["devices", "-l"])
+        .output()
+        .context("running adb devices -l for Quest access")?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        return build_quest_access_record(
+            options,
+            ParsedQuestDevice::default(),
+            "unavailable",
+            &format!("adb devices -l failed: {}", stderr.trim()),
+        );
+    }
+
+    let parsed = parse_quest_device_from_adb(&stdout, options.quest_serial.as_deref());
+    let parsed_device = parsed.unwrap_or_default();
+    let (state, detail): (String, String) = match &parsed_device {
+        device if device.connection_state == "device" => (
+            "usb-authorized".to_string(),
+            "Quest is authorized over USB. Muninn can publish access and route Quest input/video surfaces; tracked poses still require a Quest/OpenXR witness.".to_string(),
+        ),
+        device if device.serial.is_empty() => (
+            "unavailable".to_string(),
+            "No matching Quest device was found in adb devices -l.".to_string(),
+        ),
+        device => (
+            device.connection_state.clone(),
+            "Quest is visible over USB but not authorized for local access.".to_string(),
+        ),
+    };
+    build_quest_access_record(options, parsed_device, &state, &detail)
+}
+
+fn build_quest_access_record(
+    options: &Options,
+    device: ParsedQuestDevice,
+    state: &str,
+    detail: &str,
+) -> Result<MuninnQuestAccessRecord> {
+    let serial = if device.serial.is_empty() {
+        options
+            .quest_serial
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string())
+    } else {
+        device.serial
+    };
+    Ok(MuninnQuestAccessRecord {
+        access_id: format!("muninn:{}:quest-access:{}", options.host_id, serial),
+        host_id: options.host_id.clone(),
+        serial,
+        connection_state: device.connection_state,
+        product: device.product,
+        model: device.model,
+        device: device.device,
+        transport_id: device.transport_id,
+        input_stream_id: options
+            .quest_input_stream_id
+            .clone()
+            .unwrap_or_else(|| format!("muninn:{}:quest-input", options.host_id)),
+        pose_stream_id: options
+            .quest_pose_stream_id
+            .clone()
+            .unwrap_or_else(|| format!("muninn:{}:quest-poses", options.host_id)),
+        video_input_stream_id: options
+            .quest_video_input_stream_id
+            .clone()
+            .unwrap_or_else(|| format!("muninn:{}:quest-warped-video-input", options.host_id)),
+        video_input_transport: "brokkr-unity-editor-warped-frame-stream".to_string(),
+        state: state.to_string(),
+        detail: detail.to_string(),
+        observed_at: timestamp()?,
+    })
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ParsedQuestDevice {
+    serial: String,
+    connection_state: String,
+    product: String,
+    model: String,
+    device: String,
+    transport_id: String,
+}
+
+fn parse_quest_device_from_adb(
+    adb_devices_output: &str,
+    requested_serial: Option<&str>,
+) -> Option<ParsedQuestDevice> {
+    adb_devices_output
+        .lines()
+        .filter_map(parse_adb_device_line)
+        .find(|device| {
+            if let Some(serial) = requested_serial {
+                return device.serial == serial;
+            }
+            device.model.contains("Quest")
+                || device.product == "hollywood"
+                || device.device == "hollywood"
+        })
+}
+
+fn parse_adb_device_line(line: &str) -> Option<ParsedQuestDevice> {
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    if tokens.len() < 2 || tokens[0] == "List" {
+        return None;
+    }
+
+    let mut device = ParsedQuestDevice {
+        serial: tokens[0].to_string(),
+        connection_state: tokens[1].to_string(),
+        ..ParsedQuestDevice::default()
+    };
+    for token in tokens.iter().skip(2) {
+        let Some((key, value)) = token.split_once(':') else {
+            continue;
+        };
+        match key {
+            "product" => device.product = value.to_string(),
+            "model" => device.model = value.to_string(),
+            "device" => device.device = value.to_string(),
+            "transport_id" => device.transport_id = value.to_string(),
+            _ => {}
+        }
+    }
+    Some(device)
+}
+
+fn quest_access_status(options: Options) -> Result<()> {
+    let node = open_node(&options, "muninn-quest-access-status")?;
+    let record = node
+        .get_required::<MuninnQuestAccessRecord>("quest-access")
+        .context("Muninn Quest access record is unavailable")?;
+    println!(
+        "{} state={} model={} product={} input={} poses={} video={} detail={}",
+        record.serial,
+        record.state,
+        record.model,
+        record.product,
+        record.input_stream_id,
+        record.pose_stream_id,
+        record.video_input_stream_id,
+        record.detail
+    );
+    Ok(())
+}
+
 fn health_check(options: &Options) -> Result<()> {
     let node = open_node(options, "muninn-health")?;
     let surface = node
@@ -1290,6 +1477,11 @@ impl Options {
             move_evidence_verse_id: "mimir-live".to_string(),
             move_evidence_ring_slots: 4,
             move_evidence_slot_bytes: 8192,
+            quest_adb: false,
+            quest_serial: None,
+            quest_input_stream_id: None,
+            quest_pose_stream_id: None,
+            quest_video_input_stream_id: None,
         };
 
         let mut args = args.peekable();
@@ -1300,6 +1492,7 @@ impl Options {
                 "request-move-light" => options.mode = Mode::RequestMoveLight,
                 "move-light-status" => options.mode = Mode::MoveLightStatus,
                 "move-state-status" => options.mode = Mode::MoveStateStatus,
+                "quest-access-status" => options.mode = Mode::QuestAccessStatus,
                 "--health" => options.mode = Mode::Health,
                 "--dry-run" => options.mode = Mode::DryRun,
                 "--store" => options.store_path = PathBuf::from(take_value(&mut args, "--store")?),
@@ -1372,6 +1565,22 @@ impl Options {
                             .parse()
                             .context("--move-evidence-slot-bytes must be a positive integer")?
                 }
+                "--quest-adb" => options.quest_adb = true,
+                "--quest-serial" => {
+                    options.quest_serial = Some(take_value(&mut args, "--quest-serial")?)
+                }
+                "--quest-input-stream" => {
+                    options.quest_input_stream_id =
+                        Some(take_value(&mut args, "--quest-input-stream")?)
+                }
+                "--quest-pose-stream" => {
+                    options.quest_pose_stream_id =
+                        Some(take_value(&mut args, "--quest-pose-stream")?)
+                }
+                "--quest-video-input-stream" => {
+                    options.quest_video_input_stream_id =
+                        Some(take_value(&mut args, "--quest-video-input-stream")?)
+                }
                 "--color" => options.move_colors.push(take_value(&mut args, "--color")?),
                 "--duration-ms" => options
                     .move_durations_ms
@@ -1415,6 +1624,22 @@ impl Options {
                 "--move-evidence-slot-bytes must be greater than zero"
             ));
         }
+        for (name, value) in [
+            ("--quest-serial", options.quest_serial.as_ref()),
+            (
+                "--quest-input-stream",
+                options.quest_input_stream_id.as_ref(),
+            ),
+            ("--quest-pose-stream", options.quest_pose_stream_id.as_ref()),
+            (
+                "--quest-video-input-stream",
+                options.quest_video_input_stream_id.as_ref(),
+            ),
+        ] {
+            if value.is_some_and(|value| value.trim().is_empty()) {
+                return Err(anyhow!("{name} must be non-empty"));
+            }
+        }
         Ok(options)
     }
 }
@@ -1441,7 +1666,7 @@ fn timestamp_ns() -> Result<i64> {
 }
 
 fn help_text() -> &'static str {
-    "Usage: muninn [serve|activate|request-move-light|move-light-status|move-state-status] [--store <path>] [--target-host <host>] [--port <port>] [--obs-target-host <host>] [--obs-port <port>] [--loopback-script <path>] [--ffmpeg <path>] [--move-state <move-id>=<hidraw-path>] [--move-evidence-stream <stream-id>] [--move-evidence-verse <verse-id>] [--dry-run] [--health]\n\nMuninn is Odin's portable telemetry Verse assembler. serve publishes cheap typed telemetry affordances, optional source-local Move controller state, and a CultMesh Move evidence stream when Move state sources are attached; activate starts an explicitly requested local stream; request-move-light publishes a typed Move light command for Muninn serve to execute; move-light-status reads typed command receipts; move-state-status reads typed controller-state records."
+    "Usage: muninn [serve|activate|request-move-light|move-light-status|move-state-status|quest-access-status] [--store <path>] [--target-host <host>] [--port <port>] [--obs-target-host <host>] [--obs-port <port>] [--loopback-script <path>] [--ffmpeg <path>] [--move-state <move-id>=<hidraw-path>] [--move-evidence-stream <stream-id>] [--move-evidence-verse <verse-id>] [--quest-adb] [--quest-serial <serial>] [--quest-input-stream <stream-id>] [--quest-pose-stream <stream-id>] [--quest-video-input-stream <stream-id>] [--dry-run] [--health]\n\nMuninn is Odin's portable telemetry Verse assembler. serve publishes cheap typed telemetry affordances, optional source-local Move controller state, optional Quest USB access surfaces, and a CultMesh Move evidence stream when Move state sources are attached; activate starts an explicitly requested local stream; request-move-light publishes a typed Move light command for Muninn serve to execute; move-light-status reads typed command receipts; move-state-status reads typed controller-state records; quest-access-status reads typed Quest access state."
 }
 
 fn parse_move_state_source(value: &str) -> Result<MoveStateSource> {
@@ -1702,6 +1927,87 @@ mod tests {
             Some("muninn:nightwing:move-evidence")
         );
         assert_eq!(options.move_evidence_verse_id, "mimir-live");
+    }
+
+    #[test]
+    fn serve_accepts_quest_access_streams() {
+        let options = Options::parse(
+            [
+                "serve",
+                "--host",
+                "starfire",
+                "--quest-adb",
+                "--quest-serial",
+                "1WMHHB68PG1515",
+                "--quest-input-stream",
+                "muninn:starfire:quest-input",
+                "--quest-pose-stream",
+                "muninn:starfire:quest-poses",
+                "--quest-video-input-stream",
+                "muninn:starfire:quest-warped-video-input",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap();
+
+        assert!(options.quest_adb);
+        assert_eq!(options.quest_serial.as_deref(), Some("1WMHHB68PG1515"));
+        assert_eq!(
+            options.quest_video_input_stream_id.as_deref(),
+            Some("muninn:starfire:quest-warped-video-input")
+        );
+    }
+
+    #[test]
+    fn parses_authorized_quest_from_adb_devices() {
+        let output = "List of devices attached\n1WMHHB68PG1515         device product:hollywood model:Quest_2 device:hollywood transport_id:5\n";
+        let device = parse_quest_device_from_adb(output, None).expect("Quest should parse");
+
+        assert_eq!(device.serial, "1WMHHB68PG1515");
+        assert_eq!(device.connection_state, "device");
+        assert_eq!(device.product, "hollywood");
+        assert_eq!(device.model, "Quest_2");
+        assert_eq!(device.transport_id, "5");
+    }
+
+    #[test]
+    fn quest_access_record_defaults_streams_to_host_owned_muninn_surfaces() {
+        let options = Options::parse(
+            ["serve", "--host", "starfire", "--quest-adb"]
+                .into_iter()
+                .map(String::from),
+        )
+        .unwrap();
+        let record = build_quest_access_record(
+            &options,
+            ParsedQuestDevice {
+                serial: "1WMHHB68PG1515".to_string(),
+                connection_state: "device".to_string(),
+                product: "hollywood".to_string(),
+                model: "Quest_2".to_string(),
+                device: "hollywood".to_string(),
+                transport_id: "5".to_string(),
+            },
+            "usb-authorized",
+            "test",
+        )
+        .unwrap();
+
+        assert_eq!(
+            record.access_id,
+            "muninn:starfire:quest-access:1WMHHB68PG1515"
+        );
+        assert_eq!(record.input_stream_id, "muninn:starfire:quest-input");
+        assert_eq!(record.pose_stream_id, "muninn:starfire:quest-poses");
+        assert_eq!(
+            record.video_input_stream_id,
+            "muninn:starfire:quest-warped-video-input"
+        );
+        assert_eq!(
+            record.video_input_transport,
+            "brokkr-unity-editor-warped-frame-stream"
+        );
     }
 
     #[derive(Deserialize)]
