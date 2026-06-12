@@ -116,7 +116,11 @@ startup to burn capture resources.
 Move optical marker extraction belongs to Muninn because it is sensor stream
 exposure, not Mimir fusion or Odin registry truth. The native helper lives at
 `crates/muninn-move-tracker`; Muninn may publish per-frame candidates as
-`muninn.move_marker_candidate.v1`. Mimir consumes those candidate streams into
+`muninn.move_marker_candidate.v1`. USB Move controller facts are
+`muninn.move_controller_state.v1` receipts. Those records are not the hot
+tracking transport: Muninn bundles marker candidates and controller states into
+a CultMesh bytes stream frame with metadata schema
+`mimir.muninn_move_evidence_stream_frame.v1`. Mimir consumes that stream into
 tracking buffers and later fusion. Odin indexes the schema and projection
 surface only.
 
@@ -149,6 +153,9 @@ Verse announcement
 - Device clients own sensor and media capture; Mimir owns the normalized ingest ledger; Odin owns the aggregate operator projection.
 - Muninn advertises local telemetry affordances cheaply and starts capture only
   after an explicit activation request.
+- Muninn's live Move evidence is a CultMesh stream frame body; CultCache
+  Move records are receipts/debug state and must not become Mimir's hot
+  tracking path.
 - Translation paths must name source schema, target schema, lossiness, authority, and version.
 - Service presentation flows are CultMesh/Eve/CultUI interface projections. Odin aggregates those projection graphs; it does not replace them with nameplate summaries.
 - Renderers lower surfaces only. If a renderer fixes network truth, the machine is split-brained.

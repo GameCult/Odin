@@ -502,6 +502,8 @@ dependencies = [
  "cultmesh-rs",
  "libc",
  "odin-core",
+ "rmp-serde",
+ "serde",
 ]
 
 [[package]]

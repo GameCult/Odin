@@ -1,9 +1,13 @@
 use anyhow::{Context, Result, anyhow};
-use cultmesh_rs::{CultMesh, CultMeshNodeOptions};
+use cultmesh_rs::{
+    CultMesh, CultMeshNodeOptions, CultMeshSharedMemoryFrameRing, CultMeshStreamBodyTransport,
+    CultMeshStreamCatalog, CultMeshStreamClock, CultMeshStreamDescriptor, CultMeshStreamKind,
+};
 use odin_core::{
     MuninnCaptureStreamRecord, MuninnMoveControllerStateRecord, MuninnMoveLightCommandRecord,
     MuninnObsStreamCatalogRecord, MuninnTelemetrySurfaceRecord, OdinDocuments,
 };
+use serde::Serialize;
 use std::env;
 use std::fs;
 use std::io::Write;
@@ -57,6 +61,10 @@ struct Options {
     move_repeat_count: u32,
     command_id: Option<String>,
     move_state_sources: Vec<MoveStateSource>,
+    move_evidence_stream_id: Option<String>,
+    move_evidence_verse_id: String,
+    move_evidence_ring_slots: usize,
+    move_evidence_slot_bytes: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -86,6 +94,18 @@ struct ActiveMoveStateSource {
     joystick_axes: [i16; 16],
     joystick_buttons: [bool; 32],
 }
+
+#[derive(Serialize)]
+struct MuninnMoveEvidenceStreamFrame<'a>(
+    &'a str,
+    &'a str,
+    i64,
+    &'a [MuninnMoveMarkerCandidateWire],
+    &'a [MuninnMoveControllerStateRecord],
+);
+
+#[derive(Serialize)]
+struct MuninnMoveMarkerCandidateWire;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct JoystickEvent {
@@ -133,6 +153,7 @@ fn main() -> Result<()> {
 
 fn serve(options: Options) -> Result<()> {
     ensure_state_dirs(&options)?;
+    let mut move_evidence_stream = create_move_evidence_stream(&options)?;
     let mut active_move_lights = Vec::new();
     let mut active_move_states: Vec<ActiveMoveStateSource> = options
         .move_state_sources
@@ -155,6 +176,7 @@ fn serve(options: Options) -> Result<()> {
             &options,
             &mut active_move_states,
             &mut HidMoveControllerStateReader,
+            move_evidence_stream.as_mut(),
         )?;
         publish_surface(&mut node, &options, "idle", &[])?;
         if options.interval_seconds.is_none()
@@ -170,6 +192,13 @@ fn serve(options: Options) -> Result<()> {
         };
         thread::sleep(sleep);
     }
+}
+
+struct ActiveMoveEvidenceStream {
+    catalog: CultMeshStreamCatalog,
+    stream_id: String,
+    producer_peer_id: String,
+    frame_counter: u64,
 }
 
 fn activate(options: Options, spawner: impl ProcessSpawner) -> Result<()> {
@@ -370,6 +399,88 @@ fn publish_obs_catalog(
     Ok(())
 }
 
+fn create_move_evidence_stream(options: &Options) -> Result<Option<ActiveMoveEvidenceStream>> {
+    if options.move_state_sources.is_empty() {
+        return Ok(None);
+    }
+
+    let stream_id = options
+        .move_evidence_stream_id
+        .clone()
+        .unwrap_or_else(|| format!("muninn:{}:move-evidence", options.host_id));
+    let producer_peer_id = format!("muninn:{}", options.host_id);
+    let clock_domain_id = format!("{}:clock", producer_peer_id);
+    let descriptor = CultMeshStreamDescriptor::new(
+        stream_id.clone(),
+        options.move_evidence_verse_id.clone(),
+        producer_peer_id.clone(),
+        CultMeshStreamKind::Bytes,
+        CultMeshStreamClock::new(clock_domain_id)?
+            .source_id(stream_id.clone())?
+            .confidence(1.0)
+            .evidence_kind("muninn-move-evidence")?,
+        vec![
+            CultMeshStreamBodyTransport::SharedMemory,
+            CultMeshStreamBodyTransport::CultCachePage,
+        ],
+    )?
+    .label("Muninn Move evidence")?
+    .max_in_flight_frames(options.move_evidence_ring_slots as u32)
+    .metadata_schema_id("mimir.muninn_move_evidence_stream_frame.v1")?;
+
+    let mut catalog = CultMesh::create_stream_catalog();
+    catalog.declare(descriptor);
+    catalog.create_shared_memory_ring(
+        &stream_id,
+        options.move_evidence_ring_slots,
+        options.move_evidence_slot_bytes,
+    )?;
+
+    Ok(Some(ActiveMoveEvidenceStream {
+        catalog,
+        stream_id,
+        producer_peer_id,
+        frame_counter: 0,
+    }))
+}
+
+fn publish_move_evidence_stream_frame(
+    stream: &mut ActiveMoveEvidenceStream,
+    controller_states: &[MuninnMoveControllerStateRecord],
+) -> Result<Option<cultmesh_rs::CultMeshStreamFrameHandle>> {
+    if controller_states.is_empty() {
+        return Ok(None);
+    }
+
+    let published_at_ns = timestamp_ns()?;
+    let frame_id = format!("{}:{}", stream.stream_id, stream.frame_counter);
+    stream.frame_counter = stream.frame_counter.saturating_add(1);
+    let marker_candidates: &[MuninnMoveMarkerCandidateWire] = &[];
+    let frame = MuninnMoveEvidenceStreamFrame(
+        &frame_id,
+        &stream.producer_peer_id,
+        published_at_ns,
+        marker_candidates,
+        controller_states,
+    );
+    let payload =
+        rmp_serde::to_vec(&frame).context("encoding Muninn Move evidence stream frame")?;
+    let handle = {
+        let ring: &mut CultMeshSharedMemoryFrameRing =
+            stream
+                .catalog
+                .ring_mut(&stream.stream_id)
+                .ok_or_else(|| anyhow!("missing Muninn Move evidence ring"))?;
+        ring.try_publish_copy(&payload, published_at_ns, 0)?
+    };
+    if let Some(handle) = handle {
+        stream.catalog.publish_frame(handle.clone())?;
+        Ok(Some(handle))
+    } else {
+        Ok(None)
+    }
+}
+
 trait MoveLightWriter {
     fn write_report(&mut self, hidraw_path: &str, report: &[u8]) -> Result<()>;
 }
@@ -470,7 +581,9 @@ fn publish_move_controller_states(
     options: &Options,
     active: &mut [ActiveMoveStateSource],
     reader: &mut impl MoveControllerStateReader,
+    move_evidence_stream: Option<&mut ActiveMoveEvidenceStream>,
 ) -> Result<()> {
+    let mut published_records = Vec::new();
     for state in active {
         let record = if is_joystick_path(&state.source.hidraw_path) {
             let events = reader.read_joystick_events(&state.source.hidraw_path)?;
@@ -522,6 +635,10 @@ fn publish_move_controller_states(
             &format!("{}:{}", record.stream_id, record.sequence),
             &record,
         )?;
+        published_records.push(record);
+    }
+    if let Some(stream) = move_evidence_stream {
+        publish_move_evidence_stream_frame(stream, &published_records)?;
     }
     Ok(())
 }
@@ -1169,6 +1286,10 @@ impl Options {
             move_repeat_count: 1,
             command_id: None,
             move_state_sources: Vec::new(),
+            move_evidence_stream_id: None,
+            move_evidence_verse_id: "mimir-live".to_string(),
+            move_evidence_ring_slots: 4,
+            move_evidence_slot_bytes: 8192,
         };
 
         let mut args = args.peekable();
@@ -1232,6 +1353,25 @@ impl Options {
                         .move_state_sources
                         .push(parse_move_state_source(&value)?);
                 }
+                "--move-evidence-stream" => {
+                    options.move_evidence_stream_id =
+                        Some(take_value(&mut args, "--move-evidence-stream")?)
+                }
+                "--move-evidence-verse" => {
+                    options.move_evidence_verse_id = take_value(&mut args, "--move-evidence-verse")?
+                }
+                "--move-evidence-ring-slots" => {
+                    options.move_evidence_ring_slots =
+                        take_value(&mut args, "--move-evidence-ring-slots")?
+                            .parse()
+                            .context("--move-evidence-ring-slots must be a positive integer")?
+                }
+                "--move-evidence-slot-bytes" => {
+                    options.move_evidence_slot_bytes =
+                        take_value(&mut args, "--move-evidence-slot-bytes")?
+                            .parse()
+                            .context("--move-evidence-slot-bytes must be a positive integer")?
+                }
                 "--color" => options.move_colors.push(take_value(&mut args, "--color")?),
                 "--duration-ms" => options
                     .move_durations_ms
@@ -1254,6 +1394,26 @@ impl Options {
 
         if options.interval_seconds == Some(0) {
             return Err(anyhow!("--interval-seconds must be greater than zero"));
+        }
+        if options.move_evidence_verse_id.trim().is_empty() {
+            return Err(anyhow!("--move-evidence-verse must be non-empty"));
+        }
+        if options
+            .move_evidence_stream_id
+            .as_ref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            return Err(anyhow!("--move-evidence-stream must be non-empty"));
+        }
+        if options.move_evidence_ring_slots == 0 {
+            return Err(anyhow!(
+                "--move-evidence-ring-slots must be greater than zero"
+            ));
+        }
+        if options.move_evidence_slot_bytes == 0 {
+            return Err(anyhow!(
+                "--move-evidence-slot-bytes must be greater than zero"
+            ));
         }
         Ok(options)
     }
@@ -1281,7 +1441,7 @@ fn timestamp_ns() -> Result<i64> {
 }
 
 fn help_text() -> &'static str {
-    "Usage: muninn [serve|activate|request-move-light|move-light-status|move-state-status] [--store <path>] [--target-host <host>] [--port <port>] [--obs-target-host <host>] [--obs-port <port>] [--loopback-script <path>] [--ffmpeg <path>] [--move-state <move-id>=<hidraw-path>] [--dry-run] [--health]\n\nMuninn is Odin's portable telemetry Verse assembler. serve publishes cheap typed telemetry affordances and optional source-local Move controller state; activate starts an explicitly requested local stream; request-move-light publishes a typed Move light command for Muninn serve to execute; move-light-status reads typed command receipts; move-state-status reads typed controller-state records."
+    "Usage: muninn [serve|activate|request-move-light|move-light-status|move-state-status] [--store <path>] [--target-host <host>] [--port <port>] [--obs-target-host <host>] [--obs-port <port>] [--loopback-script <path>] [--ffmpeg <path>] [--move-state <move-id>=<hidraw-path>] [--move-evidence-stream <stream-id>] [--move-evidence-verse <verse-id>] [--dry-run] [--health]\n\nMuninn is Odin's portable telemetry Verse assembler. serve publishes cheap typed telemetry affordances, optional source-local Move controller state, and a CultMesh Move evidence stream when Move state sources are attached; activate starts an explicitly requested local stream; request-move-light publishes a typed Move light command for Muninn serve to execute; move-light-status reads typed command receipts; move-state-status reads typed controller-state records."
 }
 
 fn parse_move_state_source(value: &str) -> Result<MoveStateSource> {
@@ -1304,6 +1464,7 @@ fn parse_move_state_source(value: &str) -> Result<MoveStateSource> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::Deserialize;
 
     #[derive(Default)]
     struct RecordingMoveLightWriter {
@@ -1521,6 +1682,8 @@ mod tests {
                 "nightwing",
                 "--move-state",
                 "move-usb=/dev/hidraw1",
+                "--move-evidence-stream",
+                "muninn:nightwing:move-evidence",
             ]
             .into_iter()
             .map(String::from),
@@ -1534,6 +1697,102 @@ mod tests {
                 hidraw_path: "/dev/hidraw1".to_string(),
             }]
         );
+        assert_eq!(
+            options.move_evidence_stream_id.as_deref(),
+            Some("muninn:nightwing:move-evidence")
+        );
+        assert_eq!(options.move_evidence_verse_id, "mimir-live");
+    }
+
+    #[derive(Deserialize)]
+    struct DecodedMoveEvidenceStreamFrame(
+        String,
+        String,
+        i64,
+        Vec<DecodedMarkerCandidate>,
+        Vec<MuninnMoveControllerStateRecord>,
+    );
+
+    #[derive(Deserialize)]
+    struct DecodedMarkerCandidate;
+
+    #[test]
+    fn move_controller_state_publishes_mimir_compatible_cultmesh_frame() {
+        let options = Options::parse(
+            [
+                "serve",
+                "--host",
+                "nightwing",
+                "--move-state",
+                "move-usb=/dev/input/js0",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap();
+        let source = options.move_state_sources[0].clone();
+        let record = build_move_controller_state_record_from_joystick(
+            &options,
+            &source,
+            7,
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 0, 0, 0, 0, 0, 0],
+            {
+                let mut buttons = [false; 32];
+                buttons[16] = true;
+                buttons[17] = true;
+                buttons
+            },
+            123_456_789,
+            "unix-1".to_string(),
+        );
+        let mut stream = create_move_evidence_stream(&options)
+            .unwrap()
+            .expect("move state source should create a stream");
+
+        let handle = publish_move_evidence_stream_frame(&mut stream, &[record.clone()])
+            .unwrap()
+            .expect("controller state should publish a frame");
+
+        assert_eq!(handle.stream_id, "muninn:nightwing:move-evidence");
+        assert_eq!(
+            stream
+                .catalog
+                .latest_frame("muninn:nightwing:move-evidence")
+                .unwrap()
+                .sequence,
+            0
+        );
+        assert_eq!(
+            stream
+                .catalog
+                .get("muninn:nightwing:move-evidence")
+                .unwrap()
+                .metadata_schema_id
+                .as_deref(),
+            Some("mimir.muninn_move_evidence_stream_frame.v1")
+        );
+        let lease = stream
+            .catalog
+            .ring("muninn:nightwing:move-evidence")
+            .and_then(CultMeshSharedMemoryFrameRing::try_acquire_latest_read)
+            .expect("latest frame should be readable");
+        let decoded: DecodedMoveEvidenceStreamFrame = rmp_serde::from_slice(lease.bytes()).unwrap();
+
+        assert_eq!(decoded.0, "muninn:nightwing:move-evidence:0");
+        assert_eq!(decoded.1, "muninn:nightwing");
+        assert!(decoded.2 > 0);
+        assert!(decoded.3.is_empty());
+        assert_eq!(decoded.4.len(), 1);
+        assert_eq!(decoded.4[0].stream_id, record.stream_id);
+        assert_eq!(decoded.4[0].host_id, record.host_id);
+        assert_eq!(decoded.4[0].move_id, record.move_id);
+        assert_eq!(decoded.4[0].sequence, record.sequence);
+        assert_eq!(decoded.4[0].source_timestamp_ns, record.source_timestamp_ns);
+        assert_eq!(decoded.4[0].accelerometer_xyz, record.accelerometer_xyz);
+        assert_eq!(decoded.4[0].gyroscope_xyz, record.gyroscope_xyz);
+        assert_eq!(decoded.4[0].magnetometer_xyz, record.magnetometer_xyz);
+        assert_eq!(decoded.4[0].buttons, record.buttons);
+        assert!(decoded.4[0].battery01.is_nan());
     }
 
     #[test]

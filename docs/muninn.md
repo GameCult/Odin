@@ -13,7 +13,8 @@ microphones, cameras, and future sensors.
 - Inputs: cheap local probes, operator or Verse activation requests, and local
   capture tools such as FFmpeg or WASAPI helpers.
 - Outputs: `muninn.telemetry_surface.v1`, active `muninn.capture_stream.v1`,
-  and Move optical `muninn.move_marker_candidate.v1` records.
+  Move receipt records, and a CultMesh bytes stream carrying live Move evidence
+  frames for Mimir.
 - Forbidden writers: daemon startup, Idunn keepalive, Mimir ingest, OBS, Odin,
   Gjallar, and renderer bodies must not start capture by implication.
 
@@ -79,6 +80,16 @@ own raw capture, candidate extraction, calibration, triangulation, IMU fusion,
 prediction, or final 6DoF pose. Muninn does not synthesize wand pose; it
 reports what the local body saw and read from USB.
 
+The hot tracking path is a CultMesh stream, not CultCache polling. When
+`serve` has one or more `--move-state` sources, it declares
+`muninn:<host>:move-evidence` in Verse `mimir-live` and publishes
+MessagePack `mimir.muninn_move_evidence_stream_frame.v1` bytes through a
+shared-memory frame ring. The frame contains any marker candidates available
+from local optical extraction plus the controller states read from USB. The
+`muninn.move_marker_candidate.v1` and `muninn.move_controller_state.v1` records
+remain receipts/debug state in the `.cc` store; Mimir drinks the stream and
+owns association, calibration, fusion, prediction, and final pose.
+
 On Linux hosts, enable the controller-state feed by passing one or more Move
 joystick sources to `serve`:
 
@@ -92,6 +103,9 @@ muninn serve \
 The published values are raw Linux joystick/HID counts. Mimir owns calibration,
 axis interpretation, unit conversion, fusion, prediction, and resolved pose
 publication. Hidraw remains the local output path for LED reports.
+Use `--move-evidence-stream <stream-id>` or `--move-evidence-verse <verse-id>`
+only when the default `muninn:<host>:move-evidence` / `mimir-live` address is
+not the desired Mimir-facing stream identity.
 
 ## Move Light Commands
 
@@ -145,3 +159,6 @@ restart actuator launches `serve --host nightwing --interval-seconds 15` with
 `--move-state move-usb=/dev/input/by-id/usb-Sony_Computer_Entertainment_Motion_Controller-joystick`,
 PID, and logs under
 `/home/metacrat/.local/state/gamecult/muninn`.
+With that Move state source attached, `serve` also publishes the
+`muninn:nightwing:move-evidence` CultMesh stream frame body that Mimir's native
+Move evidence reservoir consumes.
