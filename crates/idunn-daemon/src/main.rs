@@ -277,6 +277,16 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 interval_seconds: 30,
             },
             DaemonTarget {
+                daemon_id: "vili".to_string(),
+                verse_id: "raven.local".to_string(),
+                name: "Vili Persona animation daemon".to_string(),
+                health_command: Some(script("health-vili.cmd")),
+                deploy_command: None,
+                restart_command: Some(script("restart-vili.cmd")),
+                enabled: true,
+                interval_seconds: 60,
+            },
+            DaemonTarget {
                 daemon_id: "idunn-swarm-deployment-coverage".to_string(),
                 verse_id: "starfire.local".to_string(),
                 name: "Idunn swarm deployment coverage".to_string(),
