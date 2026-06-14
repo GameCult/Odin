@@ -1,6 +1,7 @@
 param(
   [string] $MuninnExe = "C:\Meta\Odin\Muninn\muninn.exe",
-  [string] $StorePath = "C:\Meta\Odin\state\starfire.muninn.telemetry.cc"
+  [string] $StorePath = "C:\Meta\Odin\state\starfire.muninn.telemetry.cc",
+  [switch] $SkipUsbMoveLight
 )
 
 $ErrorActionPreference = "Stop"
@@ -27,4 +28,16 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 & $MuninnExe quest-access-status --store $StorePath
-exit $LASTEXITCODE
+if ($LASTEXITCODE -ne 0) {
+  exit $LASTEXITCODE
+}
+
+if (-not $SkipUsbMoveLight) {
+  $moveLightProcess = Get-Process -Name "Mimir.PsMoveProbe" -ErrorAction SilentlyContinue |
+    Select-Object -First 1
+  if ($null -eq $moveLightProcess) {
+    throw "Starfire USB Move light worker is not running"
+  }
+}
+
+exit 0

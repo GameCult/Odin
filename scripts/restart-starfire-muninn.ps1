@@ -2,7 +2,11 @@ param(
   [string] $MuninnExe = "C:\Meta\Odin\Muninn\muninn.exe",
   [string] $StorePath = "C:\Meta\Odin\state\starfire.muninn.telemetry.cc",
   [string] $LogRoot = "C:\Meta\Odin\logs\starfire-muninn",
-  [string] $QuestSerial = "1WMHHB68PG1515"
+  [string] $QuestSerial = "1WMHHB68PG1515",
+  [string] $MimirRepoPath = "E:\Projects\Mimir",
+  [string] $UsbMoveLightRgb = "#35ff6c",
+  [int] $UsbMoveLightRefreshMs = 200,
+  [switch] $SkipUsbMoveLight
 )
 
 $ErrorActionPreference = "Stop"
@@ -46,6 +50,17 @@ $process = Start-Process `
   -RedirectStandardError (Join-Path $LogRoot "muninn-serve.err.log")
 
 $process.Id | Set-Content -Encoding ASCII -LiteralPath (Join-Path $LogRoot "muninn-serve.pid")
+
+if (-not $SkipUsbMoveLight) {
+  $moveLightScript = Join-Path $MimirRepoPath "scripts\start-starfire-move-light.ps1"
+  if (-not (Test-Path -LiteralPath $moveLightScript)) {
+    throw "Starfire USB Move light script not found at $moveLightScript"
+  }
+  & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $moveLightScript `
+    -Rgb $UsbMoveLightRgb `
+    -RefreshMs $UsbMoveLightRefreshMs `
+    -HoldSeconds 0
+}
 
 Start-Sleep -Seconds 2
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "health-starfire-muninn.ps1") `
