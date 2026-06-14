@@ -1180,19 +1180,79 @@ fn health_check(options: &Options) -> Result<()> {
     let surface = node
         .get_required::<MuninnTelemetrySurfaceRecord>("latest")
         .context("Muninn telemetry surface is unavailable")?;
-    if surface.state == "idle" || surface.state == "active" {
-        println!(
-            "Muninn healthy: {} on {} ({})",
-            surface.surface_id, surface.host_id, surface.state
-        );
-        Ok(())
-    } else {
-        Err(anyhow!(
+    if surface.state != "idle" && surface.state != "active" {
+        return Err(anyhow!(
             "Muninn telemetry surface is {}: {}",
             surface.state,
             surface.detail
-        ))
+        ));
     }
+
+    verify_move_sources_fresh(options, &node)?;
+
+    println!(
+        "Muninn healthy: {} on {} ({})",
+        surface.surface_id, surface.host_id, surface.state
+    );
+    Ok(())
+}
+
+fn verify_move_sources_fresh(
+    options: &Options,
+    node: &cultmesh_rs::CultMeshNode,
+) -> Result<()> {
+    if options.move_state_sources.is_empty() {
+        return Ok(());
+    }
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before Unix epoch")?
+        .as_secs();
+    let max_age_seconds = options
+        .interval_seconds
+        .unwrap_or(15)
+        .saturating_mul(4)
+        .max(30);
+    let states = node.cache().get_all::<MuninnMoveControllerStateRecord>()?;
+
+    for source in &options.move_state_sources {
+        let latest = states
+            .iter()
+            .filter(|state| state.host_id == options.host_id && state.move_id == source.move_id)
+            .max_by_key(|state| state.sequence)
+            .ok_or_else(|| {
+                anyhow!(
+                    "Muninn Move source {} has no controller-state records",
+                    source.move_id
+                )
+            })?;
+        let observed_seconds = parse_unix_timestamp(&latest.observed_at).with_context(|| {
+            format!(
+                "Muninn Move source {} has invalid observed_at",
+                source.move_id
+            )
+        })?;
+        let age = now.saturating_sub(observed_seconds);
+        if age > max_age_seconds {
+            return Err(anyhow!(
+                "Muninn Move source {} is stale: observed {} seconds ago, max {}",
+                source.move_id,
+                age,
+                max_age_seconds
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn parse_unix_timestamp(value: &str) -> Result<u64> {
+    value
+        .strip_prefix("unix-")
+        .ok_or_else(|| anyhow!("timestamp must start with unix-"))?
+        .parse()
+        .context("timestamp seconds must be an integer")
 }
 
 fn request_move_light(options: Options) -> Result<()> {

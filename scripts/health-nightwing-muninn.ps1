@@ -2,7 +2,9 @@ param(
   [string] $SshTarget = "nightwing",
   [string] $MuninnExe = "/home/metacrat/.local/bin/muninn",
   [string] $StorePath = "/home/metacrat/.local/state/gamecult/muninn/muninn.telemetry.cc",
-  [string] $PidPath = "/home/metacrat/.local/state/gamecult/muninn/muninn.pid"
+  [string] $PidPath = "/home/metacrat/.local/state/gamecult/muninn/muninn.pid",
+  [string] $MoveState = "move-usb=/dev/input/by-id/usb-Sony_Computer_Entertainment_Motion_Controller-joystick",
+  [int] $IntervalSeconds = 15
 )
 
 $ErrorActionPreference = "Stop"
@@ -21,7 +23,11 @@ else
   echo 'Muninn serve process is not running on Nightwing' >&2
   exit 1
 fi
-'$MuninnExe' --health --store '$StorePath'
+'$MuninnExe' --health \
+  --store '$StorePath' \
+  --host nightwing \
+  --move-state '$MoveState' \
+  --interval-seconds '$IntervalSeconds'
 "@
 
 ssh.exe -o BatchMode=yes -o ConnectTimeout=5 $SshTarget $remoteScript

@@ -4,6 +4,7 @@ param(
   [string] $StorePath = "/home/metacrat/.local/state/gamecult/muninn/muninn.telemetry.cc",
   [string] $LogRoot = "/home/metacrat/.local/state/gamecult/muninn",
   [string] $MoveState = "move-usb=/dev/input/by-id/usb-Sony_Computer_Entertainment_Motion_Controller-joystick",
+  [string] $MoveEvidenceStream = "muninn:nightwing:move-evidence",
   [int] $IntervalSeconds = 15
 )
 
@@ -28,6 +29,7 @@ nohup '$MuninnExe' serve \
   --log-root '$LogRoot' \
   --host nightwing \
   --move-state '$MoveState' \
+  --move-evidence-stream '$MoveEvidenceStream' \
   --interval-seconds '$IntervalSeconds' \
   > '$LogRoot/muninn-serve.out.log' \
   2> '$LogRoot/muninn-serve.err.log' \
