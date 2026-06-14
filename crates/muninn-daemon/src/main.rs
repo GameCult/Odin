@@ -1217,7 +1217,7 @@ fn verify_move_sources_fresh(
         let latest = states
             .iter()
             .filter(|state| state.host_id == options.host_id && state.move_id == source.move_id)
-            .max_by_key(|state| state.sequence)
+            .max_by_key(|state| unix_timestamp_sort_key(&state.observed_at))
             .ok_or_else(|| {
                 anyhow!(
                     "Muninn Move source {} has no controller-state records",
@@ -1250,6 +1250,10 @@ fn parse_unix_timestamp(value: &str) -> Result<u64> {
         .ok_or_else(|| anyhow!("timestamp must start with unix-"))?
         .parse()
         .context("timestamp seconds must be an integer")
+}
+
+fn unix_timestamp_sort_key(value: &str) -> u64 {
+    parse_unix_timestamp(value).unwrap_or(0)
 }
 
 fn request_move_light(options: Options) -> Result<()> {
@@ -1300,6 +1304,9 @@ fn move_state_status(options: Options) -> Result<()> {
     states.sort_by(|a, b| {
         a.stream_id
             .cmp(&b.stream_id)
+            .then(unix_timestamp_sort_key(&a.observed_at).cmp(&unix_timestamp_sort_key(
+                &b.observed_at,
+            )))
             .then(a.sequence.cmp(&b.sequence))
     });
     if states.is_empty() {
