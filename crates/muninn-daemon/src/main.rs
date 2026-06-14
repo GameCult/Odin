@@ -12,6 +12,8 @@ use serde::Serialize;
 use std::env;
 use std::fs;
 use std::io::Write;
+#[cfg(unix)]
+use std::path::Path;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::thread;
@@ -100,6 +102,8 @@ struct ActiveMoveStateSource {
     sequence: u64,
     joystick_axes: [i16; 16],
     joystick_buttons: [bool; 32],
+    light_hidraw_path: Option<String>,
+    last_default_light_write_at: Option<Instant>,
 }
 
 #[derive(Serialize)]
@@ -168,10 +172,12 @@ fn serve(options: Options) -> Result<()> {
         .iter()
         .cloned()
         .map(|source| ActiveMoveStateSource {
+            light_hidraw_path: default_move_light_path(&source.hidraw_path),
             source,
             sequence: 0,
             joystick_axes: [0; 16],
             joystick_buttons: [false; 32],
+            last_default_light_write_at: None,
         })
         .collect();
 
@@ -179,6 +185,11 @@ fn serve(options: Options) -> Result<()> {
         let mut node = open_node(&options, "muninn-daemon")?;
         register_move_light_commands(&mut node, &options, &mut active_move_lights)?;
         tick_move_light_commands(&mut node, &mut active_move_lights, &mut HidMoveLightWriter)?;
+        tick_default_move_light_pulse(
+            &mut active_move_states,
+            &active_move_lights,
+            &mut HidMoveLightWriter,
+        );
         publish_move_controller_states(
             &mut node,
             &options,
@@ -945,6 +956,107 @@ fn tick_move_light_commands(
     Ok(())
 }
 
+const DEFAULT_MOVE_LIGHT_COLORS: &[(u8, u8, u8)] = &[
+    (255, 48, 64),
+    (32, 160, 255),
+    (80, 255, 120),
+    (255, 208, 48),
+    (200, 80, 255),
+    (255, 128, 32),
+];
+
+fn tick_default_move_light_pulse(
+    states: &mut [ActiveMoveStateSource],
+    active_commands: &[ActiveMoveLightCommand],
+    writer: &mut impl MoveLightWriter,
+) {
+    let now = Instant::now();
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
+
+    for (index, state) in states.iter_mut().enumerate() {
+        let Some(hidraw_path) = state.light_hidraw_path.as_deref() else {
+            continue;
+        };
+        if active_commands
+            .iter()
+            .any(|command| command.command.hidraw_path == hidraw_path)
+        {
+            continue;
+        }
+        if state
+            .last_default_light_write_at
+            .is_some_and(|last| now.duration_since(last) < Duration::from_millis(200))
+        {
+            continue;
+        }
+
+        let color = DEFAULT_MOVE_LIGHT_COLORS[index % DEFAULT_MOVE_LIGHT_COLORS.len()];
+        let report = default_move_light_report(color, seconds);
+        if writer.write_report(hidraw_path, &report).is_ok() {
+            state.last_default_light_write_at = Some(now);
+        }
+    }
+}
+
+fn default_move_light_report(color: (u8, u8, u8), seconds: f64) -> [u8; 9] {
+    let intensity = seconds.sin().abs() * 0.5 + 0.5;
+    [
+        0x06,
+        0,
+        scale_color_channel(color.0, intensity),
+        scale_color_channel(color.1, intensity),
+        scale_color_channel(color.2, intensity),
+        0,
+        0,
+        0,
+        0,
+    ]
+}
+
+fn scale_color_channel(channel: u8, intensity: f64) -> u8 {
+    ((f64::from(channel) * intensity).round()).clamp(0.0, 255.0) as u8
+}
+
+fn default_move_light_path(source_path: &str) -> Option<String> {
+    if source_path.contains("/dev/hidraw") {
+        return Some(source_path.to_string());
+    }
+    if is_joystick_path(source_path) {
+        return joystick_light_hidraw_path(source_path);
+    }
+    None
+}
+
+#[cfg(unix)]
+fn joystick_light_hidraw_path(joystick_path: &str) -> Option<String> {
+    let joystick_name = Path::new(joystick_path).file_name()?.to_str()?;
+    let mut cursor = fs::canonicalize(format!("/sys/class/input/{joystick_name}/device")).ok()?;
+    for _ in 0..4 {
+        let hidraw_dir = cursor.join("hidraw");
+        if let Ok(entries) = fs::read_dir(hidraw_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name = name.to_str()?;
+                if name.starts_with("hidraw") {
+                    return Some(format!("/dev/{name}"));
+                }
+            }
+        }
+        if !cursor.pop() {
+            break;
+        }
+    }
+    None
+}
+
+#[cfg(not(unix))]
+fn joystick_light_hidraw_path(_joystick_path: &str) -> Option<String> {
+    None
+}
+
 #[cfg(test)]
 fn execute_move_light_command(
     command: MuninnMoveLightCommandRecord,
@@ -1196,10 +1308,7 @@ fn health_check(options: &Options) -> Result<()> {
     Ok(())
 }
 
-fn verify_move_sources_fresh(
-    options: &Options,
-    node: &cultmesh_rs::CultMeshNode,
-) -> Result<()> {
+fn verify_move_sources_fresh(options: &Options, node: &cultmesh_rs::CultMeshNode) -> Result<()> {
     if options.move_state_sources.is_empty() {
         return Ok(());
     }
@@ -1311,9 +1420,10 @@ fn move_state_status(options: Options) -> Result<()> {
     states.sort_by(|a, b| {
         a.stream_id
             .cmp(&b.stream_id)
-            .then(unix_timestamp_sort_key(&a.observed_at).cmp(&unix_timestamp_sort_key(
-                &b.observed_at,
-            )))
+            .then(
+                unix_timestamp_sort_key(&a.observed_at)
+                    .cmp(&unix_timestamp_sort_key(&b.observed_at)),
+            )
             .then(a.sequence.cmp(&b.sequence))
     });
     if states.is_empty() {
@@ -1869,6 +1979,18 @@ mod tests {
     }
 
     #[test]
+    fn default_move_light_report_pulses_between_half_and_full_brightness() {
+        assert_eq!(
+            default_move_light_report((100, 80, 60), 0.0),
+            [0x06, 0, 50, 40, 30, 0, 0, 0, 0]
+        );
+        assert_eq!(
+            default_move_light_report((100, 80, 60), std::f64::consts::FRAC_PI_2),
+            [0x06, 0, 100, 80, 60, 0, 0, 0, 0]
+        );
+    }
+
+    #[test]
     fn move_light_command_rejects_duration_shape_mismatch() {
         let command = MuninnMoveLightCommandRecord {
             colors: vec!["#ff0000".to_string(), "#00ff00".to_string()],
@@ -2134,6 +2256,8 @@ mod tests {
             sequence: 0,
             joystick_axes: [0; 16],
             joystick_buttons: [false; 32],
+            light_hidraw_path: None,
+            last_default_light_write_at: None,
         }];
         let mut reader = RecordingMoveStateReader {
             joystick_events: Vec::new(),
