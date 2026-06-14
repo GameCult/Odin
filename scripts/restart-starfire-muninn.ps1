@@ -3,6 +3,7 @@ param(
   [string] $StorePath = "C:\Meta\Odin\state\starfire.muninn.telemetry.cc",
   [string] $LogRoot = "C:\Meta\Odin\logs\starfire-muninn",
   [string] $QuestSerial = "1WMHHB68PG1515",
+  [string] $MoveBluetoothHost = "5C:93:A2:9C:A8:A8",
   [string[]] $MoveState = @(),
   [switch] $EnableUsbMoveState
 )
@@ -27,6 +28,10 @@ New-Item -ItemType Directory -Force -Path $LogRoot | Out-Null
 $storeParent = Split-Path -Parent $StorePath
 if (-not [string]::IsNullOrWhiteSpace($storeParent)) {
   New-Item -ItemType Directory -Force -Path $storeParent | Out-Null
+}
+
+if (-not [string]::IsNullOrWhiteSpace($MoveBluetoothHost)) {
+  & $MuninnExe claim-move-host --move-host $MoveBluetoothHost
 }
 
 $arguments = @(

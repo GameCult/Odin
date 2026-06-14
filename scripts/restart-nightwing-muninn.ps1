@@ -16,6 +16,8 @@ function Quote-ShSingle([string] $Value) {
 
 $moveStateSpecs = @($MoveState | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
 if ($moveStateSpecs.Count -eq 0) {
+  $claimScript = Join-Path $PSScriptRoot "claim-nightwing-usb-moves.ps1"
+  & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $claimScript -SshTarget $SshTarget
   $sourceScript = Join-Path $PSScriptRoot "get-nightwing-move-state-sources.ps1"
   $moveStateSpecs = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $sourceScript -SshTarget $SshTarget)
 }

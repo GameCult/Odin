@@ -38,6 +38,7 @@ enum Mode {
     RequestMoveLight,
     MoveLightStatus,
     MoveStateStatus,
+    ClaimMoveHost,
     QuestAccessStatus,
 }
 
@@ -69,6 +70,7 @@ struct Options {
     move_durations_ms: Vec<u32>,
     move_repeat_count: u32,
     command_id: Option<String>,
+    move_host_address: Option<String>,
     move_state_sources: Vec<MoveStateSource>,
     move_evidence_stream_id: Option<String>,
     move_evidence_verse_id: String,
@@ -164,6 +166,7 @@ fn main() -> Result<()> {
         Mode::RequestMoveLight => request_move_light(options),
         Mode::MoveLightStatus => move_light_status(options),
         Mode::MoveStateStatus => move_state_status(options),
+        Mode::ClaimMoveHost => claim_move_host(options),
         Mode::QuestAccessStatus => quest_access_status(options),
         Mode::DryRun => {
             let plan = build_mux_plan(&options, "dry-run".to_string());
@@ -1280,6 +1283,194 @@ fn windows_ps_move_controller_identity(handle: *mut std::ffi::c_void) -> Option<
 }
 
 #[cfg(windows)]
+fn parse_bluetooth_address_little_endian(value: &str) -> Result<[u8; 6]> {
+    let parts = value.split([':', '-']).collect::<Vec<_>>();
+    if parts.len() != 6 {
+        return Err(anyhow!("Bluetooth address must have six hex bytes"));
+    }
+    let mut address = [0u8; 6];
+    for (index, part) in parts.iter().enumerate() {
+        let byte = u8::from_str_radix(part, 16)
+            .with_context(|| format!("parsing Bluetooth address byte {part}"))?;
+        address[5 - index] = byte;
+    }
+    Ok(address)
+}
+
+#[cfg(windows)]
+fn format_bluetooth_address_little_endian(address: &[u8]) -> String {
+    address
+        .iter()
+        .rev()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+#[cfg(windows)]
+fn windows_ps_move_bluetooth_addresses(
+    handle: *mut std::ffi::c_void,
+) -> Option<(String, String)> {
+    use windows_sys::Win32::Devices::HumanInterfaceDevice::HidD_GetFeature;
+
+    let mut report = [0u8; 16];
+    report[0] = 0x04;
+    let ok = unsafe { HidD_GetFeature(handle, report.as_mut_ptr().cast(), report.len() as u32) };
+    if ok == 0 {
+        return None;
+    }
+    Some((
+        format_bluetooth_address_little_endian(&report[1..7]),
+        format_bluetooth_address_little_endian(&report[10..16]),
+    ))
+}
+
+#[cfg(windows)]
+fn windows_claim_ps_move_host(host: &[u8; 6]) -> Result<usize> {
+    use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
+        DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, SP_DEVICE_INTERFACE_DATA,
+        SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW,
+    };
+    use windows_sys::Win32::Devices::HumanInterfaceDevice::{
+        HIDD_ATTRIBUTES, HIDP_CAPS, HIDP_STATUS_SUCCESS, HidD_FreePreparsedData,
+        HidD_GetAttributes, HidD_GetHidGuid, HidD_GetPreparsedData, HidD_SetFeature, HidP_GetCaps,
+    };
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+
+    let mut hid_guid = unsafe { std::mem::zeroed() };
+    unsafe { HidD_GetHidGuid(&mut hid_guid) };
+    let info_set = unsafe {
+        SetupDiGetClassDevsW(
+            &hid_guid,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            DIGCF_PRESENT | DIGCF_DEVICEINTERFACE,
+        )
+    };
+    if info_set == INVALID_HANDLE_VALUE as isize {
+        return Err(std::io::Error::last_os_error()).context("enumerating Windows HID devices");
+    }
+
+    let mut claims = 0usize;
+    let mut index = 0;
+    loop {
+        let mut interface_data = SP_DEVICE_INTERFACE_DATA {
+            cbSize: std::mem::size_of::<SP_DEVICE_INTERFACE_DATA>() as u32,
+            InterfaceClassGuid: unsafe { std::mem::zeroed() },
+            Flags: 0,
+            Reserved: 0,
+        };
+        let ok = unsafe {
+            SetupDiEnumDeviceInterfaces(
+                info_set,
+                std::ptr::null_mut(),
+                &hid_guid,
+                index,
+                &mut interface_data,
+            )
+        };
+        if ok == 0 {
+            break;
+        }
+        index += 1;
+
+        let Some(path) = (unsafe { windows_hid_interface_path(info_set, &mut interface_data) })
+        else {
+            continue;
+        };
+        if !path.to_ascii_lowercase().contains("&col02#") {
+            continue;
+        }
+
+        let wide = wide_null(&path);
+        let handle = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                std::ptr::null_mut(),
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                std::ptr::null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            eprintln!(
+                "path={} open=failed error={}",
+                path,
+                std::io::Error::last_os_error()
+            );
+            continue;
+        }
+
+        let mut attributes = HIDD_ATTRIBUTES {
+            Size: std::mem::size_of::<HIDD_ATTRIBUTES>() as u32,
+            VendorID: 0,
+            ProductID: 0,
+            VersionNumber: 0,
+        };
+        let mut preparsed = 0;
+        let is_move = unsafe {
+            HidD_GetAttributes(handle, &mut attributes) != 0
+                && attributes.VendorID == 0x054c
+                && attributes.ProductID == 0x03d5
+                && HidD_GetPreparsedData(handle, &mut preparsed) != 0
+        };
+        if !is_move {
+            unsafe { CloseHandle(handle) };
+            continue;
+        }
+
+        let mut caps: HIDP_CAPS = unsafe { std::mem::zeroed() };
+        let caps_ok = unsafe { HidP_GetCaps(preparsed, &mut caps) == HIDP_STATUS_SUCCESS };
+        unsafe { HidD_FreePreparsedData(preparsed) };
+        if !caps_ok || caps.FeatureReportByteLength < 23 {
+            unsafe { CloseHandle(handle) };
+            continue;
+        }
+
+        let before = windows_ps_move_bluetooth_addresses(handle);
+        let mut report = [0u8; 23];
+        report[0] = 0x05;
+        report[1..7].copy_from_slice(host);
+        let ok = unsafe { HidD_SetFeature(handle, report.as_mut_ptr().cast(), report.len() as u32) };
+        if ok == 0 {
+            let error = std::io::Error::last_os_error();
+            unsafe { CloseHandle(handle) };
+            eprintln!("path={} set_feature=failed error={}", path, error);
+            continue;
+        }
+        let after = windows_ps_move_bluetooth_addresses(handle);
+        unsafe { CloseHandle(handle) };
+
+        let controller = after
+            .as_ref()
+            .or(before.as_ref())
+            .map(|addresses| addresses.0.as_str())
+            .unwrap_or("(unknown)");
+        let host_before = before
+            .as_ref()
+            .map(|addresses| addresses.1.as_str())
+            .unwrap_or("(unknown)");
+        let host_after = after
+            .as_ref()
+            .map(|addresses| addresses.1.as_str())
+            .unwrap_or("(unknown)");
+        println!(
+            "path={} controller={} host_before={} host_after={}",
+            path, controller, host_before, host_after
+        );
+        claims += 1;
+    }
+
+    unsafe { SetupDiDestroyDeviceInfoList(info_set) };
+    Ok(claims)
+}
+
+#[cfg(windows)]
 fn windows_ps_move_input_report() -> Result<Option<Vec<u8>>> {
     use windows_sys::Win32::Devices::HumanInterfaceDevice::{
         HIDP_CAPS, HIDP_STATUS_SUCCESS, HidD_FreePreparsedData, HidD_GetInputReport,
@@ -1934,6 +2125,31 @@ fn move_state_status(options: Options) -> Result<()> {
     Ok(())
 }
 
+fn claim_move_host(options: Options) -> Result<()> {
+    let host = options
+        .move_host_address
+        .as_deref()
+        .ok_or_else(|| anyhow!("--move-host is required for claim-move-host"))?;
+    claim_ps_move_host(host)
+}
+
+#[cfg(not(windows))]
+fn claim_ps_move_host(_host_address: &str) -> Result<()> {
+    Err(anyhow!(
+        "claim-move-host is implemented in Muninn on Windows; use scripts/nightwing-claim-usb-moves.sh on Linux"
+    ))
+}
+
+#[cfg(windows)]
+fn claim_ps_move_host(host_address: &str) -> Result<()> {
+    let host = parse_bluetooth_address_little_endian(host_address)?;
+    let claims = windows_claim_ps_move_host(&host)?;
+    if claims == 0 {
+        println!("no USB PS Move pairing collections found");
+    }
+    Ok(())
+}
+
 fn build_move_light_command(options: &Options) -> Result<MuninnMoveLightCommandRecord> {
     parse_move_colors(&options.move_colors)?;
     if options.hidraw_path.trim().is_empty() {
@@ -2137,6 +2353,7 @@ impl Options {
             move_durations_ms: Vec::new(),
             move_repeat_count: 1,
             command_id: None,
+            move_host_address: None,
             move_state_sources: Vec::new(),
             move_evidence_stream_id: None,
             move_evidence_verse_id: "mimir-live".to_string(),
@@ -2157,6 +2374,7 @@ impl Options {
                 "request-move-light" => options.mode = Mode::RequestMoveLight,
                 "move-light-status" => options.mode = Mode::MoveLightStatus,
                 "move-state-status" => options.mode = Mode::MoveStateStatus,
+                "claim-move-host" => options.mode = Mode::ClaimMoveHost,
                 "quest-access-status" => options.mode = Mode::QuestAccessStatus,
                 "--health" => options.mode = Mode::Health,
                 "--dry-run" => options.mode = Mode::DryRun,
@@ -2256,6 +2474,9 @@ impl Options {
                         .context("--repeat-count must be a positive integer")?
                 }
                 "--command" => options.command_id = Some(take_value(&mut args, "--command")?),
+                "--move-host" => {
+                    options.move_host_address = Some(take_value(&mut args, "--move-host")?)
+                }
                 "--help" | "-h" => return Err(anyhow!(help_text())),
                 other => {
                     return Err(anyhow!(
@@ -2300,6 +2521,7 @@ impl Options {
                 "--quest-video-input-stream",
                 options.quest_video_input_stream_id.as_ref(),
             ),
+            ("--move-host", options.move_host_address.as_ref()),
         ] {
             if value.is_some_and(|value| value.trim().is_empty()) {
                 return Err(anyhow!("{name} must be non-empty"));
@@ -2331,7 +2553,7 @@ fn timestamp_ns() -> Result<i64> {
 }
 
 fn help_text() -> &'static str {
-    "Usage: muninn [serve|activate|request-move-light|move-light-status|move-state-status|quest-access-status] [--store <path>] [--target-host <host>] [--port <port>] [--obs-target-host <host>] [--obs-port <port>] [--loopback-script <path>] [--ffmpeg <path>] [--move-state <move-id>=<hidraw-path>] [--move-evidence-stream <stream-id>] [--move-evidence-verse <verse-id>] [--quest-adb] [--quest-serial <serial>] [--quest-input-stream <stream-id>] [--quest-pose-stream <stream-id>] [--quest-video-input-stream <stream-id>] [--dry-run] [--health]\n\nMuninn is Odin's portable telemetry Verse assembler. serve publishes cheap typed telemetry affordances, optional source-local Move controller state, optional Quest USB access surfaces, and a CultMesh Move evidence stream when Move state sources are attached; activate starts an explicitly requested local stream; request-move-light publishes a typed Move light command for Muninn serve to execute; move-light-status reads typed command receipts; move-state-status reads typed controller-state records; quest-access-status reads typed Quest access state."
+    "Usage: muninn [serve|activate|request-move-light|move-light-status|move-state-status|claim-move-host|quest-access-status] [--store <path>] [--target-host <host>] [--port <port>] [--obs-target-host <host>] [--obs-port <port>] [--loopback-script <path>] [--ffmpeg <path>] [--move-state <move-id>=<hidraw-path>] [--move-host <bt-addr>] [--move-evidence-stream <stream-id>] [--move-evidence-verse <verse-id>] [--quest-adb] [--quest-serial <serial>] [--quest-input-stream <stream-id>] [--quest-pose-stream <stream-id>] [--quest-video-input-stream <stream-id>] [--dry-run] [--health]\n\nMuninn is Odin's portable telemetry Verse assembler. serve publishes cheap typed telemetry affordances, optional source-local Move controller state, optional Quest USB access surfaces, and a CultMesh Move evidence stream when Move state sources are attached; activate starts an explicitly requested local stream; request-move-light publishes a typed Move light command for Muninn serve to execute; move-light-status reads typed command receipts; move-state-status reads typed controller-state records; claim-move-host assigns USB-attached PS Moves to a Bluetooth host; quest-access-status reads typed Quest access state."
 }
 
 fn parse_move_state_source(value: &str) -> Result<MoveStateSource> {
@@ -2585,6 +2807,26 @@ mod tests {
         assert_eq!(options.mode, Mode::MoveStateStatus);
         assert_eq!(options.host_id, "nightwing");
         assert_eq!(options.move_id, "move-usb");
+    }
+
+    #[test]
+    fn claim_move_host_accepts_target_bluetooth_address() {
+        let options = Options::parse(
+            [
+                "claim-move-host",
+                "--move-host",
+                "5C:93:A2:9C:A8:A8",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap();
+
+        assert_eq!(options.mode, Mode::ClaimMoveHost);
+        assert_eq!(
+            options.move_host_address.as_deref(),
+            Some("5C:93:A2:9C:A8:A8")
+        );
     }
 
     #[test]
