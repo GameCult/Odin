@@ -3,11 +3,25 @@ param(
   [string] $MuninnExe = "/home/metacrat/.local/bin/muninn",
   [string] $StorePath = "/home/metacrat/.local/state/gamecult/muninn/muninn.telemetry.cc",
   [string] $PidPath = "/home/metacrat/.local/state/gamecult/muninn/muninn.pid",
-  [string] $MoveState = "move-usb=/dev/input/by-id/usb-Sony_Computer_Entertainment_Motion_Controller-joystick",
+  [string[]] $MoveState = @(),
   [int] $IntervalSeconds = 15
 )
 
 $ErrorActionPreference = "Stop"
+
+function Quote-ShSingle([string] $Value) {
+  return "'" + ($Value -replace "'", "'\''") + "'"
+}
+
+$moveStateSpecs = @($MoveState | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+if ($moveStateSpecs.Count -eq 0) {
+  $sourceScript = Join-Path $PSScriptRoot "get-nightwing-move-state-sources.ps1"
+  $moveStateSpecs = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $sourceScript -SshTarget $SshTarget)
+}
+
+$moveStateSetLines = ($moveStateSpecs | ForEach-Object {
+  "set -- ""`$@"" --move-state $(Quote-ShSingle $_)"
+}) -join "`n"
 
 $remoteScript = @"
 set -eu
@@ -23,11 +37,13 @@ else
   echo 'Muninn serve process is not running on Nightwing' >&2
   exit 1
 fi
-'$MuninnExe' --health \
+set -- --health \
   --store '$StorePath' \
-  --host nightwing \
-  --move-state '$MoveState' \
+  --host nightwing
+$moveStateSetLines
+set -- "`$@" \
   --interval-seconds '$IntervalSeconds'
+'$MuninnExe' "`$@"
 "@
 
 ssh.exe -o BatchMode=yes -o ConnectTimeout=5 $SshTarget $remoteScript

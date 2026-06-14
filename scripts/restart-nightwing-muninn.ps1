@@ -3,12 +3,26 @@ param(
   [string] $MuninnExe = "/home/metacrat/.local/bin/muninn",
   [string] $StorePath = "/home/metacrat/.local/state/gamecult/muninn/muninn.telemetry.cc",
   [string] $LogRoot = "/home/metacrat/.local/state/gamecult/muninn",
-  [string] $MoveState = "move-usb=/dev/input/by-id/usb-Sony_Computer_Entertainment_Motion_Controller-joystick",
+  [string[]] $MoveState = @(),
   [string] $MoveEvidenceStream = "muninn:nightwing:move-evidence",
   [int] $IntervalSeconds = 15
 )
 
 $ErrorActionPreference = "Stop"
+
+function Quote-ShSingle([string] $Value) {
+  return "'" + ($Value -replace "'", "'\''") + "'"
+}
+
+$moveStateSpecs = @($MoveState | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+if ($moveStateSpecs.Count -eq 0) {
+  $sourceScript = Join-Path $PSScriptRoot "get-nightwing-move-state-sources.ps1"
+  $moveStateSpecs = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $sourceScript -SshTarget $SshTarget)
+}
+
+$moveStateSetLines = ($moveStateSpecs | ForEach-Object {
+  "set -- ""`$@"" --move-state $(Quote-ShSingle $_)"
+}) -join "`n"
 
 $remoteScript = @"
 set -eu
@@ -24,13 +38,15 @@ fi
 for pid in `$(pgrep -f '[m]uninn serve .*--host nightwing' 2>/dev/null || true); do
   kill "`$pid" 2>/dev/null || true
 done
-nohup '$MuninnExe' serve \
+set -- serve \
   --store '$StorePath' \
   --log-root '$LogRoot' \
-  --host nightwing \
-  --move-state '$MoveState' \
+  --host nightwing
+$moveStateSetLines
+set -- "`$@" \
   --move-evidence-stream '$MoveEvidenceStream' \
-  --interval-seconds '$IntervalSeconds' \
+  --interval-seconds '$IntervalSeconds'
+nohup '$MuninnExe' "`$@" \
   > '$LogRoot/muninn-serve.out.log' \
   2> '$LogRoot/muninn-serve.err.log' \
   < /dev/null &
