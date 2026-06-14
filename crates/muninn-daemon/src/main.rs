@@ -110,6 +110,12 @@ struct ActiveMoveStateSource {
     light_hidraw_path: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DefaultMoveLightTarget {
+    path: String,
+    identity: String,
+}
+
 #[derive(Serialize)]
 struct MuninnMoveEvidenceStreamFrame<'a>(
     &'a str,
@@ -1015,38 +1021,56 @@ fn tick_default_move_light_pulse(
         .as_secs_f64();
     let paths = default_move_light_paths(states);
 
-    for (index, hidraw_path) in paths.iter().enumerate() {
+    for target in paths.iter() {
         if active_commands
             .iter()
-            .any(|command| command.command.hidraw_path == *hidraw_path)
+            .any(|command| command.command.hidraw_path == target.path)
         {
             continue;
         }
 
-        let color = DEFAULT_MOVE_LIGHT_COLORS[index % DEFAULT_MOVE_LIGHT_COLORS.len()];
+        let color = default_move_color_for_identity(&target.identity);
         let report = default_move_light_report(color, seconds);
-        let _ = writer.write_report(hidraw_path, &report);
+        let _ = writer.write_report(&target.path, &report);
     }
     *last_write_at = Some(now);
 }
 
-fn default_move_light_paths(states: &[ActiveMoveStateSource]) -> Vec<String> {
+fn default_move_light_paths(states: &[ActiveMoveStateSource]) -> Vec<DefaultMoveLightTarget> {
     let mut paths = Vec::new();
     for state in states {
         if let Some(path) = state.light_hidraw_path.as_ref() {
-            push_unique(&mut paths, path.clone());
+            push_unique_light_target(
+                &mut paths,
+                DefaultMoveLightTarget {
+                    path: path.clone(),
+                    identity: state.source.move_id.clone(),
+                },
+            );
         }
     }
     for path in platform_default_move_light_paths() {
-        push_unique(&mut paths, path);
+        push_unique_light_target(&mut paths, path);
     }
     paths
 }
 
-fn push_unique(paths: &mut Vec<String>, path: String) {
-    if !paths.iter().any(|existing| existing == &path) {
-        paths.push(path);
+fn push_unique_light_target(
+    paths: &mut Vec<DefaultMoveLightTarget>,
+    target: DefaultMoveLightTarget,
+) {
+    if !paths.iter().any(|existing| existing.path == target.path) {
+        paths.push(target);
     }
+}
+
+fn default_move_color_for_identity(identity: &str) -> (u8, u8, u8) {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in identity.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    DEFAULT_MOVE_LIGHT_COLORS[hash as usize % DEFAULT_MOVE_LIGHT_COLORS.len()]
 }
 
 fn default_move_light_report(color: (u8, u8, u8), seconds: f64) -> [u8; 9] {
@@ -1106,7 +1130,7 @@ fn joystick_light_hidraw_path(_joystick_path: &str) -> Option<String> {
 }
 
 #[cfg(not(windows))]
-fn platform_default_move_light_paths() -> Vec<String> {
+fn platform_default_move_light_paths() -> Vec<DefaultMoveLightTarget> {
     Vec::new()
 }
 
@@ -1116,7 +1140,7 @@ fn platform_default_move_lights_enabled() -> bool {
 }
 
 #[cfg(windows)]
-fn platform_default_move_light_paths() -> Vec<String> {
+fn platform_default_move_light_paths() -> Vec<DefaultMoveLightTarget> {
     windows_ps_move_light_paths().unwrap_or_default()
 }
 
@@ -1126,7 +1150,7 @@ fn platform_default_move_lights_enabled() -> bool {
 }
 
 #[cfg(windows)]
-fn windows_ps_move_light_paths() -> Result<Vec<String>> {
+fn windows_ps_move_light_paths() -> Result<Vec<DefaultMoveLightTarget>> {
     use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
         DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, SP_DEVICE_INTERFACE_DATA,
         SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW,
@@ -1218,7 +1242,10 @@ fn windows_ps_move_light_paths() -> Result<Vec<String>> {
             let mut caps: HIDP_CAPS = unsafe { std::mem::zeroed() };
             let caps_ok = unsafe { HidP_GetCaps(preparsed, &mut caps) == HIDP_STATUS_SUCCESS };
             if caps_ok && caps.OutputReportByteLength > 0 {
-                paths.push(path);
+                let identity = windows_ps_move_controller_identity(handle)
+                    .map(|id| format!("move-{id}"))
+                    .unwrap_or_else(|| path.clone());
+                paths.push(DefaultMoveLightTarget { path, identity });
             }
         }
         if preparsed != 0 {
@@ -1228,8 +1255,27 @@ fn windows_ps_move_light_paths() -> Result<Vec<String>> {
     }
 
     unsafe { SetupDiDestroyDeviceInfoList(info_set) };
-    paths.sort();
+    paths.sort_by(|a, b| a.identity.cmp(&b.identity).then(a.path.cmp(&b.path)));
     Ok(paths)
+}
+
+#[cfg(windows)]
+fn windows_ps_move_controller_identity(handle: *mut std::ffi::c_void) -> Option<String> {
+    use windows_sys::Win32::Devices::HumanInterfaceDevice::HidD_GetFeature;
+
+    let mut report = [0u8; 16];
+    report[0] = 0x04;
+    let ok = unsafe { HidD_GetFeature(handle, report.as_mut_ptr().cast(), report.len() as u32) };
+    if ok == 0 {
+        return None;
+    }
+    Some(
+        report[1..7]
+            .iter()
+            .rev()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>(),
+    )
 }
 
 #[cfg(windows)]
@@ -1244,9 +1290,10 @@ fn windows_ps_move_input_report() -> Result<Option<Vec<u8>>> {
         FILE_SHARE_WRITE, OPEN_EXISTING,
     };
 
-    let Some(path) = windows_ps_move_light_paths()?.into_iter().next() else {
+    let Some(target) = windows_ps_move_light_paths()?.into_iter().next() else {
         return Ok(None);
     };
+    let path = target.path;
     let wide = wide_null(&path);
     let handle = unsafe {
         CreateFileW(
@@ -2422,6 +2469,18 @@ mod tests {
         assert_eq!(
             default_move_light_report((100, 80, 60), std::f64::consts::FRAC_PI_2),
             [0x06, 0, 100, 80, 60, 0, 0, 0, 0]
+        );
+    }
+
+    #[test]
+    fn default_move_color_is_stable_for_physical_identity() {
+        assert_eq!(
+            default_move_color_for_identity("move-0006f523e2d1"),
+            default_move_color_for_identity("move-0006f523e2d1")
+        );
+        assert_ne!(
+            default_move_color_for_identity("move-0006f523e2d1"),
+            default_move_color_for_identity("move-000704a6be5f")
         );
     }
 

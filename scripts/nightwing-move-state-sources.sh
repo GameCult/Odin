@@ -1,6 +1,47 @@
 #!/bin/sh
 set -eu
 
+controller_id_from_hidraw() {
+  hidraw="$1"
+  python3 - "$hidraw" <<'PY'
+import fcntl
+import os
+import sys
+
+path = sys.argv[1]
+HIDIOCGFEATURE = lambda length: 0xC0000000 | (length << 16) | (0x48 << 8) | 0x07
+try:
+    fd = os.open(path, os.O_RDWR | os.O_NONBLOCK)
+    buf = bytearray(16)
+    buf[0] = 4
+    fcntl.ioctl(fd, HIDIOCGFEATURE(len(buf)), buf, True)
+    os.close(fd)
+    print(''.join(f'{byte:02x}' for byte in reversed(buf[1:7])))
+except Exception:
+    try:
+        os.close(fd)
+    except Exception:
+        pass
+    sys.exit(1)
+PY
+}
+
+hidraw_for_js() {
+  js="$1"
+  cursor="$(readlink -f "/sys/class/input/$(basename "$js")/device" 2>/dev/null || true)"
+  while [ -n "$cursor" ] && [ "$cursor" != "/" ]; do
+    if [ -d "$cursor/hidraw" ]; then
+      for raw in "$cursor"/hidraw/hidraw*; do
+        [ -e "$raw" ] || continue
+        printf '/dev/%s\n' "$(basename "$raw")"
+        return 0
+      done
+    fi
+    cursor="$(dirname "$cursor")"
+  done
+  return 1
+}
+
 for js in /dev/input/js*; do
   [ -e "$js" ] || continue
   props="$(udevadm info -q property -n "$js" 2>/dev/null || true)"
@@ -18,19 +59,21 @@ $uevent_text" in
   bus="$(printf '%s\n' "$props" | awk -F= '$1=="ID_BUS"{print $2; exit}')"
   uniq="$(printf '%s\n' "$uevent_text" | awk -F= '$1=="HID_UNIQ"{print $2; exit}' | tr -d ':')"
   path_tag="$(printf '%s\n' "$props" | awk -F= '$1=="ID_PATH_TAG"{print $2; exit}' | tr -c 'A-Za-z0-9_' '_' | sed 's/_*$//')"
+  hidraw="$(hidraw_for_js "$js" || true)"
+  controller_id=""
+  if [ -n "$hidraw" ]; then
+    controller_id="$(controller_id_from_hidraw "$hidraw" 2>/dev/null || true)"
+  fi
 
-  case "$bus:$uniq" in
-    bluetooth:?*)
-      id="move-bt-$uniq"
-      ;;
-    *)
-      if [ -n "$path_tag" ]; then
-        id="move-usb-$path_tag"
-      else
-        id="move-$(basename "$js")"
-      fi
-      ;;
-  esac
+  if [ -n "$controller_id" ]; then
+    id="move-$controller_id"
+  elif [ "$bus" = "bluetooth" ] && [ -n "$uniq" ]; then
+    id="move-$uniq"
+  elif [ -n "$path_tag" ]; then
+    id="move-usb-$path_tag"
+  else
+    id="move-$(basename "$js")"
+  fi
 
   printf '%s=%s\n' "$id" "$js"
 done
