@@ -2,6 +2,30 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 
 $IdunnDeploymentTargets = @(
   [pscustomobject]@{
+    Id = "starfire-muninn"
+    Repo = "Odin"
+    LocalPath = "E:\Projects\Odin"
+    Host = "starfire"
+    Service = "muninn serve --host starfire"
+    Status = "runtime-enforced"
+    Health = "$repoRoot\scripts\health-starfire-muninn.cmd"
+    Deploy = $null
+    Restart = "$repoRoot\scripts\restart-starfire-muninn.cmd"
+    Reason = "Central Idunn keeps Starfire-local Muninn alive for Quest access and local telemetry surfaces."
+  },
+  [pscustomobject]@{
+    Id = "nightwing-muninn"
+    Repo = "Odin"
+    LocalPath = "E:\Projects\Odin"
+    Host = "nightwing"
+    Service = "muninn serve --host nightwing"
+    Status = "runtime-enforced"
+    Health = "$repoRoot\scripts\health-nightwing-muninn.cmd"
+    Deploy = $null
+    Restart = "$repoRoot\scripts\restart-nightwing-muninn.cmd"
+    Reason = "Central Idunn reaches Nightwing over SSH and keeps the host-local Muninn Move HID daemon alive."
+  },
+  [pscustomobject]@{
     Id = "nightwing-gjallar"
     Repo = "Gjallar"
     LocalPath = "E:\Projects\Gjallar"

@@ -2,9 +2,9 @@ $ErrorActionPreference = "Stop"
 
 . (Join-Path $PSScriptRoot "idunn-deployment-targets.ps1")
 
-$unknown = @($IdunnDeploymentTargets | Where-Object { $_.Status -notin @("enforced", "blocked", "external-owned", "not-runtime") })
+$unknown = @($IdunnDeploymentTargets | Where-Object { $_.Status -notin @("enforced", "runtime-enforced", "blocked", "external-owned", "not-runtime") })
 $enforcedWithoutDeploy = @($IdunnDeploymentTargets | Where-Object { $_.Status -eq "enforced" -and [string]::IsNullOrWhiteSpace($_.Deploy) })
-$enforcedWithoutHealth = @($IdunnDeploymentTargets | Where-Object { $_.Status -eq "enforced" -and [string]::IsNullOrWhiteSpace($_.Health) })
+$enforcedWithoutHealth = @($IdunnDeploymentTargets | Where-Object { $_.Status -in @("enforced", "runtime-enforced") -and [string]::IsNullOrWhiteSpace($_.Health) })
 $blockedWithoutReason = @($IdunnDeploymentTargets | Where-Object { $_.Status -in @("blocked", "external-owned") -and [string]::IsNullOrWhiteSpace($_.Reason) })
 
 $issues = @()
@@ -26,6 +26,7 @@ if ($issues.Count) {
 }
 
 $enforced = @($IdunnDeploymentTargets | Where-Object { $_.Status -eq "enforced" })
+$runtimeEnforced = @($IdunnDeploymentTargets | Where-Object { $_.Status -eq "runtime-enforced" })
 $blocked = @($IdunnDeploymentTargets | Where-Object { $_.Status -eq "blocked" })
 $external = @($IdunnDeploymentTargets | Where-Object { $_.Status -eq "external-owned" })
-Write-Host "Idunn deployment catalog coherent: $($IdunnDeploymentTargets.Count) targets, $($enforced.Count) enforced, $($blocked.Count) blocked, $($external.Count) external-owned."
+Write-Host "Idunn deployment catalog coherent: $($IdunnDeploymentTargets.Count) targets, $($enforced.Count) deploy-enforced, $($runtimeEnforced.Count) runtime-enforced, $($blocked.Count) blocked, $($external.Count) external-owned."
