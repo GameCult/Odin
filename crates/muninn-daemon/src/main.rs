@@ -714,6 +714,7 @@ fn is_joystick_path(path: &str) -> bool {
     path.contains("/dev/input/js") || path.contains("-joystick")
 }
 
+#[cfg(windows)]
 fn is_windows_ps_move_source(path: &str) -> bool {
     path.eq_ignore_ascii_case("windows-psmove") || path.eq_ignore_ascii_case("windows-psmove-col01")
 }
