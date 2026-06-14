@@ -11,6 +11,7 @@ use odin_core::{
 use serde::Serialize;
 use std::env;
 use std::fs;
+#[cfg(not(windows))]
 use std::io::Write;
 #[cfg(unix)]
 use std::path::Path;
@@ -19,10 +20,14 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[cfg(windows)]
+use std::ffi::OsStr;
 #[cfg(unix)]
 use std::io::{ErrorKind, Read};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Mode {
@@ -103,7 +108,6 @@ struct ActiveMoveStateSource {
     joystick_axes: [i16; 16],
     joystick_buttons: [bool; 32],
     light_hidraw_path: Option<String>,
-    last_default_light_write_at: Option<Instant>,
 }
 
 #[derive(Serialize)]
@@ -167,6 +171,7 @@ fn serve(options: Options) -> Result<()> {
     ensure_state_dirs(&options)?;
     let mut move_evidence_stream = create_move_evidence_stream(&options)?;
     let mut active_move_lights = Vec::new();
+    let mut last_default_move_light_write_at = None;
     let mut active_move_states: Vec<ActiveMoveStateSource> = options
         .move_state_sources
         .iter()
@@ -177,7 +182,6 @@ fn serve(options: Options) -> Result<()> {
             sequence: 0,
             joystick_axes: [0; 16],
             joystick_buttons: [false; 32],
-            last_default_light_write_at: None,
         })
         .collect();
 
@@ -188,6 +192,7 @@ fn serve(options: Options) -> Result<()> {
         tick_default_move_light_pulse(
             &mut active_move_states,
             &active_move_lights,
+            &mut last_default_move_light_write_at,
             &mut HidMoveLightWriter,
         );
         publish_move_controller_states(
@@ -199,13 +204,18 @@ fn serve(options: Options) -> Result<()> {
         )?;
         publish_quest_access_if_requested(&mut node, &options)?;
         publish_surface(&mut node, &options, "idle", &[])?;
+        let has_platform_default_move_lights = platform_default_move_lights_enabled();
         if options.interval_seconds.is_none()
             && active_move_lights.is_empty()
             && active_move_states.is_empty()
+            && !has_platform_default_move_lights
         {
             return Ok(());
         }
-        let sleep = if !active_move_lights.is_empty() || !active_move_states.is_empty() {
+        let sleep = if !active_move_lights.is_empty()
+            || !active_move_states.is_empty()
+            || has_platform_default_move_lights
+        {
             Duration::from_millis(250)
         } else {
             Duration::from_secs(options.interval_seconds.unwrap_or(15))
@@ -523,6 +533,7 @@ trait MoveLightWriter {
 struct HidMoveLightWriter;
 
 impl MoveLightWriter for HidMoveLightWriter {
+    #[cfg(not(windows))]
     fn write_report(&mut self, hidraw_path: &str, report: &[u8]) -> Result<()> {
         let mut device = fs::OpenOptions::new()
             .write(true)
@@ -531,6 +542,11 @@ impl MoveLightWriter for HidMoveLightWriter {
         device
             .write_all(report)
             .with_context(|| format!("writing PS Move HID report to {hidraw_path}"))
+    }
+
+    #[cfg(windows)]
+    fn write_report(&mut self, hidraw_path: &str, report: &[u8]) -> Result<()> {
+        write_windows_hid_report(hidraw_path, report)
     }
 }
 
@@ -968,36 +984,51 @@ const DEFAULT_MOVE_LIGHT_COLORS: &[(u8, u8, u8)] = &[
 fn tick_default_move_light_pulse(
     states: &mut [ActiveMoveStateSource],
     active_commands: &[ActiveMoveLightCommand],
+    last_write_at: &mut Option<Instant>,
     writer: &mut impl MoveLightWriter,
 ) {
     let now = Instant::now();
+    if last_write_at.is_some_and(|last| now.duration_since(last) < Duration::from_millis(200)) {
+        return;
+    }
+
     let seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs_f64();
+    let paths = default_move_light_paths(states);
 
-    for (index, state) in states.iter_mut().enumerate() {
-        let Some(hidraw_path) = state.light_hidraw_path.as_deref() else {
-            continue;
-        };
+    for (index, hidraw_path) in paths.iter().enumerate() {
         if active_commands
             .iter()
-            .any(|command| command.command.hidraw_path == hidraw_path)
-        {
-            continue;
-        }
-        if state
-            .last_default_light_write_at
-            .is_some_and(|last| now.duration_since(last) < Duration::from_millis(200))
+            .any(|command| command.command.hidraw_path == *hidraw_path)
         {
             continue;
         }
 
         let color = DEFAULT_MOVE_LIGHT_COLORS[index % DEFAULT_MOVE_LIGHT_COLORS.len()];
         let report = default_move_light_report(color, seconds);
-        if writer.write_report(hidraw_path, &report).is_ok() {
-            state.last_default_light_write_at = Some(now);
+        let _ = writer.write_report(hidraw_path, &report);
+    }
+    *last_write_at = Some(now);
+}
+
+fn default_move_light_paths(states: &[ActiveMoveStateSource]) -> Vec<String> {
+    let mut paths = Vec::new();
+    for state in states {
+        if let Some(path) = state.light_hidraw_path.as_ref() {
+            push_unique(&mut paths, path.clone());
         }
+    }
+    for path in platform_default_move_light_paths() {
+        push_unique(&mut paths, path);
+    }
+    paths
+}
+
+fn push_unique(paths: &mut Vec<String>, path: String) {
+    if !paths.iter().any(|existing| existing == &path) {
+        paths.push(path);
     }
 }
 
@@ -1055,6 +1086,240 @@ fn joystick_light_hidraw_path(joystick_path: &str) -> Option<String> {
 #[cfg(not(unix))]
 fn joystick_light_hidraw_path(_joystick_path: &str) -> Option<String> {
     None
+}
+
+#[cfg(not(windows))]
+fn platform_default_move_light_paths() -> Vec<String> {
+    Vec::new()
+}
+
+#[cfg(not(windows))]
+fn platform_default_move_lights_enabled() -> bool {
+    false
+}
+
+#[cfg(windows)]
+fn platform_default_move_light_paths() -> Vec<String> {
+    windows_ps_move_light_paths().unwrap_or_default()
+}
+
+#[cfg(windows)]
+fn platform_default_move_lights_enabled() -> bool {
+    true
+}
+
+#[cfg(windows)]
+fn windows_ps_move_light_paths() -> Result<Vec<String>> {
+    use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
+        DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, SP_DEVICE_INTERFACE_DATA,
+        SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW,
+    };
+    use windows_sys::Win32::Devices::HumanInterfaceDevice::{
+        HIDD_ATTRIBUTES, HIDP_CAPS, HIDP_STATUS_SUCCESS, HidD_FreePreparsedData,
+        HidD_GetAttributes, HidD_GetHidGuid, HidD_GetPreparsedData, HidP_GetCaps,
+    };
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+
+    let mut hid_guid = unsafe { std::mem::zeroed() };
+    unsafe { HidD_GetHidGuid(&mut hid_guid) };
+    let info_set = unsafe {
+        SetupDiGetClassDevsW(
+            &hid_guid,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            DIGCF_PRESENT | DIGCF_DEVICEINTERFACE,
+        )
+    };
+    if info_set == INVALID_HANDLE_VALUE as isize {
+        return Ok(Vec::new());
+    }
+
+    let mut paths = Vec::new();
+    let mut index = 0;
+    loop {
+        let mut interface_data = SP_DEVICE_INTERFACE_DATA {
+            cbSize: std::mem::size_of::<SP_DEVICE_INTERFACE_DATA>() as u32,
+            InterfaceClassGuid: unsafe { std::mem::zeroed() },
+            Flags: 0,
+            Reserved: 0,
+        };
+        let ok = unsafe {
+            SetupDiEnumDeviceInterfaces(
+                info_set,
+                std::ptr::null_mut(),
+                &hid_guid,
+                index,
+                &mut interface_data,
+            )
+        };
+        if ok == 0 {
+            break;
+        }
+        index += 1;
+
+        let Some(path) = (unsafe { windows_hid_interface_path(info_set, &mut interface_data) })
+        else {
+            continue;
+        };
+        if !path.to_ascii_lowercase().contains("&col01#") {
+            continue;
+        }
+
+        let wide = wide_null(&path);
+        let handle = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                std::ptr::null_mut(),
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                std::ptr::null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            continue;
+        }
+
+        let mut attributes = HIDD_ATTRIBUTES {
+            Size: std::mem::size_of::<HIDD_ATTRIBUTES>() as u32,
+            VendorID: 0,
+            ProductID: 0,
+            VersionNumber: 0,
+        };
+        let mut preparsed = 0;
+        let is_move_light = unsafe {
+            HidD_GetAttributes(handle, &mut attributes) != 0
+                && attributes.VendorID == 0x054c
+                && attributes.ProductID == 0x03d5
+                && HidD_GetPreparsedData(handle, &mut preparsed) != 0
+        };
+        if is_move_light {
+            let mut caps: HIDP_CAPS = unsafe { std::mem::zeroed() };
+            let caps_ok = unsafe { HidP_GetCaps(preparsed, &mut caps) == HIDP_STATUS_SUCCESS };
+            if caps_ok && caps.OutputReportByteLength > 0 {
+                paths.push(path);
+            }
+        }
+        if preparsed != 0 {
+            unsafe { HidD_FreePreparsedData(preparsed) };
+        }
+        unsafe { CloseHandle(handle) };
+    }
+
+    unsafe { SetupDiDestroyDeviceInfoList(info_set) };
+    paths.sort();
+    Ok(paths)
+}
+
+#[cfg(windows)]
+unsafe fn windows_hid_interface_path(
+    info_set: isize,
+    interface_data: &mut windows_sys::Win32::Devices::DeviceAndDriverInstallation::SP_DEVICE_INTERFACE_DATA,
+) -> Option<String> {
+    use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
+        SP_DEVICE_INTERFACE_DETAIL_DATA_W, SetupDiGetDeviceInterfaceDetailW,
+    };
+
+    let mut required_size = 0;
+    unsafe {
+        SetupDiGetDeviceInterfaceDetailW(
+            info_set,
+            interface_data,
+            std::ptr::null_mut(),
+            0,
+            &mut required_size,
+            std::ptr::null_mut(),
+        );
+    }
+    if required_size == 0 {
+        return None;
+    }
+
+    let mut buffer = vec![0u8; required_size as usize];
+    let detail = buffer.as_mut_ptr() as *mut SP_DEVICE_INTERFACE_DETAIL_DATA_W;
+    unsafe {
+        (*detail).cbSize = if cfg!(target_pointer_width = "64") {
+            8
+        } else {
+            6
+        };
+    }
+    let ok = unsafe {
+        SetupDiGetDeviceInterfaceDetailW(
+            info_set,
+            interface_data,
+            detail,
+            required_size,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        return None;
+    }
+
+    let path_ptr = unsafe { (*detail).DevicePath.as_ptr() };
+    let mut len = 0;
+    unsafe {
+        while *path_ptr.add(len) != 0 {
+            len += 1;
+        }
+        Some(String::from_utf16_lossy(std::slice::from_raw_parts(
+            path_ptr, len,
+        )))
+    }
+}
+
+#[cfg(windows)]
+fn write_windows_hid_report(path: &str, report: &[u8]) -> Result<()> {
+    use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_WRITE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+        WriteFile,
+    };
+
+    let wide = wide_null(path);
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            std::ptr::null_mut(),
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("opening Windows PS Move HID path {path}"));
+    }
+
+    let mut written = 0;
+    let ok = unsafe {
+        WriteFile(
+            handle,
+            report.as_ptr().cast(),
+            report.len() as u32,
+            &mut written,
+            std::ptr::null_mut(),
+        )
+    };
+    unsafe { CloseHandle(handle) };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("writing Windows PS Move HID report to {path}"));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn wide_null(value: &str) -> Vec<u16> {
+    OsStr::new(value).encode_wide().chain(Some(0)).collect()
 }
 
 #[cfg(test)]
@@ -2257,7 +2522,6 @@ mod tests {
             joystick_axes: [0; 16],
             joystick_buttons: [false; 32],
             light_hidraw_path: None,
-            last_default_light_write_at: None,
         }];
         let mut reader = RecordingMoveStateReader {
             joystick_events: Vec::new(),
