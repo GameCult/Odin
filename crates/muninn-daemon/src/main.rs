@@ -611,9 +611,6 @@ fn publish_move_controller_states(
     for state in active {
         let record = if is_joystick_path(&state.source.hidraw_path) {
             let events = reader.read_joystick_events(&state.source.hidraw_path)?;
-            if events.is_empty() {
-                continue;
-            }
             for event in events {
                 match event.event_type & 0x7f {
                     0x01 => {
@@ -2081,6 +2078,67 @@ mod tests {
 
     #[derive(Deserialize)]
     struct DecodedMarkerCandidate;
+
+    struct RecordingMoveStateReader {
+        joystick_events: Vec<JoystickEvent>,
+    }
+
+    impl MoveControllerStateReader for RecordingMoveStateReader {
+        fn read_report(&mut self, _hidraw_path: &str) -> Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+
+        fn read_joystick_events(&mut self, _joystick_path: &str) -> Result<Vec<JoystickEvent>> {
+            Ok(std::mem::take(&mut self.joystick_events))
+        }
+    }
+
+    #[test]
+    fn joystick_move_state_publishes_fresh_record_without_new_events() {
+        let store_path = std::env::temp_dir().join(format!(
+            "muninn-empty-joystick-events-{}.cc",
+            timestamp_ns().unwrap()
+        ));
+        let options = Options::parse(
+            [
+                "serve",
+                "--host",
+                "nightwing",
+                "--store",
+                store_path.to_str().unwrap(),
+                "--move-state",
+                "move-usb=/dev/input/js0",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap();
+        let source = options.move_state_sources[0].clone();
+        let mut active = vec![ActiveMoveStateSource {
+            source,
+            sequence: 0,
+            joystick_axes: [0; 16],
+            joystick_buttons: [false; 32],
+        }];
+        let mut reader = RecordingMoveStateReader {
+            joystick_events: Vec::new(),
+        };
+        let mut node = open_node(&options, "muninn-empty-joystick-test").unwrap();
+
+        publish_move_controller_states(&mut node, &options, &mut active, &mut reader, None)
+            .unwrap();
+
+        let record = node
+            .get_required::<MuninnMoveControllerStateRecord>(
+                "nightwing:move-usb:move-controller-state",
+            )
+            .unwrap();
+        assert_eq!(record.sequence, 1);
+        assert_eq!(record.host_id, "nightwing");
+        assert_eq!(record.move_id, "move-usb");
+        assert_eq!(record.accelerometer_xyz, vec![0.0, 0.0, 0.0]);
+        let _ = fs::remove_file(store_path);
+    }
 
     #[test]
     fn move_controller_state_publishes_mimir_compatible_cultmesh_frame() {
