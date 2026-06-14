@@ -484,6 +484,8 @@ pub struct MuninnMoveControllerStateRecord {
     pub battery01: f32,
     #[cultcache(key = 11)]
     pub observed_at: String,
+    #[cultcache(key = 12, default)]
+    pub source_path: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]

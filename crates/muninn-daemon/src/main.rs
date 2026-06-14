@@ -704,6 +704,7 @@ fn build_move_controller_state_record(
         buttons: move_button_names(report),
         battery01: move_battery01(report.get(12).copied().unwrap_or_default()),
         observed_at,
+        source_path: source.hidraw_path.clone(),
     }
 }
 
@@ -732,6 +733,7 @@ fn build_move_controller_state_record_from_joystick(
         buttons: joystick_button_names(buttons),
         battery01: f32::NAN,
         observed_at,
+        source_path: source.hidraw_path.clone(),
     }
 }
 
@@ -1216,12 +1218,17 @@ fn verify_move_sources_fresh(
     for source in &options.move_state_sources {
         let latest = states
             .iter()
-            .filter(|state| state.host_id == options.host_id && state.move_id == source.move_id)
+            .filter(|state| {
+                state.host_id == options.host_id
+                    && state.move_id == source.move_id
+                    && state.source_path == source.hidraw_path
+            })
             .max_by_key(|state| unix_timestamp_sort_key(&state.observed_at))
             .ok_or_else(|| {
                 anyhow!(
-                    "Muninn Move source {} has no controller-state records",
-                    source.move_id
+                    "Muninn Move source {} at {} has no controller-state records",
+                    source.move_id,
+                    source.hidraw_path
                 )
             })?;
         let observed_seconds = parse_unix_timestamp(&latest.observed_at).with_context(|| {
@@ -1318,10 +1325,11 @@ fn move_state_status(options: Options) -> Result<()> {
     }
     for state in states {
         println!(
-            "{} seq={} move={} buttons=[{}] trigger={:.3} accel={:?} gyro={:?} battery={:.3} observed={}",
+            "{} seq={} move={} source={} buttons=[{}] trigger={:.3} accel={:?} gyro={:?} battery={:.3} observed={}",
             state.stream_id,
             state.sequence,
             state.move_id,
+            state.source_path,
             state.buttons.join(","),
             state.trigger_value,
             state.accelerometer_xyz,
