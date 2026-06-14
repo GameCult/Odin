@@ -3,7 +3,7 @@ param(
   [string] $MuninnExe = "/home/metacrat/.local/bin/muninn",
   [string] $StorePath = "/home/metacrat/.local/state/gamecult/muninn/muninn.telemetry.cc",
   [string] $PidPath = "/home/metacrat/.local/state/gamecult/muninn/muninn.pid",
-  [string] $MoveState = "move-usb=/dev/hidraw1",
+  [string] $MoveState = "move-usb=/dev/input/by-id/usb-Sony_Computer_Entertainment_Motion_Controller-joystick",
   [int] $IntervalSeconds = 15
 )
 
