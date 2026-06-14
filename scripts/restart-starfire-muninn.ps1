@@ -2,7 +2,9 @@ param(
   [string] $MuninnExe = "C:\Meta\Odin\Muninn\muninn.exe",
   [string] $StorePath = "C:\Meta\Odin\state\starfire.muninn.telemetry.cc",
   [string] $LogRoot = "C:\Meta\Odin\logs\starfire-muninn",
-  [string] $QuestSerial = "1WMHHB68PG1515"
+  [string] $QuestSerial = "1WMHHB68PG1515",
+  [string[]] $MoveState = @(),
+  [switch] $EnableUsbMoveState
 )
 
 $ErrorActionPreference = "Stop"
@@ -36,6 +38,14 @@ $arguments = @(
   "--quest-adb",
   "--quest-serial", $QuestSerial
 )
+foreach ($source in $MoveState) {
+  if (-not [string]::IsNullOrWhiteSpace($source)) {
+    $arguments += @("--move-state", $source)
+  }
+}
+if ($EnableUsbMoveState) {
+  $arguments += @("--move-state", "move-starfire-usb=windows-psmove")
+}
 
 $process = Start-Process `
   -FilePath $MuninnExe `

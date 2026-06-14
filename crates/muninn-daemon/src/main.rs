@@ -578,13 +578,26 @@ impl MoveControllerStateReader for HidMoveControllerStateReader {
         }
     }
 
-    #[cfg(not(unix))]
+    #[cfg(all(not(unix), not(windows)))]
     fn read_report(&mut self, hidraw_path: &str) -> Result<Option<Vec<u8>>> {
         if hidraw_path.trim().is_empty() {
             return Ok(None);
         }
         Err(anyhow!(
             "PS Move controller state HID reads are currently implemented for Unix hidraw paths"
+        ))
+    }
+
+    #[cfg(windows)]
+    fn read_report(&mut self, hidraw_path: &str) -> Result<Option<Vec<u8>>> {
+        if hidraw_path.trim().is_empty() {
+            return Ok(None);
+        }
+        if is_windows_ps_move_source(hidraw_path) {
+            return windows_ps_move_input_report();
+        }
+        Err(anyhow!(
+            "Windows PS Move controller state reads require the windows-psmove source path"
         ))
     }
 
@@ -693,6 +706,10 @@ fn publish_move_controller_states(
 
 fn is_joystick_path(path: &str) -> bool {
     path.contains("/dev/input/js") || path.contains("-joystick")
+}
+
+fn is_windows_ps_move_source(path: &str) -> bool {
+    path.eq_ignore_ascii_case("windows-psmove") || path.eq_ignore_ascii_case("windows-psmove-col01")
 }
 
 fn build_move_controller_state_record(
@@ -1213,6 +1230,159 @@ fn windows_ps_move_light_paths() -> Result<Vec<String>> {
     unsafe { SetupDiDestroyDeviceInfoList(info_set) };
     paths.sort();
     Ok(paths)
+}
+
+#[cfg(windows)]
+fn windows_ps_move_input_report() -> Result<Option<Vec<u8>>> {
+    use windows_sys::Win32::Devices::HumanInterfaceDevice::{
+        HIDP_CAPS, HIDP_STATUS_SUCCESS, HidD_FreePreparsedData, HidD_GetInputReport,
+        HidD_GetPreparsedData, HidP_GetCaps,
+    };
+    use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_READ, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_OVERLAPPED, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+
+    let Some(path) = windows_ps_move_light_paths()?.into_iter().next() else {
+        return Ok(None);
+    };
+    let wide = wide_null(&path);
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            std::ptr::null_mut(),
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("opening Windows PS Move input HID path {path}"));
+    }
+
+    let mut preparsed = 0;
+    if unsafe { HidD_GetPreparsedData(handle, &mut preparsed) } == 0 {
+        let error = std::io::Error::last_os_error();
+        unsafe { CloseHandle(handle) };
+        return Err(error).with_context(|| format!("reading HID preparsed data from {path}"));
+    }
+
+    let mut caps: HIDP_CAPS = unsafe { std::mem::zeroed() };
+    let caps_ok = unsafe { HidP_GetCaps(preparsed, &mut caps) == HIDP_STATUS_SUCCESS };
+    unsafe { HidD_FreePreparsedData(preparsed) };
+    if !caps_ok || caps.InputReportByteLength == 0 {
+        unsafe { CloseHandle(handle) };
+        return Ok(None);
+    }
+
+    let mut report = vec![0u8; caps.InputReportByteLength as usize];
+    report[0] = 0x01;
+    let ok =
+        unsafe { HidD_GetInputReport(handle, report.as_mut_ptr().cast(), report.len() as u32) };
+    if ok != 0 {
+        unsafe { CloseHandle(handle) };
+        return Ok(Some(report));
+    }
+
+    let interrupt_report = windows_read_hid_interrupt_report(handle, report.len(), &path)?;
+    unsafe { CloseHandle(handle) };
+    Ok(interrupt_report)
+}
+
+#[cfg(windows)]
+fn windows_read_hid_interrupt_report(
+    handle: *mut std::ffi::c_void,
+    report_len: usize,
+    path: &str,
+) -> Result<Option<Vec<u8>>> {
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, ERROR_IO_PENDING, ERROR_OPERATION_ABORTED, ERROR_SEM_TIMEOUT, ERROR_TIMEOUT,
+        WAIT_OBJECT_0, WAIT_TIMEOUT,
+    };
+    use windows_sys::Win32::Storage::FileSystem::ReadFile;
+    use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
+    use windows_sys::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
+
+    let event = unsafe { CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) };
+    if event.is_null() {
+        return Err(std::io::Error::last_os_error()).context("creating Windows HID read event");
+    }
+
+    let mut report = vec![0u8; report_len];
+    let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+    overlapped.hEvent = event;
+    let mut bytes_read = 0;
+    let ok = unsafe {
+        ReadFile(
+            handle,
+            report.as_mut_ptr(),
+            report.len() as u32,
+            &mut bytes_read,
+            &mut overlapped,
+        )
+    };
+    if ok != 0 {
+        unsafe { CloseHandle(event) };
+        report.truncate(bytes_read as usize);
+        return Ok(Some(report));
+    }
+
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() != Some(ERROR_IO_PENDING as i32) {
+        unsafe { CloseHandle(event) };
+        if matches!(
+            error.raw_os_error(),
+            Some(code)
+                if code == ERROR_TIMEOUT as i32
+                    || code == ERROR_SEM_TIMEOUT as i32
+                    || code == ERROR_OPERATION_ABORTED as i32
+        ) {
+            return Ok(None);
+        }
+        return Err(error)
+            .with_context(|| format!("starting Windows PS Move input read from {path}"));
+    }
+
+    let wait = unsafe { WaitForSingleObject(event, 25) };
+    if wait == WAIT_TIMEOUT {
+        unsafe {
+            CancelIoEx(handle, &mut overlapped);
+            CloseHandle(event);
+        }
+        return Ok(None);
+    }
+    if wait != WAIT_OBJECT_0 {
+        unsafe {
+            CancelIoEx(handle, &mut overlapped);
+            CloseHandle(event);
+        }
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("waiting for Windows PS Move input read from {path}"));
+    }
+
+    let mut transferred = 0;
+    let done = unsafe { GetOverlappedResult(handle, &mut overlapped, &mut transferred, 0) };
+    unsafe { CloseHandle(event) };
+    if done == 0 {
+        let error = std::io::Error::last_os_error();
+        if matches!(
+            error.raw_os_error(),
+            Some(code)
+                if code == ERROR_OPERATION_ABORTED as i32
+                    || code == ERROR_TIMEOUT as i32
+                    || code == ERROR_SEM_TIMEOUT as i32
+        ) {
+            return Ok(None);
+        }
+        return Err(error)
+            .with_context(|| format!("completing Windows PS Move input read from {path}"));
+    }
+    report.truncate(transferred as usize);
+    Ok(Some(report))
 }
 
 #[cfg(windows)]
