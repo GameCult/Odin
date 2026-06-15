@@ -45,17 +45,20 @@ GameCult machine.
 For a developer, Idunn should mean fewer mystery services to restart by hand.
 For an operator, Idunn should mean health problems become visible, witnessed,
 and routed to the right place. For daemon authors, Idunn should mean they can
-publish health and command boundaries instead of building one more private
-watchdog.
+publish health, transport profiles, and command boundaries over CultNet RUDP
+instead of building one more private watchdog.
 
 ## Current State
 
 Idunn is a Rust daemon inside Odin's Cargo workspace. The live local runtime is
 one long-lived `idunn.exe` process that owns the whole Starfire-local swarm:
 Odin, local adjunct daemons, the Yggdrasil deploy lanes, and the Nightwing
-display services. Each target keeps its own interval, health command, and
-deploy/restart authority, but the scheduler and continuity witness now belong
-to one Rust process instead of a PowerShell-herded pile of one-daemon workers.
+display services. Each target declares a daemon-owned health contract and keeps
+its own interval and deploy/restart authority. The current shell health
+commands are compatibility probes until each daemon updates its CultLib
+dependency and publishes health through CultNet over the shared RUDP transport.
+The scheduler and continuity witness now belong to one Rust process instead of
+a PowerShell-herded pile of one-daemon workers.
 
 ```text
 scratch/idunn/idunn.keepalive.cc
@@ -155,9 +158,10 @@ Pages remains external-owned.
 - `idunn.restart_result.v1`
 - `idunn.operator_alarm.v1`
 
-The next cuts are promoting the built-in target catalog into Odin-ingested
-service/provider records, adding named adapters for systemd, Windows services,
-Docker, and provider-advertised CultMesh commands, and replacing the local
+The next cuts are updating daemon CultLib dependencies so health and command
+boundaries publish through `cultnet.transport.rudp.v0`, promoting the built-in
+target catalog into Odin-ingested service/provider records, keeping named
+adapters only for legacy service-manager crossings, and replacing the local
 operator alarm bridge with a fully Bifrost-owned notification request record.
 
 ## Boundaries

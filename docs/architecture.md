@@ -63,14 +63,22 @@ Odin's executable body is split by ownership:
 - `src/odin-coordinator.cjs`: process lifecycle, refresh loop, persistence, health, and transport wiring.
 - `src/odin/config.cjs`: runtime paths, seed deck URLs, intervals, and CultLib module path setup.
 - `src/odin/documents.cjs`: CultCache/CultMesh document definitions accepted by Odin.
-- `src/odin/probes.cjs`: local Docker/ADB/TCP probes plus named SSH service and GPU probes.
+- `src/odin/probes.cjs`: local Docker/ADB probes plus demoted TCP/SSH/GPU
+  compatibility probes while daemon CultLib dependencies migrate to CultNet
+  RUDP health publication.
 - `src/odin/observations.cjs`: Mimir observation ledger tailing and dashboard-ready stream projection.
-- `src/odin/interfaces.cjs`: Eve provider manifest discovery, provider WebSocket fetches, provider advertisements, and CultMesh interface bindings.
+- `src/odin/interfaces.cjs`: Eve provider manifest discovery, provider
+  WebSocket fetches, provider advertisements, and CultMesh interface bindings.
+  WebSocket fetches are compatibility input adapters, not the desired daemon
+  transport.
 - `src/odin/layout.cjs`: `odin.interface_layout.v1` read/write and merge policy.
 - `src/odin/marquee.cjs`: canonical marquee tape assembly from Stonks securities and ordered VoidBot poem lines.
 - `src/odin/surface.cjs`: `gamecult.eve.surface.v1` tree projection.
 - `src/odin/state.cjs`: one refresh's input records into Odin's provider catalog/proxy state.
-- `src/odin/websocket.cjs`: Eve deck HTTP/WebSocket serving and client WebSocket helpers.
+- `src/odin/websocket.cjs`: Eve deck HTTP/WebSocket serving and client
+  WebSocket helpers. This is a compatibility bridge for current
+  dashboard/lowering clients until CultNet RUDP provider subscriptions replace
+  it.
 
 The entrypoint is not allowed to grow new probe, surface, provider, layout, or renderer policy. If a new owner is needed, name the owner and its invariant before adding code.
 
@@ -212,7 +220,9 @@ Odin currently publishes service squares for:
 - Periwinkle: ADB reachability.
 - Periwinkle: latest typed motion, microphone, touch, and camera stream summaries from Mimir's CultMesh observation ledger when present.
 - Raven: SSH reachability.
-- Yggdrasil: SSH/HTTP/HTTPS reachability plus nginx, StreamPixels, Heimdall, Repixelizer, and Bifrost systemd state.
+- Yggdrasil: compatibility SSH/HTTP/HTTPS reachability plus nginx,
+  StreamPixels, Heimdall, Repixelizer, and Bifrost systemd state until those
+  daemon surfaces publish health and command boundaries over CultNet RUDP.
 
 Gjallar consumes Odin's deck and composes these surfaces into the Nightwing
 display. Nightwing is the host/body; Gjallar is the terminal product running
@@ -240,7 +250,9 @@ Daemons should publish advertisements that name service id, Verse id, schema
 catalog, `.cc` witnesses, Eve surface keys, command boundaries, nested Verses,
 style capabilities, freshness, and redaction policy. Once an advertisement is
 available, Odin should prefer it over LAN scans, hardcoded deck URLs, private
-layout files, or web-dashboard scraping.
+layout files, or web-dashboard scraping. Daemon health and provider state
+should publish through `cultnet.transport.rudp.v0`; TCP, HTTP, and WebSocket
+routes are compatibility exports only and must not become daemon-owned truth.
 
 Provider advertisements should also publish semantic CultMesh addresses in this
 shape:
@@ -264,7 +276,8 @@ relocation, such as `asgard.bifrost`. Located service addresses name the current
 host, such as `asgard.starfire.bifrost` now and
 `asgard.yggdrasil.bifrost` after migration. CultNet routes are transport
 metadata for resolving those names. WebSocket URLs remain compatibility deck
-bridges, not native service identity.
+bridges, not native service identity; native daemon transport is CultNet over
+the shared RUDP profile.
 
 The canonical contract lives in
 `E:\Projects\Eve\docs\provider-advertisement-contract.md`.

@@ -17,9 +17,10 @@ escalation, and continuity witness state.
   daemon lives: bring-up after host reboot, deployment freshness, crash
   recovery, health watching, deploy/restart policy, and operator escalation.
 - Inputs: Odin's accepted service records, provider advertisements, `.cc`
-  witnesses, advertised command boundaries, health contracts, freshness
-  windows, operator policy, local service manager state, and direct local
-  service probes only when no provider advertisement exists.
+  witnesses, advertised command boundaries, CultNet/RUDP health contracts,
+  freshness windows, operator policy, local service manager state, and demoted
+  compatibility probes only while daemon CultLib dependencies still lack the
+  shared RUDP health publication path.
 - Outputs: typed keepalive observations, deployment requests/results, restart
   requests/results, denied-action records, operator alarms, Bifrost
   operator-notification requests, and an Eve/CultUI keepalive surface.
@@ -104,11 +105,19 @@ idunn.operator_alarm.v1
 - Restart attempts must be witnessed: requested by whom, against which service,
   through which command boundary, with what result and timestamp.
 - Health command exit status is not daemon awareness by itself. Every Idunn
-  target must declare a health contract naming what the probe proves and what
-  unmarked failure means. `idunn.desired_daemon.v1` and
+  target must declare a daemon-owned CultNet/RUDP health contract naming what
+  health publication should prove and what unmarked failure means.
+  `idunn.desired_daemon.v1` and
   `idunn.daemon_health.v1` both record that contract so later readers can
-  distinguish process liveness, HTTP health, source deployment freshness,
-  framebuffer composition, telemetry capture, and catalog coherence.
+  distinguish process liveness, source deployment freshness, framebuffer
+  composition, telemetry capture, and catalog coherence without mistaking a
+  temporary HTTP/WebSocket/SSH/systemd probe for the real protocol surface.
+- The Starfire-local shell probes are compatibility evidence, not the target
+  architecture. A daemon is fully Idunn-aware only when it publishes its health,
+  command boundary, and transport profile as typed CultNet/CultMesh documents
+  over `cultnet.transport.rudp.v0`. TCP, HTTP, WebSocket, and ad hoc port probes
+  are migration debt, tolerated only at xenos/legacy boundaries and while the
+  daemon's CultLib dependency has not yet been updated.
 - A stale deployment is not restartable liveness. If a target reports
   `stale-deployment` without deploy authority, Idunn must alarm instead of
   restarting the stale artifact. If a target reports `dependency-unavailable`
@@ -181,10 +190,12 @@ The local swarm mode owns:
 6. recovery of fast local targets like Odin without waiting behind slow remote
    Yggdrasil checks.
 
-Next: ingest Odin-owned service/provider advertisements directly, promote the
-target catalog out of hardcoded bootstrap data, add named adapters for Windows
-services, systemd, Docker, and provider-advertised CultMesh commands, then
+Next: update daemon CultLib dependencies to the cross-runtime
+`cultnet.transport.rudp.v0` surface, ingest Odin-owned service/provider
+advertisements directly, promote the target catalog out of hardcoded bootstrap
+data, add named adapters only for legacy service-manager crossings, then
 publish an Eve/CultUI keepalive surface.
 
-No ad hoc JSON manifest may become the live state owner. Debug projections are
-fine when they name the `.cc` record or CultMesh document behind them.
+No ad hoc JSON manifest, HTTP endpoint, TCP socket, or WebSocket bridge may
+become the live state owner. Debug projections are fine when they name the
+`.cc` record, CultNet document, or CultMesh publication behind them.

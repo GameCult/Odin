@@ -38,8 +38,11 @@ body they are being lowered into.
 
 - `E:\Projects\Gjallar` is Gjallar's executable C# runtime repo.
 - `Gjallar.csproj` builds the Nightwing framebuffer compositor.
-- Gjallar consumes Odin's provider catalog over HTTP/WebSocket, defaulting to
-  `ws://192.168.1.66:8797/eve/deck` with no fixed provider id.
+- Gjallar currently consumes Odin's provider catalog over the compatibility
+  HTTP/WebSocket deck bridge, defaulting to `ws://192.168.1.66:8797/eve/deck`
+  with no fixed provider id. The target input path is a native CultNet
+  subscription over `cultnet.transport.rudp.v0`; the WebSocket bridge is not
+  daemon-owned truth.
 - The old Rust `crates/gjallar-daemon` and `gjallar.overview` records were cut
   because they created an intermediate composition owner that did nothing Odin
   and Gjallar's live renderer could not explain directly.
