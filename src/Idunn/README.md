@@ -157,12 +157,19 @@ Pages remains external-owned.
 - `idunn.restart_request.v1`
 - `idunn.restart_result.v1`
 - `idunn.operator_alarm.v1`
+- `idunn.daemon_surgery_plan.v1`
+
+Idunn publishes one `idunn.daemon_surgery_plan.v1` record per swarm target when
+the swarm starts. Those records make the CultNet/RUDP migration queue explicit:
+owner, objective, current compatibility mechanism, intended authority, cut line,
+steps, blockers, severity, and status.
 
 The next cuts are updating daemon CultLib dependencies so health and command
-boundaries publish through `cultnet.transport.rudp.v0`, promoting the built-in
-target catalog into Odin-ingested service/provider records, keeping named
-adapters only for legacy service-manager crossings, and replacing the local
-operator alarm bridge with a fully Bifrost-owned notification request record.
+boundaries publish through `cultnet.transport.rudp.v0`, switching Idunn to those
+daemon-owned records, promoting the built-in target catalog into Odin-ingested
+service/provider records, keeping named adapters only for legacy service-manager
+crossings, and replacing the local operator alarm bridge with a fully
+Bifrost-owned notification request record.
 
 ## Boundaries
 

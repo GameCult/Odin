@@ -19,6 +19,7 @@ pub const IDUNN_RESTART_RESULT_SCHEMA: &str = "idunn.restart_result.v1";
 pub const IDUNN_DEPLOYMENT_REQUEST_SCHEMA: &str = "idunn.deployment_request.v1";
 pub const IDUNN_DEPLOYMENT_RESULT_SCHEMA: &str = "idunn.deployment_result.v1";
 pub const IDUNN_OPERATOR_ALARM_SCHEMA: &str = "idunn.operator_alarm.v1";
+pub const IDUNN_DAEMON_SURGERY_PLAN_SCHEMA: &str = "idunn.daemon_surgery_plan.v1";
 pub const MUNINN_TELEMETRY_SURFACE_SCHEMA: &str = "muninn.telemetry_surface.v1";
 pub const MUNINN_CAPTURE_STREAM_SCHEMA: &str = "muninn.capture_stream.v1";
 pub const MUNINN_OBS_STREAM_CATALOG_SCHEMA: &str = "muninn.obs_stream_catalog.v1";
@@ -342,6 +343,38 @@ pub struct IdunnOperatorAlarmRecord {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(
+    type = "idunn.daemon_surgery_plan",
+    schema = "idunn.daemon_surgery_plan.v1"
+)]
+pub struct IdunnDaemonSurgeryPlanRecord {
+    #[cultcache(key = 0)]
+    pub plan_id: String,
+    #[cultcache(key = 1)]
+    pub daemon_id: String,
+    #[cultcache(key = 2)]
+    pub severity: String,
+    #[cultcache(key = 3)]
+    pub status: String,
+    #[cultcache(key = 4)]
+    pub owner: String,
+    #[cultcache(key = 5)]
+    pub objective: String,
+    #[cultcache(key = 6)]
+    pub current_mechanism: String,
+    #[cultcache(key = 7)]
+    pub intended_authority: String,
+    #[cultcache(key = 8)]
+    pub cut_line: String,
+    #[cultcache(key = 9)]
+    pub steps: Vec<String>,
+    #[cultcache(key = 10)]
+    pub blockers: Vec<String>,
+    #[cultcache(key = 11)]
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
 #[cultcache(type = "muninn.capture_stream", schema = "muninn.capture_stream.v1")]
 pub struct MuninnCaptureStreamRecord {
     #[cultcache(key = 0)]
@@ -576,6 +609,7 @@ cultmesh_rs::cultmesh_documents!(OdinDocuments {
     IdunnDeploymentRequestRecord => IDUNN_DEPLOYMENT_REQUEST_SCHEMA,
     IdunnDeploymentResultRecord => IDUNN_DEPLOYMENT_RESULT_SCHEMA,
     IdunnOperatorAlarmRecord => IDUNN_OPERATOR_ALARM_SCHEMA,
+    IdunnDaemonSurgeryPlanRecord => IDUNN_DAEMON_SURGERY_PLAN_SCHEMA,
     MuninnTelemetrySurfaceRecord => MUNINN_TELEMETRY_SURFACE_SCHEMA,
     MuninnCaptureStreamRecord => MUNINN_CAPTURE_STREAM_SCHEMA,
     MuninnObsStreamCatalogRecord => MUNINN_OBS_STREAM_CATALOG_SCHEMA,

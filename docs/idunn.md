@@ -86,6 +86,7 @@ idunn.deployment_result.v1
 idunn.restart_request.v1
 idunn.restart_result.v1
 idunn.operator_alarm.v1
+idunn.daemon_surgery_plan.v1
 ```
 
 ## Invariants
@@ -118,6 +119,13 @@ idunn.operator_alarm.v1
   over `cultnet.transport.rudp.v0`. TCP, HTTP, WebSocket, and ad hoc port probes
   are migration debt, tolerated only at xenos/legacy boundaries and while the
   daemon's CultLib dependency has not yet been updated.
+- Idunn publishes the transport migration plan as
+  `idunn.daemon_surgery_plan.v1` records in the keepalive store. Each daemon
+  plan names severity, status, owner, objective, current mechanism, intended
+  CultNet/RUDP authority, cut line, ordered steps, blockers, and update time.
+  These records are operational state, not documentation garnish: Nightwing,
+  Gjallar, Odin, and future Eve lowerings should inspect them when projecting
+  the daemon surgery queue.
 - A stale deployment is not restartable liveness. If a target reports
   `stale-deployment` without deploy authority, Idunn must alarm instead of
   restarting the stale artifact. If a target reports `dependency-unavailable`
@@ -184,10 +192,12 @@ The local swarm mode owns:
 
 1. the built-in Starfire-local target catalog;
 2. a mandatory health contract per target;
-3. one in-process schedule per target instead of one watchdog process per target;
-4. shared typed keepalive records in one CultMesh store;
-5. deploy/restart/alarm execution through the same Rust decision engine;
-6. recovery of fast local targets like Odin without waiting behind slow remote
+3. a typed `idunn.daemon_surgery_plan.v1` record per target, so transport debt
+   is visible in the same state surface as daemon health;
+4. one in-process schedule per target instead of one watchdog process per target;
+5. shared typed keepalive records in one CultMesh store;
+6. deploy/restart/alarm execution through the same Rust decision engine;
+7. recovery of fast local targets like Odin without waiting behind slow remote
    Yggdrasil checks.
 
 Next: update daemon CultLib dependencies to the cross-runtime

@@ -1,8 +1,9 @@
 use anyhow::{Context, Result, anyhow};
 use cultmesh_rs::{CultMesh, CultMeshNode, CultMeshNodeOptions};
 use odin_core::{
-    IdunnDaemonHealthRecord, IdunnDeploymentResultRecord, IdunnDesiredDaemonRecord,
-    IdunnOperatorAlarmRecord, IdunnRestartResultRecord, OdinDocuments, plan_keepalive,
+    IdunnDaemonHealthRecord, IdunnDaemonSurgeryPlanRecord, IdunnDeploymentResultRecord,
+    IdunnDesiredDaemonRecord, IdunnOperatorAlarmRecord, IdunnRestartResultRecord, OdinDocuments,
+    plan_keepalive,
 };
 use std::env;
 use std::path::PathBuf;
@@ -99,6 +100,9 @@ fn run_swarm(options: &SwarmOptions, common: &CommonOptions) -> Result<()> {
     println!("CultMesh store: {}", common.store_path.display());
 
     let store_lock = Arc::new(Mutex::new(()));
+    let now = timestamp()?;
+    publish_daemon_surgery_plans(&targets, common, &store_lock, &now)?;
+
     let mut workers = Vec::with_capacity(targets.len());
     for target in targets {
         let worker_common = common.clone();
@@ -305,6 +309,197 @@ where
     write(&mut node)
 }
 
+fn publish_daemon_surgery_plans(
+    targets: &[DaemonTarget],
+    options: &CommonOptions,
+    store_lock: &Arc<Mutex<()>>,
+    updated_at: &str,
+) -> Result<()> {
+    let plans = daemon_surgery_plans(targets, updated_at);
+    with_store_node(options, store_lock, |node| {
+        for plan in &plans {
+            node.put(&plan.plan_id, plan)?;
+        }
+        Ok(())
+    })
+}
+
+fn daemon_surgery_plans(
+    targets: &[DaemonTarget],
+    updated_at: &str,
+) -> Vec<IdunnDaemonSurgeryPlanRecord> {
+    targets
+        .iter()
+        .map(|target| daemon_surgery_plan(target, updated_at))
+        .collect()
+}
+
+fn daemon_surgery_plan(target: &DaemonTarget, updated_at: &str) -> IdunnDaemonSurgeryPlanRecord {
+    let mut severity = "high";
+    let mut status = "transport-surgery-required";
+    let mut owner = "daemon-owned CultLib update";
+    let mut objective = format!(
+        "{} publishes daemon-owned health, provider state, command boundary, and transport profile through CultNet/RUDP.",
+        target.name
+    );
+    let mut current_mechanism = format!(
+        "Idunn target {} currently uses local compatibility health command {:?} under contract {}.",
+        target.daemon_id, target.health_command, target.health_contract.id
+    );
+    let mut intended_authority = "Daemon publishes typed CultMesh/CultNet documents over cultnet.transport.rudp.v0; Idunn consumes those records and only actuates advertised lifecycle commands.".to_string();
+    let mut cut_line = "Cut HTTP, WebSocket, SSH, systemd, and command-exit probes as sources of daemon truth once the daemon's CultLib can publish the RUDP health contract.".to_string();
+    let mut steps = vec![
+        "Update the daemon's runtime CultLib dependency to a build that can speak CultNet over RUDP.".to_string(),
+        "Publish daemon_health, provider_advertisement, command_boundary, and transport_profile typed records over cultnet.transport.rudp.v0.".to_string(),
+        "Teach Odin to accept the daemon's RUDP provider records into the service/catalog surface.".to_string(),
+        "Switch Idunn from the compatibility health command to the daemon-owned RUDP health record.".to_string(),
+        "Delete or demote the old probe to a xenos-boundary compatibility check with no lifecycle authority.".to_string(),
+    ];
+    let mut blockers = Vec::new();
+
+    match target.daemon_id.as_str() {
+        "odin" => {
+            severity = "critical";
+            owner = "Odin core";
+            current_mechanism =
+                "Odin still exposes local health and Eve deck compatibility surfaces over HTTP/WebSocket while Idunn verifies liveness through a command probe."
+                    .to_string();
+            intended_authority =
+                "Odin owns accepted Verse discovery and provider catalog truth as typed CultMesh/CultNet records over cultnet.transport.rudp.v0."
+                    .to_string();
+            cut_line =
+                "HTTP/WebSocket deck and health endpoints become browser/lowering bridges only; they no longer decide daemon health, discovery, or provider truth."
+                    .to_string();
+            steps[2] =
+                "Make Odin ingest RUDP provider advertisements directly into its accepted service/catalog surface."
+                    .to_string();
+        }
+        "nightwing-gjallar" => {
+            severity = "critical";
+            owner = "Gjallar C# runtime plus Odin provider feed";
+            current_mechanism =
+                "Gjallar currently proves visible composition through service checks and /var/log/gjallar.status, fed by Odin's WebSocket deck compatibility bridge."
+                    .to_string();
+            intended_authority =
+                "Gjallar subscribes to Odin/provider deck state over CultNet/RUDP and publishes framebuffer composition health as typed CultMesh/CultNet state."
+                    .to_string();
+            cut_line =
+                "Cut Odin WebSocket deck consumption as the compositor truth path; keep it only as a browser/debug lowering if needed."
+                    .to_string();
+            blockers
+                .push("Requires native C# CultNet/RUDP subscription path for Gjallar.".to_string());
+        }
+        "stonks" => {
+            owner = "Stonks TypeScript runtime";
+            current_mechanism =
+                "Stonks has a repaired CultCache startup path, but health and market projection are still checked through local HTTP/WebSocket compatibility surfaces."
+                    .to_string();
+            blockers.push("Requires TypeScript CultLib RUDP publication support.".to_string());
+        }
+        "mimir-eve-dashboard" => {
+            severity = "high";
+            owner = "Mimir dashboard runtime";
+            current_mechanism =
+                "Mimir dashboard health is currently a local compatibility probe with no Idunn restart authority."
+                    .to_string();
+            blockers.push(
+                "No restart/deploy command authority is currently advertised to Idunn.".to_string(),
+            );
+        }
+        "weksa" => {
+            severity = "medium-high";
+            owner = "Weksa provider runtime";
+            current_mechanism =
+                "Weksa has provider advertisement bones, but Idunn still relies on compatibility process/health probes."
+                    .to_string();
+        }
+        "voidbot" => {
+            severity = "medium-high";
+            owner = "VoidBot internal provider stack";
+            current_mechanism =
+                "VoidBot has CultMesh/CultCache swarm state, but Idunn still treats stack health through a compatibility command; Discord remains an external xenos boundary."
+                    .to_string();
+            intended_authority =
+                "VoidBot publishes internal swarm, repo-face, and provider health over CultNet/RUDP; Discord delivery remains a boundary adapter, never daemon truth."
+                    .to_string();
+        }
+        "starfire-muninn" | "muninn" | "nightwing-muninn" => {
+            owner = "Muninn Rust runtime";
+            current_mechanism =
+                "Muninn has typed telemetry state, but Idunn still validates continuity through local or remote script probes."
+                    .to_string();
+            intended_authority =
+                "Muninn publishes telemetry, Quest/Move access, and daemon health over CultNet/RUDP; activation commands remain separate from keepalive."
+                    .to_string();
+        }
+        "vili" => {
+            owner = "Vili animation runtime";
+            current_mechanism =
+                "Vili is watched through compatibility health/deck checks instead of daemon-owned CultNet/RUDP animation health."
+                    .to_string();
+        }
+        "nightwing-eve-dashboard" | "nightwing-eve-browser-reference" => {
+            severity = "medium";
+            owner = "Eve lowering/runtime owner";
+            current_mechanism =
+                "Nightwing Eve runtime services are watched through local service probes; browser-facing transports are lowering bridges."
+                    .to_string();
+            intended_authority =
+                "Eve runtimes subscribe to provider-owned CultMesh/CultNet state; any browser/WebSocket bridge is display-only and does not own daemon health."
+                    .to_string();
+            cut_line =
+                "Cut display/runtime liveness from provider truth. Browser-compatible bridges may remain only as lowering targets."
+                    .to_string();
+        }
+        "yggdrasil-heimdall" | "yggdrasil-repixelizer" | "yggdrasil-streampixels" => {
+            severity = "medium";
+            owner = "Yggdrasil service owner plus gamecult-ops deploy lane";
+            current_mechanism =
+                "Yggdrasil source apps are currently checked and deployed through SSH/systemd/source-artifact compatibility scripts."
+                    .to_string();
+            intended_authority =
+                "Public HTTP remains the product boundary, but deployment freshness, daemon health, and lifecycle commands publish as internal CultNet/RUDP state."
+                    .to_string();
+            cut_line =
+                "SSH/systemd probes stop deciding freshness once hosted services publish internal RUDP health and deployment manifests."
+                    .to_string();
+        }
+        "idunn-swarm-deployment-coverage" => {
+            severity = "medium";
+            status = "catalog-coherence-probe";
+            owner = "Idunn";
+            objective =
+                "Keep Idunn's deployment target catalog honest while daemon-owned RUDP publication is being installed."
+                    .to_string();
+            current_mechanism =
+                "A local coverage command verifies deployment authority categories for the swarm target catalog."
+                    .to_string();
+            intended_authority =
+                "Daemon provider advertisements and command_boundary records make deploy/restart ownership inspectable without a local coverage shim."
+                    .to_string();
+            cut_line =
+                "Delete this probe after every deployable daemon publishes command_boundary and transport_profile over CultNet/RUDP."
+                    .to_string();
+        }
+        _ => {}
+    }
+
+    IdunnDaemonSurgeryPlanRecord {
+        plan_id: format!("surgery:{}", target.daemon_id),
+        daemon_id: target.daemon_id.clone(),
+        severity: severity.to_string(),
+        status: status.to_string(),
+        owner: owner.to_string(),
+        objective,
+        current_mechanism,
+        intended_authority,
+        cut_line,
+        steps,
+        blockers,
+        updated_at: updated_at.to_string(),
+    }
+}
+
 fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
     let repo_root = options.repo_root.display().to_string();
     let script = |name: &str| format!(r"{}\scripts\{}", repo_root, name);
@@ -384,7 +579,10 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 daemon_id: "muninn".to_string(),
                 verse_id: "raven.local".to_string(),
                 name: "Muninn telemetry Verse assembler".to_string(),
-                health_contract: health_contract("muninn.cultnet-rudp-remote-telemetry-health", "failed"),
+                health_contract: health_contract(
+                    "muninn.cultnet-rudp-remote-telemetry-health",
+                    "failed",
+                ),
                 health_command: Some(script("health-muninn.cmd")),
                 deploy_command: None,
                 restart_command: Some(script("restart-muninn.cmd")),
@@ -487,7 +685,10 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 daemon_id: "nightwing-eve-dashboard".to_string(),
                 verse_id: "nightwing.local".to_string(),
                 name: "Nightwing Eve dashboard broker".to_string(),
-                health_contract: health_contract("nightwing.cultnet-rudp-eve-dashboard-health", "failed"),
+                health_contract: health_contract(
+                    "nightwing.cultnet-rudp-eve-dashboard-health",
+                    "failed",
+                ),
                 health_command: Some(script("health-nightwing-eve-dashboard.cmd")),
                 deploy_command: None,
                 restart_command: Some(script("restart-nightwing-eve-dashboard.cmd")),
@@ -498,7 +699,10 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 daemon_id: "nightwing-eve-browser-reference".to_string(),
                 verse_id: "nightwing.local".to_string(),
                 name: "Nightwing Eve browser reference".to_string(),
-                health_contract: health_contract("nightwing.cultnet-rudp-browser-reference-health", "failed"),
+                health_contract: health_contract(
+                    "nightwing.cultnet-rudp-browser-reference-health",
+                    "failed",
+                ),
                 health_command: Some(script("health-nightwing-eve-browser-reference.cmd")),
                 deploy_command: None,
                 restart_command: Some(script("restart-nightwing-eve-browser-reference.cmd")),

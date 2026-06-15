@@ -175,7 +175,10 @@ fn decision(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::documents::{IDUNN_DESIRED_DAEMON_SCHEMA, OdinDocuments};
+    use crate::documents::{
+        IDUNN_DAEMON_SURGERY_PLAN_SCHEMA, IDUNN_DESIRED_DAEMON_SCHEMA,
+        IdunnDaemonSurgeryPlanRecord, OdinDocuments,
+    };
     use anyhow::Result;
     use cultmesh_rs::{CultMesh, CultMeshNodeOptions};
 
@@ -328,6 +331,24 @@ mod tests {
         node.put(&health.daemon_id, &health)?;
         node.put(&plan.decision.decision_id, &plan.decision)?;
         node.put(&request.request_id, &request)?;
+        let surgery_plan = IdunnDaemonSurgeryPlanRecord {
+            plan_id: "surgery:voidbot".to_string(),
+            daemon_id: "voidbot".to_string(),
+            severity: "high".to_string(),
+            status: "transport-surgery-required".to_string(),
+            owner: "VoidBot internal provider stack".to_string(),
+            objective: "Publish VoidBot internal daemon health over CultNet/RUDP".to_string(),
+            current_mechanism: "compatibility command probe".to_string(),
+            intended_authority: "daemon-owned CultNet/RUDP health record".to_string(),
+            cut_line: "demote command probe after RUDP health exists".to_string(),
+            steps: vec![
+                "update CultLib".to_string(),
+                "publish RUDP health".to_string(),
+            ],
+            blockers: vec!["runtime CultLib update".to_string()],
+            updated_at: "2026-06-04T00:00:02Z".to_string(),
+        };
+        node.put(&surgery_plan.plan_id, &surgery_plan)?;
 
         let reloaded = CultMesh::create_node(
             &store_path,
@@ -348,9 +369,23 @@ mod tests {
         );
         assert_eq!(
             reloaded
+                .documents()
+                .binding("idunn.daemon_surgery_plan")
+                .and_then(|binding| binding.payload_schema_version.clone())
+                .as_deref(),
+            Some(IDUNN_DAEMON_SURGERY_PLAN_SCHEMA)
+        );
+        assert_eq!(
+            reloaded
                 .get_required::<IdunnKeepaliveDecisionRecord>(&plan.decision.decision_id)?
                 .action,
             "restart"
+        );
+        assert_eq!(
+            reloaded
+                .get_required::<IdunnDaemonSurgeryPlanRecord>(&surgery_plan.plan_id)?
+                .cut_line,
+            "demote command probe after RUDP health exists"
         );
         assert_eq!(
             reloaded
