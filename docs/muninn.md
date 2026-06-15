@@ -184,6 +184,14 @@ muninn move-light-status \
 Idunn keeps the Muninn daemon alive. Idunn does not learn a Move-specific
 watcher, and Mimir does not write HID directly except through temporary smoke
 scripts used to prove hardware behavior before a Muninn daemon is available.
+In `--health` mode, Muninn can also publish `idunn.daemon_health` directly to
+Idunn over `cultnet.transport.rudp.v0` with `--idunn-rudp-health`,
+`--idunn-daemon`, and `--idunn-health-contract`. Starfire uses this path for
+the `starfire-muninn` target; the command probe remains compatibility evidence,
+not daemon truth.
+Quest ADB probing is a telemetry input, not daemon liveness. If `adb` is
+missing or the Quest is unavailable, Muninn publishes `muninn.quest_access` as
+`unavailable` and keeps serving the local telemetry surface.
 
 ## Host Deployments
 

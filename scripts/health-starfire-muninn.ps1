@@ -2,7 +2,8 @@ param(
   [string] $MuninnExe = "C:\Meta\Odin\Muninn\muninn.exe",
   [string] $StorePath = "C:\Meta\Odin\state\starfire.muninn.telemetry.cc",
   [string[]] $MoveState = @(),
-  [int] $IntervalSeconds = 15
+  [int] $IntervalSeconds = 15,
+  [string] $IdunnRudpHealth = "127.0.0.1:17870"
 )
 
 $ErrorActionPreference = "Stop"
@@ -23,7 +24,15 @@ if ($null -eq $process) {
   throw "Starfire Muninn serve process is not running with Quest access enabled"
 }
 
-$healthArgs = @("--health", "--store", $StorePath, "--host", "starfire", "--interval-seconds", "$IntervalSeconds")
+$healthArgs = @(
+  "--health",
+  "--store", $StorePath,
+  "--host", "starfire",
+  "--interval-seconds", "$IntervalSeconds",
+  "--idunn-rudp-health", $IdunnRudpHealth,
+  "--idunn-daemon", "starfire-muninn",
+  "--idunn-health-contract", "muninn.cultnet-rudp-local-telemetry-and-quest-access"
+)
 foreach ($source in $MoveState) {
   if (-not [string]::IsNullOrWhiteSpace($source)) {
     $healthArgs += @("--move-state", $source)

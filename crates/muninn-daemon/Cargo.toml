@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1"
 cultmesh-rs = { path = "../../vendor/cultmesh-rs" }
+cultnet-rs = { path = "../../vendor/cultnet-rs" }
 libc = "0.2"
 odin-core = { path = "../odin-core" }
 rmp-serde = "1.3"

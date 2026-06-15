@@ -3,16 +3,21 @@ use cultmesh_rs::{
     CultMesh, CultMeshNodeOptions, CultMeshSharedMemoryFrameRing, CultMeshStreamBodyTransport,
     CultMeshStreamCatalog, CultMeshStreamClock, CultMeshStreamDescriptor, CultMeshStreamKind,
 };
+use cultnet_rs::{
+    CULTNET_RUDP_PROTOCOL_ID, CultNetMessage, CultNetRawDocumentRecord, CultNetRawPayloadEncoding,
+    CultNetRudpOptions, send_cultnet_message_rudp,
+};
 use odin_core::{
-    MuninnCaptureStreamRecord, MuninnMoveControllerStateRecord, MuninnMoveLightCommandRecord,
-    MuninnObsStreamCatalogRecord, MuninnQuestAccessRecord, MuninnTelemetrySurfaceRecord,
-    OdinDocuments,
+    IdunnDaemonHealthRecord, MuninnCaptureStreamRecord, MuninnMoveControllerStateRecord,
+    MuninnMoveLightCommandRecord, MuninnObsStreamCatalogRecord, MuninnQuestAccessRecord,
+    MuninnTelemetrySurfaceRecord, OdinDocuments,
 };
 use serde::Serialize;
 use std::env;
 use std::fs;
 #[cfg(not(windows))]
 use std::io::Write;
+use std::net::{SocketAddr, UdpSocket};
 #[cfg(unix)]
 use std::path::Path;
 use std::path::PathBuf;
@@ -81,12 +86,20 @@ struct Options {
     quest_input_stream_id: Option<String>,
     quest_pose_stream_id: Option<String>,
     quest_video_input_stream_id: Option<String>,
+    idunn_rudp_health: Option<IdunnRudpHealthOptions>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct MoveStateSource {
     move_id: String,
     hidraw_path: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct IdunnRudpHealthOptions {
+    endpoint: SocketAddr,
+    daemon_id: String,
+    health_contract: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1812,10 +1825,17 @@ fn publish_quest_access_if_requested(
 }
 
 fn probe_quest_access(options: &Options) -> Result<MuninnQuestAccessRecord> {
-    let output = Command::new("adb")
-        .args(["devices", "-l"])
-        .output()
-        .context("running adb devices -l for Quest access")?;
+    let output = match Command::new("adb").args(["devices", "-l"]).output() {
+        Ok(output) => output,
+        Err(error) => {
+            return build_quest_access_record(
+                options,
+                ParsedQuestDevice::default(),
+                "unavailable",
+                &format!("adb devices -l could not run: {error}"),
+            );
+        }
+    };
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     if !output.status.success() {
@@ -1961,6 +1981,34 @@ fn quest_access_status(options: Options) -> Result<()> {
 }
 
 fn health_check(options: &Options) -> Result<()> {
+    let observed_at = idunn_timestamp()?;
+    let result = evaluate_health(options);
+    let (state, detail) = match &result {
+        Ok(detail) => ("active", detail.clone()),
+        Err(error) => ("failed", error.to_string()),
+    };
+    if let Some(idunn) = options.idunn_rudp_health.as_ref() {
+        let publish_result = publish_idunn_rudp_health(idunn, state, &detail, &observed_at);
+        if let Err(publish_error) = publish_result {
+            return match result {
+                Ok(_) => Err(publish_error).context("publishing Muninn health to Idunn RUDP"),
+                Err(health_error) => Err(anyhow!(
+                    "{health_error}; also failed to publish Muninn health to Idunn RUDP: {publish_error}"
+                )),
+            };
+        }
+    }
+
+    match result {
+        Ok(detail) => {
+            println!("{detail}");
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn evaluate_health(options: &Options) -> Result<String> {
     let node = open_node(options, "muninn-health")?;
     let surface = node
         .get_required::<MuninnTelemetrySurfaceRecord>("latest")
@@ -1975,10 +2023,59 @@ fn health_check(options: &Options) -> Result<()> {
 
     verify_move_sources_fresh(options, &node)?;
 
-    println!(
+    Ok(format!(
         "Muninn healthy: {} on {} ({})",
         surface.surface_id, surface.host_id, surface.state
-    );
+    ))
+}
+
+fn publish_idunn_rudp_health(
+    options: &IdunnRudpHealthOptions,
+    state: &str,
+    detail: &str,
+    observed_at: &str,
+) -> Result<()> {
+    let health = IdunnDaemonHealthRecord {
+        daemon_id: options.daemon_id.clone(),
+        state: state.to_string(),
+        detail: detail.to_string(),
+        observed_at: observed_at.to_string(),
+        health_contract: options.health_contract.clone(),
+        publication_source: "daemon-published".to_string(),
+        transport: CULTNET_RUDP_PROTOCOL_ID.to_string(),
+    };
+    let message = CultNetMessage::DocumentPutRaw {
+        message_id: format!(
+            "muninn-health:{}:{}",
+            options.daemon_id,
+            observed_at.replace(':', "-")
+        ),
+        document: CultNetRawDocumentRecord {
+            schema_id: "idunn.daemon_health".to_string(),
+            record_key: options.daemon_id.clone(),
+            stored_at: observed_at.to_string(),
+            payload_encoding: CultNetRawPayloadEncoding::Messagepack,
+            payload: rmp_serde::to_vec(&health).context("encoding Idunn daemon health")?,
+            source_runtime_id: Some("muninn-daemon".to_string()),
+            source_agent_id: None,
+            source_role: Some("daemon-health-publisher".to_string()),
+            tags: Some(vec![CULTNET_RUDP_PROTOCOL_ID.to_string()]),
+        },
+    };
+    let bind_address = if options.endpoint.is_ipv4() {
+        "0.0.0.0:0"
+    } else {
+        "[::]:0"
+    };
+    let socket = UdpSocket::bind(bind_address)
+        .with_context(|| format!("binding Muninn RUDP sender at {bind_address}"))?;
+    send_cultnet_message_rudp(
+        &socket,
+        options.endpoint,
+        &message,
+        &CultNetRudpOptions::default(),
+    )
+    .with_context(|| format!("sending Idunn health to {}", options.endpoint))?;
     Ok(())
 }
 
@@ -2364,9 +2461,13 @@ impl Options {
             quest_input_stream_id: None,
             quest_pose_stream_id: None,
             quest_video_input_stream_id: None,
+            idunn_rudp_health: None,
         };
 
         let mut args = args.peekable();
+        let mut idunn_rudp_health_endpoint = None;
+        let mut idunn_daemon_id = None;
+        let mut idunn_health_contract = None;
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "serve" => options.mode = Mode::Serve,
@@ -2464,6 +2565,19 @@ impl Options {
                     options.quest_video_input_stream_id =
                         Some(take_value(&mut args, "--quest-video-input-stream")?)
                 }
+                "--idunn-rudp-health" => {
+                    idunn_rudp_health_endpoint = Some(
+                        take_value(&mut args, "--idunn-rudp-health")?
+                            .parse()
+                            .context("--idunn-rudp-health must be a socket address")?,
+                    )
+                }
+                "--idunn-daemon" => {
+                    idunn_daemon_id = Some(take_value(&mut args, "--idunn-daemon")?)
+                }
+                "--idunn-health-contract" => {
+                    idunn_health_contract = Some(take_value(&mut args, "--idunn-health-contract")?)
+                }
                 "--color" => options.move_colors.push(take_value(&mut args, "--color")?),
                 "--duration-ms" => options
                     .move_durations_ms
@@ -2522,11 +2636,32 @@ impl Options {
                 options.quest_video_input_stream_id.as_ref(),
             ),
             ("--move-host", options.move_host_address.as_ref()),
+            ("--idunn-daemon", idunn_daemon_id.as_ref()),
+            ("--idunn-health-contract", idunn_health_contract.as_ref()),
         ] {
             if value.is_some_and(|value| value.trim().is_empty()) {
                 return Err(anyhow!("{name} must be non-empty"));
             }
         }
+        options.idunn_rudp_health = match (
+            idunn_rudp_health_endpoint,
+            idunn_daemon_id,
+            idunn_health_contract,
+        ) {
+            (None, None, None) => None,
+            (Some(endpoint), Some(daemon_id), Some(health_contract)) => {
+                Some(IdunnRudpHealthOptions {
+                    endpoint,
+                    daemon_id,
+                    health_contract,
+                })
+            }
+            _ => {
+                return Err(anyhow!(
+                    "--idunn-rudp-health, --idunn-daemon, and --idunn-health-contract must be provided together"
+                ));
+            }
+        };
         Ok(options)
     }
 }
@@ -2544,6 +2679,14 @@ fn timestamp() -> Result<String> {
     Ok(format!("unix-{seconds}"))
 }
 
+fn idunn_timestamp() -> Result<String> {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before Unix epoch")?
+        .as_secs();
+    Ok(format!("unix:{seconds}"))
+}
+
 fn timestamp_ns() -> Result<i64> {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2553,7 +2696,7 @@ fn timestamp_ns() -> Result<i64> {
 }
 
 fn help_text() -> &'static str {
-    "Usage: muninn [serve|activate|request-move-light|move-light-status|move-state-status|claim-move-host|quest-access-status] [--store <path>] [--target-host <host>] [--port <port>] [--obs-target-host <host>] [--obs-port <port>] [--loopback-script <path>] [--ffmpeg <path>] [--move-state <move-id>=<hidraw-path>] [--move-host <bt-addr>] [--move-evidence-stream <stream-id>] [--move-evidence-verse <verse-id>] [--quest-adb] [--quest-serial <serial>] [--quest-input-stream <stream-id>] [--quest-pose-stream <stream-id>] [--quest-video-input-stream <stream-id>] [--dry-run] [--health]\n\nMuninn is Odin's portable telemetry Verse assembler. serve publishes cheap typed telemetry affordances, optional source-local Move controller state, optional Quest USB access surfaces, and a CultMesh Move evidence stream when Move state sources are attached; activate starts an explicitly requested local stream; request-move-light publishes a typed Move light command for Muninn serve to execute; move-light-status reads typed command receipts; move-state-status reads typed controller-state records; claim-move-host assigns USB-attached PS Moves to a Bluetooth host; quest-access-status reads typed Quest access state."
+    "Usage: muninn [serve|activate|request-move-light|move-light-status|move-state-status|claim-move-host|quest-access-status] [--store <path>] [--target-host <host>] [--port <port>] [--obs-target-host <host>] [--obs-port <port>] [--loopback-script <path>] [--ffmpeg <path>] [--move-state <move-id>=<hidraw-path>] [--move-host <bt-addr>] [--move-evidence-stream <stream-id>] [--move-evidence-verse <verse-id>] [--quest-adb] [--quest-serial <serial>] [--quest-input-stream <stream-id>] [--quest-pose-stream <stream-id>] [--quest-video-input-stream <stream-id>] [--idunn-rudp-health <addr>] [--idunn-daemon <id>] [--idunn-health-contract <contract>] [--dry-run] [--health]\n\nMuninn is Odin's portable telemetry Verse assembler. serve publishes cheap typed telemetry affordances, optional source-local Move controller state, optional Quest USB access surfaces, and a CultMesh Move evidence stream when Move state sources are attached; activate starts an explicitly requested local stream; request-move-light publishes a typed Move light command for Muninn serve to execute; move-light-status reads typed command receipts; move-state-status reads typed controller-state records; claim-move-host assigns USB-attached PS Moves to a Bluetooth host; quest-access-status reads typed Quest access state. In --health mode, the Idunn RUDP flags publish typed daemon health to Idunn while preserving command-probe exit semantics."
 }
 
 fn parse_move_state_source(value: &str) -> Result<MoveStateSource> {
@@ -2612,6 +2755,86 @@ mod tests {
 
         assert_eq!(options.mode, Mode::Serve);
         assert!(options.interval_seconds.is_none());
+    }
+
+    #[test]
+    fn health_idunn_rudp_options_are_explicit_bundle() {
+        let options = Options::parse(
+            [
+                "--health",
+                "--idunn-rudp-health",
+                "127.0.0.1:17870",
+                "--idunn-daemon",
+                "starfire-muninn",
+                "--idunn-health-contract",
+                "muninn.cultnet-rudp-local-telemetry-and-quest-access",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap();
+
+        let idunn = options.idunn_rudp_health.unwrap();
+        assert_eq!(options.mode, Mode::Health);
+        assert_eq!(idunn.endpoint, "127.0.0.1:17870".parse().unwrap());
+        assert_eq!(idunn.daemon_id, "starfire-muninn");
+        assert_eq!(
+            idunn.health_contract,
+            "muninn.cultnet-rudp-local-telemetry-and-quest-access"
+        );
+
+        let error = Options::parse(
+            ["--health", "--idunn-rudp-health", "127.0.0.1:17870"]
+                .into_iter()
+                .map(String::from),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("must be provided together"));
+    }
+
+    #[test]
+    fn idunn_rudp_health_publisher_sends_raw_daemon_health_document() {
+        let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let receiver_addr = receiver.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            cultnet_rs::recv_cultnet_message_rudp(
+                &receiver,
+                &CultNetRudpOptions {
+                    ack_timeout: Duration::from_secs(1),
+                    ..CultNetRudpOptions::default()
+                },
+            )
+            .unwrap()
+        });
+        let options = IdunnRudpHealthOptions {
+            endpoint: receiver_addr,
+            daemon_id: "starfire-muninn".to_string(),
+            health_contract: "muninn.cultnet-rudp-local-telemetry-and-quest-access".to_string(),
+        };
+
+        publish_idunn_rudp_health(&options, "active", "Muninn healthy", "unix:100").unwrap();
+
+        let (message, _, _) = handle.join().unwrap();
+        let CultNetMessage::DocumentPutRaw { document, .. } = message else {
+            panic!("expected raw document put");
+        };
+        assert_eq!(document.schema_id, "idunn.daemon_health");
+        assert_eq!(document.record_key, "starfire-muninn");
+        assert_eq!(
+            document.payload_encoding,
+            CultNetRawPayloadEncoding::Messagepack
+        );
+        let health: IdunnDaemonHealthRecord = rmp_serde::from_slice(&document.payload).unwrap();
+        assert_eq!(health.daemon_id, "starfire-muninn");
+        assert_eq!(health.state, "active");
+        assert_eq!(
+            health.health_contract,
+            "muninn.cultnet-rudp-local-telemetry-and-quest-access"
+        );
+        assert_eq!(health.publication_source, "daemon-published");
+        assert_eq!(health.transport, CULTNET_RUDP_PROTOCOL_ID);
+        assert_eq!(health.observed_at, "unix:100");
     }
 
     #[test]

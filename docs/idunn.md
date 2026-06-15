@@ -253,14 +253,16 @@ The local swarm mode owns:
    Yggdrasil checks.
 
 Current plan surface: `idunn.swarm_surgery_plan.v1` for profile
-`starfire-local` currently points at `starfire-muninn` as the first Rust daemon
-cut. The verification layer is the CultMesh keepalive store plus live Idunn
-decision cycles, not command exit codes or chat summaries.
+`starfire-local` points at `starfire-muninn` as the first Rust daemon cut.
+Muninn's `--health` mode now has an explicit Idunn RUDP publication path; the
+Starfire health wrapper passes the `starfire-muninn` daemon id and
+`muninn.cultnet-rudp-local-telemetry-and-quest-access` contract into that path.
+The verification layer is the CultMesh keepalive store plus live Idunn decision
+cycles, not command exit codes or chat summaries.
 
-Next: update Muninn's CultLib dependency to publish daemon-owned health through
-the cross-runtime `cultnet.transport.rudp.v0` surface, prove Idunn consumes that
-live record, then continue runtime-by-runtime until compatibility probes can be
-deleted or demoted.
+Next: prove Idunn consumes Starfire Muninn's live RUDP health record, then
+continue runtime-by-runtime until compatibility probes can be deleted or
+demoted.
 
 No ad hoc JSON manifest, HTTP endpoint, TCP socket, or WebSocket bridge may
 become the live state owner. Debug projections are fine when they name the
