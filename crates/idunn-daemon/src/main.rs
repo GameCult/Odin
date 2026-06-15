@@ -1,11 +1,17 @@
 use anyhow::{Context, Result, anyhow};
 use cultmesh_rs::{CultMesh, CultMeshNode, CultMeshNodeOptions};
+use cultnet_rs::{
+    CULTNET_RUDP_PROTOCOL_ID, CultNetMessage, CultNetRudpOptions, recv_cultnet_message_rudp,
+    send_cultnet_message_rudp,
+};
 use odin_core::{
     IdunnCommandBoundaryRecord, IdunnDaemonHealthRecord, IdunnDaemonSurgeryPlanRecord,
     IdunnDaemonTransportProfileRecord, IdunnDeploymentResultRecord, IdunnDesiredDaemonRecord,
-    IdunnOperatorAlarmRecord, IdunnRestartResultRecord, OdinDocuments, plan_keepalive,
+    IdunnOperatorAlarmRecord, IdunnRestartResultRecord, IdunnRuntimeTransportCheckRecord,
+    OdinDocuments, plan_keepalive,
 };
 use std::env;
+use std::net::UdpSocket;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -76,6 +82,8 @@ fn main() -> Result<()> {
     match &options.mode {
         Mode::Single(target) => {
             let store_lock = Arc::new(Mutex::new(()));
+            let now = timestamp()?;
+            publish_runtime_transport_check(&options.common, &store_lock, &now)?;
             run_target_cycle(target, &options.common, &store_lock)
         }
         Mode::Swarm(swarm) => run_swarm(swarm, &options.common),
@@ -101,6 +109,7 @@ fn run_swarm(options: &SwarmOptions, common: &CommonOptions) -> Result<()> {
 
     let store_lock = Arc::new(Mutex::new(()));
     let now = timestamp()?;
+    publish_runtime_transport_check(common, &store_lock, &now)?;
     publish_daemon_surgery_plans(&targets, common, &store_lock, &now)?;
 
     let mut workers = Vec::with_capacity(targets.len());
@@ -313,6 +322,81 @@ where
         },
     )?;
     write(&mut node)
+}
+
+fn publish_runtime_transport_check(
+    options: &CommonOptions,
+    store_lock: &Arc<Mutex<()>>,
+    observed_at: &str,
+) -> Result<()> {
+    let check = runtime_transport_check(observed_at);
+    with_store_node(options, store_lock, |node| {
+        node.put(&check.check_id, &check)?;
+        Ok(())
+    })
+}
+
+fn runtime_transport_check(observed_at: &str) -> IdunnRuntimeTransportCheckRecord {
+    match verify_rudp_loopback() {
+        Ok(transfer_id) => IdunnRuntimeTransportCheckRecord {
+            check_id: "idunn-runtime-rudp-loopback".to_string(),
+            runtime_id: "idunn-daemon".to_string(),
+            transport: CULTNET_RUDP_PROTOCOL_ID.to_string(),
+            state: "available".to_string(),
+            detail: format!("loopback CultNet RUDP message acknowledged as transfer {transfer_id}"),
+            observed_at: observed_at.to_string(),
+        },
+        Err(error) => IdunnRuntimeTransportCheckRecord {
+            check_id: "idunn-runtime-rudp-loopback".to_string(),
+            runtime_id: "idunn-daemon".to_string(),
+            transport: CULTNET_RUDP_PROTOCOL_ID.to_string(),
+            state: "failed".to_string(),
+            detail: format!("loopback CultNet RUDP check failed: {error}"),
+            observed_at: observed_at.to_string(),
+        },
+    }
+}
+
+fn verify_rudp_loopback() -> Result<String> {
+    let sender = UdpSocket::bind("127.0.0.1:0")?;
+    let receiver = UdpSocket::bind("127.0.0.1:0")?;
+    let receiver_addr = receiver.local_addr()?;
+    let options = CultNetRudpOptions {
+        ack_timeout: Duration::from_millis(100),
+        retries: 3,
+        ..CultNetRudpOptions::default()
+    };
+    let receiver_options = options.clone();
+
+    let handle = thread::spawn(move || -> Result<()> {
+        let (message, _source, _transfer_id) =
+            recv_cultnet_message_rudp(&receiver, &receiver_options)?;
+        match message {
+            CultNetMessage::Hello { runtime_id, .. } if runtime_id == "idunn-daemon" => Ok(()),
+            other => Err(anyhow!("unexpected loopback CultNet message: {other:?}")),
+        }
+    });
+
+    let transfer_id = send_cultnet_message_rudp(
+        &sender,
+        receiver_addr,
+        &CultNetMessage::Hello {
+            runtime_id: "idunn-daemon".to_string(),
+            runtime_kind: "keepalive".to_string(),
+            agent_id: None,
+            role: Some("idunn.runtime-transport-self-check".to_string()),
+            display_name: Some("Idunn RUDP self-check".to_string()),
+            supported_document_types: Some(vec!["idunn.runtime_transport_check".to_string()]),
+            supported_mutation_contracts: None,
+            supported_message_versions: Some(vec!["cultnet.hello.v0".to_string()]),
+            supports_schema_catalog: Some(false),
+        },
+        &options,
+    )?;
+    handle
+        .join()
+        .map_err(|_| anyhow!("Idunn RUDP loopback receiver thread panicked"))??;
+    Ok(transfer_id)
 }
 
 fn publish_daemon_surgery_plans(
@@ -1313,5 +1397,14 @@ mod tests {
             health_state_from_detail("plain command failure", &target),
             "dependency-unavailable"
         );
+    }
+
+    #[test]
+    fn runtime_transport_check_proves_rudp_loopback() {
+        let check = runtime_transport_check("2026-06-15T00:00:00Z");
+
+        assert_eq!(check.check_id, "idunn-runtime-rudp-loopback");
+        assert_eq!(check.transport, CULTNET_RUDP_PROTOCOL_ID);
+        assert_eq!(check.state, "available");
     }
 }

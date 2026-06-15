@@ -179,7 +179,7 @@ mod tests {
         IDUNN_COMMAND_BOUNDARY_SCHEMA, IDUNN_DAEMON_SURGERY_PLAN_SCHEMA,
         IDUNN_DAEMON_TRANSPORT_PROFILE_SCHEMA, IDUNN_DESIRED_DAEMON_SCHEMA,
         IdunnCommandBoundaryRecord, IdunnDaemonSurgeryPlanRecord,
-        IdunnDaemonTransportProfileRecord, OdinDocuments,
+        IdunnDaemonTransportProfileRecord, IdunnRuntimeTransportCheckRecord, OdinDocuments,
     };
     use anyhow::Result;
     use cultmesh_rs::{CultMesh, CultMeshNodeOptions};
@@ -379,6 +379,15 @@ mod tests {
             observed_at: "2026-06-04T00:00:02Z".to_string(),
         };
         node.put(&command_boundary.boundary_id, &command_boundary)?;
+        let runtime_check = IdunnRuntimeTransportCheckRecord {
+            check_id: "idunn-runtime-rudp-loopback".to_string(),
+            runtime_id: "idunn-daemon".to_string(),
+            transport: "cultnet.transport.rudp.v0".to_string(),
+            state: "available".to_string(),
+            detail: "loopback acknowledged".to_string(),
+            observed_at: "2026-06-04T00:00:02Z".to_string(),
+        };
+        node.put(&runtime_check.check_id, &runtime_check)?;
 
         let reloaded = CultMesh::create_node(
             &store_path,
@@ -451,6 +460,12 @@ mod tests {
                 .get_required::<IdunnCommandBoundaryRecord>(&command_boundary.boundary_id)?
                 .health_authority,
             "compatibility.probe-only"
+        );
+        assert_eq!(
+            reloaded
+                .get_required::<IdunnRuntimeTransportCheckRecord>(&runtime_check.check_id)?
+                .state,
+            "available"
         );
         assert_eq!(
             reloaded

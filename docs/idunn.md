@@ -89,6 +89,7 @@ idunn.operator_alarm.v1
 idunn.daemon_surgery_plan.v1
 idunn.daemon_transport_profile.v1
 idunn.command_boundary.v1
+idunn.runtime_transport_check.v1
 ```
 
 ## Invariants
@@ -134,6 +135,10 @@ idunn.command_boundary.v1
   excuse. It does not make any daemon fully migrated until that daemon publishes
   its health and command boundary through the RUDP path and Idunn consumes that
   daemon-owned publication instead of the compatibility command.
+- Idunn publishes `idunn.runtime_transport_check.v1` at startup. The current
+  check sends a CultNet hello over loopback `cultnet.transport.rudp.v0` and
+  records whether the acknowledgement path works in Idunn's own Rust runtime.
+  This proves Idunn's local substrate, not fleet migration.
 - Idunn publishes the transport migration plan as
   `idunn.daemon_surgery_plan.v1` records in the keepalive store. Each daemon
   plan names severity, status, owner, objective, current mechanism, intended
@@ -212,10 +217,12 @@ The local swarm mode owns:
 4. a typed `idunn.daemon_transport_profile.v1` and
    `idunn.command_boundary.v1` record per target, so compatibility probes and
    local commands cannot pretend to be daemon-owned CultNet/RUDP truth;
-5. one in-process schedule per target instead of one watchdog process per target;
-6. shared typed keepalive records in one CultMesh store;
-7. deploy/restart/alarm execution through the same Rust decision engine;
-8. recovery of fast local targets like Odin without waiting behind slow remote
+5. a startup `idunn.runtime_transport_check.v1` witness proving Idunn's own
+   Rust RUDP loopback path;
+6. one in-process schedule per target instead of one watchdog process per target;
+7. shared typed keepalive records in one CultMesh store;
+8. deploy/restart/alarm execution through the same Rust decision engine;
+9. recovery of fast local targets like Odin without waiting behind slow remote
    Yggdrasil checks.
 
 Next: update daemon CultLib dependencies to the cross-runtime

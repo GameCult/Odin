@@ -22,6 +22,7 @@ pub const IDUNN_OPERATOR_ALARM_SCHEMA: &str = "idunn.operator_alarm.v1";
 pub const IDUNN_DAEMON_SURGERY_PLAN_SCHEMA: &str = "idunn.daemon_surgery_plan.v1";
 pub const IDUNN_DAEMON_TRANSPORT_PROFILE_SCHEMA: &str = "idunn.daemon_transport_profile.v1";
 pub const IDUNN_COMMAND_BOUNDARY_SCHEMA: &str = "idunn.command_boundary.v1";
+pub const IDUNN_RUNTIME_TRANSPORT_CHECK_SCHEMA: &str = "idunn.runtime_transport_check.v1";
 pub const MUNINN_TELEMETRY_SURFACE_SCHEMA: &str = "muninn.telemetry_surface.v1";
 pub const MUNINN_CAPTURE_STREAM_SCHEMA: &str = "muninn.capture_stream.v1";
 pub const MUNINN_OBS_STREAM_CATALOG_SCHEMA: &str = "muninn.obs_stream_catalog.v1";
@@ -434,6 +435,26 @@ pub struct IdunnCommandBoundaryRecord {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(
+    type = "idunn.runtime_transport_check",
+    schema = "idunn.runtime_transport_check.v1"
+)]
+pub struct IdunnRuntimeTransportCheckRecord {
+    #[cultcache(key = 0)]
+    pub check_id: String,
+    #[cultcache(key = 1)]
+    pub runtime_id: String,
+    #[cultcache(key = 2)]
+    pub transport: String,
+    #[cultcache(key = 3)]
+    pub state: String,
+    #[cultcache(key = 4)]
+    pub detail: String,
+    #[cultcache(key = 5)]
+    pub observed_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
 #[cultcache(type = "muninn.capture_stream", schema = "muninn.capture_stream.v1")]
 pub struct MuninnCaptureStreamRecord {
     #[cultcache(key = 0)]
@@ -671,6 +692,7 @@ cultmesh_rs::cultmesh_documents!(OdinDocuments {
     IdunnDaemonSurgeryPlanRecord => IDUNN_DAEMON_SURGERY_PLAN_SCHEMA,
     IdunnDaemonTransportProfileRecord => IDUNN_DAEMON_TRANSPORT_PROFILE_SCHEMA,
     IdunnCommandBoundaryRecord => IDUNN_COMMAND_BOUNDARY_SCHEMA,
+    IdunnRuntimeTransportCheckRecord => IDUNN_RUNTIME_TRANSPORT_CHECK_SCHEMA,
     MuninnTelemetrySurfaceRecord => MUNINN_TELEMETRY_SURFACE_SCHEMA,
     MuninnCaptureStreamRecord => MUNINN_CAPTURE_STREAM_SCHEMA,
     MuninnObsStreamCatalogRecord => MUNINN_OBS_STREAM_CATALOG_SCHEMA,

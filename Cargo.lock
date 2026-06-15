@@ -422,6 +422,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "cultmesh-rs",
+ "cultnet-rs",
  "odin-core",
 ]
 

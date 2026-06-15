@@ -160,6 +160,7 @@ Pages remains external-owned.
 - `idunn.daemon_surgery_plan.v1`
 - `idunn.daemon_transport_profile.v1`
 - `idunn.command_boundary.v1`
+- `idunn.runtime_transport_check.v1`
 
 Idunn publishes one `idunn.daemon_surgery_plan.v1` record per swarm target when
 the swarm starts. Those records make the CultNet/RUDP migration queue explicit:
@@ -171,6 +172,11 @@ It also publishes one `idunn.daemon_transport_profile.v1` and one
 both. The transport profile names `cultnet.transport.rudp.v0` as the target and
 marks the current command probe as compatibility evidence. The command boundary
 names restart, deploy, health, and alarm authority separately.
+
+At startup Idunn also publishes `idunn.runtime_transport_check.v1`, currently a
+loopback CultNet hello over `cultnet.transport.rudp.v0`. That proves Idunn's
+Rust body can use the RUDP substrate before it asks the rest of the swarm to
+walk through the same door.
 
 The next cuts are updating daemon CultLib dependencies so health and command
 boundaries publish through `cultnet.transport.rudp.v0`, switching Idunn to those
