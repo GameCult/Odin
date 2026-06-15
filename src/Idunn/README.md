@@ -185,6 +185,12 @@ started with `--rudp-health-bind none`. It accepts raw
 them into the keepalive store. That is daemon-owned health publication, not
 restart/deploy authority.
 
+When a fresh daemon-published RUDP health record exists for a target, Idunn uses
+that record for keepalive planning before falling back to the local command
+probe. The record must match the daemon id, health contract, RUDP transport,
+and freshness window; otherwise the compatibility probe remains fallback
+evidence.
+
 The next cuts are updating daemon CultLib dependencies so health and command
 boundaries publish through `cultnet.transport.rudp.v0`, switching Idunn to those
 daemon-owned records, promoting the built-in target catalog into Odin-ingested

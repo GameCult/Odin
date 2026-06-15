@@ -209,6 +209,8 @@ mod tests {
             detail: "unit probe".to_string(),
             observed_at: "2026-06-04T00:00:01Z".to_string(),
             health_contract: "test.command-exit".to_string(),
+            publication_source: "compatibility-command".to_string(),
+            transport: "compatibility.local-command".to_string(),
         }
     }
 

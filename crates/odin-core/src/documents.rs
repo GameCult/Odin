@@ -241,6 +241,10 @@ pub struct IdunnDaemonHealthRecord {
     pub observed_at: String,
     #[cultcache(key = 4)]
     pub health_contract: String,
+    #[cultcache(key = 5, default)]
+    pub publication_source: String,
+    #[cultcache(key = 6, default)]
+    pub transport: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]

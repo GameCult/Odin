@@ -117,6 +117,9 @@ idunn.rudp_health_ingress.v1
   distinguish process liveness, source deployment freshness, framebuffer
   composition, telemetry capture, and catalog coherence without mistaking a
   temporary HTTP/WebSocket/SSH/systemd probe for the real protocol surface.
+  `idunn.daemon_health.v1` also records `publication_source` and `transport` so
+  daemon-published RUDP health can be distinguished from compatibility command
+  evidence.
 - `idunn.desired_daemon.v1` links to
   `idunn.daemon_transport_profile.v1` and `idunn.command_boundary.v1` records.
   The transport profile names the target transport
@@ -147,6 +150,11 @@ idunn.rudp_health_ingress.v1
   not grant deploy/restart authority and it does not make compatibility probes
   owners; it is the first daemon-owned health publication path Idunn can
   consume.
+- During each target cycle, fresh daemon-published RUDP health wins over the
+  local compatibility command. Idunn accepts it only when the daemon id, health
+  contract, `publication_source=daemon-published`, transport
+  `cultnet.transport.rudp.v0`, and `max_silence_seconds` freshness window all
+  match. If any of those fail, the command probe remains fallback evidence.
 - Idunn publishes the transport migration plan as
   `idunn.daemon_surgery_plan.v1` records in the keepalive store. Each daemon
   plan names severity, status, owner, objective, current mechanism, intended

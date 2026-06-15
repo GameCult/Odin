@@ -202,7 +202,8 @@ fn run_target_cycle(
         observed_at: now.clone(),
     };
 
-    let health = probe_health(target, options.command_timeout_seconds, &now);
+    let health = read_fresh_daemon_published_health(options, store_lock, &desired, &now)?
+        .unwrap_or_else(|| probe_health(target, options.command_timeout_seconds, &now));
     let plan = plan_keepalive(&desired, &health, now.clone());
 
     with_store_node(options, store_lock, |node| {
@@ -308,9 +309,13 @@ fn run_target_cycle(
     Ok(())
 }
 
-fn with_store_node<F>(options: &CommonOptions, store_lock: &Arc<Mutex<()>>, write: F) -> Result<()>
+fn with_store_node<T, F>(
+    options: &CommonOptions,
+    store_lock: &Arc<Mutex<()>>,
+    write: F,
+) -> Result<T>
 where
-    F: FnOnce(&mut CultMeshNode) -> Result<()>,
+    F: FnOnce(&mut CultMeshNode) -> Result<T>,
 {
     let _store_guard = store_lock
         .lock()
@@ -324,6 +329,57 @@ where
         },
     )?;
     write(&mut node)
+}
+
+fn read_fresh_daemon_published_health(
+    options: &CommonOptions,
+    store_lock: &Arc<Mutex<()>>,
+    desired: &IdunnDesiredDaemonRecord,
+    now: &str,
+) -> Result<Option<IdunnDaemonHealthRecord>> {
+    with_store_node(options, store_lock, |node| {
+        let Some(health) = node.get::<IdunnDaemonHealthRecord>(&desired.daemon_id)? else {
+            return Ok(None);
+        };
+        if is_fresh_daemon_published_health(&health, desired, now) {
+            Ok(Some(health))
+        } else {
+            Ok(None)
+        }
+    })
+}
+
+fn is_fresh_daemon_published_health(
+    health: &IdunnDaemonHealthRecord,
+    desired: &IdunnDesiredDaemonRecord,
+    now: &str,
+) -> bool {
+    if health.daemon_id != desired.daemon_id {
+        return false;
+    }
+    if health.health_contract != desired.health_contract {
+        return false;
+    }
+    if health.publication_source != "daemon-published" {
+        return false;
+    }
+    if health.transport != CULTNET_RUDP_PROTOCOL_ID {
+        return false;
+    }
+    let Some(now_seconds) = parse_unix_timestamp(now) else {
+        return false;
+    };
+    let Some(observed_seconds) = parse_unix_timestamp(&health.observed_at) else {
+        return false;
+    };
+    if observed_seconds > now_seconds {
+        return false;
+    }
+    now_seconds.saturating_sub(observed_seconds) <= u64::from(desired.max_silence_seconds)
+}
+
+fn parse_unix_timestamp(value: &str) -> Option<u64> {
+    value.strip_prefix("unix:")?.parse().ok()
 }
 
 fn publish_runtime_transport_check(
@@ -488,7 +544,9 @@ fn run_rudp_health_ingress_loop(
             Ok((message, source, transfer_id)) => {
                 let observed_at = timestamp()?;
                 match health_from_rudp_message(&message) {
-                    Ok(health) => {
+                    Ok(mut health) => {
+                        health.publication_source = "daemon-published".to_string();
+                        health.transport = CULTNET_RUDP_PROTOCOL_ID.to_string();
                         with_store_node(&options, &store_lock, |node| {
                             node.put(&health.daemon_id, &health)?;
                             Ok(())
@@ -1209,6 +1267,8 @@ fn probe_health(
                 state: "active".to_string(),
                 detail: command_output_detail("health command exited successfully", &output),
                 health_contract: target.health_contract.id.clone(),
+                publication_source: "compatibility-command".to_string(),
+                transport: "compatibility.local-command".to_string(),
                 observed_at: observed_at.to_string(),
             },
             Ok(output) => {
@@ -1221,6 +1281,8 @@ fn probe_health(
                     state: health_state_from_detail(&detail, target).to_string(),
                     detail,
                     health_contract: target.health_contract.id.clone(),
+                    publication_source: "compatibility-command".to_string(),
+                    transport: "compatibility.local-command".to_string(),
                     observed_at: observed_at.to_string(),
                 }
             }
@@ -1229,6 +1291,8 @@ fn probe_health(
                 state: "failed".to_string(),
                 detail: format!("health command could not run: {error}"),
                 health_contract: target.health_contract.id.clone(),
+                publication_source: "compatibility-command".to_string(),
+                transport: "compatibility.local-command".to_string(),
                 observed_at: observed_at.to_string(),
             },
         },
@@ -1237,6 +1301,8 @@ fn probe_health(
             state: "unknown".to_string(),
             detail: "no health command was provided".to_string(),
             health_contract: target.health_contract.id.clone(),
+            publication_source: "compatibility-command".to_string(),
+            transport: "compatibility.local-command".to_string(),
             observed_at: observed_at.to_string(),
         },
     }
@@ -1565,6 +1631,49 @@ mod tests {
     }
 
     #[test]
+    fn fresh_daemon_published_rudp_health_can_replace_probe_health() {
+        let desired = IdunnDesiredDaemonRecord {
+            daemon_id: "test-daemon".to_string(),
+            verse_id: "test.local".to_string(),
+            name: "Test daemon".to_string(),
+            enabled: true,
+            health_command: Some("exit 1".to_string()),
+            restart_command: Some("restart test".to_string()),
+            authority: "idunn.local-command".to_string(),
+            max_silence_seconds: 60,
+            observed_at: "unix:100".to_string(),
+            deploy_command: None,
+            health_contract: "test.cultnet-rudp-health".to_string(),
+            transport_profile_id: "transport:test-daemon".to_string(),
+            command_boundary_id: "command-boundary:test-daemon".to_string(),
+        };
+        let mut health = IdunnDaemonHealthRecord {
+            daemon_id: "test-daemon".to_string(),
+            state: "active".to_string(),
+            detail: "daemon published".to_string(),
+            observed_at: "unix:95".to_string(),
+            health_contract: "test.cultnet-rudp-health".to_string(),
+            publication_source: "daemon-published".to_string(),
+            transport: CULTNET_RUDP_PROTOCOL_ID.to_string(),
+        };
+
+        assert!(is_fresh_daemon_published_health(
+            &health, &desired, "unix:100"
+        ));
+
+        health.observed_at = "unix:1".to_string();
+        assert!(!is_fresh_daemon_published_health(
+            &health, &desired, "unix:100"
+        ));
+
+        health.observed_at = "unix:95".to_string();
+        health.publication_source = "compatibility-command".to_string();
+        assert!(!is_fresh_daemon_published_health(
+            &health, &desired, "unix:100"
+        ));
+    }
+
+    #[test]
     fn runtime_transport_check_proves_rudp_loopback() {
         let check = runtime_transport_check("2026-06-15T00:00:00Z");
 
@@ -1581,6 +1690,8 @@ mod tests {
             detail: "published by daemon".to_string(),
             observed_at: "2026-06-15T00:00:00Z".to_string(),
             health_contract: "test.cultnet-rudp-health".to_string(),
+            publication_source: "daemon-published".to_string(),
+            transport: CULTNET_RUDP_PROTOCOL_ID.to_string(),
         };
         let message = CultNetMessage::DocumentPutRaw {
             message_id: "test-health".to_string(),
