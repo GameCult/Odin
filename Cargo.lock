@@ -424,6 +424,7 @@ dependencies = [
  "cultmesh-rs",
  "cultnet-rs",
  "odin-core",
+ "rmp-serde",
 ]
 
 [[package]]

@@ -23,6 +23,7 @@ pub const IDUNN_DAEMON_SURGERY_PLAN_SCHEMA: &str = "idunn.daemon_surgery_plan.v1
 pub const IDUNN_DAEMON_TRANSPORT_PROFILE_SCHEMA: &str = "idunn.daemon_transport_profile.v1";
 pub const IDUNN_COMMAND_BOUNDARY_SCHEMA: &str = "idunn.command_boundary.v1";
 pub const IDUNN_RUNTIME_TRANSPORT_CHECK_SCHEMA: &str = "idunn.runtime_transport_check.v1";
+pub const IDUNN_RUDP_HEALTH_INGRESS_SCHEMA: &str = "idunn.rudp_health_ingress.v1";
 pub const MUNINN_TELEMETRY_SURFACE_SCHEMA: &str = "muninn.telemetry_surface.v1";
 pub const MUNINN_CAPTURE_STREAM_SCHEMA: &str = "muninn.capture_stream.v1";
 pub const MUNINN_OBS_STREAM_CATALOG_SCHEMA: &str = "muninn.obs_stream_catalog.v1";
@@ -455,6 +456,28 @@ pub struct IdunnRuntimeTransportCheckRecord {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(
+    type = "idunn.rudp_health_ingress",
+    schema = "idunn.rudp_health_ingress.v1"
+)]
+pub struct IdunnRudpHealthIngressRecord {
+    #[cultcache(key = 0)]
+    pub ingress_id: String,
+    #[cultcache(key = 1)]
+    pub bind_address: String,
+    #[cultcache(key = 2)]
+    pub transport: String,
+    #[cultcache(key = 3)]
+    pub accepted_schema: String,
+    #[cultcache(key = 4)]
+    pub state: String,
+    #[cultcache(key = 5)]
+    pub detail: String,
+    #[cultcache(key = 6)]
+    pub observed_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
 #[cultcache(type = "muninn.capture_stream", schema = "muninn.capture_stream.v1")]
 pub struct MuninnCaptureStreamRecord {
     #[cultcache(key = 0)]
@@ -693,6 +716,7 @@ cultmesh_rs::cultmesh_documents!(OdinDocuments {
     IdunnDaemonTransportProfileRecord => IDUNN_DAEMON_TRANSPORT_PROFILE_SCHEMA,
     IdunnCommandBoundaryRecord => IDUNN_COMMAND_BOUNDARY_SCHEMA,
     IdunnRuntimeTransportCheckRecord => IDUNN_RUNTIME_TRANSPORT_CHECK_SCHEMA,
+    IdunnRudpHealthIngressRecord => IDUNN_RUDP_HEALTH_INGRESS_SCHEMA,
     MuninnTelemetrySurfaceRecord => MUNINN_TELEMETRY_SURFACE_SCHEMA,
     MuninnCaptureStreamRecord => MUNINN_CAPTURE_STREAM_SCHEMA,
     MuninnObsStreamCatalogRecord => MUNINN_OBS_STREAM_CATALOG_SCHEMA,

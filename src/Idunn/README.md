@@ -161,6 +161,7 @@ Pages remains external-owned.
 - `idunn.daemon_transport_profile.v1`
 - `idunn.command_boundary.v1`
 - `idunn.runtime_transport_check.v1`
+- `idunn.rudp_health_ingress.v1`
 
 Idunn publishes one `idunn.daemon_surgery_plan.v1` record per swarm target when
 the swarm starts. Those records make the CultNet/RUDP migration queue explicit:
@@ -177,6 +178,12 @@ At startup Idunn also publishes `idunn.runtime_transport_check.v1`, currently a
 loopback CultNet hello over `cultnet.transport.rudp.v0`. That proves Idunn's
 Rust body can use the RUDP substrate before it asks the rest of the swarm to
 walk through the same door.
+
+The local swarm also opens a RUDP health ingress at `127.0.0.1:17870` unless
+started with `--rudp-health-bind none`. It accepts raw
+`idunn.daemon_health` document puts over `cultnet.transport.rudp.v0` and writes
+them into the keepalive store. That is daemon-owned health publication, not
+restart/deploy authority.
 
 The next cuts are updating daemon CultLib dependencies so health and command
 boundaries publish through `cultnet.transport.rudp.v0`, switching Idunn to those

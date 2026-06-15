@@ -90,6 +90,7 @@ idunn.daemon_surgery_plan.v1
 idunn.daemon_transport_profile.v1
 idunn.command_boundary.v1
 idunn.runtime_transport_check.v1
+idunn.rudp_health_ingress.v1
 ```
 
 ## Invariants
@@ -139,6 +140,13 @@ idunn.runtime_transport_check.v1
   check sends a CultNet hello over loopback `cultnet.transport.rudp.v0` and
   records whether the acknowledgement path works in Idunn's own Rust runtime.
   This proves Idunn's local substrate, not fleet migration.
+- Idunn also opens a local RUDP health ingress by default at
+  `127.0.0.1:17870` and publishes `idunn.rudp_health_ingress.v1`. That ingress
+  accepts only raw `idunn.daemon_health` CultNet document puts, decodes the
+  typed MessagePack payload, and writes it into the keepalive store. It does
+  not grant deploy/restart authority and it does not make compatibility probes
+  owners; it is the first daemon-owned health publication path Idunn can
+  consume.
 - Idunn publishes the transport migration plan as
   `idunn.daemon_surgery_plan.v1` records in the keepalive store. Each daemon
   plan names severity, status, owner, objective, current mechanism, intended
@@ -219,10 +227,12 @@ The local swarm mode owns:
    local commands cannot pretend to be daemon-owned CultNet/RUDP truth;
 5. a startup `idunn.runtime_transport_check.v1` witness proving Idunn's own
    Rust RUDP loopback path;
-6. one in-process schedule per target instead of one watchdog process per target;
-7. shared typed keepalive records in one CultMesh store;
-8. deploy/restart/alarm execution through the same Rust decision engine;
-9. recovery of fast local targets like Odin without waiting behind slow remote
+6. a local `idunn.rudp_health_ingress.v1` listener for daemon-owned RUDP
+   health publication;
+7. one in-process schedule per target instead of one watchdog process per target;
+8. shared typed keepalive records in one CultMesh store;
+9. deploy/restart/alarm execution through the same Rust decision engine;
+10. recovery of fast local targets like Odin without waiting behind slow remote
    Yggdrasil checks.
 
 Next: update daemon CultLib dependencies to the cross-runtime
