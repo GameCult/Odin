@@ -215,6 +215,8 @@ pub struct IdunnDesiredDaemonRecord {
     pub observed_at: String,
     #[cultcache(key = 9)]
     pub deploy_command: Option<String>,
+    #[cultcache(key = 10)]
+    pub health_contract: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
@@ -228,6 +230,8 @@ pub struct IdunnDaemonHealthRecord {
     pub detail: String,
     #[cultcache(key = 3)]
     pub observed_at: String,
+    #[cultcache(key = 4)]
+    pub health_contract: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]

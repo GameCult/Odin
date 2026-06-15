@@ -17,9 +17,9 @@ escalation, and continuity witness state.
   daemon lives: bring-up after host reboot, deployment freshness, crash
   recovery, health watching, deploy/restart policy, and operator escalation.
 - Inputs: Odin's accepted service records, provider advertisements, `.cc`
-  witnesses, advertised command boundaries, freshness windows, operator policy,
-  local service manager state, and direct local service probes only when no
-  provider advertisement exists.
+  witnesses, advertised command boundaries, health contracts, freshness
+  windows, operator policy, local service manager state, and direct local
+  service probes only when no provider advertisement exists.
 - Outputs: typed keepalive observations, deployment requests/results, restart
   requests/results, denied-action records, operator alarms, Bifrost
   operator-notification requests, and an Eve/CultUI keepalive surface.
@@ -103,6 +103,17 @@ idunn.operator_alarm.v1
   Odin refresh or manual click, Idunn's ownership path is still incomplete.
 - Restart attempts must be witnessed: requested by whom, against which service,
   through which command boundary, with what result and timestamp.
+- Health command exit status is not daemon awareness by itself. Every Idunn
+  target must declare a health contract naming what the probe proves and what
+  unmarked failure means. `idunn.desired_daemon.v1` and
+  `idunn.daemon_health.v1` both record that contract so later readers can
+  distinguish process liveness, HTTP health, source deployment freshness,
+  framebuffer composition, telemetry capture, and catalog coherence.
+- A stale deployment is not restartable liveness. If a target reports
+  `stale-deployment` without deploy authority, Idunn must alarm instead of
+  restarting the stale artifact. If a target reports `dependency-unavailable`
+  or `degraded`, Idunn must alarm instead of treating local deploy/restart as
+  the owner.
 - Idunn should fail closed when authority is unclear. Unknown ownership,
   repeated restart failure, missing command authority, or degraded health that
   needs a human becomes an operator alarm.
@@ -163,10 +174,11 @@ Idunn's current Rust runtime now has two postures:
 The local swarm mode owns:
 
 1. the built-in Starfire-local target catalog;
-2. one in-process schedule per target instead of one watchdog process per target;
-3. shared typed keepalive records in one CultMesh store;
-4. deploy/restart/alarm execution through the same Rust decision engine;
-5. recovery of fast local targets like Odin without waiting behind slow remote
+2. a mandatory health contract per target;
+3. one in-process schedule per target instead of one watchdog process per target;
+4. shared typed keepalive records in one CultMesh store;
+5. deploy/restart/alarm execution through the same Rust decision engine;
+6. recovery of fast local targets like Odin without waiting behind slow remote
    Yggdrasil checks.
 
 Next: ingest Odin-owned service/provider advertisements directly, promote the

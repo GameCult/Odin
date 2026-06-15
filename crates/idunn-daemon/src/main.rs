@@ -17,11 +17,25 @@ struct DaemonTarget {
     daemon_id: String,
     verse_id: String,
     name: String,
+    health_contract: HealthContract,
     health_command: Option<String>,
     deploy_command: Option<String>,
     restart_command: Option<String>,
     enabled: bool,
     interval_seconds: u64,
+}
+
+#[derive(Clone, Debug)]
+struct HealthContract {
+    id: String,
+    default_failure_state: String,
+}
+
+fn health_contract(id: &str, default_failure_state: &str) -> HealthContract {
+    HealthContract {
+        id: id.to_string(),
+        default_failure_state: default_failure_state.to_string(),
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -75,6 +89,7 @@ fn run_swarm(options: &SwarmOptions, common: &CommonOptions) -> Result<()> {
             options.profile
         ));
     }
+    validate_targets(&targets)?;
 
     println!(
         "Idunn swarm profile {} starting with {} targets.",
@@ -102,6 +117,35 @@ fn run_swarm(options: &SwarmOptions, common: &CommonOptions) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn validate_targets(targets: &[DaemonTarget]) -> Result<()> {
+    let mut issues = Vec::new();
+    for target in targets {
+        if target.health_contract.id.trim().is_empty() {
+            issues.push(format!("{} has no health contract", target.daemon_id));
+        }
+        if target.health_command.is_none() {
+            issues.push(format!("{} has no health command", target.daemon_id));
+        }
+        if target.health_contract.default_failure_state == "stale-deployment"
+            && target.deploy_command.is_none()
+        {
+            issues.push(format!(
+                "{} treats probe failure as stale deployment but has no deploy command",
+                target.daemon_id
+            ));
+        }
+    }
+
+    if issues.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "Idunn target catalog is incoherent: {}",
+            issues.join("; ")
+        ))
+    }
 }
 
 fn run_target_loop(
@@ -135,6 +179,7 @@ fn run_target_cycle(
         health_command: target.health_command.clone(),
         restart_command: target.restart_command.clone(),
         deploy_command: target.deploy_command.clone(),
+        health_contract: target.health_contract.id.clone(),
         authority: "idunn.local-command".to_string(),
         max_silence_seconds: 60,
         observed_at: now.clone(),
@@ -242,11 +287,7 @@ fn run_target_cycle(
     Ok(())
 }
 
-fn with_store_node<F>(
-    options: &CommonOptions,
-    store_lock: &Arc<Mutex<()>>,
-    write: F,
-) -> Result<()>
+fn with_store_node<F>(options: &CommonOptions, store_lock: &Arc<Mutex<()>>, write: F) -> Result<()>
 where
     F: FnOnce(&mut CultMeshNode) -> Result<()>,
 {
@@ -274,6 +315,7 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 daemon_id: "odin".to_string(),
                 verse_id: "starfire.local".to_string(),
                 name: "Odin all-seer".to_string(),
+                health_contract: health_contract("odin.http-health-and-deck-publication", "failed"),
                 health_command: Some(script("health-odin.cmd")),
                 deploy_command: None,
                 restart_command: Some(script("restart-odin.cmd")),
@@ -284,6 +326,7 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 daemon_id: "mimir-eve-dashboard".to_string(),
                 verse_id: "starfire.local".to_string(),
                 name: "Mimir Eve dashboard".to_string(),
+                health_contract: health_contract("mimir.http-dashboard-health", "failed"),
                 health_command: Some(script("health-mimir-eve-dashboard.cmd")),
                 deploy_command: None,
                 restart_command: None,
@@ -294,6 +337,7 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 daemon_id: "stonks".to_string(),
                 verse_id: "starfire.local".to_string(),
                 name: "Stonks market pulse".to_string(),
+                health_contract: health_contract("stonks.http-health", "failed"),
                 health_command: Some(script("health-stonks.cmd")),
                 deploy_command: None,
                 restart_command: Some(script("restart-stonks.cmd")),
@@ -304,6 +348,7 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 daemon_id: "voidbot".to_string(),
                 verse_id: "starfire.local".to_string(),
                 name: "VoidBot local stack".to_string(),
+                health_contract: health_contract("voidbot.stack-health", "failed"),
                 health_command: Some(script("health-voidbot.cmd")),
                 deploy_command: None,
                 restart_command: Some(script("restart-voidbot.cmd")),
@@ -314,6 +359,7 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 daemon_id: "weksa".to_string(),
                 verse_id: "starfire.local".to_string(),
                 name: "Weksa intent and utterance lowering service".to_string(),
+                health_contract: health_contract("weksa.provider-health", "failed"),
                 health_command: Some(script("health-weksa.cmd")),
                 deploy_command: None,
                 restart_command: Some(script("restart-weksa.cmd")),
@@ -324,6 +370,10 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 daemon_id: "starfire-muninn".to_string(),
                 verse_id: "starfire.local".to_string(),
                 name: "Starfire Muninn telemetry and Quest access daemon".to_string(),
+                health_contract: health_contract(
+                    "muninn.local-telemetry-and-quest-access",
+                    "failed",
+                ),
                 health_command: Some(script("health-starfire-muninn.cmd")),
                 deploy_command: None,
                 restart_command: Some(script("restart-starfire-muninn.cmd")),
@@ -334,6 +384,7 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 daemon_id: "muninn".to_string(),
                 verse_id: "raven.local".to_string(),
                 name: "Muninn telemetry Verse assembler".to_string(),
+                health_contract: health_contract("muninn.remote-telemetry-health", "failed"),
                 health_command: Some(script("health-muninn.cmd")),
                 deploy_command: None,
                 restart_command: Some(script("restart-muninn.cmd")),
@@ -344,6 +395,7 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 daemon_id: "vili".to_string(),
                 verse_id: "raven.local".to_string(),
                 name: "Vili Persona animation daemon".to_string(),
+                health_contract: health_contract("vili.http-animation-health", "failed"),
                 health_command: Some(script("health-vili.cmd")),
                 deploy_command: None,
                 restart_command: Some(script("restart-vili.cmd")),
@@ -354,6 +406,7 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 daemon_id: "idunn-swarm-deployment-coverage".to_string(),
                 verse_id: "starfire.local".to_string(),
                 name: "Idunn swarm deployment coverage".to_string(),
+                health_contract: health_contract("idunn.deployment-catalog-coherence", "degraded"),
                 health_command: Some(script("health-idunn-swarm-deployment-coverage.cmd")),
                 deploy_command: None,
                 restart_command: None,
@@ -364,6 +417,10 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 daemon_id: "yggdrasil-heimdall".to_string(),
                 verse_id: "yggdrasil.local".to_string(),
                 name: "Yggdrasil Heimdall".to_string(),
+                health_contract: health_contract(
+                    "yggdrasil.source-deployment-freshness",
+                    "stale-deployment",
+                ),
                 health_command: Some(script("health-yggdrasil-heimdall.cmd")),
                 deploy_command: Some(script("deploy-yggdrasil-heimdall.cmd")),
                 restart_command: None,
@@ -374,6 +431,10 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 daemon_id: "yggdrasil-repixelizer".to_string(),
                 verse_id: "yggdrasil.local".to_string(),
                 name: "Yggdrasil Repixelizer".to_string(),
+                health_contract: health_contract(
+                    "yggdrasil.source-deployment-freshness",
+                    "stale-deployment",
+                ),
                 health_command: Some(script("health-yggdrasil-repixelizer.cmd")),
                 deploy_command: Some(script("deploy-yggdrasil-repixelizer.cmd")),
                 restart_command: None,
@@ -384,6 +445,10 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 daemon_id: "yggdrasil-streampixels".to_string(),
                 verse_id: "yggdrasil.local".to_string(),
                 name: "Yggdrasil StreamPixels".to_string(),
+                health_contract: health_contract(
+                    "yggdrasil.source-deployment-freshness",
+                    "stale-deployment",
+                ),
                 health_command: Some(script("health-yggdrasil-streampixels.cmd")),
                 deploy_command: Some(script("deploy-yggdrasil-streampixels.cmd")),
                 restart_command: None,
@@ -394,6 +459,10 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 daemon_id: "nightwing-gjallar".to_string(),
                 verse_id: "nightwing.local".to_string(),
                 name: "Nightwing Gjallar framebuffer compositor".to_string(),
+                health_contract: health_contract(
+                    "gjallar.framebuffer-composition-witness",
+                    "dependency-unavailable",
+                ),
                 health_command: Some(script("health-nightwing-gjallar.cmd")),
                 deploy_command: Some(script("deploy-nightwing-gjallar.cmd")),
                 restart_command: Some(script("restart-nightwing-gjallar.cmd")),
@@ -404,6 +473,7 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 daemon_id: "nightwing-muninn".to_string(),
                 verse_id: "nightwing.local".to_string(),
                 name: "Nightwing Muninn telemetry and Move HID daemon".to_string(),
+                health_contract: health_contract("muninn.remote-telemetry-and-move-hid", "failed"),
                 health_command: Some(script("health-nightwing-muninn.cmd")),
                 deploy_command: None,
                 restart_command: Some(script("restart-nightwing-muninn.cmd")),
@@ -414,6 +484,7 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 daemon_id: "nightwing-eve-dashboard".to_string(),
                 verse_id: "nightwing.local".to_string(),
                 name: "Nightwing Eve dashboard broker".to_string(),
+                health_contract: health_contract("nightwing.systemd-service-liveness", "failed"),
                 health_command: Some(script("health-nightwing-eve-dashboard.cmd")),
                 deploy_command: None,
                 restart_command: Some(script("restart-nightwing-eve-dashboard.cmd")),
@@ -424,6 +495,7 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 daemon_id: "nightwing-eve-browser-reference".to_string(),
                 verse_id: "nightwing.local".to_string(),
                 name: "Nightwing Eve browser reference".to_string(),
+                health_contract: health_contract("nightwing.systemd-service-liveness", "failed"),
                 health_command: Some(script("health-nightwing-eve-browser-reference.cmd")),
                 deploy_command: None,
                 restart_command: Some(script("restart-nightwing-eve-browser-reference.cmd")),
@@ -564,6 +636,7 @@ impl Options {
                     daemon_id: daemon_id.clone(),
                     verse_id,
                     name: name.unwrap_or(daemon_id),
+                    health_contract: health_contract("manual.command-health", "failed"),
                     health_command,
                     deploy_command,
                     restart_command,
@@ -599,6 +672,7 @@ fn probe_health(
                 daemon_id: target.daemon_id.clone(),
                 state: "active".to_string(),
                 detail: command_output_detail("health command exited successfully", &output),
+                health_contract: target.health_contract.id.clone(),
                 observed_at: observed_at.to_string(),
             },
             Ok(output) => {
@@ -608,8 +682,9 @@ fn probe_health(
                 );
                 IdunnDaemonHealthRecord {
                     daemon_id: target.daemon_id.clone(),
-                    state: health_state_from_detail(&detail).to_string(),
+                    state: health_state_from_detail(&detail, target).to_string(),
                     detail,
+                    health_contract: target.health_contract.id.clone(),
                     observed_at: observed_at.to_string(),
                 }
             }
@@ -617,6 +692,7 @@ fn probe_health(
                 daemon_id: target.daemon_id.clone(),
                 state: "failed".to_string(),
                 detail: format!("health command could not run: {error}"),
+                health_contract: target.health_contract.id.clone(),
                 observed_at: observed_at.to_string(),
             },
         },
@@ -624,12 +700,13 @@ fn probe_health(
             daemon_id: target.daemon_id.clone(),
             state: "unknown".to_string(),
             detail: "no health command was provided".to_string(),
+            health_contract: target.health_contract.id.clone(),
             observed_at: observed_at.to_string(),
         },
     }
 }
 
-fn health_state_from_detail(detail: &str) -> &str {
+fn health_state_from_detail<'a>(detail: &'a str, target: &'a DaemonTarget) -> &'a str {
     for state in [
         "stale-deployment",
         "dependency-unavailable",
@@ -642,7 +719,7 @@ fn health_state_from_detail(detail: &str) -> &str {
         }
     }
 
-    "failed"
+    &target.health_contract.default_failure_state
 }
 
 fn run_restart(
@@ -901,4 +978,52 @@ fn timestamp() -> Result<String> {
 
 fn help_text() -> &'static str {
     "Usage: idunn --daemon <id> [--name <name>] [--verse <verse>] [--store <path>] [--health-command <command>] [--deploy-command <command>] [--restart-command <command>] [--operator-alarm-command <command>] [--execute] [--interval-seconds <seconds>] [--command-timeout-seconds <seconds>] [--repo-root <path>] [--swarm-profile <profile>]\n\nIdunn can run one manual daemon probe lane with --daemon, or one built-in swarm supervisor with --swarm-profile starfire-local."
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn target(default_failure_state: &str, deploy_command: Option<&str>) -> DaemonTarget {
+        DaemonTarget {
+            daemon_id: "test-daemon".to_string(),
+            verse_id: "test.local".to_string(),
+            name: "Test daemon".to_string(),
+            health_contract: health_contract("test.contract", default_failure_state),
+            health_command: Some("exit 0".to_string()),
+            deploy_command: deploy_command.map(ToString::to_string),
+            restart_command: Some("restart test".to_string()),
+            enabled: true,
+            interval_seconds: 30,
+        }
+    }
+
+    #[test]
+    fn target_catalog_requires_health_contract() {
+        let mut target = target("failed", None);
+        target.health_contract.id = String::new();
+
+        let error = validate_targets(&[target]).unwrap_err().to_string();
+
+        assert!(error.contains("has no health contract"));
+    }
+
+    #[test]
+    fn stale_deployment_contract_requires_deploy_authority() {
+        let error = validate_targets(&[target("stale-deployment", None)])
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("has no deploy command"));
+    }
+
+    #[test]
+    fn health_state_uses_contract_default_when_probe_has_no_marker() {
+        let target = target("dependency-unavailable", None);
+
+        assert_eq!(
+            health_state_from_detail("plain command failure", &target),
+            "dependency-unavailable"
+        );
+    }
 }

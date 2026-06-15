@@ -85,6 +85,27 @@ pub fn plan_keepalive(
         }
     }
 
+    if health.state == "stale-deployment" {
+        let alarm_id = format!("alarm:{}:{}", desired.daemon_id, now);
+        let reason = format!(
+            "health is stale-deployment under {}; no deploy command authority is available",
+            desired.health_contract
+        );
+        return IdunnPlan {
+            decision: decision(&decision_id, desired, "alarm", &reason, &now),
+            deployment_request: None,
+            restart_request: None,
+            operator_alarm: Some(IdunnOperatorAlarmRecord {
+                alarm_id,
+                daemon_id: desired.daemon_id.clone(),
+                severity: "operator-action-required".to_string(),
+                reason,
+                escalation_target: "bifrost.operator-notification".to_string(),
+                raised_at: now,
+            }),
+        };
+    }
+
     match desired.restart_command.as_deref() {
         Some(command) if !command.trim().is_empty() => {
             let request_id = format!("restart:{}:{}", desired.daemon_id, now);
@@ -170,6 +191,7 @@ mod tests {
             max_silence_seconds: 60,
             observed_at: "2026-06-04T00:00:00Z".to_string(),
             deploy_command: None,
+            health_contract: "test.command-exit".to_string(),
         }
     }
 
@@ -179,6 +201,7 @@ mod tests {
             state: state.to_string(),
             detail: "unit probe".to_string(),
             observed_at: "2026-06-04T00:00:01Z".to_string(),
+            health_contract: "test.command-exit".to_string(),
         }
     }
 
@@ -248,6 +271,20 @@ mod tests {
         let plan = plan_keepalive(
             &desired,
             &health("dependency-unavailable"),
+            "2026-06-04T00:00:02Z",
+        );
+
+        assert_eq!(plan.decision.action, "alarm");
+        assert!(plan.deployment_request.is_none());
+        assert!(plan.restart_request.is_none());
+        assert!(plan.operator_alarm.is_some());
+    }
+
+    #[test]
+    fn stale_deployment_without_deploy_authority_raises_alarm_instead_of_restarting() {
+        let plan = plan_keepalive(
+            &desired(Some("systemctl restart old-app")),
+            &health("stale-deployment"),
             "2026-06-04T00:00:02Z",
         );
 
