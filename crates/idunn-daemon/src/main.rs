@@ -601,15 +601,18 @@ fn probe_health(
                 detail: command_output_detail("health command exited successfully", &output),
                 observed_at: observed_at.to_string(),
             },
-            Ok(output) => IdunnDaemonHealthRecord {
-                daemon_id: target.daemon_id.clone(),
-                state: "failed".to_string(),
-                detail: command_output_detail(
+            Ok(output) => {
+                let detail = command_output_detail(
                     &format!("health command exited with {}", output.status),
                     &output,
-                ),
-                observed_at: observed_at.to_string(),
-            },
+                );
+                IdunnDaemonHealthRecord {
+                    daemon_id: target.daemon_id.clone(),
+                    state: health_state_from_detail(&detail).to_string(),
+                    detail,
+                    observed_at: observed_at.to_string(),
+                }
+            }
             Err(error) => IdunnDaemonHealthRecord {
                 daemon_id: target.daemon_id.clone(),
                 state: "failed".to_string(),
@@ -624,6 +627,22 @@ fn probe_health(
             observed_at: observed_at.to_string(),
         },
     }
+}
+
+fn health_state_from_detail(detail: &str) -> &str {
+    for state in [
+        "stale-deployment",
+        "dependency-unavailable",
+        "degraded",
+        "failed",
+    ] {
+        let marker = format!("idunn.health.state={state}");
+        if detail.contains(&marker) {
+            return state;
+        }
+    }
+
+    "failed"
 }
 
 fn run_restart(

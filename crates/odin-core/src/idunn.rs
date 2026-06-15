@@ -37,8 +37,29 @@ pub fn plan_keepalive(
         };
     }
 
+    if health.state == "degraded" || health.state == "dependency-unavailable" {
+        let alarm_id = format!("alarm:{}:{}", desired.daemon_id, now);
+        let reason = format!(
+            "health is {}; local restart/deploy is not the owner of this failure: {}",
+            health.state, health.detail
+        );
+        return IdunnPlan {
+            decision: decision(&decision_id, desired, "alarm", &reason, &now),
+            deployment_request: None,
+            restart_request: None,
+            operator_alarm: Some(IdunnOperatorAlarmRecord {
+                alarm_id,
+                daemon_id: desired.daemon_id.clone(),
+                severity: "operator-action-required".to_string(),
+                reason,
+                escalation_target: "bifrost.operator-notification".to_string(),
+                raised_at: now,
+            }),
+        };
+    }
+
     if let Some(command) = desired.deploy_command.as_deref() {
-        if !command.trim().is_empty() {
+        if !command.trim().is_empty() && health.state == "stale-deployment" {
             let request_id = format!("deploy:{}:{}", desired.daemon_id, now);
             return IdunnPlan {
                 decision: decision(
@@ -193,12 +214,47 @@ mod tests {
     fn unhealthy_daemon_with_deploy_authority_requests_deployment_before_restart() {
         let mut desired = desired(Some("systemctl restart gjallar"));
         desired.deploy_command = Some("deploy gjallar".to_string());
-        let plan = plan_keepalive(&desired, &health("failed"), "2026-06-04T00:00:02Z");
+        let plan = plan_keepalive(
+            &desired,
+            &health("stale-deployment"),
+            "2026-06-04T00:00:02Z",
+        );
 
         assert_eq!(plan.decision.action, "deploy");
         assert_eq!(plan.deployment_request.unwrap().command, "deploy gjallar");
         assert!(plan.restart_request.is_none());
         assert!(plan.operator_alarm.is_none());
+    }
+
+    #[test]
+    fn failed_daemon_with_deploy_and_restart_authority_restarts_instead_of_redeploying() {
+        let mut desired = desired(Some("systemctl restart gjallar"));
+        desired.deploy_command = Some("deploy gjallar".to_string());
+        let plan = plan_keepalive(&desired, &health("failed"), "2026-06-04T00:00:02Z");
+
+        assert_eq!(plan.decision.action, "restart");
+        assert!(plan.deployment_request.is_none());
+        assert_eq!(
+            plan.restart_request.unwrap().command,
+            "systemctl restart gjallar"
+        );
+        assert!(plan.operator_alarm.is_none());
+    }
+
+    #[test]
+    fn dependency_unavailable_raises_alarm_instead_of_redeploying_or_restarting() {
+        let mut desired = desired(Some("systemctl restart gjallar"));
+        desired.deploy_command = Some("deploy gjallar".to_string());
+        let plan = plan_keepalive(
+            &desired,
+            &health("dependency-unavailable"),
+            "2026-06-04T00:00:02Z",
+        );
+
+        assert_eq!(plan.decision.action, "alarm");
+        assert!(plan.deployment_request.is_none());
+        assert!(plan.restart_request.is_none());
+        assert!(plan.operator_alarm.is_some());
     }
 
     #[test]

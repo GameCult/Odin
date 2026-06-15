@@ -126,15 +126,19 @@ idunn.operator_alarm.v1
   screen/audio streams as part of keepalive. Raven A/V over SRT is an explicit
   activation path through `activate-muninn-raven-av-srt.ps1`, not daemon
   startup behavior.
-- Nightwing Gjallar deployment freshness is now part of Idunn's ops role.
-  `health-nightwing-gjallar.ps1` verifies both `gjallar.service` liveness and
-  the remote deployment manifest at
+- Nightwing Gjallar deployment freshness and visible composition health are now
+  part of Idunn's ops role. `health-nightwing-gjallar.ps1` verifies
+  `gjallar.service` liveness, the remote deployment manifest at
   `/opt/gamecult/gjallar/gamecult-gjallar-deploy-manifest.txt`. A missing or
-  stale manifest makes health fail. Idunn then runs
+  stale manifest emits `idunn.health.state=stale-deployment`; Idunn then runs
   `deploy-nightwing-gjallar.ps1`, which publishes the committed local Gjallar
   revision, writes `gamecult.gjallar.deployment_manifest.v1`, restarts
   `gjallar.service`, and leaves deployment request/result records in its
-  keepalive `.cc`.
+  keepalive `.cc`. The same health probe also reads `/var/log/gjallar.status`;
+  an empty catalog, failed receive loop, stale status witness, or zero composed
+  provider panels is unhealthy even when the process is alive. Upstream deck
+  failure emits `idunn.health.state=dependency-unavailable` so Idunn does not
+  redeploy Gjallar for an Odin/provider input outage.
 - Swarm-wide deployment ownership means Idunn owns the target catalog and the
   freshness contract for the repo swarm. It does not mean Idunn invents deploy
   authority for every repo immediately. A target without a safe noninteractive

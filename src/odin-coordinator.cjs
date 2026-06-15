@@ -54,7 +54,7 @@ main().catch((error) => {
 
 async function main() {
   if (cultRuntime.CultMesh && documents.surfaceDefinition) {
-    meshNodePromise = cultRuntime.CultMesh.createNode(config.cachePath, { documents: [documents.surfaceDefinition] });
+    meshNodePromise = createDurableSurfaceNode();
   }
 
   const dashboardServer = createDashboardServer({
@@ -70,6 +70,22 @@ async function main() {
   setInterval(() => {
     refresh(dashboardServer.clients).catch((error) => console.error("refresh failed:", error));
   }, config.intervalMs);
+}
+
+async function createDurableSurfaceNode() {
+  try {
+    return await cultRuntime.CultMesh.createNode(config.cachePath, { documents: [documents.surfaceDefinition] });
+  } catch (error) {
+    if (!fs.existsSync(config.cachePath)) {
+      throw error;
+    }
+
+    const corruptPath = `${config.cachePath}.corrupt-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+    fs.renameSync(config.cachePath, corruptPath);
+    console.error(`CultMesh surface cache was unreadable and has been quarantined: ${corruptPath}`);
+    console.error(`CultMesh surface cache read error: ${error.message}`);
+    return cultRuntime.CultMesh.createNode(config.cachePath, { documents: [documents.surfaceDefinition] });
+  }
 }
 
 async function refresh(clients) {
