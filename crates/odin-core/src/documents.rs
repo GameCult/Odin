@@ -19,6 +19,7 @@ pub const IDUNN_RESTART_RESULT_SCHEMA: &str = "idunn.restart_result.v1";
 pub const IDUNN_DEPLOYMENT_REQUEST_SCHEMA: &str = "idunn.deployment_request.v1";
 pub const IDUNN_DEPLOYMENT_RESULT_SCHEMA: &str = "idunn.deployment_result.v1";
 pub const IDUNN_OPERATOR_ALARM_SCHEMA: &str = "idunn.operator_alarm.v1";
+pub const IDUNN_SWARM_SURGERY_PLAN_SCHEMA: &str = "idunn.swarm_surgery_plan.v1";
 pub const IDUNN_DAEMON_SURGERY_PLAN_SCHEMA: &str = "idunn.daemon_surgery_plan.v1";
 pub const IDUNN_DAEMON_TRANSPORT_PROFILE_SCHEMA: &str = "idunn.daemon_transport_profile.v1";
 pub const IDUNN_COMMAND_BOUNDARY_SCHEMA: &str = "idunn.command_boundary.v1";
@@ -352,6 +353,40 @@ pub struct IdunnOperatorAlarmRecord {
     pub escalation_target: String,
     #[cultcache(key = 5)]
     pub raised_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(
+    type = "idunn.swarm_surgery_plan",
+    schema = "idunn.swarm_surgery_plan.v1"
+)]
+pub struct IdunnSwarmSurgeryPlanRecord {
+    #[cultcache(key = 0)]
+    pub plan_id: String,
+    #[cultcache(key = 1)]
+    pub profile: String,
+    #[cultcache(key = 2)]
+    pub status: String,
+    #[cultcache(key = 3)]
+    pub owner: String,
+    #[cultcache(key = 4)]
+    pub objective: String,
+    #[cultcache(key = 5)]
+    pub current_mechanism: String,
+    #[cultcache(key = 6)]
+    pub invariants: Vec<String>,
+    #[cultcache(key = 7)]
+    pub phases: Vec<String>,
+    #[cultcache(key = 8)]
+    pub current_phase: String,
+    #[cultcache(key = 9)]
+    pub next_target: String,
+    #[cultcache(key = 10)]
+    pub cut_line: String,
+    #[cultcache(key = 11)]
+    pub verification_layer: String,
+    #[cultcache(key = 12)]
+    pub updated_at: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
@@ -716,6 +751,7 @@ cultmesh_rs::cultmesh_documents!(OdinDocuments {
     IdunnDeploymentRequestRecord => IDUNN_DEPLOYMENT_REQUEST_SCHEMA,
     IdunnDeploymentResultRecord => IDUNN_DEPLOYMENT_RESULT_SCHEMA,
     IdunnOperatorAlarmRecord => IDUNN_OPERATOR_ALARM_SCHEMA,
+    IdunnSwarmSurgeryPlanRecord => IDUNN_SWARM_SURGERY_PLAN_SCHEMA,
     IdunnDaemonSurgeryPlanRecord => IDUNN_DAEMON_SURGERY_PLAN_SCHEMA,
     IdunnDaemonTransportProfileRecord => IDUNN_DAEMON_TRANSPORT_PROFILE_SCHEMA,
     IdunnCommandBoundaryRecord => IDUNN_COMMAND_BOUNDARY_SCHEMA,

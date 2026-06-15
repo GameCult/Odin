@@ -86,6 +86,7 @@ idunn.deployment_result.v1
 idunn.restart_request.v1
 idunn.restart_result.v1
 idunn.operator_alarm.v1
+idunn.swarm_surgery_plan.v1
 idunn.daemon_surgery_plan.v1
 idunn.daemon_transport_profile.v1
 idunn.command_boundary.v1
@@ -155,7 +156,13 @@ idunn.rudp_health_ingress.v1
   contract, `publication_source=daemon-published`, transport
   `cultnet.transport.rudp.v0`, and `max_silence_seconds` freshness window all
   match. If any of those fail, the command probe remains fallback evidence.
-- Idunn publishes the transport migration plan as
+- Idunn publishes the active swarm transport migration plan as
+  `idunn.swarm_surgery_plan.v1`. That record names the active profile, owner,
+  objective, current mechanism, invariants, ordered phases, current phase, next
+  target, cut line, and verification layer. It is the state-surface answer to
+  "what surgery is Idunn doing next?" and must be lowered by Nightwing/Gjallar
+  before any chat summary or dashboard prose claims ownership of the plan.
+- Idunn publishes per-target transport migration plans as
   `idunn.daemon_surgery_plan.v1` records in the keepalive store. Each daemon
   plan names severity, status, owner, objective, current mechanism, intended
   CultNet/RUDP authority, cut line, ordered steps, blockers, and update time.
@@ -228,26 +235,32 @@ The local swarm mode owns:
 
 1. the built-in Starfire-local target catalog;
 2. a mandatory health contract per target;
-3. a typed `idunn.daemon_surgery_plan.v1` record per target, so transport debt
+3. a typed `idunn.swarm_surgery_plan.v1` record, so Idunn's active migration
+   order, next target, cut line, and verification layer are explicit state;
+4. a typed `idunn.daemon_surgery_plan.v1` record per target, so transport debt
    is visible in the same state surface as daemon health;
-4. a typed `idunn.daemon_transport_profile.v1` and
+5. a typed `idunn.daemon_transport_profile.v1` and
    `idunn.command_boundary.v1` record per target, so compatibility probes and
    local commands cannot pretend to be daemon-owned CultNet/RUDP truth;
-5. a startup `idunn.runtime_transport_check.v1` witness proving Idunn's own
+6. a startup `idunn.runtime_transport_check.v1` witness proving Idunn's own
    Rust RUDP loopback path;
-6. a local `idunn.rudp_health_ingress.v1` listener for daemon-owned RUDP
+7. a local `idunn.rudp_health_ingress.v1` listener for daemon-owned RUDP
    health publication;
-7. one in-process schedule per target instead of one watchdog process per target;
-8. shared typed keepalive records in one CultMesh store;
-9. deploy/restart/alarm execution through the same Rust decision engine;
-10. recovery of fast local targets like Odin without waiting behind slow remote
+8. one in-process schedule per target instead of one watchdog process per target;
+9. shared typed keepalive records in one CultMesh store;
+10. deploy/restart/alarm execution through the same Rust decision engine;
+11. recovery of fast local targets like Odin without waiting behind slow remote
    Yggdrasil checks.
 
-Next: update daemon CultLib dependencies to the cross-runtime
-`cultnet.transport.rudp.v0` surface, ingest Odin-owned service/provider
-advertisements directly, promote the target catalog out of hardcoded bootstrap
-data, add named adapters only for legacy service-manager crossings, then
-publish an Eve/CultUI keepalive surface.
+Current plan surface: `idunn.swarm_surgery_plan.v1` for profile
+`starfire-local` currently points at `starfire-muninn` as the first Rust daemon
+cut. The verification layer is the CultMesh keepalive store plus live Idunn
+decision cycles, not command exit codes or chat summaries.
+
+Next: update Muninn's CultLib dependency to publish daemon-owned health through
+the cross-runtime `cultnet.transport.rudp.v0` surface, prove Idunn consumes that
+live record, then continue runtime-by-runtime until compatibility probes can be
+deleted or demoted.
 
 No ad hoc JSON manifest, HTTP endpoint, TCP socket, or WebSocket bridge may
 become the live state owner. Debug projections are fine when they name the

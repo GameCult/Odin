@@ -8,7 +8,7 @@ use odin_core::{
     IdunnCommandBoundaryRecord, IdunnDaemonHealthRecord, IdunnDaemonSurgeryPlanRecord,
     IdunnDaemonTransportProfileRecord, IdunnDeploymentResultRecord, IdunnDesiredDaemonRecord,
     IdunnOperatorAlarmRecord, IdunnRestartResultRecord, IdunnRudpHealthIngressRecord,
-    IdunnRuntimeTransportCheckRecord, OdinDocuments, plan_keepalive,
+    IdunnRuntimeTransportCheckRecord, IdunnSwarmSurgeryPlanRecord, OdinDocuments, plan_keepalive,
 };
 use std::env;
 use std::net::{SocketAddr, UdpSocket};
@@ -112,7 +112,7 @@ fn run_swarm(options: &SwarmOptions, common: &CommonOptions) -> Result<()> {
     let now = timestamp()?;
     publish_runtime_transport_check(common, &store_lock, &now)?;
     start_rudp_health_ingress(common, &store_lock, &now)?;
-    publish_daemon_surgery_plans(&targets, common, &store_lock, &now)?;
+    publish_surgery_plans(&options.profile, &targets, common, &store_lock, &now)?;
 
     let mut workers = Vec::with_capacity(targets.len());
     for target in targets {
@@ -607,14 +607,17 @@ fn health_from_rudp_message(message: &CultNetMessage) -> Result<IdunnDaemonHealt
     Ok(health)
 }
 
-fn publish_daemon_surgery_plans(
+fn publish_surgery_plans(
+    profile: &str,
     targets: &[DaemonTarget],
     options: &CommonOptions,
     store_lock: &Arc<Mutex<()>>,
     updated_at: &str,
 ) -> Result<()> {
+    let swarm_plan = swarm_surgery_plan(profile, targets, updated_at);
     let plans = daemon_surgery_plans(targets, updated_at);
     with_store_node(options, store_lock, |node| {
+        node.put(&swarm_plan.plan_id, &swarm_plan)?;
         for target in targets {
             let transport_profile = daemon_transport_profile(target, updated_at);
             let command_boundary = command_boundary(target, updated_at);
@@ -626,6 +629,60 @@ fn publish_daemon_surgery_plans(
         }
         Ok(())
     })
+}
+
+fn swarm_surgery_plan(
+    profile: &str,
+    targets: &[DaemonTarget],
+    updated_at: &str,
+) -> IdunnSwarmSurgeryPlanRecord {
+    let next_target = if targets
+        .iter()
+        .any(|target| target.daemon_id == "starfire-muninn")
+    {
+        "starfire-muninn"
+    } else if let Some(target) = targets.iter().find(|target| target.enabled) {
+        target.daemon_id.as_str()
+    } else {
+        "none"
+    };
+
+    IdunnSwarmSurgeryPlanRecord {
+        plan_id: format!("swarm-surgery:{profile}"),
+        profile: profile.to_string(),
+        status: "active-transport-migration".to_string(),
+        owner: "Idunn swarm supervisor".to_string(),
+        objective:
+            "Move daemon awareness from compatibility probes to daemon-published typed CultNet/RUDP state."
+                .to_string(),
+        current_mechanism:
+            "Idunn publishes per-daemon desired state, surgery plans, transport profiles, command boundaries, runtime RUDP self-checks, and RUDP health ingress; compatibility command probes remain fallback evidence until each daemon publishes its own health."
+                .to_string(),
+        invariants: vec![
+            "Daemon truth is typed CultCache/CultMesh state carried over cultnet.transport.rudp.v0.".to_string(),
+            "Compatibility commands, HTTP, WebSocket, SSH, and systemd probes are evidence only and must not own daemon health.".to_string(),
+            "Idunn consumes daemon-published RUDP health before compatibility probes and actuates only advertised lifecycle authority.".to_string(),
+            "Each migrated daemon must publish the same health contract that Idunn expects for its target.".to_string(),
+        ],
+        phases: vec![
+            "1. Publish Idunn's own RUDP substrate and ingress state.".to_string(),
+            "2. Install daemon-published RUDP health in one Rust daemon and prove Idunn consumes it live.".to_string(),
+            "3. Extend CultLib RUDP publication support across TypeScript, C#, and remaining daemon runtimes.".to_string(),
+            "4. Promote provider advertisements, command boundaries, and transport profiles to daemon-owned CultNet/RUDP records.".to_string(),
+            "5. Delete or demote compatibility probes once every target has daemon-owned publication and advertised lifecycle authority.".to_string(),
+        ],
+        current_phase:
+            "Phase 2: install daemon-published RUDP health in Muninn as the first Rust daemon cut."
+                .to_string(),
+        next_target: next_target.to_string(),
+        cut_line:
+            "The old command-probe path is cut per daemon only after fresh daemon-published RUDP health matches daemon_id, health_contract, publication_source, transport, and freshness window."
+                .to_string(),
+        verification_layer:
+            "CultMesh keepalive store records plus live Idunn decision cycles, not process exit codes or chat summaries."
+                .to_string(),
+        updated_at: updated_at.to_string(),
+    }
 }
 
 fn transport_profile_id(target: &DaemonTarget) -> String {
@@ -1627,6 +1684,48 @@ mod tests {
         assert_eq!(
             health_state_from_detail("plain command failure", &target),
             "dependency-unavailable"
+        );
+    }
+
+    #[test]
+    fn swarm_surgery_plan_names_current_cut_and_verification_layer() {
+        let muninn = DaemonTarget {
+            daemon_id: "starfire-muninn".to_string(),
+            verse_id: "starfire.local".to_string(),
+            name: "Starfire Muninn".to_string(),
+            health_contract: health_contract(
+                "muninn.cultnet-rudp-local-telemetry-and-quest-access",
+                "degraded",
+            ),
+            health_command: Some("health-starfire-muninn.cmd".to_string()),
+            deploy_command: None,
+            restart_command: Some("restart-starfire-muninn.cmd".to_string()),
+            enabled: true,
+            interval_seconds: 30,
+        };
+        let odin = DaemonTarget {
+            daemon_id: "odin".to_string(),
+            verse_id: "starfire.local".to_string(),
+            name: "Odin".to_string(),
+            health_contract: health_contract("odin.cultnet-rudp-provider-health", "failed"),
+            health_command: Some("health-odin.cmd".to_string()),
+            deploy_command: None,
+            restart_command: Some("restart-odin.cmd".to_string()),
+            enabled: true,
+            interval_seconds: 30,
+        };
+
+        let plan = swarm_surgery_plan("starfire-local", &[odin, muninn], "unix:100");
+
+        assert_eq!(plan.plan_id, "swarm-surgery:starfire-local");
+        assert_eq!(plan.status, "active-transport-migration");
+        assert_eq!(plan.next_target, "starfire-muninn");
+        assert!(plan.current_phase.contains("Muninn"));
+        assert!(plan.verification_layer.contains("CultMesh keepalive store"));
+        assert!(
+            plan.invariants
+                .iter()
+                .any(|invariant| invariant.contains("cultnet.transport.rudp.v0"))
         );
     }
 

@@ -178,8 +178,9 @@ mod tests {
     use crate::documents::{
         IDUNN_COMMAND_BOUNDARY_SCHEMA, IDUNN_DAEMON_SURGERY_PLAN_SCHEMA,
         IDUNN_DAEMON_TRANSPORT_PROFILE_SCHEMA, IDUNN_DESIRED_DAEMON_SCHEMA,
-        IdunnCommandBoundaryRecord, IdunnDaemonSurgeryPlanRecord,
-        IdunnDaemonTransportProfileRecord, IdunnRuntimeTransportCheckRecord, OdinDocuments,
+        IDUNN_SWARM_SURGERY_PLAN_SCHEMA, IdunnCommandBoundaryRecord, IdunnDaemonSurgeryPlanRecord,
+        IdunnDaemonTransportProfileRecord, IdunnRuntimeTransportCheckRecord,
+        IdunnSwarmSurgeryPlanRecord, OdinDocuments,
     };
     use anyhow::Result;
     use cultmesh_rs::{CultMesh, CultMeshNodeOptions};
@@ -354,6 +355,22 @@ mod tests {
             blockers: vec!["runtime CultLib update".to_string()],
             updated_at: "2026-06-04T00:00:02Z".to_string(),
         };
+        let swarm_surgery_plan = IdunnSwarmSurgeryPlanRecord {
+            plan_id: "swarm-surgery:starfire-local".to_string(),
+            profile: "starfire-local".to_string(),
+            status: "active-transport-migration".to_string(),
+            owner: "Idunn swarm supervisor".to_string(),
+            objective: "Move daemon awareness to CultNet/RUDP".to_string(),
+            current_mechanism: "compatibility probes with RUDP fallback".to_string(),
+            invariants: vec!["daemon truth is typed RUDP state".to_string()],
+            phases: vec!["install Muninn RUDP health".to_string()],
+            current_phase: "Phase 2".to_string(),
+            next_target: "starfire-muninn".to_string(),
+            cut_line: "cut command probe after RUDP health exists".to_string(),
+            verification_layer: "CultMesh keepalive store".to_string(),
+            updated_at: "2026-06-04T00:00:02Z".to_string(),
+        };
+        node.put(&swarm_surgery_plan.plan_id, &swarm_surgery_plan)?;
         node.put(&surgery_plan.plan_id, &surgery_plan)?;
         let transport_profile = IdunnDaemonTransportProfileRecord {
             profile_id: "transport:voidbot".to_string(),
@@ -411,6 +428,14 @@ mod tests {
         assert_eq!(
             reloaded
                 .documents()
+                .binding("idunn.swarm_surgery_plan")
+                .and_then(|binding| binding.payload_schema_version.clone())
+                .as_deref(),
+            Some(IDUNN_SWARM_SURGERY_PLAN_SCHEMA)
+        );
+        assert_eq!(
+            reloaded
+                .documents()
                 .binding("idunn.daemon_surgery_plan")
                 .and_then(|binding| binding.payload_schema_version.clone())
                 .as_deref(),
@@ -444,6 +469,12 @@ mod tests {
                 .get_required::<IdunnKeepaliveDecisionRecord>(&plan.decision.decision_id)?
                 .action,
             "restart"
+        );
+        assert_eq!(
+            reloaded
+                .get_required::<IdunnSwarmSurgeryPlanRecord>(&swarm_surgery_plan.plan_id)?
+                .next_target,
+            "starfire-muninn"
         );
         assert_eq!(
             reloaded
