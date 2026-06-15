@@ -4,6 +4,7 @@ use crate::{
 };
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
+use std::io::ErrorKind;
 use std::net::{SocketAddr, UdpSocket};
 use std::time::Duration;
 use uuid::Uuid;
@@ -180,7 +181,11 @@ pub fn recv_cultnet_message_rudp(
 ) -> Result<(CultNetMessage, SocketAddr, String)> {
     let mut buffer = vec![0_u8; options.max_datagram_bytes];
     loop {
-        let (size, source) = socket.recv_from(&mut buffer)?;
+        let (size, source) = match socket.recv_from(&mut buffer) {
+            Ok(received) => received,
+            Err(error) if error.kind() == ErrorKind::ConnectionReset => continue,
+            Err(error) => return Err(error.into()),
+        };
         let packet = decode_cultnet_rudp_packet(&buffer[..size])?;
         let CultNetRudpPacket::Data {
             transfer_id,
