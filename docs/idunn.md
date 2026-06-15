@@ -87,6 +87,8 @@ idunn.restart_request.v1
 idunn.restart_result.v1
 idunn.operator_alarm.v1
 idunn.daemon_surgery_plan.v1
+idunn.daemon_transport_profile.v1
+idunn.command_boundary.v1
 ```
 
 ## Invariants
@@ -113,6 +115,13 @@ idunn.daemon_surgery_plan.v1
   distinguish process liveness, source deployment freshness, framebuffer
   composition, telemetry capture, and catalog coherence without mistaking a
   temporary HTTP/WebSocket/SSH/systemd probe for the real protocol surface.
+- `idunn.desired_daemon.v1` links to
+  `idunn.daemon_transport_profile.v1` and `idunn.command_boundary.v1` records.
+  The transport profile names the target transport
+  `cultnet.transport.rudp.v0`, the still-active compatibility mechanism, and
+  the cut line that demotes old probes. The command boundary names restart,
+  deploy, health, and alarm authority separately so Idunn can actuate only the
+  commands it actually owns.
 - The Starfire-local shell probes are compatibility evidence, not the target
   architecture. A daemon is fully Idunn-aware only when it publishes its health,
   command boundary, and transport profile as typed CultNet/CultMesh documents
@@ -194,10 +203,13 @@ The local swarm mode owns:
 2. a mandatory health contract per target;
 3. a typed `idunn.daemon_surgery_plan.v1` record per target, so transport debt
    is visible in the same state surface as daemon health;
-4. one in-process schedule per target instead of one watchdog process per target;
-5. shared typed keepalive records in one CultMesh store;
-6. deploy/restart/alarm execution through the same Rust decision engine;
-7. recovery of fast local targets like Odin without waiting behind slow remote
+4. a typed `idunn.daemon_transport_profile.v1` and
+   `idunn.command_boundary.v1` record per target, so compatibility probes and
+   local commands cannot pretend to be daemon-owned CultNet/RUDP truth;
+5. one in-process schedule per target instead of one watchdog process per target;
+6. shared typed keepalive records in one CultMesh store;
+7. deploy/restart/alarm execution through the same Rust decision engine;
+8. recovery of fast local targets like Odin without waiting behind slow remote
    Yggdrasil checks.
 
 Next: update daemon CultLib dependencies to the cross-runtime

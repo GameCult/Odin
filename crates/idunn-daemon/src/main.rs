@@ -1,9 +1,9 @@
 use anyhow::{Context, Result, anyhow};
 use cultmesh_rs::{CultMesh, CultMeshNode, CultMeshNodeOptions};
 use odin_core::{
-    IdunnDaemonHealthRecord, IdunnDaemonSurgeryPlanRecord, IdunnDeploymentResultRecord,
-    IdunnDesiredDaemonRecord, IdunnOperatorAlarmRecord, IdunnRestartResultRecord, OdinDocuments,
-    plan_keepalive,
+    IdunnCommandBoundaryRecord, IdunnDaemonHealthRecord, IdunnDaemonSurgeryPlanRecord,
+    IdunnDaemonTransportProfileRecord, IdunnDeploymentResultRecord, IdunnDesiredDaemonRecord,
+    IdunnOperatorAlarmRecord, IdunnRestartResultRecord, OdinDocuments, plan_keepalive,
 };
 use std::env;
 use std::path::PathBuf;
@@ -184,6 +184,8 @@ fn run_target_cycle(
         restart_command: target.restart_command.clone(),
         deploy_command: target.deploy_command.clone(),
         health_contract: target.health_contract.id.clone(),
+        transport_profile_id: transport_profile_id(target),
+        command_boundary_id: command_boundary_id(target),
         authority: "idunn.local-command".to_string(),
         max_silence_seconds: 60,
         observed_at: now.clone(),
@@ -193,6 +195,10 @@ fn run_target_cycle(
     let plan = plan_keepalive(&desired, &health, now.clone());
 
     with_store_node(options, store_lock, |node| {
+        let transport_profile = daemon_transport_profile(target, &now);
+        let command_boundary = command_boundary(target, &now);
+        node.put(&transport_profile.profile_id, &transport_profile)?;
+        node.put(&command_boundary.boundary_id, &command_boundary)?;
         node.put(&desired.daemon_id, &desired)?;
         node.put(&health.daemon_id, &health)?;
         node.put(&plan.decision.decision_id, &plan.decision)?;
@@ -317,11 +323,86 @@ fn publish_daemon_surgery_plans(
 ) -> Result<()> {
     let plans = daemon_surgery_plans(targets, updated_at);
     with_store_node(options, store_lock, |node| {
+        for target in targets {
+            let transport_profile = daemon_transport_profile(target, updated_at);
+            let command_boundary = command_boundary(target, updated_at);
+            node.put(&transport_profile.profile_id, &transport_profile)?;
+            node.put(&command_boundary.boundary_id, &command_boundary)?;
+        }
         for plan in &plans {
             node.put(&plan.plan_id, plan)?;
         }
         Ok(())
     })
+}
+
+fn transport_profile_id(target: &DaemonTarget) -> String {
+    format!("transport:{}", target.daemon_id)
+}
+
+fn command_boundary_id(target: &DaemonTarget) -> String {
+    format!("command-boundary:{}", target.daemon_id)
+}
+
+fn daemon_transport_profile(
+    target: &DaemonTarget,
+    observed_at: &str,
+) -> IdunnDaemonTransportProfileRecord {
+    IdunnDaemonTransportProfileRecord {
+        profile_id: transport_profile_id(target),
+        daemon_id: target.daemon_id.clone(),
+        target_transport: "cultnet.transport.rudp.v0".to_string(),
+        current_transport: "compatibility.local-command".to_string(),
+        state: "migration-required".to_string(),
+        health_contract: target.health_contract.id.clone(),
+        publication_schema: "idunn.daemon_health.v1".to_string(),
+        compatibility_mechanism: target
+            .health_command
+            .clone()
+            .unwrap_or_else(|| "none".to_string()),
+        cut_line: "Compatibility command probes are evidence only; daemon truth moves to CultNet/RUDP health publication and advertised command boundaries."
+            .to_string(),
+        observed_at: observed_at.to_string(),
+    }
+}
+
+fn command_boundary(target: &DaemonTarget, observed_at: &str) -> IdunnCommandBoundaryRecord {
+    let restart_authority = target
+        .restart_command
+        .as_ref()
+        .map(|_| "idunn.local-command.restart")
+        .unwrap_or("none")
+        .to_string();
+    let deploy_authority = target
+        .deploy_command
+        .as_ref()
+        .map(|_| "idunn.local-command.deploy")
+        .unwrap_or("none")
+        .to_string();
+    let compatibility_commands = [
+        target.health_command.as_ref(),
+        target.restart_command.as_ref(),
+        target.deploy_command.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .cloned()
+    .collect();
+
+    IdunnCommandBoundaryRecord {
+        boundary_id: command_boundary_id(target),
+        daemon_id: target.daemon_id.clone(),
+        owner: "idunn.local-command-compatibility".to_string(),
+        restart_authority,
+        deploy_authority,
+        health_authority: "compatibility.probe-only".to_string(),
+        alarm_authority: "bifrost.operator-notification".to_string(),
+        compatibility_commands,
+        forbidden_authority:
+            "Health commands, HTTP endpoints, WebSocket decks, SSH probes, and systemd status do not own daemon truth."
+                .to_string(),
+        observed_at: observed_at.to_string(),
+    }
 }
 
 fn daemon_surgery_plans(

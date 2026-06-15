@@ -176,8 +176,10 @@ fn decision(
 mod tests {
     use super::*;
     use crate::documents::{
-        IDUNN_DAEMON_SURGERY_PLAN_SCHEMA, IDUNN_DESIRED_DAEMON_SCHEMA,
-        IdunnDaemonSurgeryPlanRecord, OdinDocuments,
+        IDUNN_COMMAND_BOUNDARY_SCHEMA, IDUNN_DAEMON_SURGERY_PLAN_SCHEMA,
+        IDUNN_DAEMON_TRANSPORT_PROFILE_SCHEMA, IDUNN_DESIRED_DAEMON_SCHEMA,
+        IdunnCommandBoundaryRecord, IdunnDaemonSurgeryPlanRecord,
+        IdunnDaemonTransportProfileRecord, OdinDocuments,
     };
     use anyhow::Result;
     use cultmesh_rs::{CultMesh, CultMeshNodeOptions};
@@ -195,6 +197,8 @@ mod tests {
             observed_at: "2026-06-04T00:00:00Z".to_string(),
             deploy_command: None,
             health_contract: "test.command-exit".to_string(),
+            transport_profile_id: "transport:voidbot".to_string(),
+            command_boundary_id: "command-boundary:voidbot".to_string(),
         }
     }
 
@@ -349,6 +353,32 @@ mod tests {
             updated_at: "2026-06-04T00:00:02Z".to_string(),
         };
         node.put(&surgery_plan.plan_id, &surgery_plan)?;
+        let transport_profile = IdunnDaemonTransportProfileRecord {
+            profile_id: "transport:voidbot".to_string(),
+            daemon_id: "voidbot".to_string(),
+            target_transport: "cultnet.transport.rudp.v0".to_string(),
+            current_transport: "compatibility.local-command".to_string(),
+            state: "migration-required".to_string(),
+            health_contract: "test.command-exit".to_string(),
+            publication_schema: "idunn.daemon_health.v1".to_string(),
+            compatibility_mechanism: "exit 1".to_string(),
+            cut_line: "cut command probe".to_string(),
+            observed_at: "2026-06-04T00:00:02Z".to_string(),
+        };
+        node.put(&transport_profile.profile_id, &transport_profile)?;
+        let command_boundary = IdunnCommandBoundaryRecord {
+            boundary_id: "command-boundary:voidbot".to_string(),
+            daemon_id: "voidbot".to_string(),
+            owner: "idunn.local-command-compatibility".to_string(),
+            restart_authority: "idunn.local-command.restart".to_string(),
+            deploy_authority: "none".to_string(),
+            health_authority: "compatibility.probe-only".to_string(),
+            alarm_authority: "bifrost.operator-notification".to_string(),
+            compatibility_commands: vec!["exit 1".to_string(), "npm start".to_string()],
+            forbidden_authority: "compatibility probes do not own truth".to_string(),
+            observed_at: "2026-06-04T00:00:02Z".to_string(),
+        };
+        node.put(&command_boundary.boundary_id, &command_boundary)?;
 
         let reloaded = CultMesh::create_node(
             &store_path,
@@ -377,6 +407,29 @@ mod tests {
         );
         assert_eq!(
             reloaded
+                .documents()
+                .binding("idunn.daemon_transport_profile")
+                .and_then(|binding| binding.payload_schema_version.clone())
+                .as_deref(),
+            Some(IDUNN_DAEMON_TRANSPORT_PROFILE_SCHEMA)
+        );
+        assert_eq!(
+            reloaded
+                .documents()
+                .binding("idunn.command_boundary")
+                .and_then(|binding| binding.payload_schema_version.clone())
+                .as_deref(),
+            Some(IDUNN_COMMAND_BOUNDARY_SCHEMA)
+        );
+        let reloaded_desired =
+            reloaded.get_required::<IdunnDesiredDaemonRecord>(&desired.daemon_id)?;
+        assert_eq!(reloaded_desired.transport_profile_id, "transport:voidbot");
+        assert_eq!(
+            reloaded_desired.command_boundary_id,
+            "command-boundary:voidbot"
+        );
+        assert_eq!(
+            reloaded
                 .get_required::<IdunnKeepaliveDecisionRecord>(&plan.decision.decision_id)?
                 .action,
             "restart"
@@ -386,6 +439,18 @@ mod tests {
                 .get_required::<IdunnDaemonSurgeryPlanRecord>(&surgery_plan.plan_id)?
                 .cut_line,
             "demote command probe after RUDP health exists"
+        );
+        assert_eq!(
+            reloaded
+                .get_required::<IdunnDaemonTransportProfileRecord>(&transport_profile.profile_id)?
+                .target_transport,
+            "cultnet.transport.rudp.v0"
+        );
+        assert_eq!(
+            reloaded
+                .get_required::<IdunnCommandBoundaryRecord>(&command_boundary.boundary_id)?
+                .health_authority,
+            "compatibility.probe-only"
         );
         assert_eq!(
             reloaded
