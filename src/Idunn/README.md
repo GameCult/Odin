@@ -179,6 +179,13 @@ service/provider records, keeping named adapters only for legacy service-manager
 crossings, and replacing the local operator alarm bridge with a fully
 Bifrost-owned notification request record.
 
+Rust no longer gets to claim the transport is imaginary:
+`vendor/cultnet-rs` includes a narrow stop-and-wait
+`cultnet.transport.rudp.v0` path for acknowledged CultNet messages over UDP.
+That is substrate only. Idunn still marks daemon profiles as
+`migration-required` until each daemon actually publishes health and command
+boundary records through that path.
+
 ## Boundaries
 
 Idunn is not Odin. It does not decide which Verses exist.

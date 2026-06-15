@@ -128,6 +128,12 @@ idunn.command_boundary.v1
   over `cultnet.transport.rudp.v0`. TCP, HTTP, WebSocket, and ad hoc port probes
   are migration debt, tolerated only at xenos/legacy boundaries and while the
   daemon's CultLib dependency has not yet been updated.
+- Rust now has a narrow `cultnet.transport.rudp.v0` substrate in
+  `vendor/cultnet-rs`: one CultNet message per acknowledged UDP datagram with
+  timeout/retry semantics. This removes "Rust cannot speak RUDP" as a substrate
+  excuse. It does not make any daemon fully migrated until that daemon publishes
+  its health and command boundary through the RUDP path and Idunn consumes that
+  daemon-owned publication instead of the compatibility command.
 - Idunn publishes the transport migration plan as
   `idunn.daemon_surgery_plan.v1` records in the keepalive store. Each daemon
   plan names severity, status, owner, objective, current mechanism, intended

@@ -1,9 +1,9 @@
 # CultNet RS
 
 `cultnet-rs` is the Rust sibling of `cultnet-ts`: typed MessagePack messages,
-4-byte length-prefixed direct-pipe framing, CultLib-shaped security helpers, and
-CultCache replication without making callers paw through raw envelopes like we
-lost a bet.
+4-byte length-prefixed direct-pipe framing, stop-and-wait RUDP message delivery,
+CultLib-shaped security helpers, and CultCache replication without making
+callers paw through raw envelopes like we lost a bet.
 
 The contract is intentionally boring:
 
@@ -14,6 +14,8 @@ The contract is intentionally boring:
 - document put/delete/snapshot messages move typed CultCache entries.
 - raw document put/snapshot messages preserve canonical MessagePack payload
   bytes for bit-compatible neighbors.
+- `cultnet.transport.rudp.v0` carries one CultNet message per acknowledged UDP
+  datagram with timeout/retry semantics.
 - hello messages advertise `supportedMutationContracts`, so callers discover
   which document types are read-only, which accept typed intents, which
   authority owns the mutation, and which receipt documents prove the outcome.
@@ -43,6 +45,21 @@ The initial tests prove:
 - CultCache snapshot replication through registered typed documents
 - raw snapshot replication that preserves the original payload bytes
 - document mutation contract advertisement through hello frames and registries
+- acknowledged localhost UDP delivery through `cultnet.transport.rudp.v0`
+
+## RUDP Transport
+
+`cultnet.transport.rudp.v0` is the Rust crate's first non-TCP daemon transport.
+It is intentionally small: one CultNet message becomes one UDP data packet, the
+receiver sends an acknowledgement packet, and the sender retries until the ack
+arrives or the retry budget is spent.
+
+This is a daemon health/control substrate, not a bulk stream transport. It does
+not fragment oversized messages, multiplex streams, or promise congestion
+control. Large snapshots should stay in CultCache/CultMesh storage and move by
+document reference or a later chunking contract. The useful invariant is simple:
+Rust runtimes can now move a typed CultNet message across UDP without reaching
+for TCP as the hidden truth path.
 
 ## Schema Discovery
 
