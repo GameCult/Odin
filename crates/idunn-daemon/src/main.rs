@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, anyhow};
-use cultmesh_rs::{CultMesh, CultMeshNodeOptions};
+use cultmesh_rs::{CultMesh, CultMeshNode, CultMeshNodeOptions};
 use odin_core::{
     IdunnDaemonHealthRecord, IdunnDeploymentResultRecord, IdunnDesiredDaemonRecord,
     IdunnOperatorAlarmRecord, IdunnRestartResultRecord, OdinDocuments, plan_keepalive,
@@ -7,6 +7,7 @@ use odin_core::{
 use std::env;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -58,7 +59,10 @@ fn main() -> Result<()> {
     }
 
     match &options.mode {
-        Mode::Single(target) => run_target_cycle(target, &options.common),
+        Mode::Single(target) => {
+            let store_lock = Arc::new(Mutex::new(()));
+            run_target_cycle(target, &options.common, &store_lock)
+        }
         Mode::Swarm(swarm) => run_swarm(swarm, &options.common),
     }
 }
@@ -79,11 +83,13 @@ fn run_swarm(options: &SwarmOptions, common: &CommonOptions) -> Result<()> {
     );
     println!("CultMesh store: {}", common.store_path.display());
 
+    let store_lock = Arc::new(Mutex::new(()));
     let mut workers = Vec::with_capacity(targets.len());
     for target in targets {
         let worker_common = common.clone();
+        let worker_store_lock = Arc::clone(&store_lock);
         workers.push(thread::spawn(move || {
-            run_target_loop(target, worker_common)
+            run_target_loop(target, worker_common, worker_store_lock)
         }));
     }
 
@@ -98,9 +104,13 @@ fn run_swarm(options: &SwarmOptions, common: &CommonOptions) -> Result<()> {
     Ok(())
 }
 
-fn run_target_loop(target: DaemonTarget, options: CommonOptions) -> Result<()> {
+fn run_target_loop(
+    target: DaemonTarget,
+    options: CommonOptions,
+    store_lock: Arc<Mutex<()>>,
+) -> Result<()> {
     loop {
-        if let Err(error) = run_target_cycle(&target, &options) {
+        if let Err(error) = run_target_cycle(&target, &options, &store_lock) {
             eprintln!(
                 "Idunn swarm target {} cycle failed: {}",
                 target.daemon_id, error
@@ -110,7 +120,11 @@ fn run_target_loop(target: DaemonTarget, options: CommonOptions) -> Result<()> {
     }
 }
 
-fn run_target_cycle(target: &DaemonTarget, options: &CommonOptions) -> Result<()> {
+fn run_target_cycle(
+    target: &DaemonTarget,
+    options: &CommonOptions,
+    store_lock: &Arc<Mutex<()>>,
+) -> Result<()> {
     let now = timestamp()?;
 
     let desired = IdunnDesiredDaemonRecord {
@@ -129,31 +143,42 @@ fn run_target_cycle(target: &DaemonTarget, options: &CommonOptions) -> Result<()
     let health = probe_health(target, options.command_timeout_seconds, &now);
     let plan = plan_keepalive(&desired, &health, now.clone());
 
-    let mut node = CultMesh::create_node(
-        &options.store_path,
-        OdinDocuments,
-        CultMeshNodeOptions {
-            runtime_id: "idunn-daemon".to_string(),
-            pull_on_start: true,
-        },
-    )?;
-
-    node.put(&desired.daemon_id, &desired)?;
-    node.put(&health.daemon_id, &health)?;
-    node.put(&plan.decision.decision_id, &plan.decision)?;
+    with_store_node(options, store_lock, |node| {
+        node.put(&desired.daemon_id, &desired)?;
+        node.put(&health.daemon_id, &health)?;
+        node.put(&plan.decision.decision_id, &plan.decision)?;
+        if let Some(request) = &plan.deployment_request {
+            node.put(&request.request_id, request)?;
+        }
+        if let Some(request) = &plan.restart_request {
+            node.put(&request.request_id, request)?;
+        }
+        if let Some(alarm) = &plan.operator_alarm {
+            node.put(&alarm.alarm_id, alarm)?;
+        }
+        Ok(())
+    })?;
 
     if let Some(request) = &plan.deployment_request {
-        node.put(&request.request_id, request)?;
         if options.execute {
             let result = run_deployment(request, &now, options.command_timeout_seconds);
-            node.put(&result.result_id, &result)?;
+            let alarm = if result.state != "succeeded" {
+                Some(deployment_failure_alarm(&result, &now))
+            } else {
+                None
+            };
+            with_store_node(options, store_lock, |node| {
+                node.put(&result.result_id, &result)?;
+                if let Some(alarm) = &alarm {
+                    node.put(&alarm.alarm_id, alarm)?;
+                }
+                Ok(())
+            })?;
             println!(
                 "Idunn deployment {} for {}: {}",
                 result.state, result.daemon_id, result.detail
             );
-            if result.state != "succeeded" {
-                let alarm = deployment_failure_alarm(&result, &now);
-                node.put(&alarm.alarm_id, &alarm)?;
+            if let Some(alarm) = alarm {
                 println!(
                     "Idunn raised operator alarm for {} through {}: {}",
                     alarm.daemon_id, alarm.escalation_target, alarm.reason
@@ -169,17 +194,25 @@ fn run_target_cycle(target: &DaemonTarget, options: &CommonOptions) -> Result<()
     }
 
     if let Some(request) = &plan.restart_request {
-        node.put(&request.request_id, request)?;
         if options.execute {
             let result = run_restart(request, &now, options.command_timeout_seconds);
-            node.put(&result.result_id, &result)?;
+            let alarm = if result.state != "succeeded" {
+                Some(restart_failure_alarm(&result, &now))
+            } else {
+                None
+            };
+            with_store_node(options, store_lock, |node| {
+                node.put(&result.result_id, &result)?;
+                if let Some(alarm) = &alarm {
+                    node.put(&alarm.alarm_id, alarm)?;
+                }
+                Ok(())
+            })?;
             println!(
                 "Idunn restart {} for {}: {}",
                 result.state, result.daemon_id, result.detail
             );
-            if result.state != "succeeded" {
-                let alarm = restart_failure_alarm(&result, &now);
-                node.put(&alarm.alarm_id, &alarm)?;
+            if let Some(alarm) = alarm {
                 println!(
                     "Idunn raised operator alarm for {} through {}: {}",
                     alarm.daemon_id, alarm.escalation_target, alarm.reason
@@ -195,7 +228,6 @@ fn run_target_cycle(target: &DaemonTarget, options: &CommonOptions) -> Result<()
     }
 
     if let Some(alarm) = &plan.operator_alarm {
-        node.put(&alarm.alarm_id, alarm)?;
         println!(
             "Idunn raised operator alarm for {} through {}: {}",
             alarm.daemon_id, alarm.escalation_target, alarm.reason
@@ -208,6 +240,28 @@ fn run_target_cycle(target: &DaemonTarget, options: &CommonOptions) -> Result<()
         plan.decision.daemon_id, plan.decision.action, plan.decision.reason
     );
     Ok(())
+}
+
+fn with_store_node<F>(
+    options: &CommonOptions,
+    store_lock: &Arc<Mutex<()>>,
+    write: F,
+) -> Result<()>
+where
+    F: FnOnce(&mut CultMeshNode) -> Result<()>,
+{
+    let _store_guard = store_lock
+        .lock()
+        .map_err(|_| anyhow!("Idunn store lock is poisoned"))?;
+    let mut node = CultMesh::create_node(
+        &options.store_path,
+        OdinDocuments,
+        CultMeshNodeOptions {
+            runtime_id: "idunn-daemon".to_string(),
+            pull_on_start: true,
+        },
+    )?;
+    write(&mut node)
 }
 
 fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
@@ -544,13 +598,16 @@ fn probe_health(
             Ok(output) if output.status.success() => IdunnDaemonHealthRecord {
                 daemon_id: target.daemon_id.clone(),
                 state: "active".to_string(),
-                detail: "health command exited successfully".to_string(),
+                detail: command_output_detail("health command exited successfully", &output),
                 observed_at: observed_at.to_string(),
             },
             Ok(output) => IdunnDaemonHealthRecord {
                 daemon_id: target.daemon_id.clone(),
                 state: "failed".to_string(),
-                detail: format!("health command exited with {}", output.status),
+                detail: command_output_detail(
+                    &format!("health command exited with {}", output.status),
+                    &output,
+                ),
                 observed_at: observed_at.to_string(),
             },
             Err(error) => IdunnDaemonHealthRecord {
@@ -581,7 +638,7 @@ fn run_restart(
             request_id: request.request_id.clone(),
             daemon_id: request.daemon_id.clone(),
             state: "succeeded".to_string(),
-            detail: "restart command exited successfully".to_string(),
+            detail: command_output_detail("restart command exited successfully", &output),
             completed_at: requested_at.to_string(),
         },
         Ok(output) => IdunnRestartResultRecord {
@@ -589,7 +646,10 @@ fn run_restart(
             request_id: request.request_id.clone(),
             daemon_id: request.daemon_id.clone(),
             state: "failed".to_string(),
-            detail: format!("restart command exited with {}", output.status),
+            detail: command_output_detail(
+                &format!("restart command exited with {}", output.status),
+                &output,
+            ),
             completed_at: requested_at.to_string(),
         },
         Err(error) => IdunnRestartResultRecord {
@@ -615,7 +675,7 @@ fn run_deployment(
             request_id: request.request_id.clone(),
             daemon_id: request.daemon_id.clone(),
             state: "succeeded".to_string(),
-            detail: "deployment command exited successfully".to_string(),
+            detail: command_output_detail("deployment command exited successfully", &output),
             completed_at: requested_at.to_string(),
         },
         Ok(output) => IdunnDeploymentResultRecord {
@@ -623,7 +683,10 @@ fn run_deployment(
             request_id: request.request_id.clone(),
             daemon_id: request.daemon_id.clone(),
             state: "failed".to_string(),
-            detail: format!("deployment command exited with {}", output.status),
+            detail: command_output_detail(
+                &format!("deployment command exited with {}", output.status),
+                &output,
+            ),
             completed_at: requested_at.to_string(),
         },
         Err(error) => IdunnDeploymentResultRecord {
@@ -637,10 +700,40 @@ fn run_deployment(
     }
 }
 
+fn command_output_detail(prefix: &str, output: &std::process::Output) -> String {
+    let mut detail = prefix.to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = stdout.trim();
+    let stderr = stderr.trim();
+    if !stdout.is_empty() {
+        detail.push_str("; stdout: ");
+        detail.push_str(&truncate_detail(stdout, 600));
+    }
+    if !stderr.is_empty() {
+        detail.push_str("; stderr: ");
+        detail.push_str(&truncate_detail(stderr, 600));
+    }
+    detail
+}
+
+fn truncate_detail(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let truncated: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{truncated}...")
+    } else {
+        truncated
+    }
+}
+
 fn run_shell(command: &str, timeout_seconds: u64) -> Result<std::process::Output> {
     let mut process = if cfg!(windows) {
+        let path = windows_command_path();
+        let command = format!(r#"set "PATH={path}" && set "Path={path}" && {command}"#);
         let mut process = Command::new("cmd");
-        process.arg("/C").arg(command);
+        process.arg("/D").arg("/S").arg("/C").arg(command);
+        apply_windows_command_environment(&mut process, &path);
         process
     } else {
         let mut process = Command::new("sh");
@@ -665,8 +758,11 @@ fn run_operator_alarm_command(options: &CommonOptions, alarm: &IdunnOperatorAlar
     }
 
     let mut process = if cfg!(windows) {
+        let path = windows_command_path();
+        let command = format!(r#"set "PATH={path}" && set "Path={path}" && {command}"#);
         let mut process = Command::new("cmd");
-        process.arg("/C").arg(command);
+        process.arg("/D").arg("/S").arg("/C").arg(command);
+        apply_windows_command_environment(&mut process, &path);
         process
     } else {
         let mut process = Command::new("sh");
@@ -717,6 +813,32 @@ fn run_operator_alarm_command(options: &CommonOptions, alarm: &IdunnOperatorAlar
             );
         }
     }
+}
+
+fn windows_command_path() -> String {
+    [
+        r"C:\WINDOWS\system32",
+        r"C:\WINDOWS",
+        r"C:\WINDOWS\System32\Wbem",
+        r"C:\WINDOWS\System32\WindowsPowerShell\v1.0",
+        r"C:\WINDOWS\System32\OpenSSH",
+        r"C:\Program Files\Git\cmd",
+        r"C:\Program Files\nodejs",
+        r"C:\Program Files\Docker\Docker\resources\bin",
+        r"C:\Users\Meta\AppData\Local\Programs\Ollama",
+        r"C:\Program Files\dotnet",
+        r"C:\Users\Meta\.cargo\bin",
+    ]
+    .join(";")
+}
+
+fn apply_windows_command_environment(process: &mut Command, path: &str) {
+    if !cfg!(windows) {
+        return;
+    }
+
+    process.env("PATH", path);
+    process.env("Path", path);
 }
 
 fn wait_for_child_with_timeout(

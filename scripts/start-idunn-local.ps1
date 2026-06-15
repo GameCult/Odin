@@ -80,7 +80,7 @@ $arguments = @(
   "--swarm-profile", "starfire-local",
   "--repo-root", $repoRoot,
   "--store", $storePath,
-  "--command-timeout-seconds", "30",
+  "--command-timeout-seconds", "600",
   "--execute"
 )
 
