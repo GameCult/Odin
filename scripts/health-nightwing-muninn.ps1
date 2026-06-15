@@ -4,7 +4,8 @@ param(
   [string] $StorePath = "/home/metacrat/.local/state/gamecult/muninn/muninn.telemetry.cc",
   [string] $PidPath = "/home/metacrat/.local/state/gamecult/muninn/muninn.pid",
   [string[]] $MoveState = @(),
-  [int] $IntervalSeconds = 15
+  [int] $IntervalSeconds = 15,
+  [string] $IdunnRudpHealth = "10.77.0.2:17870"
 )
 
 $ErrorActionPreference = "Stop"
@@ -42,7 +43,10 @@ set -- --health \
   --host nightwing
 $moveStateSetLines
 set -- "`$@" \
-  --interval-seconds '$IntervalSeconds'
+  --interval-seconds '$IntervalSeconds' \
+  --idunn-rudp-health '$IdunnRudpHealth' \
+  --idunn-daemon 'nightwing-muninn' \
+  --idunn-health-contract 'muninn.cultnet-rudp-remote-telemetry-and-move-hid'
 '$MuninnExe' "`$@"
 "@
 

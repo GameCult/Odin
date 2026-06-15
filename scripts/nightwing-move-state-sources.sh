@@ -42,6 +42,7 @@ hidraw_for_js() {
   return 1
 }
 
+emit_candidates() {
 for js in /dev/input/js*; do
   [ -e "$js" ] || continue
   props="$(udevadm info -q property -n "$js" 2>/dev/null || true)"
@@ -75,5 +76,28 @@ $uevent_text" in
     id="move-$(basename "$js")"
   fi
 
-  printf '%s=%s\n' "$id" "$js"
+  score=1
+  case "$uevent_text" in
+    *HID_ID=0005:0000054C:000003D5*) score=2 ;;
+  esac
+
+  printf '%s %s %s\n' "$id" "$score" "$js"
 done
+}
+
+emit_candidates | awk '
+  {
+    id = $1
+    score = $2 + 0
+    path = $3
+    if (!(id in best_score) || score >= best_score[id]) {
+      best_score[id] = score
+      best_path[id] = path
+    }
+  }
+  END {
+    for (id in best_path) {
+      print id "=" best_path[id]
+    }
+  }
+'

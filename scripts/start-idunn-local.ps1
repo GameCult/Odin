@@ -80,6 +80,7 @@ $arguments = @(
   "--swarm-profile", "starfire-local",
   "--repo-root", $repoRoot,
   "--store", $storePath,
+  "--rudp-health-bind", "0.0.0.0:17870",
   "--command-timeout-seconds", "600",
   "--execute"
 )

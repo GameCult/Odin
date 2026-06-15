@@ -216,3 +216,10 @@ PID, and logs under
 With that Move state source attached, `serve` also publishes the
 `muninn:nightwing:move-evidence` CultMesh stream frame body that Mimir's native
 Move evidence reservoir consumes.
+Nightwing source discovery must emit one Move source per controller id. The USB
+pairing collection and Bluetooth joystick can expose the same controller as
+separate `/dev/input/js*` paths; `nightwing-move-state-sources.sh` prefers the
+Bluetooth `HID_ID=0005:0000054C:000003D5` path so Idunn health does not demand
+fresh records from two faces of the same controller. The Nightwing health
+actuator publishes `nightwing-muninn` health over RUDP to Starfire Idunn at
+`10.77.0.2:17870`.

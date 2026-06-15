@@ -144,8 +144,10 @@ idunn.rudp_health_ingress.v1
   check sends a CultNet hello over loopback `cultnet.transport.rudp.v0` and
   records whether the acknowledgement path works in Idunn's own Rust runtime.
   This proves Idunn's local substrate, not fleet migration.
-- Idunn also opens a local RUDP health ingress by default at
-  `127.0.0.1:17870` and publishes `idunn.rudp_health_ingress.v1`. That ingress
+- Idunn also opens a RUDP health ingress and publishes
+  `idunn.rudp_health_ingress.v1`. The Starfire local supervisor binds
+  `0.0.0.0:17870` so host-local publishers can use `127.0.0.1:17870` and
+  WireGuard peers such as Nightwing can publish to `10.77.0.2:17870`. That ingress
   accepts only raw `idunn.daemon_health` CultNet document puts, decodes the
   typed MessagePack payload, and writes it into the keepalive store. It does
   not grant deploy/restart authority and it does not make compatibility probes
@@ -253,16 +255,16 @@ The local swarm mode owns:
    Yggdrasil checks.
 
 Current plan surface: `idunn.swarm_surgery_plan.v1` for profile
-`starfire-local` points at `starfire-muninn` as the first Rust daemon cut.
-Muninn's `--health` mode now has an explicit Idunn RUDP publication path; the
-Starfire health wrapper passes the `starfire-muninn` daemon id and
-`muninn.cultnet-rudp-local-telemetry-and-quest-access` contract into that path.
-The verification layer is the CultMesh keepalive store plus live Idunn decision
-cycles, not command exit codes or chat summaries.
+`starfire-local` treats Starfire Muninn and Nightwing Muninn as completed Rust
+cuts. Muninn's `--health` mode publishes `idunn.daemon_health` over RUDP;
+Starfire publishes to local Idunn, and Nightwing publishes over WireGuard to
+`10.77.0.2:17870` using the `nightwing-muninn` daemon id and
+`muninn.cultnet-rudp-remote-telemetry-and-move-hid` contract. Live Idunn cycles
+accept both records before command-probe fallback. The plan's current phase now
+points at the Raven `muninn` lane.
 
-Next: prove Idunn consumes Starfire Muninn's live RUDP health record, then
-continue runtime-by-runtime until compatibility probes can be deleted or
-demoted.
+Next: prove Idunn consumes Raven `muninn` daemon-published health, then continue
+runtime-by-runtime until compatibility probes can be deleted or demoted.
 
 No ad hoc JSON manifest, HTTP endpoint, TCP socket, or WebSocket bridge may
 become the live state owner. Debug projections are fine when they name the

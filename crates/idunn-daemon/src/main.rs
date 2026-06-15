@@ -636,11 +636,9 @@ fn swarm_surgery_plan(
     targets: &[DaemonTarget],
     updated_at: &str,
 ) -> IdunnSwarmSurgeryPlanRecord {
-    let next_target = if targets
-        .iter()
-        .any(|target| target.daemon_id == "starfire-muninn")
-    {
-        "starfire-muninn"
+    let has_raven_muninn = targets.iter().any(|target| target.daemon_id == "muninn");
+    let next_target = if has_raven_muninn {
+        "muninn"
     } else if let Some(target) = targets.iter().find(|target| target.enabled) {
         target.daemon_id.as_str()
     } else {
@@ -672,11 +670,11 @@ fn swarm_surgery_plan(
             "5. Delete or demote compatibility probes once every target has daemon-owned publication and advertised lifecycle authority.".to_string(),
         ],
         current_phase:
-            "Phase 2: install daemon-published RUDP health in Muninn as the first Rust daemon cut."
+            "Phase 4: extend daemon-published RUDP health from Starfire and Nightwing Muninn to the Raven Muninn lane."
                 .to_string(),
         next_target: next_target.to_string(),
         cut_line:
-            "The old command-probe path is cut per daemon only after fresh daemon-published RUDP health matches daemon_id, health_contract, publication_source, transport, and freshness window."
+            "Starfire and Nightwing Muninn now publish daemon-owned RUDP health. Raven Muninn still needs the same route before its SSH command probe can be demoted."
                 .to_string(),
         verification_layer:
             "CultMesh keepalive store records plus live Idunn decision cycles, not process exit codes or chat summaries."
@@ -1688,8 +1686,8 @@ mod tests {
     }
 
     #[test]
-    fn swarm_surgery_plan_names_current_cut_and_verification_layer() {
-        let muninn = DaemonTarget {
+    fn swarm_surgery_plan_names_raven_muninn_after_starfire_and_nightwing_cuts() {
+        let starfire_muninn = DaemonTarget {
             daemon_id: "starfire-muninn".to_string(),
             verse_id: "starfire.local".to_string(),
             name: "Starfire Muninn".to_string(),
@@ -1700,6 +1698,34 @@ mod tests {
             health_command: Some("health-starfire-muninn.cmd".to_string()),
             deploy_command: None,
             restart_command: Some("restart-starfire-muninn.cmd".to_string()),
+            enabled: true,
+            interval_seconds: 30,
+        };
+        let nightwing_muninn = DaemonTarget {
+            daemon_id: "nightwing-muninn".to_string(),
+            verse_id: "nightwing.local".to_string(),
+            name: "Nightwing Muninn".to_string(),
+            health_contract: health_contract(
+                "muninn.cultnet-rudp-remote-telemetry-and-move-hid",
+                "failed",
+            ),
+            health_command: Some("health-nightwing-muninn.cmd".to_string()),
+            deploy_command: None,
+            restart_command: Some("restart-nightwing-muninn.cmd".to_string()),
+            enabled: true,
+            interval_seconds: 30,
+        };
+        let raven_muninn = DaemonTarget {
+            daemon_id: "muninn".to_string(),
+            verse_id: "raven.local".to_string(),
+            name: "Raven Muninn".to_string(),
+            health_contract: health_contract(
+                "muninn.cultnet-rudp-remote-telemetry-health",
+                "failed",
+            ),
+            health_command: Some("health-muninn.cmd".to_string()),
+            deploy_command: None,
+            restart_command: Some("restart-muninn.cmd".to_string()),
             enabled: true,
             interval_seconds: 30,
         };
@@ -1715,12 +1741,17 @@ mod tests {
             interval_seconds: 30,
         };
 
-        let plan = swarm_surgery_plan("starfire-local", &[odin, muninn], "unix:100");
+        let plan = swarm_surgery_plan(
+            "starfire-local",
+            &[odin, starfire_muninn, nightwing_muninn, raven_muninn],
+            "unix:100",
+        );
 
         assert_eq!(plan.plan_id, "swarm-surgery:starfire-local");
         assert_eq!(plan.status, "active-transport-migration");
-        assert_eq!(plan.next_target, "starfire-muninn");
-        assert!(plan.current_phase.contains("Muninn"));
+        assert_eq!(plan.next_target, "muninn");
+        assert!(plan.current_phase.contains("Raven Muninn"));
+        assert!(plan.cut_line.contains("Raven Muninn"));
         assert!(plan.verification_layer.contains("CultMesh keepalive store"));
         assert!(
             plan.invariants
