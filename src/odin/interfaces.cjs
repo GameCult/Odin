@@ -53,12 +53,15 @@ function createInterfaceDiscovery({
   async function discoverProviderAdvertisements() {
     const {
       interfaceBindingDefinition,
+      idunnDaemonHealthDefinition,
       operatorStateDefinition,
       providerAdvertisementDefinition,
       stonksCommandBoundaryDefinition,
       stonksMarketSnapshotDefinition,
       stonksRequestEventDefinition,
       stonksTransportProfileDefinition,
+      streamPixelsCommandBoundaryDefinition,
+      streamPixelsTransportProfileDefinition,
       surfaceDefinition,
       viliCommandBoundaryDefinition,
       viliTransportProfileDefinition,
@@ -67,7 +70,7 @@ function createInterfaceDiscovery({
       weksaTransportProfileDefinition,
       voidbotSwarmSnapshotDefinition,
     } = documents;
-    if (!CultMesh || !interfaceBindingDefinition || !operatorStateDefinition || !stonksCommandBoundaryDefinition || !stonksMarketSnapshotDefinition || !stonksRequestEventDefinition || !stonksTransportProfileDefinition || !surfaceDefinition || !viliCommandBoundaryDefinition || !viliTransportProfileDefinition || !weksaCommandBoundaryDefinition || !weksaOperatorStateDefinition || !weksaTransportProfileDefinition || !voidbotSwarmSnapshotDefinition || !providerAdvertisementDefinition) {
+    if (!CultMesh || !interfaceBindingDefinition || !idunnDaemonHealthDefinition || !operatorStateDefinition || !stonksCommandBoundaryDefinition || !stonksMarketSnapshotDefinition || !stonksRequestEventDefinition || !stonksTransportProfileDefinition || !streamPixelsCommandBoundaryDefinition || !streamPixelsTransportProfileDefinition || !surfaceDefinition || !viliCommandBoundaryDefinition || !viliTransportProfileDefinition || !weksaCommandBoundaryDefinition || !weksaOperatorStateDefinition || !weksaTransportProfileDefinition || !voidbotSwarmSnapshotDefinition || !providerAdvertisementDefinition) {
       return [];
     }
 
@@ -87,6 +90,9 @@ function createInterfaceDiscovery({
             surfaceDefinition,
             stonksCommandBoundaryDefinition,
             stonksTransportProfileDefinition,
+            streamPixelsCommandBoundaryDefinition,
+            streamPixelsTransportProfileDefinition,
+            idunnDaemonHealthDefinition,
             operatorStateDefinition,
             viliCommandBoundaryDefinition,
             viliTransportProfileDefinition,
@@ -99,12 +105,13 @@ function createInterfaceDiscovery({
           ? node.cache.getAll(providerAdvertisementDefinition)
           : [];
         for (const advertisement of advertisements) {
-          if (!advertisement?.providerId) {
+          const providerId = advertisement?.providerId || advertisement?.provider?.id || advertisement?.id;
+          if (!providerId) {
             continue;
           }
           providers.push({
-            id: advertisement.providerId,
-            title: advertisement.title || advertisement.providerId,
+            id: providerId,
+            title: advertisement.title || advertisement.provider?.title || providerId,
             description: advertisement.description || "Provider-owned CultMesh advertisement.",
             version: String(advertisement.version || 0),
             endpoint: advertisement.cultMeshAddress || advertisement.endpoints?.[0]?.address || advertisement.provider?.endpoint || `cultmesh:${storePath}`,
@@ -126,11 +133,13 @@ function createInterfaceDiscovery({
               viliCommandBoundaryDefinition,
               weksaCommandBoundaryDefinition,
               stonksCommandBoundaryDefinition,
+              streamPixelsCommandBoundaryDefinition,
             ], advertisement) || null,
             transportProfile: providerRecord(node, [
               viliTransportProfileDefinition,
               weksaTransportProfileDefinition,
               stonksTransportProfileDefinition,
+              streamPixelsTransportProfileDefinition,
             ], advertisement) || null,
             usesCultMesh: true,
             transport: advertisement.provider?.transport || "CultMesh provider advertisement",
@@ -153,12 +162,15 @@ function createInterfaceDiscovery({
   async function discoverCultMeshInterfaceBindings() {
     const {
       interfaceBindingDefinition,
+      idunnDaemonHealthDefinition,
       operatorStateDefinition,
       providerAdvertisementDefinition,
       stonksCommandBoundaryDefinition,
       stonksMarketSnapshotDefinition,
       stonksRequestEventDefinition,
       stonksTransportProfileDefinition,
+      streamPixelsCommandBoundaryDefinition,
+      streamPixelsTransportProfileDefinition,
       surfaceDefinition,
       viliCommandBoundaryDefinition,
       viliTransportProfileDefinition,
@@ -167,7 +179,7 @@ function createInterfaceDiscovery({
       weksaTransportProfileDefinition,
       voidbotSwarmSnapshotDefinition,
     } = documents;
-    if (!CultMesh || !interfaceBindingDefinition || !operatorStateDefinition || !stonksCommandBoundaryDefinition || !stonksMarketSnapshotDefinition || !stonksRequestEventDefinition || !stonksTransportProfileDefinition || !surfaceDefinition || !viliCommandBoundaryDefinition || !viliTransportProfileDefinition || !weksaCommandBoundaryDefinition || !weksaOperatorStateDefinition || !weksaTransportProfileDefinition || !voidbotSwarmSnapshotDefinition || !providerAdvertisementDefinition) {
+    if (!CultMesh || !interfaceBindingDefinition || !idunnDaemonHealthDefinition || !operatorStateDefinition || !stonksCommandBoundaryDefinition || !stonksMarketSnapshotDefinition || !stonksRequestEventDefinition || !stonksTransportProfileDefinition || !streamPixelsCommandBoundaryDefinition || !streamPixelsTransportProfileDefinition || !surfaceDefinition || !viliCommandBoundaryDefinition || !viliTransportProfileDefinition || !weksaCommandBoundaryDefinition || !weksaOperatorStateDefinition || !weksaTransportProfileDefinition || !voidbotSwarmSnapshotDefinition || !providerAdvertisementDefinition) {
       return [];
     }
     const interfaces = [];
@@ -186,6 +198,9 @@ function createInterfaceDiscovery({
             surfaceDefinition,
             stonksCommandBoundaryDefinition,
             stonksTransportProfileDefinition,
+            streamPixelsCommandBoundaryDefinition,
+            streamPixelsTransportProfileDefinition,
+            idunnDaemonHealthDefinition,
             operatorStateDefinition,
             viliCommandBoundaryDefinition,
             viliTransportProfileDefinition,
@@ -217,11 +232,13 @@ function createInterfaceDiscovery({
               viliCommandBoundaryDefinition,
               weksaCommandBoundaryDefinition,
               stonksCommandBoundaryDefinition,
+              streamPixelsCommandBoundaryDefinition,
             ], advertisement) || null,
             transportProfile: providerRecord(node, [
               viliTransportProfileDefinition,
               weksaTransportProfileDefinition,
               stonksTransportProfileDefinition,
+              streamPixelsTransportProfileDefinition,
             ], advertisement) || null,
           }));
         }
@@ -292,9 +309,11 @@ function cultMeshProviderInterface({
   transportProfile = null,
 }) {
   const surface = state.surface || null;
+  const providerId = advertisement.providerId || advertisement.provider?.id || advertisement.id || "unknown-provider";
+  const title = state.title || advertisement.title || advertisement.provider?.title || providerId;
   return {
-    providerId: advertisement.providerId,
-    title: state.title || advertisement.title || advertisement.providerId,
+    providerId,
+    title,
     state: "active",
     detail: `${surface?.root?.kind || surface?.root?.type || "surface"} ${countSurfaceNodes(surface, state)} nodes via provider advertisement`,
     version: state.version || 0,
@@ -332,12 +351,14 @@ function providerRecordKeys(advertisement) {
     advertisement?.daemon_id,
     advertisement?.serviceId,
     advertisement?.service_id,
+    advertisement?.provider?.id,
     advertisement?.canonicalService,
     advertisement?.locatedService,
   ];
   if (advertisement?.providerId === "vili.animation") keys.push("vili");
   if (advertisement?.providerId === "weksa.intent.service") keys.push("weksa");
   if (advertisement?.providerId === "stonks.market") keys.push("stonks");
+  if (advertisement?.provider?.id === "streampixels.service") keys.push("streampixels", "yggdrasil-streampixels");
   return [...new Set(keys.filter(Boolean).map(String))];
 }
 

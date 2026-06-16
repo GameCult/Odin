@@ -40,6 +40,7 @@ function buildConfig(argv) {
     path.join(repoRoot, "..", "weksa", ".weksa", "provider-advertisement-store.cc"),
     path.join(repoRoot, "..", "Vili", ".vili", "vili.service.cc"),
     path.join(repoRoot, "..", "Stonks", "scratch", "stonks", "stonks-state.cc"),
+    path.join(repoRoot, "..", "StreamPixels", ".streampixels-data", "cultcache", "streampixels.service.cc"),
   ].join(",");
   const interfaceBindingStores = String(
     args.interfaceBindingStore ||

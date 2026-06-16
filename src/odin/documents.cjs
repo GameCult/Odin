@@ -6,12 +6,15 @@ function defineOdinDocuments(defineDocumentType) {
   if (!defineDocumentType) {
     return {
       interfaceBindingDefinition: null,
+      idunnDaemonHealthDefinition: null,
       operatorStateDefinition: null,
       providerAdvertisementDefinition: null,
       stonksCommandBoundaryDefinition: null,
       stonksMarketSnapshotDefinition: null,
       stonksRequestEventDefinition: null,
       stonksTransportProfileDefinition: null,
+      streamPixelsCommandBoundaryDefinition: null,
+      streamPixelsTransportProfileDefinition: null,
       surfaceDefinition: null,
       viliCommandBoundaryDefinition: null,
       viliTransportProfileDefinition: null,
@@ -53,8 +56,17 @@ function defineOdinDocuments(defineDocumentType) {
     schemaId: "gamecult.eve.provider_advertisement.v1",
     schemaVersion: "gamecult.eve.provider_advertisement.v1",
     global: false,
-    name: (value) => value?.providerId || "provider",
+    name: (value) => value?.providerId || value?.provider?.id || "provider",
     schema: parseObjectDocument("Eve provider advertisement"),
+  });
+  const idunnDaemonHealthDefinition = defineDocumentType({
+    type: "idunn.daemon_health",
+    schemaName: "idunn.daemon_health",
+    schemaId: "idunn.daemon_health",
+    schemaVersion: "idunn.daemon_health.v1",
+    global: false,
+    name: (value) => value?.daemonId || value?.daemon_id || "daemon",
+    schema: parseObjectDocument("Idunn daemon health"),
   });
   const operatorStateDefinition = defineDocumentType({
     type: "gamecult.vili.operator_state",
@@ -145,6 +157,24 @@ function defineOdinDocuments(defineDocumentType) {
     name: (value) => value?.profileId || value?.daemonId || "stonks",
     schema: parseObjectDocument("Stonks transport profile"),
   });
+  const streamPixelsCommandBoundaryDefinition = defineDocumentType({
+    type: "streampixels.command_boundary",
+    schemaName: "streampixels.command_boundary",
+    schemaId: "streampixels.command_boundary.v1",
+    schemaVersion: "streampixels.command_boundary.v1",
+    global: false,
+    name: (value) => value?.boundaryId || value?.daemonId || "streampixels",
+    schema: parseObjectDocument("StreamPixels command boundary"),
+  });
+  const streamPixelsTransportProfileDefinition = defineDocumentType({
+    type: "streampixels.transport_profile",
+    schemaName: "streampixels.transport_profile",
+    schemaId: "streampixels.transport_profile.v1",
+    schemaVersion: "streampixels.transport_profile.v1",
+    global: false,
+    name: (value) => value?.profileId || value?.daemonId || "streampixels",
+    schema: parseObjectDocument("StreamPixels transport profile"),
+  });
   const voidbotSwarmSnapshotDefinition = defineDocumentType({
     type: "voidbot.swarm_state_snapshot",
     schemaName: "voidbot.swarm_state_snapshot",
@@ -156,12 +186,15 @@ function defineOdinDocuments(defineDocumentType) {
 
   return {
     interfaceBindingDefinition,
+    idunnDaemonHealthDefinition,
     operatorStateDefinition,
     providerAdvertisementDefinition,
     stonksCommandBoundaryDefinition,
     stonksMarketSnapshotDefinition,
     stonksRequestEventDefinition,
     stonksTransportProfileDefinition,
+    streamPixelsCommandBoundaryDefinition,
+    streamPixelsTransportProfileDefinition,
     surfaceDefinition,
     viliCommandBoundaryDefinition,
     viliTransportProfileDefinition,

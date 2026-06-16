@@ -206,7 +206,12 @@ document ingress for MiMo VoiceDesign before its HTTP command route can become
 debug-only. Stonks publishes RUDP health and a daemon-owned CultCache store
 containing provider advertisement, market snapshot, Eve surface, command
 boundary, and transport profile records; Odin local discovery can ingest that
-store as provider truth. Raven Muninn task actions are also an explicit ops
+store as provider truth. StreamPixels now publishes a service-owned CultCache
+boundary store with provider advertisement, command boundary, transport profile,
+and Idunn health summary; Odin local discovery can ingest that store, but
+StreamPixels still owes CultNet/RUDP health publication and Yggdrasil deployment
+before SSH/systemd/HTTP probes are only debug witnesses. Raven Muninn task
+actions are also an explicit ops
 invariant: Task Scheduler must execute `wscript.exe //B //Nologo` hidden
 launcher actions directly for `GameCult-Muninn`, `GameCult-Muninn-Activate`,
 and `GameCult-Muninn-VideoProof`, never raw `.cmd` wrappers. After those live

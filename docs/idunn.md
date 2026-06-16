@@ -301,8 +301,14 @@ document ingress for MiMo VoiceDesign before its HTTP command route can become a
 debug-only lowering. Stonks now publishes daemon-owned provider advertisement,
 market snapshot, Eve surface, command boundary, and transport profile records in
 its CultCache store, and Odin local discovery can ingest those records; its
-HTTP/WebSocket endpoints are renderer/debug lowerings. VoidBot, Gjallar, Mimir,
-and the Nightwing Eve runtime services still owe provider advertisement and
+HTTP/WebSocket endpoints are renderer/debug lowerings. StreamPixels now has a
+service-owned CultCache boundary store at
+`E:\Projects\StreamPixels\.streampixels-data\cultcache\streampixels.service.cc`
+containing provider advertisement, command boundary, transport profile, and an
+Idunn health summary, and Odin local discovery can ingest it. StreamPixels still
+owes real Idunn health publication over CultNet/RUDP and Yggdrasil deployment
+before its SSH/systemd/HTTP checks can be demoted. VoidBot, Gjallar, Mimir, and
+the Nightwing Eve runtime services still owe provider advertisement and
 command-boundary RUDP publication before their compatibility surfaces can be
 purely display/debug lowerings; Gjallar also owes native CultMesh/RUDP deck
 input to replace the current Odin WebSocket lowering bridge. Raven Muninn task
