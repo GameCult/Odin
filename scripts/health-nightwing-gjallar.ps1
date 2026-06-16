@@ -82,4 +82,9 @@ if ([int]$status.receive.composedProviders -lt $MinComposedProviders) {
   Fail-IdunnHealth -State "degraded" -Message "Nightwing Gjallar composed no provider panels: composedProviders=$($status.receive.composedProviders), expected at least $MinComposedProviders."
 }
 
+if ($null -eq $status.idunnRudpHealth -or $status.idunnRudpHealth.status -ne "published") {
+  $detail = if ($null -eq $status.idunnRudpHealth) { "missing idunnRudpHealth status" } else { $status.idunnRudpHealth.error }
+  Fail-IdunnHealth -State "degraded" -Message "Nightwing Gjallar has not published daemon-owned Idunn RUDP health. $detail"
+}
+
 Write-Host "Nightwing Gjallar is active, deployed at $localCommit, and composing $($status.receive.composedProviders)/$($status.receive.catalogProviders) providers."

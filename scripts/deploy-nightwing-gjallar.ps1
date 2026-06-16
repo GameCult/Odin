@@ -1,7 +1,10 @@
 param(
   [string] $GjallarRoot = "E:\Projects\Gjallar",
   [string] $SshTarget = "nwroot",
-  [string] $RemoteDir = "/opt/gamecult/gjallar"
+  [string] $RemoteDir = "/opt/gamecult/gjallar",
+  [string] $IdunnRudpHealth = "10.77.0.2:17870",
+  [string] $IdunnDaemon = "nightwing-gjallar",
+  [string] $IdunnHealthContract = "gjallar.cultnet-rudp-framebuffer-composition-health"
 )
 
 $ErrorActionPreference = "Stop"
@@ -42,7 +45,15 @@ if ($LASTEXITCODE -ne 0) {
   throw "scp failed with exit code $LASTEXITCODE"
 }
 
-ssh.exe $SshTarget "mkdir -p '$RemoteDir' && tar -xf /tmp/gjallar-publish.tar -C '$RemoteDir' && chmod +x '$RemoteDir/Gjallar' && systemctl restart gjallar.service && systemctl is-active --quiet gjallar.service"
+$dropIn = @"
+[Service]
+Environment=GJALLAR_IDUNN_RUDP_HEALTH=$IdunnRudpHealth
+Environment=GJALLAR_IDUNN_DAEMON=$IdunnDaemon
+Environment=GJALLAR_IDUNN_HEALTH_CONTRACT=$IdunnHealthContract
+"@
+$dropInBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($dropIn))
+
+ssh.exe $SshTarget "mkdir -p '$RemoteDir' /etc/systemd/system/gjallar.service.d && tar -xf /tmp/gjallar-publish.tar -C '$RemoteDir' && chmod +x '$RemoteDir/Gjallar' && printf '%s' '$dropInBase64' | base64 -d > /etc/systemd/system/gjallar.service.d/idunn-rudp-health.conf && systemctl daemon-reload && systemctl restart gjallar.service && systemctl is-active --quiet gjallar.service"
 if ($LASTEXITCODE -ne 0) {
   throw "remote deploy or restart failed with exit code $LASTEXITCODE"
 }

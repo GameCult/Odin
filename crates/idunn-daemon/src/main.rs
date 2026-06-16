@@ -748,11 +748,11 @@ fn swarm_surgery_plan(
     targets: &[DaemonTarget],
     updated_at: &str,
 ) -> IdunnSwarmSurgeryPlanRecord {
-    let has_nightwing_gjallar = targets
+    let has_mimir_eve_dashboard = targets
         .iter()
-        .any(|target| target.daemon_id == "nightwing-gjallar");
-    let next_target = if has_nightwing_gjallar {
-        "nightwing-gjallar"
+        .any(|target| target.daemon_id == "mimir-eve-dashboard");
+    let next_target = if has_mimir_eve_dashboard {
+        "mimir-eve-dashboard"
     } else if let Some(target) = targets.iter().find(|target| target.enabled) {
         target.daemon_id.as_str()
     } else {
@@ -786,11 +786,11 @@ fn swarm_surgery_plan(
             "5. Delete or demote compatibility probes once every target has daemon-owned publication and advertised lifecycle authority.".to_string(),
         ],
         current_phase:
-            "Phase 9: move Nightwing Gjallar framebuffer health from service/status compatibility evidence to daemon-published RUDP state, with Raven Muninn scheduled-task action repair queued as a background-only ops invariant."
+            "Phase 10: move Mimir Eve dashboard health from local compatibility probes to daemon-published RUDP state, with Raven Muninn scheduled-task action repair queued as a background-only ops invariant."
                 .to_string(),
         next_target: next_target.to_string(),
         cut_line:
-            "Muninn, Idunn, Odin, Stonks, Weksa, and VoidBot now exercise daemon-owned RUDP health locally. Nightwing Gjallar is the next compositor/runtime cut. Live Raven still needs GameCult-Muninn, GameCult-Muninn-Activate, and GameCult-Muninn-VideoProof task actions repaired to execute wscript.exe hidden launchers directly; application is blocked while Raven SSH is unreachable."
+            "Muninn, Idunn, Odin, Stonks, Weksa, VoidBot, and Nightwing Gjallar now exercise daemon-owned RUDP health. Mimir Eve dashboard is the next local runtime cut. Live Raven still needs GameCult-Muninn, GameCult-Muninn-Activate, and GameCult-Muninn-VideoProof task actions repaired to execute wscript.exe hidden launchers directly; application is blocked while Raven SSH is unreachable."
                 .to_string(),
         verification_layer:
             "CultMesh keepalive store records plus live Idunn decision cycles, not process exit codes or chat summaries."
@@ -826,6 +826,11 @@ fn daemon_transport_profile(
             "daemon-published-rudp-health + compatibility.local-command fallback",
             "partial-rudp-health-live",
             "VoidBot stack health is published over CultNet/RUDP from the local orchestrator pulse; provider advertisement and command_boundary publication remain migration debt before the operations probe can be deleted.",
+        ),
+        "nightwing-gjallar" => (
+            "daemon-published-rudp-health + compatibility.local-command fallback",
+            "partial-rudp-health-live",
+            "Gjallar framebuffer composition health is published over CultNet/RUDP from Nightwing; native CultMesh/RUDP input and provider advertisement remain migration debt before the service/status probe can be deleted.",
         ),
         _ => (
             "compatibility.local-command",
@@ -940,19 +945,25 @@ fn daemon_surgery_plan(target: &DaemonTarget, updated_at: &str) -> IdunnDaemonSu
                     .to_string();
         }
         "nightwing-gjallar" => {
+            status = "partial-rudp-health-live";
             severity = "critical";
             owner = "Gjallar C# runtime plus Odin provider feed";
             current_mechanism =
-                "Gjallar currently proves visible composition through service checks and /var/log/gjallar.status, fed by Odin's WebSocket deck compatibility bridge."
+                "Nightwing Gjallar publishes gjallar.cultnet-rudp-framebuffer-composition-health over CultNet/RUDP from the C# runtime; the compatibility health script now verifies deployment and the local status witness, while Odin WebSocket deck input remains compatibility transport debt."
                     .to_string();
             intended_authority =
                 "Gjallar subscribes to Odin/provider deck state over CultNet/RUDP and publishes framebuffer composition health as typed CultMesh/CultNet state."
                     .to_string();
             cut_line =
-                "Cut Odin WebSocket deck consumption as the compositor truth path; keep it only as a browser/debug lowering if needed."
+                "Keep the service/status probe as fallback only until Gjallar's native CultMesh/RUDP input path, provider advertisement, command_boundary, and transport_profile records are daemon-owned publications."
                     .to_string();
-            blockers
-                .push("Requires native C# CultNet/RUDP subscription path for Gjallar.".to_string());
+            steps = vec![
+                "Keep live gjallar.cultnet-rudp-framebuffer-composition-health publication running from Nightwing's Gjallar service.".to_string(),
+                "Replace Odin WebSocket deck consumption with a native C# CultMesh/RUDP input path when the deck contract is ready.".to_string(),
+                "Publish Gjallar provider advertisement, command_boundary, and transport_profile records over cultnet.transport.rudp.v0.".to_string(),
+                "Teach Odin to prefer Gjallar RUDP/CultMesh compositor records over service/status compatibility ingestion.".to_string(),
+                "Delete or demote health-nightwing-gjallar.cmd to a manual deployment witness with no lifecycle truth.".to_string(),
+            ];
         }
         "stonks" => {
             status = "partial-rudp-health-live";
@@ -1893,7 +1904,7 @@ mod tests {
     }
 
     #[test]
-    fn swarm_surgery_plan_names_gjallar_after_voidbot_cut() {
+    fn swarm_surgery_plan_names_mimir_after_gjallar_cut() {
         let starfire_muninn = DaemonTarget {
             daemon_id: "starfire-muninn".to_string(),
             verse_id: "starfire.local".to_string(),
@@ -1984,10 +1995,24 @@ mod tests {
             daemon_id: "nightwing-gjallar".to_string(),
             verse_id: "nightwing.local".to_string(),
             name: "Nightwing Gjallar framebuffer compositor".to_string(),
-            health_contract: health_contract("gjallar.cultnet-rudp-framebuffer-health", "failed"),
+            health_contract: health_contract(
+                "gjallar.cultnet-rudp-framebuffer-composition-health",
+                "failed",
+            ),
             health_command: Some("health-nightwing-gjallar.cmd".to_string()),
             deploy_command: Some("deploy-nightwing-gjallar.cmd".to_string()),
             restart_command: Some("restart-nightwing-gjallar.cmd".to_string()),
+            enabled: true,
+            interval_seconds: 30,
+        };
+        let mimir = DaemonTarget {
+            daemon_id: "mimir-eve-dashboard".to_string(),
+            verse_id: "starfire.local".to_string(),
+            name: "Mimir Eve dashboard".to_string(),
+            health_contract: health_contract("mimir.cultnet-rudp-provider-health", "failed"),
+            health_command: Some("health-mimir-eve-dashboard.cmd".to_string()),
+            deploy_command: None,
+            restart_command: None,
             enabled: true,
             interval_seconds: 30,
         };
@@ -1996,10 +2021,11 @@ mod tests {
             "starfire-local",
             &[
                 odin,
+                mimir,
                 stonks,
                 weksa.clone(),
                 voidbot.clone(),
-                nightwing_gjallar,
+                nightwing_gjallar.clone(),
                 starfire_muninn,
                 nightwing_muninn,
                 raven_muninn.clone(),
@@ -2009,11 +2035,11 @@ mod tests {
 
         assert_eq!(plan.plan_id, "swarm-surgery:starfire-local");
         assert_eq!(plan.status, "active-transport-migration");
-        assert_eq!(plan.next_target, "nightwing-gjallar");
-        assert!(plan.current_phase.contains("Nightwing Gjallar"));
+        assert_eq!(plan.next_target, "mimir-eve-dashboard");
+        assert!(plan.current_phase.contains("Mimir Eve dashboard"));
         assert!(
             plan.cut_line
-                .contains("Muninn, Idunn, Odin, Stonks, Weksa, and VoidBot")
+                .contains("Muninn, Idunn, Odin, Stonks, Weksa, VoidBot, and Nightwing Gjallar")
         );
         assert!(plan.cut_line.contains("GameCult-Muninn-Activate"));
         assert!(plan.cut_line.contains("GameCult-Muninn-VideoProof"));
@@ -2081,6 +2107,19 @@ mod tests {
             voidbot_plan
                 .cut_line
                 .contains("operations probe as fallback")
+        );
+
+        let gjallar_plan = daemon_surgery_plan(&nightwing_gjallar, "unix:100");
+        assert_eq!(gjallar_plan.status, "partial-rudp-health-live");
+        assert!(
+            gjallar_plan
+                .current_mechanism
+                .contains("gjallar.cultnet-rudp-framebuffer-composition-health")
+        );
+        assert!(
+            gjallar_plan
+                .cut_line
+                .contains("service/status probe as fallback")
         );
     }
 
@@ -2205,6 +2244,37 @@ mod tests {
             profile
                 .cut_line
                 .contains("VoidBot stack health is published over CultNet/RUDP")
+        );
+    }
+
+    #[test]
+    fn gjallar_transport_profile_marks_partial_rudp_health() {
+        let gjallar = DaemonTarget {
+            daemon_id: "nightwing-gjallar".to_string(),
+            verse_id: "nightwing.local".to_string(),
+            name: "Nightwing Gjallar framebuffer compositor".to_string(),
+            health_contract: health_contract(
+                "gjallar.cultnet-rudp-framebuffer-composition-health",
+                "failed",
+            ),
+            health_command: Some("health-nightwing-gjallar.cmd".to_string()),
+            deploy_command: Some("deploy-nightwing-gjallar.cmd".to_string()),
+            restart_command: Some("restart-nightwing-gjallar.cmd".to_string()),
+            enabled: true,
+            interval_seconds: 30,
+        };
+
+        let profile = daemon_transport_profile(&gjallar, "unix:100");
+
+        assert_eq!(profile.state, "partial-rudp-health-live");
+        assert_eq!(
+            profile.current_transport,
+            "daemon-published-rudp-health + compatibility.local-command fallback"
+        );
+        assert!(
+            profile
+                .cut_line
+                .contains("Gjallar framebuffer composition health is published over CultNet/RUDP")
         );
     }
 
