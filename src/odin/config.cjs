@@ -29,6 +29,11 @@ function buildConfig(argv) {
   const gamecultTextDocumentStorePath = args.gamecultTextDocumentStorePath || path.join(repoRoot, "..", "VoidBot", ".voidbot", "private", "gamecult-text-documents.cc");
   const stonksStateUrl = args.stonksStateUrl || "http://127.0.0.1:8802/market/state";
   const stonksBurstSize = Math.max(1, Number(args.stonksBurstSize || 8));
+  const idunnRudpHealth = args["idunn-rudp-health"] ? {
+    endpoint: String(args["idunn-rudp-health"]),
+    daemonId: String(args["idunn-daemon"] || "odin"),
+    healthContract: String(args["idunn-health-contract"] || "odin.cultnet-rudp-provider-health"),
+  } : null;
   const defaultInterfaceBindingStores = [
     path.join(repoRoot, "..", "VoidBot", ".voidbot", "status", "cultmesh", "voidbot-swarm-state.cc"),
     path.join(repoRoot, "..", "Bifrost", ".bifrost", "provider-advertisement.cc"),
@@ -48,6 +53,7 @@ function buildConfig(argv) {
     gamecultTextDocumentStorePath,
     host,
     interfaceBindingStores,
+    idunnRudpHealth,
     intervalMs,
     layoutPath,
     observationFreshSeconds,

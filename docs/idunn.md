@@ -134,9 +134,10 @@ idunn.rudp_health_ingress.v1
   over `cultnet.transport.rudp.v0`. TCP, HTTP, WebSocket, and ad hoc port probes
   are migration debt, tolerated only at xenos/legacy boundaries and while the
   daemon's CultLib dependency has not yet been updated.
-- Rust now has a narrow `cultnet.transport.rudp.v0` substrate in
-  `vendor/cultnet-rs`: one CultNet message per acknowledged UDP datagram with
-  timeout/retry semantics. This removes "Rust cannot speak RUDP" as a substrate
+- Rust now shares the canonical cross-runtime `cultnet.transport.rudp.v0`
+  substrate in `vendor/cultnet-rs`: CNR0 packets, sessions, channels, reliable
+  schema frames, and timeout/retry semantics matching the TypeScript/Python
+  CultLib implementations. This removes "Rust cannot speak RUDP" as a substrate
   excuse. It does not make any daemon fully migrated until that daemon publishes
   its health and command boundary through the RUDP path and Idunn consumes that
   daemon-owned publication instead of the compatibility command.
@@ -148,11 +149,15 @@ idunn.rudp_health_ingress.v1
   `idunn.rudp_health_ingress.v1`. The Starfire local supervisor binds
   `0.0.0.0:17870` so host-local publishers can use `127.0.0.1:17870` and
   WireGuard peers such as Nightwing can publish to `10.77.0.2:17870`. That ingress
-  accepts only raw `idunn.daemon_health` CultNet document puts, decodes the
-  typed MessagePack payload, and writes it into the keepalive store. It does
-  not grant deploy/restart authority and it does not make compatibility probes
-  owners; it is the first daemon-owned health publication path Idunn can
-  consume.
+  accepts only raw `idunn.daemon_health` CultNet document puts on the `schema`
+  channel, decodes the typed MessagePack payload, and writes it into the
+  keepalive store. Each one-shot publisher gets its own RUDP session from its
+  UDP source address and the session is discarded after a delivered health
+  frame. Windows UDP `ConnectionReset`/`ConnectionAborted` reports from closed
+  one-shot clients are nonfatal ingress noise, not a reason to kill the worker.
+  The ingress does not grant deploy/restart authority and it does not make
+  compatibility probes owners; it is the first daemon-owned health publication
+  path Idunn can consume.
 - During each target cycle, fresh daemon-published RUDP health wins over the
   local compatibility command. Idunn accepts it only when the daemon id, health
   contract, `publication_source=daemon-published`, transport
@@ -260,16 +265,19 @@ The local swarm mode owns:
    Yggdrasil checks.
 
 Current plan surface: `idunn.swarm_surgery_plan.v1` for profile
-`starfire-local` treats the Muninn Rust lanes as completed cuts. Muninn's
-`--health` mode publishes `idunn.daemon_health` over RUDP; Starfire publishes to
-local Idunn, while Nightwing and Raven publish over WireGuard to
-`10.77.0.2:17870` using their target daemon ids and health contracts. Live Idunn
-cycles accept those records before command-probe fallback. The plan's current
-phase now points at Odin's own provider-health lane.
+`starfire-local` treats the Muninn Rust lanes and Odin's local provider-health
+lane as completed local substrate cuts. Muninn's `--health` mode publishes
+`idunn.daemon_health` over RUDP; Starfire publishes to local Idunn, while
+Nightwing and Raven publish over WireGuard to `10.77.0.2:17870` using their
+target daemon ids and health contracts. Odin now publishes
+`odin.cultnet-rudp-provider-health` over the same RUDP ingress after each
+provider refresh. Live Idunn cycles accept these records before command-probe
+fallback.
 
-Next: make Odin publish its own provider health over daemon-owned RUDP state,
-then continue runtime-by-runtime until compatibility probes can be deleted or
-demoted.
+Next: move Stonks market-provider health off HTTP compatibility evidence and
+onto daemon-owned RUDP state, then continue runtime-by-runtime until
+compatibility probes can be deleted or demoted. Raven Muninn task action repair
+is queued separately and remains blocked while Raven is unreachable.
 
 No ad hoc JSON manifest, HTTP endpoint, TCP socket, or WebSocket bridge may
 become the live state owner. Debug projections are fine when they name the

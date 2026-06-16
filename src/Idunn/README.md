@@ -181,9 +181,11 @@ walk through the same door.
 
 The local swarm also opens a RUDP health ingress at `127.0.0.1:17870` unless
 started with `--rudp-health-bind none`. It accepts raw
-`idunn.daemon_health` document puts over `cultnet.transport.rudp.v0` and writes
-them into the keepalive store. That is daemon-owned health publication, not
-restart/deploy authority.
+`idunn.daemon_health` document puts on the canonical CNR0 RUDP `schema` channel
+and writes them into the keepalive store. That is daemon-owned health
+publication, not restart/deploy authority. On Windows, UDP reset reports from
+closed one-shot publishers are treated as nonfatal ingress noise so one accepted
+health frame cannot kill the listener.
 
 When a fresh daemon-published RUDP health record exists for a target, Idunn uses
 that record for keepalive planning before falling back to the local command
@@ -191,17 +193,17 @@ probe. The record must match the daemon id, health contract, RUDP transport,
 and freshness window; otherwise the compatibility probe remains fallback
 evidence.
 
-The next cuts are updating daemon CultLib dependencies so health and command
-boundaries publish through `cultnet.transport.rudp.v0`, switching Idunn to those
-daemon-owned records, promoting the built-in target catalog into Odin-ingested
-service/provider records, keeping named adapters only for legacy service-manager
-crossings, and replacing the local operator alarm bridge with a fully
-Bifrost-owned notification request record.
+The next cut is Stonks: market-provider health must publish through
+`cultnet.transport.rudp.v0` instead of remaining HTTP compatibility evidence.
+After that, continue daemon-by-daemon, promote the built-in target catalog into
+Odin-ingested service/provider records, keep named adapters only for legacy
+service-manager crossings, and replace the local operator alarm bridge with a
+fully Bifrost-owned notification request record.
 
 Rust no longer gets to claim the transport is imaginary:
-`vendor/cultnet-rs` includes a narrow stop-and-wait
-`cultnet.transport.rudp.v0` path for acknowledged CultNet messages over UDP.
-That is substrate only. Idunn still marks daemon profiles as
+`vendor/cultnet-rs` includes the canonical CNR0 `cultnet.transport.rudp.v0`
+session path for acknowledged CultNet messages over UDP. That is substrate
+only. Idunn still marks daemon profiles as
 `migration-required` until each daemon actually publishes health and command
 boundary records through that path.
 

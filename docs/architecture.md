@@ -60,9 +60,13 @@ Odin's executable body is split by ownership:
   ports, normalization, and CultMesh/CultCache repository boundaries. This is
   the replacement spine; JavaScript remains legacy runtime/probe scaffolding
   until each organ has crossed the typed boundary.
-- `src/odin-coordinator.cjs`: process lifecycle, refresh loop, persistence, health, and transport wiring.
+- `src/odin-coordinator.cjs`: process lifecycle, serialized refresh loop,
+  persistence, health, and transport wiring. Refreshes must not overlap because
+  a refresh publishes Odin's daemon health.
 - `src/odin/config.cjs`: runtime paths, seed deck URLs, intervals, and CultLib module path setup.
 - `src/odin/documents.cjs`: CultCache/CultMesh document definitions accepted by Odin.
+- `src/odin/idunn-rudp.cjs`: daemon-owned Odin provider health publication to
+  Idunn over the canonical CultNet RUDP `schema` channel.
 - `src/odin/probes.cjs`: local Docker/ADB probes plus demoted TCP/SSH/GPU
   compatibility probes while daemon CultLib dependencies migrate to CultNet
   RUDP health publication.

@@ -1,8 +1,10 @@
 use anyhow::{Context, Result, anyhow};
 use cultmesh_rs::{CultMesh, CultMeshNode, CultMeshNodeOptions};
 use cultnet_rs::{
-    CULTNET_RUDP_PROTOCOL_ID, CultNetMessage, CultNetRawPayloadEncoding, CultNetRudpOptions,
-    recv_cultnet_message_rudp, send_cultnet_message_rudp,
+    CultNetMessage, CultNetRawPayloadEncoding, CultNetRudpPacketType, CultNetRudpSession,
+    CultNetRudpSessionOptions, CultNetRudpSocketTransportConnection,
+    CultNetRudpSocketTransportOptions, CultNetWireContract, decode_cultnet_message_from_slice,
+    decode_rudp_packet, encode_cultnet_message_to_vec, encode_rudp_packet,
 };
 use odin_core::{
     IdunnCommandBoundaryRecord, IdunnDaemonHealthRecord, IdunnDaemonSurgeryPlanRecord,
@@ -10,6 +12,7 @@ use odin_core::{
     IdunnOperatorAlarmRecord, IdunnRestartResultRecord, IdunnRudpHealthIngressRecord,
     IdunnRuntimeTransportCheckRecord, IdunnSwarmSurgeryPlanRecord, OdinDocuments, plan_keepalive,
 };
+use std::collections::HashMap;
 use std::env;
 use std::net::{SocketAddr, UdpSocket};
 use std::path::PathBuf;
@@ -18,6 +21,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+const CULTNET_RUDP_PROTOCOL_ID: &str = "cultnet.transport.rudp.v0";
+const IDUNN_HEALTH_RUDP_CONNECTION_ID: u32 = 0x1d0d_0001;
 
 #[derive(Clone, Debug)]
 struct DaemonTarget {
@@ -416,29 +422,56 @@ fn runtime_transport_check(observed_at: &str) -> IdunnRuntimeTransportCheckRecor
 }
 
 fn verify_rudp_loopback() -> Result<String> {
-    let sender = UdpSocket::bind("127.0.0.1:0")?;
-    let receiver = UdpSocket::bind("127.0.0.1:0")?;
-    let receiver_addr = receiver.local_addr()?;
-    let options = CultNetRudpOptions {
-        ack_timeout: Duration::from_millis(100),
-        retries: 3,
-        ..CultNetRudpOptions::default()
-    };
-    let receiver_options = options.clone();
+    let server_socket = UdpSocket::bind("127.0.0.1:0")?;
+    server_socket.set_read_timeout(Some(Duration::from_millis(100)))?;
+    let server_addr = server_socket.local_addr()?;
+    let client_socket = UdpSocket::bind("127.0.0.1:0")?;
+    client_socket.set_read_timeout(Some(Duration::from_millis(100)))?;
 
     let handle = thread::spawn(move || -> Result<()> {
-        let (message, _source, _transfer_id) =
-            recv_cultnet_message_rudp(&receiver, &receiver_options)?;
-        match message {
-            CultNetMessage::Hello { runtime_id, .. } if runtime_id == "idunn-daemon" => Ok(()),
-            other => Err(anyhow!("unexpected loopback CultNet message: {other:?}")),
+        let mut server = CultNetRudpSocketTransportConnection::new(
+            CultNetRudpSocketTransportOptions::server(
+                "idunn-rudp-loopback-server",
+                server_socket,
+                IDUNN_HEALTH_RUDP_CONNECTION_ID,
+            ),
+        )?;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Some(frame) = server.receive_once()? {
+                let message =
+                    decode_cultnet_message_from_slice(&frame.payload, CultNetWireContract::CultNetSchemaV0)?;
+                return match message {
+                    CultNetMessage::Hello { runtime_id, .. } if runtime_id == "idunn-daemon" => {
+                        Ok(())
+                    }
+                    other => Err(anyhow!("unexpected loopback CultNet message: {other:?}")),
+                };
+            }
+            if Instant::now() >= deadline {
+                return Err(anyhow!("Idunn RUDP loopback timed out waiting for schema frame"));
+            }
         }
     });
 
-    let transfer_id = send_cultnet_message_rudp(
-        &sender,
-        receiver_addr,
-        &CultNetMessage::Hello {
+    let mut client = CultNetRudpSocketTransportConnection::new(
+        CultNetRudpSocketTransportOptions::client(
+            "idunn-rudp-loopback-client",
+            client_socket,
+            server_addr,
+            IDUNN_HEALTH_RUDP_CONNECTION_ID,
+        ),
+    )?;
+    client.connect(Vec::new())?;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !client.connected() {
+        let _ = client.receive_once()?;
+        client.poll_resends()?;
+        if Instant::now() >= deadline {
+            return Err(anyhow!("Idunn RUDP loopback timed out during handshake"));
+        }
+    }
+    let message = CultNetMessage::Hello {
             runtime_id: "idunn-daemon".to_string(),
             runtime_kind: "keepalive".to_string(),
             agent_id: None,
@@ -447,14 +480,15 @@ fn verify_rudp_loopback() -> Result<String> {
             supported_document_types: Some(vec!["idunn.runtime_transport_check".to_string()]),
             supported_mutation_contracts: None,
             supported_message_versions: Some(vec!["cultnet.hello.v0".to_string()]),
+            transport_profiles: Some(vec![client.profile.clone()]),
             supports_schema_catalog: Some(false),
-        },
-        &options,
-    )?;
+        };
+    let payload = encode_cultnet_message_to_vec(&message, CultNetWireContract::CultNetSchemaV0)?;
+    client.send("schema", payload)?;
     handle
         .join()
         .map_err(|_| anyhow!("Idunn RUDP loopback receiver thread panicked"))??;
-    Ok(transfer_id)
+    Ok(format!("connection:{IDUNN_HEALTH_RUDP_CONNECTION_ID:08x}"))
 }
 
 fn start_rudp_health_ingress(
@@ -491,7 +525,7 @@ fn start_rudp_health_ingress(
         &ingress_id,
         local_addr,
         "active",
-        "listening for raw idunn.daemon_health documents over CultNet RUDP",
+        "listening for idunn.daemon_health document frames over CultNet RUDP schema channel",
         observed_at,
     );
     with_store_node(options, store_lock, |node| {
@@ -533,35 +567,59 @@ fn run_rudp_health_ingress_loop(
     options: CommonOptions,
     store_lock: Arc<Mutex<()>>,
 ) -> Result<()> {
-    let rudp_options = CultNetRudpOptions {
-        ack_timeout: Duration::from_millis(100),
-        retries: 3,
-        ..CultNetRudpOptions::default()
-    };
+    let local_addr = socket.local_addr()?;
+    let mut sessions: HashMap<SocketAddr, CultNetRudpSession> = HashMap::new();
+    let mut buffer = vec![0_u8; 65_535];
 
     loop {
-        match recv_cultnet_message_rudp(&socket, &rudp_options) {
-            Ok((message, source, transfer_id)) => {
+        match socket.recv_from(&mut buffer) {
+            Ok((size, source)) => {
                 let observed_at = timestamp()?;
-                match health_from_rudp_message(&message) {
-                    Ok(mut health) => {
-                        health.publication_source = "daemon-published".to_string();
-                        health.transport = CULTNET_RUDP_PROTOCOL_ID.to_string();
-                        with_store_node(&options, &store_lock, |node| {
-                            node.put(&health.daemon_id, &health)?;
-                            Ok(())
-                        })?;
-                        println!(
-                            "Idunn accepted RUDP health for {} from {} transfer {}.",
-                            health.daemon_id, source, transfer_id
-                        );
+                match handle_rudp_health_datagram(&socket, &mut sessions, &buffer[..size], source)
+                {
+                    Ok(frames) => {
+                        for frame in frames {
+                            let message = decode_cultnet_message_from_slice(
+                                &frame.payload,
+                                CultNetWireContract::CultNetSchemaV0,
+                            )?;
+                            match health_from_rudp_message(&message) {
+                                Ok(mut health) => {
+                                    health.publication_source = "daemon-published".to_string();
+                                    health.transport = CULTNET_RUDP_PROTOCOL_ID.to_string();
+                                    with_store_node(&options, &store_lock, |node| {
+                                        node.put(&health.daemon_id, &health)?;
+                                        Ok(())
+                                    })?;
+                                    println!(
+                                        "Idunn accepted RUDP health for {} from {} over {}.",
+                                        health.daemon_id, source, frame.channel_id
+                                    );
+                                }
+                                Err(error) => {
+                                    let failed = rudp_health_ingress_record(
+                                        "idunn-rudp-health-ingress",
+                                        local_addr,
+                                        "degraded",
+                                        &format!(
+                                            "rejected RUDP health schema frame from {source}: {error}"
+                                        ),
+                                        &observed_at,
+                                    );
+                                    with_store_node(&options, &store_lock, |node| {
+                                        node.put(&failed.ingress_id, &failed)?;
+                                        Ok(())
+                                    })?;
+                                }
+                            }
+                        }
                     }
                     Err(error) => {
                         let failed = rudp_health_ingress_record(
                             "idunn-rudp-health-ingress",
-                            socket.local_addr()?,
+                            local_addr,
                             "degraded",
-                            &format!("rejected RUDP health message from {source}: {error}"),
+                            &format!("rejected RUDP health datagram from {source}: {error}"),
                             &observed_at,
                         );
                         with_store_node(&options, &store_lock, |node| {
@@ -572,15 +630,68 @@ fn run_rudp_health_ingress_loop(
                 }
             }
             Err(error)
-                if error.downcast_ref::<std::io::Error>().is_some_and(|io| {
-                    matches!(
-                        io.kind(),
-                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                    )
-                }) => {}
-            Err(error) => return Err(error),
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionAborted
+                ) => {}
+            Err(error) => return Err(error.into()),
         }
     }
+}
+
+fn handle_rudp_health_datagram(
+    socket: &UdpSocket,
+    sessions: &mut HashMap<SocketAddr, CultNetRudpSession>,
+    wire: &[u8],
+    source: SocketAddr,
+) -> Result<Vec<cultnet_rs::CultNetTransportFrame>> {
+    let packet = decode_rudp_packet(wire)?;
+    if packet.connection_id != IDUNN_HEALTH_RUDP_CONNECTION_ID {
+        return Err(anyhow!(
+            "unexpected RUDP connection id {:08x}",
+            packet.connection_id
+        ));
+    }
+
+    let session = sessions.entry(source).or_insert_with(|| {
+        CultNetRudpSession::new(CultNetRudpSessionOptions {
+            connection_id: IDUNN_HEALTH_RUDP_CONNECTION_ID,
+            initial_sequence: 1,
+            resend_delay_ms: 100,
+            max_pending_reliable_packets: None,
+        })
+    });
+    let now = unix_epoch_millis()?;
+
+    if packet.packet_type == CultNetRudpPacketType::Connect {
+        let accept = session.accept_connect(&packet, now, Vec::new())?;
+        socket.send_to(&encode_rudp_packet(&accept)?, source)?;
+        return Ok(Vec::new());
+    }
+
+    let result = session.receive(&packet, now)?;
+    if let Some(reply) = result.reply {
+        socket.send_to(&encode_rudp_packet(&reply)?, source)?;
+    }
+    let frames = result
+        .delivered
+        .into_iter()
+        .map(|frame| cultnet_rs::CultNetTransportFrame {
+            channel_id: frame.channel_id,
+            payload: frame.payload,
+        })
+        .collect::<Vec<_>>();
+    if packet.packet_type == CultNetRudpPacketType::Accept || !frames.is_empty() {
+        let ack = session.create_ack();
+        socket.send_to(&encode_rudp_packet(&ack)?, source)?;
+    }
+    if result.disconnected || !frames.is_empty() {
+        sessions.remove(&source);
+    }
+    Ok(frames)
 }
 
 fn health_from_rudp_message(message: &CultNetMessage) -> Result<IdunnDaemonHealthRecord> {
@@ -636,9 +747,9 @@ fn swarm_surgery_plan(
     targets: &[DaemonTarget],
     updated_at: &str,
 ) -> IdunnSwarmSurgeryPlanRecord {
-    let has_odin = targets.iter().any(|target| target.daemon_id == "odin");
-    let next_target = if has_odin {
-        "odin"
+    let has_stonks = targets.iter().any(|target| target.daemon_id == "stonks");
+    let next_target = if has_stonks {
+        "stonks"
     } else if let Some(target) = targets.iter().find(|target| target.enabled) {
         target.daemon_id.as_str()
     } else {
@@ -672,11 +783,11 @@ fn swarm_surgery_plan(
             "5. Delete or demote compatibility probes once every target has daemon-owned publication and advertised lifecycle authority.".to_string(),
         ],
         current_phase:
-            "Phase 5: move Odin's own provider health from compatibility command evidence to daemon-published RUDP state."
+            "Phase 6: move Stonks market-provider health from HTTP compatibility evidence to daemon-published RUDP state."
                 .to_string(),
         next_target: next_target.to_string(),
         cut_line:
-            "All Muninn lanes now publish daemon-owned RUDP health. Odin remains the next critical provider-health cut before its local command probe can be demoted."
+            "Muninn, Idunn, and Odin now exercise daemon-owned RUDP health locally. Stonks is the next TypeScript provider cut; Raven task repairs remain queued until the host is reachable."
                 .to_string(),
         verification_layer:
             "CultMesh keepalive store records plus live Idunn decision cycles, not process exit codes or chat summaries."
@@ -1635,6 +1746,14 @@ fn timestamp() -> Result<String> {
     Ok(format!("unix:{seconds}"))
 }
 
+fn unix_epoch_millis() -> Result<u64> {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before Unix epoch")?
+        .as_millis();
+    u64::try_from(millis).context("system clock milliseconds exceeded u64")
+}
+
 fn help_text() -> &'static str {
     "Usage: idunn --daemon <id> [--name <name>] [--verse <verse>] [--store <path>] [--health-command <command>] [--deploy-command <command>] [--restart-command <command>] [--operator-alarm-command <command>] [--rudp-health-bind <addr|none>] [--execute] [--interval-seconds <seconds>] [--command-timeout-seconds <seconds>] [--repo-root <path>] [--swarm-profile <profile>]\n\nIdunn can run one manual daemon probe lane with --daemon, or one built-in swarm supervisor with --swarm-profile starfire-local."
 }
@@ -1688,7 +1807,7 @@ mod tests {
     }
 
     #[test]
-    fn swarm_surgery_plan_names_odin_after_muninn_cuts() {
+    fn swarm_surgery_plan_names_stonks_after_odin_cut() {
         let starfire_muninn = DaemonTarget {
             daemon_id: "starfire-muninn".to_string(),
             verse_id: "starfire.local".to_string(),
@@ -1742,18 +1861,29 @@ mod tests {
             enabled: true,
             interval_seconds: 30,
         };
+        let stonks = DaemonTarget {
+            daemon_id: "stonks".to_string(),
+            verse_id: "starfire.local".to_string(),
+            name: "Stonks".to_string(),
+            health_contract: health_contract("stonks.cultnet-rudp-market-health", "failed"),
+            health_command: Some("health-stonks.cmd".to_string()),
+            deploy_command: None,
+            restart_command: Some("restart-stonks.cmd".to_string()),
+            enabled: true,
+            interval_seconds: 30,
+        };
 
         let plan = swarm_surgery_plan(
             "starfire-local",
-            &[odin, starfire_muninn, nightwing_muninn, raven_muninn],
+            &[odin, stonks, starfire_muninn, nightwing_muninn, raven_muninn],
             "unix:100",
         );
 
         assert_eq!(plan.plan_id, "swarm-surgery:starfire-local");
         assert_eq!(plan.status, "active-transport-migration");
-        assert_eq!(plan.next_target, "odin");
-        assert!(plan.current_phase.contains("Odin"));
-        assert!(plan.cut_line.contains("All Muninn lanes"));
+        assert_eq!(plan.next_target, "stonks");
+        assert!(plan.current_phase.contains("Stonks"));
+        assert!(plan.cut_line.contains("Muninn, Idunn, and Odin"));
         assert!(plan.verification_layer.contains("CultMesh keepalive store"));
         assert!(
             plan.invariants

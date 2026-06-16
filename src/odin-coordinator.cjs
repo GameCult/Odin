@@ -7,12 +7,14 @@ const path = require("path");
 const { buildConfig, loadCultRuntime } = require("./odin/config.cjs");
 const { defineOdinDocuments } = require("./odin/documents.cjs");
 const { createInterfaceDiscovery } = require("./odin/interfaces.cjs");
+const { createIdunnRudpHealthPublisher, publishIdunnRudpHealth } = require("./odin/idunn-rudp.cjs");
 const { createLayoutStore } = require("./odin/layout.cjs");
 const { createStateBuilder } = require("./odin/state.cjs");
 const { broadcastState, createDashboardServer } = require("./odin/websocket.cjs");
 
 const config = buildConfig(process.argv.slice(2));
 fs.mkdirSync(config.stateDir, { recursive: true });
+const idunnRudpHealthPublisher = createIdunnRudpHealthPublisher(config.idunnRudpHealth);
 
 const cultRuntime = loadCultRuntime();
 if (cultRuntime.error) {
@@ -67,8 +69,14 @@ async function main() {
   console.log(`Durable surface cache: ${config.cachePath}`);
 
   await refresh(dashboardServer.clients);
-  setInterval(() => {
-    refresh(dashboardServer.clients).catch((error) => console.error("refresh failed:", error));
+  scheduleRefresh(dashboardServer.clients);
+}
+
+function scheduleRefresh(clients) {
+  setTimeout(() => {
+    refresh(clients)
+      .catch((error) => console.error("refresh failed:", error))
+      .finally(() => scheduleRefresh(clients));
   }, config.intervalMs);
 }
 
@@ -106,6 +114,7 @@ async function refresh(clients) {
       error: null,
       startedAt: new Date(started).toISOString(),
     };
+    await publishOdinHealth("active", `Odin provider catalog refreshed in ${lastRefresh.durationMs}ms`);
   } catch (error) {
     lastRefresh = {
       completedAt: new Date().toISOString(),
@@ -113,7 +122,21 @@ async function refresh(clients) {
       error: error.message,
       startedAt: new Date(started).toISOString(),
     };
+    await publishOdinHealth("failed", `Odin provider refresh failed: ${error.message}`);
     throw error;
+  }
+}
+
+async function publishOdinHealth(state, detail) {
+  if (!idunnRudpHealthPublisher) return;
+  try {
+    await publishIdunnRudpHealth(idunnRudpHealthPublisher, {
+      state,
+      detail,
+      observedAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.error("Idunn RUDP health publish failed:", error.message);
   }
 }
 

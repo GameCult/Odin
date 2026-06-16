@@ -4,8 +4,9 @@ use cultmesh_rs::{
     CultMeshStreamCatalog, CultMeshStreamClock, CultMeshStreamDescriptor, CultMeshStreamKind,
 };
 use cultnet_rs::{
-    CULTNET_RUDP_PROTOCOL_ID, CultNetMessage, CultNetRawDocumentRecord, CultNetRawPayloadEncoding,
-    CultNetRudpOptions, send_cultnet_message_rudp,
+    CultNetMessage, CultNetRawDocumentRecord, CultNetRawPayloadEncoding,
+    CultNetRudpSocketTransportConnection, CultNetRudpSocketTransportOptions, CultNetWireContract,
+    encode_cultnet_message_to_vec,
 };
 use odin_core::{
     IdunnDaemonHealthRecord, MuninnCaptureStreamRecord, MuninnMoveControllerStateRecord,
@@ -33,6 +34,9 @@ use std::io::{ErrorKind, Read};
 use std::os::unix::fs::OpenOptionsExt;
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
+
+const CULTNET_RUDP_PROTOCOL_ID: &str = "cultnet.transport.rudp.v0";
+const IDUNN_HEALTH_RUDP_CONNECTION_ID: u32 = 0x1d0d_0001;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Mode {
@@ -2069,13 +2073,32 @@ fn publish_idunn_rudp_health(
     };
     let socket = UdpSocket::bind(bind_address)
         .with_context(|| format!("binding Muninn RUDP sender at {bind_address}"))?;
-    send_cultnet_message_rudp(
-        &socket,
-        options.endpoint,
-        &message,
-        &CultNetRudpOptions::default(),
-    )
-    .with_context(|| format!("sending Idunn health to {}", options.endpoint))?;
+    socket.set_read_timeout(Some(Duration::from_millis(100)))?;
+    let mut transport = CultNetRudpSocketTransportConnection::new(
+        CultNetRudpSocketTransportOptions::client(
+            "muninn-daemon",
+            socket,
+            options.endpoint,
+            IDUNN_HEALTH_RUDP_CONNECTION_ID,
+        ),
+    )?;
+    transport.connect(Vec::new())?;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !transport.connected() {
+        let _ = transport.receive_once()?;
+        transport.poll_resends()?;
+        if Instant::now() >= deadline {
+            return Err(anyhow!(
+                "timed out connecting Muninn RUDP sender to {}",
+                options.endpoint
+            ));
+        }
+    }
+    let payload = encode_cultnet_message_to_vec(&message, CultNetWireContract::CultNetSchemaV0)
+        .context("encoding Idunn health CultNet message")?;
+    transport
+        .send("schema", payload)
+        .with_context(|| format!("sending Idunn health to {}", options.endpoint))?;
     Ok(())
 }
 
@@ -2796,16 +2819,33 @@ mod tests {
     #[test]
     fn idunn_rudp_health_publisher_sends_raw_daemon_health_document() {
         let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
+        receiver
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
         let receiver_addr = receiver.local_addr().unwrap();
         let handle = thread::spawn(move || {
-            cultnet_rs::recv_cultnet_message_rudp(
-                &receiver,
-                &CultNetRudpOptions {
-                    ack_timeout: Duration::from_secs(1),
-                    ..CultNetRudpOptions::default()
-                },
+            let mut transport = CultNetRudpSocketTransportConnection::new(
+                CultNetRudpSocketTransportOptions::server(
+                    "idunn-test",
+                    receiver,
+                    IDUNN_HEALTH_RUDP_CONNECTION_ID,
+                ),
             )
-            .unwrap()
+            .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                if let Some(frame) = transport.receive_once().unwrap() {
+                    return cultnet_rs::decode_cultnet_message_from_slice(
+                        &frame.payload,
+                        CultNetWireContract::CultNetSchemaV0,
+                    )
+                    .unwrap();
+                }
+                transport.poll_resends().unwrap();
+                if Instant::now() >= deadline {
+                    panic!("timed out waiting for Muninn RUDP health frame");
+                }
+            }
         });
         let options = IdunnRudpHealthOptions {
             endpoint: receiver_addr,
@@ -2815,7 +2855,7 @@ mod tests {
 
         publish_idunn_rudp_health(&options, "active", "Muninn healthy", "unix:100").unwrap();
 
-        let (message, _, _) = handle.join().unwrap();
+        let message = handle.join().unwrap();
         let CultNetMessage::DocumentPutRaw { document, .. } = message else {
             panic!("expected raw document put");
         };

@@ -1,6 +1,9 @@
 param(
   [int] $Port = 8797,
   [string] $StateDir = "E:\Projects\Odin\scratch\odin",
+  [string] $IdunnRudpHealth = "127.0.0.1:17870",
+  [string] $IdunnDaemon = "odin",
+  [string] $IdunnHealthContract = "odin.cultnet-rudp-provider-health",
   [switch] $Foreground
 )
 
@@ -29,7 +32,10 @@ $env:NODE_PATH = "E:\Projects\CultLib\packages"
 $args = @(
   $scriptPath,
   "--port", "$Port",
-  "--stateDir", $StateDir
+  "--stateDir", $StateDir,
+  "--idunn-rudp-health", $IdunnRudpHealth,
+  "--idunn-daemon", $IdunnDaemon,
+  "--idunn-health-contract", $IdunnHealthContract
 )
 
 if ($Foreground) {
