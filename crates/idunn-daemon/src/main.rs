@@ -661,6 +661,8 @@ fn swarm_surgery_plan(
             "Compatibility commands, HTTP, WebSocket, SSH, and systemd probes are evidence only and must not own daemon health.".to_string(),
             "Idunn consumes daemon-published RUDP health before compatibility probes and actuates only advertised lifecycle authority.".to_string(),
             "Each migrated daemon must publish the same health contract that Idunn expects for its target.".to_string(),
+            "Shared operator hosts such as Raven must be actuated by background-only launch paths that do not create visible terminal or interactive windows.".to_string(),
+            "Raven Task Scheduler actions must execute hidden launchers directly, not visible .cmd trampolines.".to_string(),
         ],
         phases: vec![
             "1. Publish Idunn's own RUDP substrate and ingress state.".to_string(),
@@ -1757,6 +1759,18 @@ mod tests {
             plan.invariants
                 .iter()
                 .any(|invariant| invariant.contains("cultnet.transport.rudp.v0"))
+        );
+        assert!(
+            plan.invariants
+                .iter()
+                .any(|invariant| invariant.contains("Raven")
+                    && invariant.contains("background-only")
+                    && invariant.contains("visible terminal"))
+        );
+        assert!(
+            plan.invariants.iter().any(|invariant| invariant.contains("Raven")
+                && invariant.contains("Task Scheduler")
+                && invariant.contains(".cmd"))
         );
     }
 

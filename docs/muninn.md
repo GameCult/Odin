@@ -49,8 +49,10 @@ Activation is explicit:
 ```
 
 That Raven activation starts the requested screen and Realtek loopback stream
-and publishes `muninn.capture_stream.v1`. Mimir and OBS are stream consumers;
-they do not own Muninn.
+and publishes `muninn.capture_stream.v1`. It is still a background-only Raven
+actuator: the remote scheduled task must launch through the hidden WScript /
+noninteractive PowerShell trampoline and must not create visible terminal
+windows on Raven. Mimir and OBS are stream consumers; they do not own Muninn.
 
 ## Quest Access And Unity Return Video
 
@@ -196,15 +198,15 @@ missing or the Quest is unavailable, Muninn publishes `muninn.quest_access` as
 ## Host Deployments
 
 Raven runs Muninn from `C:\Meta\Odin\Muninn`. `scripts/restart-muninn.ps1`
-recreates the `GameCult-Muninn` scheduled task and writes
-`start-muninn-serve.cmd` as a short trampoline into
-`start-muninn-serve-hidden.vbs`, which launches `start-muninn-serve.ps1` with
-`wscript.exe //B //Nologo`. The PowerShell launcher starts `muninn.exe` with
-`-WindowStyle Hidden` and redirects logs under `C:\Meta\Odin\logs\muninn`.
+recreates the `GameCult-Muninn` scheduled task with `wscript.exe` as the task
+action and `start-muninn-serve-hidden.vbs` as its argument. The VBS launches
+`start-muninn-serve.ps1` with noninteractive hidden PowerShell. The PowerShell
+launcher starts `muninn.exe` with `-WindowStyle Hidden` and redirects logs under
+`C:\Meta\Odin\logs\muninn`.
 Raven is an operator-consented host: Muninn operations on Raven must be
-background-only and must not create visible terminal windows. The `.cmd` file
-must not be the long-lived foreground process, and no restart/health path may
-flash an interactive console on Raven.
+background-only and must not create visible terminal windows. `.cmd` files may
+exist only as manual compatibility trampolines; Task Scheduler must execute
+hidden launchers directly and must not flash an interactive console on Raven.
 
 Nightwing Muninn is kept alive by the single Idunn supervisor through the
 `nightwing-muninn` daemon target. Idunn learns that target through Odin's typed

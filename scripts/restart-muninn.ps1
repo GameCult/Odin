@@ -46,9 +46,12 @@ Set-Content -LiteralPath `$vbsLauncher -Value `$vbsLines -Encoding ASCII
   "wscript.exe //B //Nologo ""`$vbsLauncher"""
 )
 Set-Content -LiteralPath `$launcher -Value `$lines -Encoding ASCII
-cmd /c "schtasks /Delete /TN GameCult-Muninn /F 2>NUL"
-cmd /c schtasks /Create /TN GameCult-Muninn /SC ONCE /ST 23:59 /TR `$launcher /RL LIMITED /F
-cmd /c schtasks /Run /TN GameCult-Muninn
+`$taskAction = New-ScheduledTaskAction -Execute "wscript.exe" -Argument "//B //Nologo ""`$vbsLauncher"""
+`$taskTrigger = New-ScheduledTaskTrigger -Once -At ([DateTime]::Today.AddHours(23).AddMinutes(59))
+`$taskPrincipal = New-ScheduledTaskPrincipal -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
+`$taskSettings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew
+Register-ScheduledTask -TaskName "GameCult-Muninn" -Action `$taskAction -Trigger `$taskTrigger -Principal `$taskPrincipal -Settings `$taskSettings -Force | Out-Null
+Start-ScheduledTask -TaskName "GameCult-Muninn"
 "@
 
 $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($remoteScript))

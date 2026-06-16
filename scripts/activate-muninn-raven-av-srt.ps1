@@ -17,6 +17,7 @@ $ErrorActionPreference = "Stop"
 
 $remoteScript = @"
 `$ErrorActionPreference = "Stop"
+`$ProgressPreference = "SilentlyContinue"
 if (-not (Test-Path -LiteralPath "$MuninnExe")) {
   throw "Muninn executable not found at $MuninnExe"
 }
@@ -31,6 +32,7 @@ Get-CimInstance Win32_Process |
 `$muninnDir = Split-Path -Parent "$MuninnExe"
 `$launcher = Join-Path `$muninnDir "activate-raven-av-srt.cmd"
 `$psLauncher = Join-Path `$muninnDir "activate-raven-av-srt.ps1"
+`$vbsLauncher = Join-Path `$muninnDir "activate-raven-av-srt-hidden.vbs"
 `$pidPath = Join-Path "$LogRoot" "muninn-activate.pid"
 `$obsArgs = ""
 if (-not [bool]::Parse("$($NoObsTarget.IsPresent)") -and -not ("$TargetHost" -eq "$ObsTargetHost" -and $Port -eq $ObsPort)) {
@@ -48,22 +50,32 @@ if (`$obsArgs -like " --no-obs-target") {
 `$encodedArguments = (`$arguments | ConvertTo-Json -Compress)
 `$psLines = @(
   '`$ErrorActionPreference = "Stop"',
+  '`$ProgressPreference = "SilentlyContinue"',
   '`$arguments = ''$encodedArguments'' | ConvertFrom-Json',
   '`$process = Start-Process -FilePath "$MuninnExe" -ArgumentList `$arguments -WindowStyle Hidden -PassThru -RedirectStandardOutput "$LogRoot\muninn-activate.out.log" -RedirectStandardError "$LogRoot\muninn-activate.err.log"',
   '`$process.Id | Set-Content -Encoding ASCII -LiteralPath "$LogRoot\muninn-activate.pid"'
 )
 Set-Content -LiteralPath `$psLauncher -Value `$psLines -Encoding ASCII
+`$vbsLines = @(
+  'Set shell = CreateObject("WScript.Shell")',
+  'psLauncher = "$psLauncher"',
+  'shell.Run "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File """ & psLauncher & """", 0, False'
+)
+Set-Content -LiteralPath `$vbsLauncher -Value `$vbsLines -Encoding ASCII
 `$lines = @(
   "@echo off",
   "cd /d ""`$muninnDir""",
-  "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""`$psLauncher"""
+  "wscript.exe //B //Nologo ""`$vbsLauncher"""
 )
 Set-Content -LiteralPath `$launcher -Value `$lines -Encoding ASCII
-cmd /c "schtasks /Delete /TN GameCult-Muninn-Activate /F 2>NUL"
-cmd /c schtasks /Create /TN GameCult-Muninn-Activate /SC ONCE /ST 23:59 /TR `$launcher /RL HIGHEST /F
-cmd /c schtasks /Run /TN GameCult-Muninn-Activate
+`$taskAction = New-ScheduledTaskAction -Execute "wscript.exe" -Argument "//B //Nologo ""`$vbsLauncher"""
+`$taskTrigger = New-ScheduledTaskTrigger -Once -At ([DateTime]::Today.AddHours(23).AddMinutes(59))
+`$taskPrincipal = New-ScheduledTaskPrincipal -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
+`$taskSettings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew
+Register-ScheduledTask -TaskName "GameCult-Muninn-Activate" -Action `$taskAction -Trigger `$taskTrigger -Principal `$taskPrincipal -Settings `$taskSettings -Force | Out-Null
+Start-ScheduledTask -TaskName "GameCult-Muninn-Activate"
 "@
 
 $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($remoteScript))
-& ssh.exe -o BatchMode=yes -o ConnectTimeout=10 $RavenHost "powershell.exe -NoProfile -EncodedCommand $encoded"
+& ssh.exe -o BatchMode=yes -o ConnectTimeout=10 $RavenHost "powershell.exe -NoProfile -NonInteractive -EncodedCommand $encoded"
 exit $LASTEXITCODE
