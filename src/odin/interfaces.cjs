@@ -54,6 +54,12 @@ function createInterfaceDiscovery({
     const {
       interfaceBindingDefinition,
       idunnDaemonHealthDefinition,
+      muninnCaptureStreamDefinition,
+      muninnCommandBoundaryDefinition,
+      muninnObsStreamCatalogDefinition,
+      muninnQuestAccessDefinition,
+      muninnTelemetrySurfaceDefinition,
+      muninnTransportProfileDefinition,
       operatorStateDefinition,
       providerAdvertisementDefinition,
       stonksCommandBoundaryDefinition,
@@ -70,7 +76,7 @@ function createInterfaceDiscovery({
       weksaTransportProfileDefinition,
       voidbotSwarmSnapshotDefinition,
     } = documents;
-    if (!CultMesh || !interfaceBindingDefinition || !idunnDaemonHealthDefinition || !operatorStateDefinition || !stonksCommandBoundaryDefinition || !stonksMarketSnapshotDefinition || !stonksRequestEventDefinition || !stonksTransportProfileDefinition || !streamPixelsCommandBoundaryDefinition || !streamPixelsTransportProfileDefinition || !surfaceDefinition || !viliCommandBoundaryDefinition || !viliTransportProfileDefinition || !weksaCommandBoundaryDefinition || !weksaOperatorStateDefinition || !weksaTransportProfileDefinition || !voidbotSwarmSnapshotDefinition || !providerAdvertisementDefinition) {
+    if (!CultMesh || !interfaceBindingDefinition || !idunnDaemonHealthDefinition || !muninnCaptureStreamDefinition || !muninnCommandBoundaryDefinition || !muninnObsStreamCatalogDefinition || !muninnQuestAccessDefinition || !muninnTelemetrySurfaceDefinition || !muninnTransportProfileDefinition || !operatorStateDefinition || !stonksCommandBoundaryDefinition || !stonksMarketSnapshotDefinition || !stonksRequestEventDefinition || !stonksTransportProfileDefinition || !streamPixelsCommandBoundaryDefinition || !streamPixelsTransportProfileDefinition || !surfaceDefinition || !viliCommandBoundaryDefinition || !viliTransportProfileDefinition || !weksaCommandBoundaryDefinition || !weksaOperatorStateDefinition || !weksaTransportProfileDefinition || !voidbotSwarmSnapshotDefinition || !providerAdvertisementDefinition) {
       return [];
     }
 
@@ -93,6 +99,12 @@ function createInterfaceDiscovery({
             streamPixelsCommandBoundaryDefinition,
             streamPixelsTransportProfileDefinition,
             idunnDaemonHealthDefinition,
+            muninnCaptureStreamDefinition,
+            muninnCommandBoundaryDefinition,
+            muninnObsStreamCatalogDefinition,
+            muninnQuestAccessDefinition,
+            muninnTelemetrySurfaceDefinition,
+            muninnTransportProfileDefinition,
             operatorStateDefinition,
             viliCommandBoundaryDefinition,
             viliTransportProfileDefinition,
@@ -102,7 +114,7 @@ function createInterfaceDiscovery({
           ],
         });
         const advertisements = typeof node.cache?.getAll === "function"
-          ? node.cache.getAll(providerAdvertisementDefinition)
+          ? node.cache.getAll(providerAdvertisementDefinition).map(unwrapDocumentRecord)
           : [];
         for (const advertisement of advertisements) {
           const providerId = advertisement?.providerId || advertisement?.provider?.id || advertisement?.id;
@@ -130,12 +142,14 @@ function createInterfaceDiscovery({
               weksaOperatorStateDefinition,
             ], advertisement) || null,
             commandBoundary: providerRecord(node, [
+              muninnCommandBoundaryDefinition,
               viliCommandBoundaryDefinition,
               weksaCommandBoundaryDefinition,
               stonksCommandBoundaryDefinition,
               streamPixelsCommandBoundaryDefinition,
             ], advertisement) || null,
             transportProfile: providerRecord(node, [
+              muninnTransportProfileDefinition,
               viliTransportProfileDefinition,
               weksaTransportProfileDefinition,
               stonksTransportProfileDefinition,
@@ -163,6 +177,12 @@ function createInterfaceDiscovery({
     const {
       interfaceBindingDefinition,
       idunnDaemonHealthDefinition,
+      muninnCaptureStreamDefinition,
+      muninnCommandBoundaryDefinition,
+      muninnObsStreamCatalogDefinition,
+      muninnQuestAccessDefinition,
+      muninnTelemetrySurfaceDefinition,
+      muninnTransportProfileDefinition,
       operatorStateDefinition,
       providerAdvertisementDefinition,
       stonksCommandBoundaryDefinition,
@@ -179,7 +199,7 @@ function createInterfaceDiscovery({
       weksaTransportProfileDefinition,
       voidbotSwarmSnapshotDefinition,
     } = documents;
-    if (!CultMesh || !interfaceBindingDefinition || !idunnDaemonHealthDefinition || !operatorStateDefinition || !stonksCommandBoundaryDefinition || !stonksMarketSnapshotDefinition || !stonksRequestEventDefinition || !stonksTransportProfileDefinition || !streamPixelsCommandBoundaryDefinition || !streamPixelsTransportProfileDefinition || !surfaceDefinition || !viliCommandBoundaryDefinition || !viliTransportProfileDefinition || !weksaCommandBoundaryDefinition || !weksaOperatorStateDefinition || !weksaTransportProfileDefinition || !voidbotSwarmSnapshotDefinition || !providerAdvertisementDefinition) {
+    if (!CultMesh || !interfaceBindingDefinition || !idunnDaemonHealthDefinition || !muninnCaptureStreamDefinition || !muninnCommandBoundaryDefinition || !muninnObsStreamCatalogDefinition || !muninnQuestAccessDefinition || !muninnTelemetrySurfaceDefinition || !muninnTransportProfileDefinition || !operatorStateDefinition || !stonksCommandBoundaryDefinition || !stonksMarketSnapshotDefinition || !stonksRequestEventDefinition || !stonksTransportProfileDefinition || !streamPixelsCommandBoundaryDefinition || !streamPixelsTransportProfileDefinition || !surfaceDefinition || !viliCommandBoundaryDefinition || !viliTransportProfileDefinition || !weksaCommandBoundaryDefinition || !weksaOperatorStateDefinition || !weksaTransportProfileDefinition || !voidbotSwarmSnapshotDefinition || !providerAdvertisementDefinition) {
       return [];
     }
     const interfaces = [];
@@ -201,6 +221,12 @@ function createInterfaceDiscovery({
             streamPixelsCommandBoundaryDefinition,
             streamPixelsTransportProfileDefinition,
             idunnDaemonHealthDefinition,
+            muninnCaptureStreamDefinition,
+            muninnCommandBoundaryDefinition,
+            muninnObsStreamCatalogDefinition,
+            muninnQuestAccessDefinition,
+            muninnTelemetrySurfaceDefinition,
+            muninnTransportProfileDefinition,
             operatorStateDefinition,
             viliCommandBoundaryDefinition,
             viliTransportProfileDefinition,
@@ -210,13 +236,13 @@ function createInterfaceDiscovery({
           ],
         });
         const advertisements = typeof node.cache?.getAll === "function"
-          ? node.cache.getAll(providerAdvertisementDefinition)
+          ? node.cache.getAll(providerAdvertisementDefinition).map(unwrapDocumentRecord)
           : [];
         for (const advertisement of advertisements) {
           if (!advertisement?.providerId) {
             continue;
           }
-          const state = node.get(surfaceDefinition, advertisement.providerId);
+          const state = unwrapDocumentRecord(node.get(surfaceDefinition, advertisement.providerId));
           if (!state?.surface) {
             continue;
           }
@@ -229,12 +255,14 @@ function createInterfaceDiscovery({
               weksaOperatorStateDefinition,
             ], advertisement) || null,
             commandBoundary: providerRecord(node, [
+              muninnCommandBoundaryDefinition,
               viliCommandBoundaryDefinition,
               weksaCommandBoundaryDefinition,
               stonksCommandBoundaryDefinition,
               streamPixelsCommandBoundaryDefinition,
             ], advertisement) || null,
             transportProfile: providerRecord(node, [
+              muninnTransportProfileDefinition,
               viliTransportProfileDefinition,
               weksaTransportProfileDefinition,
               stonksTransportProfileDefinition,
@@ -243,13 +271,13 @@ function createInterfaceDiscovery({
           }));
         }
         const bindings = typeof node.cache?.getAll === "function"
-          ? node.cache.getAll(interfaceBindingDefinition)
-          : [node.get(interfaceBindingDefinition, "voidbot.swarm")].filter(Boolean);
+          ? node.cache.getAll(interfaceBindingDefinition).map(unwrapDocumentRecord)
+          : [unwrapDocumentRecord(node.get(interfaceBindingDefinition, "voidbot.swarm"))].filter(Boolean);
         for (const binding of bindings) {
           if (!binding?.providerId) {
             continue;
           }
-          const state = node.get(surfaceDefinition, binding.providerId);
+          const state = unwrapDocumentRecord(node.get(surfaceDefinition, binding.providerId));
           const surface = state?.surface || binding.surface || null;
           interfaces.push({
             providerId: binding.providerId,
@@ -337,15 +365,24 @@ function providerRecord(node, definitions, advertisement) {
   for (const definition of definitions) {
     if (!definition) continue;
     for (const key of keys) {
-      const record = node.get?.(definition, key);
+      const record = unwrapDocumentRecord(node.get?.(definition, key));
       if (record) return record;
     }
   }
   return null;
 }
 
+function unwrapDocumentRecord(record) {
+  if (Array.isArray(record) && record.length === 1 && record[0] && typeof record[0] === "object") {
+    return record[0];
+  }
+  return record;
+}
+
 function providerRecordKeys(advertisement) {
   const keys = [
+    advertisement?.commandSurface?.commandBoundaryId,
+    advertisement?.commandSurface?.transportProfileId,
     advertisement?.providerId,
     advertisement?.daemonId,
     advertisement?.daemon_id,

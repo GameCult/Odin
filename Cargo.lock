@@ -507,6 +507,7 @@ dependencies = [
  "odin-core",
  "rmp-serde",
  "serde",
+ "serde_json",
  "windows-sys 0.59.0",
 ]
 

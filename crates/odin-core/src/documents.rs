@@ -32,6 +32,8 @@ pub const MUNINN_MOVE_MARKER_CANDIDATE_SCHEMA: &str = "muninn.move_marker_candid
 pub const MUNINN_MOVE_CONTROLLER_STATE_SCHEMA: &str = "muninn.move_controller_state.v1";
 pub const MUNINN_MOVE_LIGHT_COMMAND_SCHEMA: &str = "muninn.move_light_command.v1";
 pub const MUNINN_QUEST_ACCESS_SCHEMA: &str = "muninn.quest_access.v1";
+pub const MUNINN_COMMAND_BOUNDARY_SCHEMA: &str = "muninn.command_boundary.v1";
+pub const MUNINN_TRANSPORT_PROFILE_SCHEMA: &str = "muninn.transport_profile.v1";
 
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
 #[cultcache(type = "odin.snapshot", schema = "odin.snapshot.v1")]
@@ -732,6 +734,26 @@ pub struct MuninnQuestAccessRecord {
     pub observed_at: String,
 }
 
+#[derive(Clone, Debug, PartialEq, DatabaseEntry)]
+#[cultcache(
+    type = "muninn.command_boundary",
+    schema = "muninn.command_boundary.v1"
+)]
+pub struct MuninnCommandBoundaryCompatRecord {
+    #[cultcache(key = 0)]
+    pub value: Value,
+}
+
+#[derive(Clone, Debug, PartialEq, DatabaseEntry)]
+#[cultcache(
+    type = "muninn.transport_profile",
+    schema = "muninn.transport_profile.v1"
+)]
+pub struct MuninnTransportProfileCompatRecord {
+    #[cultcache(key = 0)]
+    pub value: Value,
+}
+
 cultmesh_rs::cultmesh_documents!(OdinDocuments {
     OdinSnapshotRecord => ODIN_SNAPSHOT_SCHEMA,
     OdinVerseRecord => ODIN_VERSE_SCHEMA,
@@ -764,6 +786,8 @@ cultmesh_rs::cultmesh_documents!(OdinDocuments {
     MuninnMoveControllerStateRecord => MUNINN_MOVE_CONTROLLER_STATE_SCHEMA,
     MuninnMoveLightCommandRecord => MUNINN_MOVE_LIGHT_COMMAND_SCHEMA,
     MuninnQuestAccessRecord => MUNINN_QUEST_ACCESS_SCHEMA,
+    MuninnCommandBoundaryCompatRecord => MUNINN_COMMAND_BOUNDARY_SCHEMA,
+    MuninnTransportProfileCompatRecord => MUNINN_TRANSPORT_PROFILE_SCHEMA,
 });
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

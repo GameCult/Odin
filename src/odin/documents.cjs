@@ -7,6 +7,12 @@ function defineOdinDocuments(defineDocumentType) {
     return {
       interfaceBindingDefinition: null,
       idunnDaemonHealthDefinition: null,
+      muninnCaptureStreamDefinition: null,
+      muninnCommandBoundaryDefinition: null,
+      muninnObsStreamCatalogDefinition: null,
+      muninnQuestAccessDefinition: null,
+      muninnTelemetrySurfaceDefinition: null,
+      muninnTransportProfileDefinition: null,
       operatorStateDefinition: null,
       providerAdvertisementDefinition: null,
       stonksCommandBoundaryDefinition: null,
@@ -67,6 +73,60 @@ function defineOdinDocuments(defineDocumentType) {
     global: false,
     name: (value) => value?.daemonId || value?.daemon_id || "daemon",
     schema: parseObjectDocument("Idunn daemon health"),
+  });
+  const muninnCaptureStreamDefinition = defineDocumentType({
+    type: "muninn.capture_stream",
+    schemaName: "muninn.capture_stream",
+    schemaId: "muninn.capture_stream.v1",
+    schemaVersion: "muninn.capture_stream.v1",
+    global: false,
+    name: (value) => value?.stream_id || value?.streamId || "capture-stream",
+    schema: parseObjectDocument("Muninn capture stream"),
+  });
+  const muninnCommandBoundaryDefinition = defineDocumentType({
+    type: "muninn.command_boundary",
+    schemaName: "muninn.command_boundary",
+    schemaId: "muninn.command_boundary.v1",
+    schemaVersion: "muninn.command_boundary.v1",
+    global: false,
+    name: (value) => value?.boundary_id || value?.boundaryId || value?.daemon_id || value?.daemonId || "muninn",
+    schema: parseObjectDocument("Muninn command boundary"),
+  });
+  const muninnObsStreamCatalogDefinition = defineDocumentType({
+    type: "muninn.obs_stream_catalog",
+    schemaName: "muninn.obs_stream_catalog",
+    schemaId: "muninn.obs_stream_catalog.v1",
+    schemaVersion: "muninn.obs_stream_catalog.v1",
+    global: false,
+    name: (value) => value?.catalog_id || value?.catalogId || value?.host_id || value?.hostId || "muninn",
+    schema: parseObjectDocument("Muninn OBS stream catalog"),
+  });
+  const muninnQuestAccessDefinition = defineDocumentType({
+    type: "muninn.quest_access",
+    schemaName: "muninn.quest_access",
+    schemaId: "muninn.quest_access.v1",
+    schemaVersion: "muninn.quest_access.v1",
+    global: false,
+    name: (value) => value?.access_id || value?.accessId || value?.serial || "quest-access",
+    schema: parseObjectDocument("Muninn Quest access"),
+  });
+  const muninnTelemetrySurfaceDefinition = defineDocumentType({
+    type: "muninn.telemetry_surface",
+    schemaName: "muninn.telemetry_surface",
+    schemaId: "muninn.telemetry_surface.v1",
+    schemaVersion: "muninn.telemetry_surface.v1",
+    global: false,
+    name: (value) => value?.surface_id || value?.surfaceId || value?.host_id || value?.hostId || "muninn-telemetry",
+    schema: parseObjectDocument("Muninn telemetry surface"),
+  });
+  const muninnTransportProfileDefinition = defineDocumentType({
+    type: "muninn.transport_profile",
+    schemaName: "muninn.transport_profile",
+    schemaId: "muninn.transport_profile.v1",
+    schemaVersion: "muninn.transport_profile.v1",
+    global: false,
+    name: (value) => value?.profile_id || value?.profileId || value?.daemon_id || value?.daemonId || "muninn",
+    schema: parseObjectDocument("Muninn transport profile"),
   });
   const operatorStateDefinition = defineDocumentType({
     type: "gamecult.vili.operator_state",
@@ -187,6 +247,12 @@ function defineOdinDocuments(defineDocumentType) {
   return {
     interfaceBindingDefinition,
     idunnDaemonHealthDefinition,
+    muninnCaptureStreamDefinition,
+    muninnCommandBoundaryDefinition,
+    muninnObsStreamCatalogDefinition,
+    muninnQuestAccessDefinition,
+    muninnTelemetrySurfaceDefinition,
+    muninnTransportProfileDefinition,
     operatorStateDefinition,
     providerAdvertisementDefinition,
     stonksCommandBoundaryDefinition,

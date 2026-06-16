@@ -9,11 +9,13 @@ use cultnet_rs::{
     encode_cultnet_message_to_vec,
 };
 use odin_core::{
-    IdunnDaemonHealthRecord, MuninnCaptureStreamRecord, MuninnMoveControllerStateRecord,
+    EveProviderAdvertisementCompatRecord, IdunnDaemonHealthRecord, MuninnCaptureStreamRecord,
+    MuninnCommandBoundaryCompatRecord, MuninnMoveControllerStateRecord,
     MuninnMoveLightCommandRecord, MuninnObsStreamCatalogRecord, MuninnQuestAccessRecord,
-    MuninnTelemetrySurfaceRecord, OdinDocuments,
+    MuninnTelemetrySurfaceRecord, MuninnTransportProfileCompatRecord, OdinDocuments,
 };
 use serde::Serialize;
+use serde_json::json;
 use std::env;
 use std::fs;
 #[cfg(not(windows))]
@@ -231,6 +233,7 @@ fn serve(options: Options) -> Result<()> {
         )?;
         publish_quest_access_if_requested(&mut node, &options)?;
         publish_surface(&mut node, &options, "idle", &[])?;
+        publish_runtime_boundary_records(&mut node, &options, "idle", &[])?;
         publish_daemon_health_if_configured(
             &options,
             &node,
@@ -274,6 +277,12 @@ fn activate(options: Options, spawner: impl ProcessSpawner) -> Result<()> {
 
     loop {
         publish_surface(
+            &mut node,
+            &options,
+            "active",
+            std::slice::from_ref(&options.stream_id),
+        )?;
+        publish_runtime_boundary_records(
             &mut node,
             &options,
             "active",
@@ -359,6 +368,224 @@ fn publish_surface(
     node.put("latest", &record)?;
     node.put(&record.surface_id, &record)?;
     Ok(())
+}
+
+fn publish_runtime_boundary_records(
+    node: &mut cultmesh_rs::CultMeshNode,
+    options: &Options,
+    state: &str,
+    active_streams: &[String],
+) -> Result<()> {
+    let provider_id = muninn_provider_id(options);
+    let daemon_id = muninn_daemon_id(options);
+    let updated_at = timestamp()?;
+    let available_sources = available_sources(options);
+    let command_boundary_key = format!("command-boundary:{daemon_id}");
+    let transport_profile_key = format!("transport-profile:{daemon_id}");
+    let store_path = options.store_path.display().to_string();
+    let log_root = options.log_root.display().to_string();
+    let stream_id = options.stream_id.clone();
+    let activation_command = format!(
+        "muninn activate --store {} --host {} --stream {}",
+        options.store_path.display(),
+        options.host_id,
+        options.stream_id
+    );
+    let health_command = format!(
+        "muninn --health --store {} --host {}",
+        options.store_path.display(),
+        options.host_id
+    );
+    let current_transport = if options.idunn_rudp_health.is_some() {
+        "daemon-published-rudp-health + daemon-owned-cultcache-telemetry-store + compatibility.local-cli fallback"
+    } else {
+        "daemon-owned-cultcache-telemetry-store + compatibility.local-cli fallback"
+    };
+    let transport_state = if options.idunn_rudp_health.is_some() {
+        "rudp-health-and-provider-store-live"
+    } else {
+        "cultcache-provider-store-only"
+    };
+    let compatibility_mechanisms = if options.idunn_rudp_health.is_some() {
+        vec![health_command.clone(), activation_command.clone()]
+    } else {
+        vec![activation_command.clone()]
+    };
+    let command_boundary = MuninnCommandBoundaryCompatRecord {
+        value: json!({
+            "schema": "muninn.command_boundary.v1",
+            "boundary_id": command_boundary_key,
+            "daemon_id": daemon_id,
+            "provider_id": provider_id,
+            "service_id": provider_id,
+            "host_id": options.host_id,
+            "owner": "Muninn telemetry runtime",
+            "updated_at": updated_at,
+            "state_store": store_path,
+            "log_root": log_root,
+            "lifecycle_authority": "idunn.local-command",
+            "health_publication": options.idunn_rudp_health.as_ref().map(|idunn| json!({
+                "contract": idunn.health_contract,
+                "transport": CULTNET_RUDP_PROTOCOL_ID,
+                "publication_source": "daemon-published",
+                "endpoint": idunn.endpoint.to_string(),
+                "state_owner": "Muninn serve process"
+            })).unwrap_or_else(|| json!({
+                "contract": serde_json::Value::Null,
+                "transport": "unconfigured",
+                "publication_source": "compatibility-command-only",
+                "state_owner": "Muninn local store"
+            })),
+            "commands": [
+                {
+                    "command": "muninn.activate",
+                    "ingress": "local-cli",
+                    "invocation": activation_command,
+                    "owns": [
+                        "explicit capture stream activation",
+                        "ffmpeg/loopback process launch",
+                        "active muninn.capture_stream receipts"
+                    ]
+                },
+                {
+                    "command": "muninn.move_light_command",
+                    "ingress": "cultmesh-document",
+                    "schema": "muninn.move_light_command.v1",
+                    "owns": [
+                        "PS Move light pulses for attached local controllers"
+                    ]
+                }
+            ],
+            "forbidden_authority": "Task Scheduler, HTTP probes, OBS consumers, and one-shot health commands do not own Muninn telemetry truth or stream activation state.",
+        }),
+    };
+    let transport_profile = MuninnTransportProfileCompatRecord {
+        value: json!({
+            "schema": "muninn.transport_profile.v1",
+            "profile_id": transport_profile_key,
+            "daemon_id": daemon_id,
+            "provider_id": provider_id,
+            "host_id": options.host_id,
+            "target_transport": CULTNET_RUDP_PROTOCOL_ID,
+            "current_transport": current_transport,
+            "state": transport_state,
+            "health_contract": options.idunn_rudp_health.as_ref().map(|idunn| idunn.health_contract.clone()),
+            "provider_advertisement_schema": "gamecult.eve.provider_advertisement.v1",
+            "command_boundary_schema": "muninn.command_boundary.v1",
+            "telemetry_surface_schema": "muninn.telemetry_surface.v1",
+            "compatibility_mechanisms": compatibility_mechanisms,
+            "cut_line": "Muninn's telemetry store owns provider advertisement, command boundary, transport profile, telemetry surface, and daemon health state. Local CLI activation and health commands are compatibility/ops witnesses only.",
+            "updated_at": updated_at,
+        }),
+    };
+    let provider_advertisement = EveProviderAdvertisementCompatRecord {
+        value: json!({
+            "schema": "gamecult.eve.provider_advertisement.v1",
+            "providerId": provider_id,
+            "daemonId": daemon_id,
+            "title": muninn_provider_title(options),
+            "description": muninn_provider_description(options),
+            "canonicalService": "asgard.muninn",
+            "locatedService": format!("asgard.{}.muninn", options.host_id),
+            "verseId": format!("{}.local", options.host_id),
+            "cultMeshAddress": format!("asgard.{}.muninn/telemetry", options.host_id),
+            "status": "active",
+            "mode": "daemon-live",
+            "updatedAt": updated_at,
+            "stateStore": store_path,
+            "surfaceId": options.surface_id,
+            "streamId": stream_id,
+            "surfaceState": state,
+            "availableSources": available_sources,
+            "activeStreams": active_streams,
+            "capabilities": muninn_capabilities(options),
+            "endpoints": [
+                {
+                    "transport": "cultcache-store",
+                    "address": options.store_path.display().to_string()
+                }
+            ],
+            "routes": [
+                {
+                    "transport": "cultcache-store",
+                    "address": options.store_path.display().to_string()
+                },
+                {
+                    "transport": "compatibility-local-cli",
+                    "address": activation_command
+                }
+            ],
+            "commandSurface": {
+                "commandBoundaryId": command_boundary_key,
+                "transportProfileId": transport_profile_key
+            }
+        }),
+    };
+    node.put(&provider_id, &provider_advertisement)?;
+    node.put(&command_boundary_key, &command_boundary)?;
+    node.put(&transport_profile_key, &transport_profile)?;
+    Ok(())
+}
+
+fn muninn_provider_id(options: &Options) -> String {
+    format!("muninn.telemetry.{}", options.host_id)
+}
+
+fn muninn_daemon_id(options: &Options) -> String {
+    if let Some(idunn) = options.idunn_rudp_health.as_ref() {
+        return idunn.daemon_id.clone();
+    }
+    match options.host_id.as_str() {
+        "raven" => "muninn".to_string(),
+        "starfire" => "starfire-muninn".to_string(),
+        "nightwing" => "nightwing-muninn".to_string(),
+        _ => format!("muninn-{}", options.host_id),
+    }
+}
+
+fn muninn_provider_title(options: &Options) -> String {
+    format!("Muninn {} Telemetry", title_case_host(&options.host_id))
+}
+
+fn muninn_provider_description(options: &Options) -> String {
+    let mut detail = format!(
+        "Muninn telemetry runtime on {} publishing local capture affordances and typed telemetry state.",
+        title_case_host(&options.host_id)
+    );
+    if options.quest_adb {
+        detail.push_str(" Quest USB access is enabled on this body.");
+    }
+    if !options.move_state_sources.is_empty() {
+        detail.push_str(" Move HID/controller evidence is enabled on this body.");
+    }
+    detail
+}
+
+fn title_case_host(host_id: &str) -> String {
+    let mut chars = host_id.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => "Unknown".to_string(),
+    }
+}
+
+fn muninn_capabilities(options: &Options) -> Vec<String> {
+    let mut capabilities = vec![
+        "screen.capture.ddagrab".to_string(),
+        "audio.loopback.wasapi".to_string(),
+        "muninn.telemetry_surface".to_string(),
+        "muninn.capture_stream".to_string(),
+        "muninn.command_boundary".to_string(),
+        "muninn.transport_profile".to_string(),
+    ];
+    if options.quest_adb {
+        capabilities.push("quest.usb.access".to_string());
+    }
+    if !options.move_state_sources.is_empty() {
+        capabilities.push("psmove.controller.state".to_string());
+        capabilities.push("muninn.move_evidence_stream".to_string());
+    }
+    capabilities
 }
 
 fn available_sources(options: &Options) -> Vec<String> {
