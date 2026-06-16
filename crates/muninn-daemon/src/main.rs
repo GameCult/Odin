@@ -33,6 +33,8 @@ use std::ffi::OsStr;
 #[cfg(unix)]
 use std::io::{ErrorKind, Read};
 #[cfg(unix)]
+use std::os::fd::AsRawFd;
+#[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
@@ -202,20 +204,10 @@ fn serve(options: Options) -> Result<()> {
     let mut active_move_lights = Vec::new();
     let mut last_default_move_light_write_at = None;
     let mut last_idunn_health_publish_attempt_at = None;
-    let mut active_move_states: Vec<ActiveMoveStateSource> = options
-        .move_state_sources
-        .iter()
-        .cloned()
-        .map(|source| ActiveMoveStateSource {
-            light_hidraw_path: default_move_light_path(&source.hidraw_path),
-            source,
-            sequence: 0,
-            joystick_axes: [0; 16],
-            joystick_buttons: [false; 32],
-        })
-        .collect();
+    let mut active_move_states = active_move_state_sources(live_move_state_sources(&options));
 
     loop {
+        sync_active_move_state_sources(&mut active_move_states, live_move_state_sources(&options));
         let mut node = open_node(&options, "muninn-daemon")?;
         register_move_light_commands(&mut node, &options, &mut active_move_lights)?;
         tick_move_light_commands(&mut node, &mut active_move_lights, &mut HidMoveLightWriter)?;
@@ -258,6 +250,55 @@ fn serve(options: Options) -> Result<()> {
         };
         thread::sleep(sleep);
     }
+}
+
+fn active_move_state_sources(sources: Vec<MoveStateSource>) -> Vec<ActiveMoveStateSource> {
+    sources.into_iter().map(active_move_state_source).collect()
+}
+
+fn active_move_state_source(source: MoveStateSource) -> ActiveMoveStateSource {
+    ActiveMoveStateSource {
+        light_hidraw_path: default_move_light_path(&source.hidraw_path),
+        source,
+        sequence: 0,
+        joystick_axes: [0; 16],
+        joystick_buttons: [false; 32],
+    }
+}
+
+fn sync_active_move_state_sources(
+    active: &mut Vec<ActiveMoveStateSource>,
+    desired: Vec<MoveStateSource>,
+) {
+    active.retain(|state| desired.iter().any(|source| source == &state.source));
+    for source in desired {
+        if active.iter().any(|state| state.source == source) {
+            continue;
+        }
+        active.push(active_move_state_source(source));
+    }
+}
+
+fn live_move_state_sources(options: &Options) -> Vec<MoveStateSource> {
+    let discovered = platform_move_state_sources();
+    if discovered.is_empty() {
+        return options.move_state_sources.clone();
+    }
+
+    let mut sources = discovered;
+    for source in &options.move_state_sources {
+        if is_joystick_path(&source.hidraw_path)
+            && sources
+                .iter()
+                .any(|discovered| discovered.hidraw_path == source.hidraw_path)
+        {
+            continue;
+        }
+        if !sources.iter().any(|discovered| discovered == source) {
+            sources.push(source.clone());
+        }
+    }
+    sources
 }
 
 struct ActiveMoveEvidenceStream {
@@ -910,7 +951,16 @@ fn publish_move_controller_states(
     let mut published_records = Vec::new();
     for state in active {
         let record = if is_joystick_path(&state.source.hidraw_path) {
-            let events = reader.read_joystick_events(&state.source.hidraw_path)?;
+            let events = match reader.read_joystick_events(&state.source.hidraw_path) {
+                Ok(events) => events,
+                Err(error) => {
+                    eprintln!(
+                        "Muninn skipped Move source {} at {}: {error:#}",
+                        state.source.move_id, state.source.hidraw_path
+                    );
+                    continue;
+                }
+            };
             for event in events {
                 match event.event_type & 0x7f {
                     0x01 => {
@@ -938,7 +988,17 @@ fn publish_move_controller_states(
                 timestamp()?,
             )
         } else {
-            let Some(report) = reader.read_report(&state.source.hidraw_path)? else {
+            let report = match reader.read_report(&state.source.hidraw_path) {
+                Ok(report) => report,
+                Err(error) => {
+                    eprintln!(
+                        "Muninn skipped Move source {} at {}: {error:#}",
+                        state.source.move_id, state.source.hidraw_path
+                    );
+                    continue;
+                }
+            };
+            let Some(report) = report else {
                 continue;
             };
             state.sequence = state.sequence.saturating_add(1);
@@ -1380,6 +1440,153 @@ fn joystick_light_hidraw_path(joystick_path: &str) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(unix)]
+fn platform_move_state_sources() -> Vec<MoveStateSource> {
+    let mut candidates: Vec<(MoveStateSource, u8)> = Vec::new();
+    let Ok(entries) = fs::read_dir("/dev/input") else {
+        return Vec::new();
+    };
+
+    for entry in entries.flatten() {
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if !name.starts_with("js") {
+            continue;
+        }
+        let joystick_path = format!("/dev/input/{name}");
+        let Some(sysfs_device) = fs::canonicalize(format!("/sys/class/input/{name}/device")).ok()
+        else {
+            continue;
+        };
+        let uevent = read_move_uevent_chain(&sysfs_device);
+        if !is_ps_move_uevent(&uevent) {
+            continue;
+        }
+
+        let hidraw_path = joystick_light_hidraw_path(&joystick_path);
+        let move_id = hidraw_path
+            .as_deref()
+            .and_then(controller_id_from_hidraw)
+            .map(|id| format!("move-{id}"))
+            .or_else(|| move_unique_id_from_uevent(&uevent))
+            .unwrap_or_else(|| format!("move-{name}"));
+        let score = if uevent.contains("HID_ID=0005:0000054C:000003D5") {
+            2
+        } else {
+            1
+        };
+
+        candidates.push((
+            MoveStateSource {
+                move_id,
+                hidraw_path: joystick_path,
+            },
+            score,
+        ));
+    }
+
+    let mut selected: Vec<(MoveStateSource, u8)> = Vec::new();
+    for candidate in candidates {
+        if let Some(existing) = selected
+            .iter_mut()
+            .find(|existing| existing.0.move_id == candidate.0.move_id)
+        {
+            if candidate.1 >= existing.1 {
+                *existing = candidate;
+            }
+            continue;
+        }
+        selected.push(candidate);
+    }
+    selected.into_iter().map(|(source, _)| source).collect()
+}
+
+#[cfg(not(unix))]
+fn platform_move_state_sources() -> Vec<MoveStateSource> {
+    Vec::new()
+}
+
+#[cfg(unix)]
+fn read_move_uevent_chain(start: &Path) -> String {
+    let mut cursor = start.to_path_buf();
+    let mut text = String::new();
+    for _ in 0..6 {
+        if let Ok(uevent) = fs::read_to_string(cursor.join("uevent")) {
+            text.push_str(&uevent);
+            text.push('\n');
+        }
+        if !cursor.pop() {
+            break;
+        }
+    }
+    text
+}
+
+#[cfg(unix)]
+fn is_ps_move_uevent(uevent: &str) -> bool {
+    uevent.contains("ID_VENDOR_ID=054c") && uevent.contains("ID_MODEL_ID=03d5")
+        || uevent.contains("ID_MODEL=Motion_Controller")
+        || uevent.contains("HID_ID=0005:0000054C:000003D5")
+        || uevent.contains("HID_ID=0003:0000054C:000003D5")
+}
+
+#[cfg(unix)]
+fn move_unique_id_from_uevent(uevent: &str) -> Option<String> {
+    value_from_uevent(uevent, "HID_UNIQ")
+        .map(|value| value.replace(':', ""))
+        .filter(|value| !value.is_empty())
+        .map(|value| format!("move-{value}"))
+}
+
+#[cfg(unix)]
+fn value_from_uevent(uevent: &str, key: &str) -> Option<String> {
+    uevent.lines().find_map(|line| {
+        let (candidate_key, value) = line.split_once('=')?;
+        (candidate_key == key).then(|| value.trim().to_string())
+    })
+}
+
+#[cfg(unix)]
+fn controller_id_from_hidraw(hidraw_path: &str) -> Option<String> {
+    let device = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(hidraw_path)
+        .ok()?;
+    let mut report = [0u8; 16];
+    report[0] = 4;
+    let request = hid_iocgfeature(report.len());
+    let ok = unsafe { libc::ioctl(device.as_raw_fd(), request, report.as_mut_ptr()) };
+    if ok < 0 {
+        return None;
+    }
+    Some(
+        report[1..7]
+            .iter()
+            .rev()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>(),
+    )
+}
+
+#[cfg(unix)]
+fn hid_iocgfeature(length: usize) -> libc::c_ulong {
+    const IOC_READ: libc::c_ulong = 2;
+    const IOC_NRBITS: libc::c_ulong = 8;
+    const IOC_TYPEBITS: libc::c_ulong = 8;
+    const IOC_SIZEBITS: libc::c_ulong = 14;
+    const IOC_NRSHIFT: libc::c_ulong = 0;
+    const IOC_TYPESHIFT: libc::c_ulong = IOC_NRSHIFT + IOC_NRBITS;
+    const IOC_SIZESHIFT: libc::c_ulong = IOC_TYPESHIFT + IOC_TYPEBITS;
+    const IOC_DIRSHIFT: libc::c_ulong = IOC_SIZESHIFT + IOC_SIZEBITS;
+    (IOC_READ << IOC_DIRSHIFT)
+        | ((length as libc::c_ulong) << IOC_SIZESHIFT)
+        | ((b'H' as libc::c_ulong) << IOC_TYPESHIFT)
+        | (0x07 << IOC_NRSHIFT)
 }
 
 #[cfg(not(unix))]
@@ -3492,6 +3699,7 @@ mod tests {
 
     struct RecordingMoveStateReader {
         joystick_events: Vec<JoystickEvent>,
+        failing_joystick_path: Option<String>,
     }
 
     impl MoveControllerStateReader for RecordingMoveStateReader {
@@ -3499,7 +3707,14 @@ mod tests {
             Ok(None)
         }
 
-        fn read_joystick_events(&mut self, _joystick_path: &str) -> Result<Vec<JoystickEvent>> {
+        fn read_joystick_events(&mut self, joystick_path: &str) -> Result<Vec<JoystickEvent>> {
+            if self
+                .failing_joystick_path
+                .as_deref()
+                .is_some_and(|path| path == joystick_path)
+            {
+                return Err(anyhow!("simulated missing joystick"));
+            }
             Ok(std::mem::take(&mut self.joystick_events))
         }
     }
@@ -3534,6 +3749,7 @@ mod tests {
         }];
         let mut reader = RecordingMoveStateReader {
             joystick_events: Vec::new(),
+            failing_joystick_path: None,
         };
         let mut node = open_node(&options, "muninn-empty-joystick-test").unwrap();
 
@@ -3550,6 +3766,88 @@ mod tests {
         assert_eq!(record.move_id, "move-usb");
         assert_eq!(record.accelerometer_xyz, vec![0.0, 0.0, 0.0]);
         let _ = fs::remove_file(store_path);
+    }
+
+    #[test]
+    fn missing_move_state_source_does_not_block_other_sources() {
+        let store_path = std::env::temp_dir().join(format!(
+            "muninn-missing-joystick-events-{}.cc",
+            timestamp_ns().unwrap()
+        ));
+        let options = Options::parse(
+            [
+                "serve",
+                "--host",
+                "nightwing",
+                "--store",
+                store_path.to_str().unwrap(),
+                "--move-state",
+                "missing=/dev/input/js-missing",
+                "--move-state",
+                "present=/dev/input/js-present",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap();
+        let mut active = active_move_state_sources(options.move_state_sources.clone());
+        let mut reader = RecordingMoveStateReader {
+            joystick_events: Vec::new(),
+            failing_joystick_path: Some("/dev/input/js-missing".to_string()),
+        };
+        let mut node = open_node(&options, "muninn-missing-joystick-test").unwrap();
+
+        publish_move_controller_states(&mut node, &options, &mut active, &mut reader, None)
+            .unwrap();
+
+        assert!(
+            node.get_required::<MuninnMoveControllerStateRecord>(
+                "nightwing:missing:move-controller-state"
+            )
+            .is_err()
+        );
+        let record = node
+            .get_required::<MuninnMoveControllerStateRecord>(
+                "nightwing:present:move-controller-state",
+            )
+            .unwrap();
+        assert_eq!(record.move_id, "present");
+        let _ = fs::remove_file(store_path);
+    }
+
+    #[test]
+    fn active_move_state_sync_replaces_stale_hotplug_identity() {
+        let mut active = active_move_state_sources(vec![MoveStateSource {
+            move_id: "move-old".to_string(),
+            hidraw_path: "/dev/input/js0".to_string(),
+        }]);
+
+        sync_active_move_state_sources(
+            &mut active,
+            vec![
+                MoveStateSource {
+                    move_id: "move-new".to_string(),
+                    hidraw_path: "/dev/input/js0".to_string(),
+                },
+                MoveStateSource {
+                    move_id: "move-bt".to_string(),
+                    hidraw_path: "/dev/input/js1".to_string(),
+                },
+            ],
+        );
+
+        assert_eq!(active.len(), 2);
+        assert!(
+            active
+                .iter()
+                .any(|state| state.source.move_id == "move-new")
+        );
+        assert!(active.iter().any(|state| state.source.move_id == "move-bt"));
+        assert!(
+            !active
+                .iter()
+                .any(|state| state.source.move_id == "move-old")
+        );
     }
 
     #[test]
