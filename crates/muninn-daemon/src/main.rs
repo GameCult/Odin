@@ -1,12 +1,12 @@
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use cultmesh_rs::{
     CultMesh, CultMeshNodeOptions, CultMeshSharedMemoryFrameRing, CultMeshStreamBodyTransport,
     CultMeshStreamCatalog, CultMeshStreamClock, CultMeshStreamDescriptor, CultMeshStreamKind,
 };
 use cultnet_rs::{
-    CultNetMessage, CultNetRawDocumentRecord, CultNetRawPayloadEncoding,
-    CultNetRudpSocketTransportConnection, CultNetRudpSocketTransportOptions, CultNetWireContract,
-    encode_cultnet_message_to_vec,
+    encode_cultnet_message_to_vec, CultNetMessage, CultNetRawDocumentRecord,
+    CultNetRawPayloadEncoding, CultNetRudpSocketTransportConnection,
+    CultNetRudpSocketTransportOptions, CultNetWireContract,
 };
 use odin_core::{
     EveProviderAdvertisementCompatRecord, IdunnDaemonHealthRecord, MuninnCaptureStreamRecord,
@@ -204,10 +204,12 @@ fn serve(options: Options) -> Result<()> {
     let mut active_move_lights = Vec::new();
     let mut last_default_move_light_write_at = None;
     let mut last_idunn_health_publish_attempt_at = None;
+    let mut last_move_host_claim_attempt_at = None;
     let mut active_move_states = active_move_state_sources(live_move_state_sources(&options));
 
     loop {
         sync_active_move_state_sources(&mut active_move_states, live_move_state_sources(&options));
+        claim_move_host_if_due(&options, &mut last_move_host_claim_attempt_at);
         let mut node = open_node(&options, "muninn-daemon")?;
         register_move_light_commands(&mut node, &options, &mut active_move_lights)?;
         tick_move_light_commands(&mut node, &mut active_move_lights, &mut HidMoveLightWriter)?;
@@ -299,6 +301,33 @@ fn live_move_state_sources(options: &Options) -> Vec<MoveStateSource> {
         }
     }
     sources
+}
+
+fn claim_move_host_if_due(options: &Options, last_attempt_at: &mut Option<Instant>) {
+    let cadence = Duration::from_secs(5);
+    if last_attempt_at
+        .as_ref()
+        .is_some_and(|instant| instant.elapsed() < cadence)
+    {
+        return;
+    }
+    *last_attempt_at = Some(Instant::now());
+
+    let Some(host) = move_host_address_for_claim(options) else {
+        return;
+    };
+    if let Err(error) = claim_ps_move_host(&host) {
+        eprintln!("Muninn could not claim USB PS Move host {host}: {error:#}");
+    }
+}
+
+fn move_host_address_for_claim(options: &Options) -> Option<String> {
+    if let Some(host) = options.move_host_address.as_deref() {
+        if !host.trim().is_empty() {
+            return Some(host.to_string());
+        }
+    }
+    platform_default_bluetooth_host_address()
 }
 
 struct ActiveMoveEvidenceStream {
@@ -1590,6 +1619,164 @@ fn hid_iocgfeature(length: usize) -> libc::c_ulong {
         | (0x07 << IOC_NRSHIFT)
 }
 
+#[cfg(unix)]
+fn hid_iocsfeature(length: usize) -> libc::c_ulong {
+    const IOC_READ: libc::c_ulong = 2;
+    const IOC_WRITE: libc::c_ulong = 1;
+    const IOC_NRBITS: libc::c_ulong = 8;
+    const IOC_TYPEBITS: libc::c_ulong = 8;
+    const IOC_SIZEBITS: libc::c_ulong = 14;
+    const IOC_NRSHIFT: libc::c_ulong = 0;
+    const IOC_TYPESHIFT: libc::c_ulong = IOC_NRSHIFT + IOC_NRBITS;
+    const IOC_SIZESHIFT: libc::c_ulong = IOC_TYPESHIFT + IOC_TYPEBITS;
+    const IOC_DIRSHIFT: libc::c_ulong = IOC_SIZESHIFT + IOC_SIZEBITS;
+    ((IOC_READ | IOC_WRITE) << IOC_DIRSHIFT)
+        | ((length as libc::c_ulong) << IOC_SIZESHIFT)
+        | ((b'H' as libc::c_ulong) << IOC_TYPESHIFT)
+        | (0x06 << IOC_NRSHIFT)
+}
+
+#[cfg(unix)]
+fn platform_default_bluetooth_host_address() -> Option<String> {
+    let entries = fs::read_dir("/sys/class/bluetooth").ok()?;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.starts_with("hci") {
+            continue;
+        }
+        let address = fs::read_to_string(entry.path().join("address")).ok()?;
+        let address = address.trim();
+        if !address.is_empty() {
+            return Some(address.to_string());
+        }
+    }
+    bluetoothctl_host_address()
+}
+
+#[cfg(unix)]
+fn bluetoothctl_host_address() -> Option<String> {
+    let output = Command::new("bluetoothctl").arg("show").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.lines().find_map(|line| {
+        let trimmed = line.trim();
+        let address = trimmed
+            .strip_prefix("Controller ")?
+            .split_whitespace()
+            .next()?;
+        parse_bluetooth_address_little_endian(address)
+            .ok()
+            .map(|_| address.to_string())
+    })
+}
+
+#[cfg(not(unix))]
+fn platform_default_bluetooth_host_address() -> Option<String> {
+    None
+}
+
+#[cfg(unix)]
+fn unix_usb_move_hidraw_paths() -> Vec<String> {
+    let mut paths = Vec::new();
+    let Ok(entries) = fs::read_dir("/sys/class/hidraw") else {
+        return paths;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Ok(uevent) = fs::read_to_string(entry.path().join("device").join("uevent")) else {
+            continue;
+        };
+        if uevent.contains("HID_ID=0003:0000054C:000003D5") {
+            paths.push(format!("/dev/{name}"));
+        }
+    }
+    paths.sort();
+    paths
+}
+
+#[cfg(unix)]
+fn unix_claim_ps_move_host(host: &[u8; 6]) -> Result<usize> {
+    let mut claims = 0usize;
+    let mut hard_errors = Vec::new();
+    for path in unix_usb_move_hidraw_paths() {
+        let device = match fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&path)
+        {
+            Ok(device) => device,
+            Err(error) => {
+                hard_errors.push(format!("{path}: {error}"));
+                continue;
+            }
+        };
+
+        let before = controller_and_host_from_hidraw_device(&device);
+        let mut report = [0u8; 23];
+        report[0] = 0x05;
+        report[1..7].copy_from_slice(host);
+        let request = hid_iocsfeature(report.len());
+        let ok = unsafe { libc::ioctl(device.as_raw_fd(), request, report.as_mut_ptr()) };
+        if ok < 0 {
+            eprintln!(
+                "path={path} skipped error={}",
+                std::io::Error::last_os_error()
+            );
+            continue;
+        }
+        let after = controller_and_host_from_hidraw_device(&device);
+        let controller = after
+            .as_ref()
+            .or(before.as_ref())
+            .map(|addresses| addresses.0.as_str())
+            .unwrap_or("(unknown)");
+        let host_before = before
+            .as_ref()
+            .map(|addresses| addresses.1.as_str())
+            .unwrap_or("(unknown)");
+        let host_after = after
+            .as_ref()
+            .map(|addresses| addresses.1.as_str())
+            .unwrap_or("(unknown)");
+        println!(
+            "path={path} controller={controller} host_before={host_before} host_after={host_after}"
+        );
+        claims += 1;
+    }
+
+    if claims == 0 && !hard_errors.is_empty() {
+        return Err(anyhow!(
+            "no USB PS Move host claims succeeded: {}",
+            hard_errors.join("; ")
+        ));
+    }
+    Ok(claims)
+}
+
+#[cfg(unix)]
+fn controller_and_host_from_hidraw_device(device: &fs::File) -> Option<(String, String)> {
+    let mut report = [0u8; 16];
+    report[0] = 4;
+    let request = hid_iocgfeature(report.len());
+    let ok = unsafe { libc::ioctl(device.as_raw_fd(), request, report.as_mut_ptr()) };
+    if ok < 0 {
+        return None;
+    }
+    Some((
+        format_bluetooth_address_little_endian(&report[1..7]),
+        format_bluetooth_address_little_endian(&report[10..16]),
+    ))
+}
+
 #[cfg(not(unix))]
 fn joystick_light_hidraw_path(_joystick_path: &str) -> Option<String> {
     None
@@ -1618,12 +1805,12 @@ fn platform_default_move_lights_enabled() -> bool {
 #[cfg(windows)]
 fn windows_ps_move_light_paths() -> Result<Vec<DefaultMoveLightTarget>> {
     use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
-        DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, SP_DEVICE_INTERFACE_DATA,
         SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW,
+        DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, SP_DEVICE_INTERFACE_DATA,
     };
     use windows_sys::Win32::Devices::HumanInterfaceDevice::{
-        HIDD_ATTRIBUTES, HIDP_CAPS, HIDP_STATUS_SUCCESS, HidD_FreePreparsedData,
-        HidD_GetAttributes, HidD_GetHidGuid, HidD_GetPreparsedData, HidP_GetCaps,
+        HidD_FreePreparsedData, HidD_GetAttributes, HidD_GetHidGuid, HidD_GetPreparsedData,
+        HidP_GetCaps, HIDD_ATTRIBUTES, HIDP_CAPS, HIDP_STATUS_SUCCESS,
     };
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{
@@ -1744,7 +1931,6 @@ fn windows_ps_move_controller_identity(handle: *mut std::ffi::c_void) -> Option<
     )
 }
 
-#[cfg(windows)]
 fn parse_bluetooth_address_little_endian(value: &str) -> Result<[u8; 6]> {
     let parts = value.split([':', '-']).collect::<Vec<_>>();
     if parts.len() != 6 {
@@ -1759,7 +1945,6 @@ fn parse_bluetooth_address_little_endian(value: &str) -> Result<[u8; 6]> {
     Ok(address)
 }
 
-#[cfg(windows)]
 fn format_bluetooth_address_little_endian(address: &[u8]) -> String {
     address
         .iter()
@@ -1788,12 +1973,12 @@ fn windows_ps_move_bluetooth_addresses(handle: *mut std::ffi::c_void) -> Option<
 #[cfg(windows)]
 fn windows_claim_ps_move_host(host: &[u8; 6]) -> Result<usize> {
     use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
-        DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, SP_DEVICE_INTERFACE_DATA,
         SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW,
+        DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, SP_DEVICE_INTERFACE_DATA,
     };
     use windows_sys::Win32::Devices::HumanInterfaceDevice::{
-        HIDD_ATTRIBUTES, HIDP_CAPS, HIDP_STATUS_SUCCESS, HidD_FreePreparsedData,
-        HidD_GetAttributes, HidD_GetHidGuid, HidD_GetPreparsedData, HidD_SetFeature, HidP_GetCaps,
+        HidD_FreePreparsedData, HidD_GetAttributes, HidD_GetHidGuid, HidD_GetPreparsedData,
+        HidD_SetFeature, HidP_GetCaps, HIDD_ATTRIBUTES, HIDP_CAPS, HIDP_STATUS_SUCCESS,
     };
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{
@@ -1934,8 +2119,8 @@ fn windows_claim_ps_move_host(host: &[u8; 6]) -> Result<usize> {
 #[cfg(windows)]
 fn windows_ps_move_input_report() -> Result<Option<Vec<u8>>> {
     use windows_sys::Win32::Devices::HumanInterfaceDevice::{
-        HIDP_CAPS, HIDP_STATUS_SUCCESS, HidD_FreePreparsedData, HidD_GetInputReport,
-        HidD_GetPreparsedData, HidP_GetCaps,
+        HidD_FreePreparsedData, HidD_GetInputReport, HidD_GetPreparsedData, HidP_GetCaps,
+        HIDP_CAPS, HIDP_STATUS_SUCCESS,
     };
     use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_READ, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{
@@ -2004,8 +2189,8 @@ fn windows_read_hid_interrupt_report(
         WAIT_OBJECT_0, WAIT_TIMEOUT,
     };
     use windows_sys::Win32::Storage::FileSystem::ReadFile;
-    use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
     use windows_sys::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
+    use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 
     let event = unsafe { CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) };
     if event.is_null() {
@@ -2091,7 +2276,7 @@ unsafe fn windows_hid_interface_path(
     interface_data: &mut windows_sys::Win32::Devices::DeviceAndDriverInstallation::SP_DEVICE_INTERFACE_DATA,
 ) -> Option<String> {
     use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
-        SP_DEVICE_INTERFACE_DETAIL_DATA_W, SetupDiGetDeviceInterfaceDetailW,
+        SetupDiGetDeviceInterfaceDetailW, SP_DEVICE_INTERFACE_DETAIL_DATA_W,
     };
 
     let mut required_size = 0;
@@ -2148,8 +2333,8 @@ unsafe fn windows_hid_interface_path(
 fn write_windows_hid_report(path: &str, report: &[u8]) -> Result<()> {
     use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_WRITE, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
-        WriteFile,
+        CreateFileW, WriteFile, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        OPEN_EXISTING,
     };
 
     let wide = wide_null(path);
@@ -2737,10 +2922,20 @@ fn claim_move_host(options: Options) -> Result<()> {
     claim_ps_move_host(host)
 }
 
-#[cfg(not(windows))]
+#[cfg(unix)]
+fn claim_ps_move_host(host_address: &str) -> Result<()> {
+    let host = parse_bluetooth_address_little_endian(host_address)?;
+    let claims = unix_claim_ps_move_host(&host)?;
+    if claims == 0 {
+        println!("no USB PS Move pairing collections found");
+    }
+    Ok(())
+}
+
+#[cfg(all(not(unix), not(windows)))]
 fn claim_ps_move_host(_host_address: &str) -> Result<()> {
     Err(anyhow!(
-        "claim-move-host is implemented in Muninn on Windows; use scripts/nightwing-claim-usb-moves.sh on Linux"
+        "claim-move-host is implemented in Muninn on Unix and Windows"
     ))
 }
 
@@ -3410,11 +3605,9 @@ mod tests {
         let sources = available_sources(&options);
 
         assert!(sources.iter().any(|source| source.starts_with("screen:")));
-        assert!(
-            sources
-                .iter()
-                .any(|source| source.starts_with("audio-loopback:"))
-        );
+        assert!(sources
+            .iter()
+            .any(|source| source.starts_with("audio-loopback:")));
     }
 
     #[test]
@@ -3802,12 +3995,11 @@ mod tests {
         publish_move_controller_states(&mut node, &options, &mut active, &mut reader, None)
             .unwrap();
 
-        assert!(
-            node.get_required::<MuninnMoveControllerStateRecord>(
+        assert!(node
+            .get_required::<MuninnMoveControllerStateRecord>(
                 "nightwing:missing:move-controller-state"
             )
-            .is_err()
-        );
+            .is_err());
         let record = node
             .get_required::<MuninnMoveControllerStateRecord>(
                 "nightwing:present:move-controller-state",
@@ -3839,17 +4031,13 @@ mod tests {
         );
 
         assert_eq!(active.len(), 2);
-        assert!(
-            active
-                .iter()
-                .any(|state| state.source.move_id == "move-new")
-        );
+        assert!(active
+            .iter()
+            .any(|state| state.source.move_id == "move-new"));
         assert!(active.iter().any(|state| state.source.move_id == "move-bt"));
-        assert!(
-            !active
-                .iter()
-                .any(|state| state.source.move_id == "move-old")
-        );
+        assert!(!active
+            .iter()
+            .any(|state| state.source.move_id == "move-old"));
     }
 
     #[test]
