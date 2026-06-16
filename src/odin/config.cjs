@@ -38,6 +38,7 @@ function buildConfig(argv) {
     path.join(repoRoot, "..", "VoidBot", ".voidbot", "status", "cultmesh", "voidbot-swarm-state.cc"),
     path.join(repoRoot, "..", "Bifrost", ".bifrost", "provider-advertisement.cc"),
     path.join(repoRoot, "..", "weksa", ".weksa", "provider-advertisement-store.cc"),
+    path.join(repoRoot, "..", "Vili", ".vili", "vili.service.cc"),
   ].join(",");
   const interfaceBindingStores = String(
     args.interfaceBindingStore ||

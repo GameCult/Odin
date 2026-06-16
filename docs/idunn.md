@@ -306,9 +306,11 @@ Vili's Node daemon now has an in-process Idunn RUDP publisher for
 `vili.cultnet-rudp-animation-health`, and local smoke proof shows Idunn accepts
 that record over `cultnet.transport.rudp.v0`. Vili also writes
 `.vili\vili.service.cc` with daemon-owned provider advertisement, operator
-state, Eve surface, command boundary, and transport profile records. That is
-implementation proof, not live Raven deployment proof. Vili remains the active
-cut until Raven is reachable, the updated package is deployed there, and
+state, Eve surface, command boundary, and transport profile records. Odin local
+provider discovery can ingest that typed store, including the Vili command
+boundary and transport profile. That is implementation proof, not live Raven
+deployment proof. Vili remains the active cut until Raven is reachable, the
+updated package is deployed there, and
 `GameCult\Vili` is restarted with
 `--idunn-rudp-health 10.77.0.2:17870`.
 

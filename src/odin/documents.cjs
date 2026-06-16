@@ -6,8 +6,11 @@ function defineOdinDocuments(defineDocumentType) {
   if (!defineDocumentType) {
     return {
       interfaceBindingDefinition: null,
+      operatorStateDefinition: null,
       providerAdvertisementDefinition: null,
       surfaceDefinition: null,
+      viliCommandBoundaryDefinition: null,
+      viliTransportProfileDefinition: null,
       voidbotSwarmSnapshotDefinition: null,
     };
   }
@@ -46,6 +49,33 @@ function defineOdinDocuments(defineDocumentType) {
     name: (value) => value?.providerId || "provider",
     schema: parseObjectDocument("Eve provider advertisement"),
   });
+  const operatorStateDefinition = defineDocumentType({
+    type: "gamecult.vili.operator_state",
+    schemaName: "gamecult.vili.operator_state",
+    schemaId: "gamecult.vili.operator_state.v1",
+    schemaVersion: "gamecult.vili.operator_state.v1",
+    global: false,
+    name: (value) => value?.service || value?.providerId || "operator",
+    schema: parseObjectDocument("Vili operator state"),
+  });
+  const viliCommandBoundaryDefinition = defineDocumentType({
+    type: "gamecult.vili.command_boundary",
+    schemaName: "gamecult.vili.command_boundary",
+    schemaId: "gamecult.vili.command_boundary.v1",
+    schemaVersion: "gamecult.vili.command_boundary.v1",
+    global: false,
+    name: (value) => value?.boundaryId || value?.daemonId || "vili",
+    schema: parseObjectDocument("Vili command boundary"),
+  });
+  const viliTransportProfileDefinition = defineDocumentType({
+    type: "gamecult.vili.transport_profile",
+    schemaName: "gamecult.vili.transport_profile",
+    schemaId: "gamecult.vili.transport_profile.v1",
+    schemaVersion: "gamecult.vili.transport_profile.v1",
+    global: false,
+    name: (value) => value?.profileId || value?.daemonId || "vili",
+    schema: parseObjectDocument("Vili transport profile"),
+  });
   const voidbotSwarmSnapshotDefinition = defineDocumentType({
     type: "voidbot.swarm_state_snapshot",
     schemaName: "voidbot.swarm_state_snapshot",
@@ -57,8 +87,11 @@ function defineOdinDocuments(defineDocumentType) {
 
   return {
     interfaceBindingDefinition,
+    operatorStateDefinition,
     providerAdvertisementDefinition,
     surfaceDefinition,
+    viliCommandBoundaryDefinition,
+    viliTransportProfileDefinition,
     voidbotSwarmSnapshotDefinition,
   };
 }

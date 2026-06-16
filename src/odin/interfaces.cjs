@@ -53,11 +53,14 @@ function createInterfaceDiscovery({
   async function discoverProviderAdvertisements() {
     const {
       interfaceBindingDefinition,
+      operatorStateDefinition,
       providerAdvertisementDefinition,
       surfaceDefinition,
+      viliCommandBoundaryDefinition,
+      viliTransportProfileDefinition,
       voidbotSwarmSnapshotDefinition,
     } = documents;
-    if (!CultMesh || !interfaceBindingDefinition || !surfaceDefinition || !voidbotSwarmSnapshotDefinition || !providerAdvertisementDefinition) {
+    if (!CultMesh || !interfaceBindingDefinition || !operatorStateDefinition || !surfaceDefinition || !viliCommandBoundaryDefinition || !viliTransportProfileDefinition || !voidbotSwarmSnapshotDefinition || !providerAdvertisementDefinition) {
       return [];
     }
 
@@ -73,6 +76,9 @@ function createInterfaceDiscovery({
             providerAdvertisementDefinition,
             interfaceBindingDefinition,
             surfaceDefinition,
+            operatorStateDefinition,
+            viliCommandBoundaryDefinition,
+            viliTransportProfileDefinition,
           ],
         });
         const advertisements = typeof node.cache?.getAll === "function"
@@ -98,6 +104,13 @@ function createInterfaceDiscovery({
               || advertisement.provider?.endpoint
               || `cultmesh:${storePath}`,
             capabilities: advertisement.provider?.capabilities || advertisement.capabilities || [],
+            operatorState: node.get?.(operatorStateDefinition, "vili") || null,
+            commandBoundary: node.get?.(viliCommandBoundaryDefinition, advertisement.providerId)
+              || node.get?.(viliCommandBoundaryDefinition, advertisement.daemonId || "vili")
+              || null,
+            transportProfile: node.get?.(viliTransportProfileDefinition, advertisement.providerId)
+              || node.get?.(viliTransportProfileDefinition, advertisement.daemonId || "vili")
+              || null,
             usesCultMesh: true,
             transport: advertisement.provider?.transport || "CultMesh provider advertisement",
             status: advertisement.status || "unknown",
@@ -119,11 +132,14 @@ function createInterfaceDiscovery({
   async function discoverCultMeshInterfaceBindings() {
     const {
       interfaceBindingDefinition,
+      operatorStateDefinition,
       providerAdvertisementDefinition,
       surfaceDefinition,
+      viliCommandBoundaryDefinition,
+      viliTransportProfileDefinition,
       voidbotSwarmSnapshotDefinition,
     } = documents;
-    if (!CultMesh || !interfaceBindingDefinition || !surfaceDefinition || !voidbotSwarmSnapshotDefinition || !providerAdvertisementDefinition) {
+    if (!CultMesh || !interfaceBindingDefinition || !operatorStateDefinition || !surfaceDefinition || !viliCommandBoundaryDefinition || !viliTransportProfileDefinition || !voidbotSwarmSnapshotDefinition || !providerAdvertisementDefinition) {
       return [];
     }
     const interfaces = [];
@@ -138,8 +154,35 @@ function createInterfaceDiscovery({
             providerAdvertisementDefinition,
             interfaceBindingDefinition,
             surfaceDefinition,
+            operatorStateDefinition,
+            viliCommandBoundaryDefinition,
+            viliTransportProfileDefinition,
           ],
         });
+        const advertisements = typeof node.cache?.getAll === "function"
+          ? node.cache.getAll(providerAdvertisementDefinition)
+          : [];
+        for (const advertisement of advertisements) {
+          if (!advertisement?.providerId) {
+            continue;
+          }
+          const state = node.get(surfaceDefinition, advertisement.providerId);
+          if (!state?.surface) {
+            continue;
+          }
+          interfaces.push(cultMeshProviderInterface({
+            advertisement,
+            state,
+            storePath,
+            operatorState: node.get?.(operatorStateDefinition, "vili") || null,
+            commandBoundary: node.get?.(viliCommandBoundaryDefinition, advertisement.providerId)
+              || node.get?.(viliCommandBoundaryDefinition, advertisement.daemonId || "vili")
+              || null,
+            transportProfile: node.get?.(viliTransportProfileDefinition, advertisement.providerId)
+              || node.get?.(viliTransportProfileDefinition, advertisement.daemonId || "vili")
+              || null,
+          }));
+        }
         const bindings = typeof node.cache?.getAll === "function"
           ? node.cache.getAll(interfaceBindingDefinition)
           : [node.get(interfaceBindingDefinition, "voidbot.swarm")].filter(Boolean);
@@ -195,6 +238,36 @@ function createInterfaceDiscovery({
     discoverProviderAdvertisements,
     discoverInterfaces,
     getDiscoveredDeckUrls: () => [...discoveredDeckUrls],
+  };
+}
+
+function cultMeshProviderInterface({
+  advertisement,
+  state,
+  storePath,
+  operatorState = null,
+  commandBoundary = null,
+  transportProfile = null,
+}) {
+  const surface = state.surface || null;
+  return {
+    providerId: advertisement.providerId,
+    title: state.title || advertisement.title || advertisement.providerId,
+    state: "active",
+    detail: `${surface?.root?.kind || surface?.root?.type || "surface"} ${countSurfaceNodes(surface, state)} nodes via provider advertisement`,
+    version: state.version || 0,
+    updatedAt: state.updatedAt || advertisement.updatedAt || new Date().toISOString(),
+    source: `cultmesh:${storePath}`,
+    manifest: advertisement,
+    canonicalService: advertisement.canonicalService || null,
+    locatedService: advertisement.locatedService || null,
+    cultMeshAddress: advertisement.cultMeshAddress || null,
+    endpoints: advertisement.endpoints || [],
+    routes: advertisement.routes || [],
+    operatorState,
+    commandBoundary,
+    transportProfile,
+    surface,
   };
 }
 

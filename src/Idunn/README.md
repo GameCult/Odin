@@ -193,14 +193,17 @@ probe. The record must match the daemon id, health contract, RUDP transport,
 and freshness window; otherwise the compatibility probe remains fallback
 evidence.
 
-The next cut is Weksa: provider health must publish through
-`cultnet.transport.rudp.v0` instead of remaining HTTP compatibility evidence.
-Stonks already publishes daemon health through RUDP, but still owes provider
-advertisement and command-boundary publication before its HTTP surfaces can be
-pure display/debug lowerings. After Weksa, continue daemon-by-daemon, promote
-the built-in target catalog into Odin-ingested service/provider records, keep
-named adapters only for legacy service-manager crossings, and replace the local
-operator alarm bridge with a fully Bifrost-owned notification request record.
+The current active cut is Vili plus Raven task-action repair. Vili publishes
+RUDP health locally and writes a daemon-owned `.vili\vili.service.cc` store with
+provider advertisement, operator state, Eve surface, command boundary, and
+transport profile records; Odin local discovery can ingest that typed store.
+Live Raven deployment remains blocked while SSH is unreachable. Raven Muninn
+task actions are also an explicit ops invariant: Task Scheduler must execute
+`wscript.exe //B //Nologo` hidden launcher actions directly for
+`GameCult-Muninn`, `GameCult-Muninn-Activate`, and
+`GameCult-Muninn-VideoProof`, never raw `.cmd` wrappers. After those live cuts,
+continue daemon-by-daemon until compatibility HTTP, TCP, WebSocket, and command
+probes are fallback witnesses only.
 
 Rust no longer gets to claim the transport is imaginary:
 `vendor/cultnet-rs` includes the canonical CNR0 `cultnet.transport.rudp.v0`

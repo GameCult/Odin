@@ -1201,7 +1201,7 @@ fn daemon_surgery_plan(target: &DaemonTarget, updated_at: &str) -> IdunnDaemonSu
             status = "rudp-health-and-cultcache-state-implemented-raven-deploy-blocked";
             owner = "Vili animation runtime";
             current_mechanism =
-                "Vili now has an in-process CultNet/RUDP Idunn health publisher in the Node animation daemon plus a Vili-owned vili.service.cc CultCache store containing provider advertisement, operator state, Eve surface, command_boundary, and transport_profile records. Local smoke proof shows Idunn accepts vili.cultnet-rudp-animation-health. Live Raven still runs the compatibility health/deck path until the updated Vili task can be deployed and restarted on that host."
+                "Vili now has an in-process CultNet/RUDP Idunn health publisher in the Node animation daemon plus a Vili-owned vili.service.cc CultCache store containing provider advertisement, operator state, Eve surface, command_boundary, and transport_profile records. Local smoke proof shows Idunn accepts vili.cultnet-rudp-animation-health, and Odin local discovery can ingest the Vili provider advertisement plus command/transport records from that store. Live Raven still runs the compatibility health/deck path until the updated Vili task can be deployed and restarted on that host."
                     .to_string();
             intended_authority =
                 "Vili publishes animation daemon health, provider advertisement, operator state, command boundary, and transport profile as typed CultMesh/CultNet records over cultnet.transport.rudp.v0; HTTP and WebSocket remain renderer/operator lowerings only."
@@ -1215,7 +1215,7 @@ fn daemon_surgery_plan(target: &DaemonTarget, updated_at: &str) -> IdunnDaemonSu
                 "Deploy the updated Vili package and npm dependency lock on Raven when SSH is reachable.".to_string(),
                 "Restart GameCult\\Vili so the task launches the daemon with --idunn-rudp-health 10.77.0.2:17870 and contract vili.cultnet-rudp-animation-health.".to_string(),
                 "Verify live Idunn accepts vili.cultnet-rudp-animation-health from Raven over cultnet.transport.rudp.v0 before compatibility probe fallback.".to_string(),
-                "Teach Odin to ingest Vili provider advertisement, command_boundary, and transport_profile over CultNet/RUDP, then demote health-vili.cmd and HTTP/WebSocket deck probes.".to_string(),
+                "Keep Odin provider discovery pointed at Vili's daemon-owned vili.service.cc store; after Raven deploy, demote health-vili.cmd and HTTP/WebSocket deck probes to fallback witnesses only.".to_string(),
             ];
             blockers.push(
                 "Raven SSH currently times out, so the updated Vili runtime cannot be deployed or restarted on the live host."
