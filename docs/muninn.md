@@ -207,6 +207,12 @@ Raven is an operator-consented host: Muninn operations on Raven must be
 background-only and must not create visible terminal windows. `.cmd` files may
 exist only as manual compatibility trampolines; Task Scheduler must execute
 hidden launchers directly and must not flash an interactive console on Raven.
+The repair actuator for live Raven task drift is
+`E:\Projects\Odin\scripts\repair-raven-muninn-task-actions.ps1`. It must
+register `GameCult-Muninn`, `GameCult-Muninn-Activate`, and
+`GameCult-Muninn-VideoProof` with `wscript.exe` as the task action and the
+corresponding `*-hidden.vbs` launcher as arguments. If Raven is unreachable, the
+repo is prepared but the live scheduler is not clean.
 
 Nightwing Muninn is kept alive by the single Idunn supervisor through the
 `nightwing-muninn` daemon target. Idunn learns that target through Odin's typed

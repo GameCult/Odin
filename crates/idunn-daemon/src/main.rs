@@ -429,18 +429,19 @@ fn verify_rudp_loopback() -> Result<String> {
     client_socket.set_read_timeout(Some(Duration::from_millis(100)))?;
 
     let handle = thread::spawn(move || -> Result<()> {
-        let mut server = CultNetRudpSocketTransportConnection::new(
-            CultNetRudpSocketTransportOptions::server(
+        let mut server =
+            CultNetRudpSocketTransportConnection::new(CultNetRudpSocketTransportOptions::server(
                 "idunn-rudp-loopback-server",
                 server_socket,
                 IDUNN_HEALTH_RUDP_CONNECTION_ID,
-            ),
-        )?;
+            ))?;
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             if let Some(frame) = server.receive_once()? {
-                let message =
-                    decode_cultnet_message_from_slice(&frame.payload, CultNetWireContract::CultNetSchemaV0)?;
+                let message = decode_cultnet_message_from_slice(
+                    &frame.payload,
+                    CultNetWireContract::CultNetSchemaV0,
+                )?;
                 return match message {
                     CultNetMessage::Hello { runtime_id, .. } if runtime_id == "idunn-daemon" => {
                         Ok(())
@@ -449,19 +450,20 @@ fn verify_rudp_loopback() -> Result<String> {
                 };
             }
             if Instant::now() >= deadline {
-                return Err(anyhow!("Idunn RUDP loopback timed out waiting for schema frame"));
+                return Err(anyhow!(
+                    "Idunn RUDP loopback timed out waiting for schema frame"
+                ));
             }
         }
     });
 
-    let mut client = CultNetRudpSocketTransportConnection::new(
-        CultNetRudpSocketTransportOptions::client(
+    let mut client =
+        CultNetRudpSocketTransportConnection::new(CultNetRudpSocketTransportOptions::client(
             "idunn-rudp-loopback-client",
             client_socket,
             server_addr,
             IDUNN_HEALTH_RUDP_CONNECTION_ID,
-        ),
-    )?;
+        ))?;
     client.connect(Vec::new())?;
     let deadline = Instant::now() + Duration::from_secs(2);
     while !client.connected() {
@@ -472,17 +474,17 @@ fn verify_rudp_loopback() -> Result<String> {
         }
     }
     let message = CultNetMessage::Hello {
-            runtime_id: "idunn-daemon".to_string(),
-            runtime_kind: "keepalive".to_string(),
-            agent_id: None,
-            role: Some("idunn.runtime-transport-self-check".to_string()),
-            display_name: Some("Idunn RUDP self-check".to_string()),
-            supported_document_types: Some(vec!["idunn.runtime_transport_check".to_string()]),
-            supported_mutation_contracts: None,
-            supported_message_versions: Some(vec!["cultnet.hello.v0".to_string()]),
-            transport_profiles: Some(vec![client.profile.clone()]),
-            supports_schema_catalog: Some(false),
-        };
+        runtime_id: "idunn-daemon".to_string(),
+        runtime_kind: "keepalive".to_string(),
+        agent_id: None,
+        role: Some("idunn.runtime-transport-self-check".to_string()),
+        display_name: Some("Idunn RUDP self-check".to_string()),
+        supported_document_types: Some(vec!["idunn.runtime_transport_check".to_string()]),
+        supported_mutation_contracts: None,
+        supported_message_versions: Some(vec!["cultnet.hello.v0".to_string()]),
+        transport_profiles: Some(vec![client.profile.clone()]),
+        supports_schema_catalog: Some(false),
+    };
     let payload = encode_cultnet_message_to_vec(&message, CultNetWireContract::CultNetSchemaV0)?;
     client.send("schema", payload)?;
     handle
@@ -575,8 +577,7 @@ fn run_rudp_health_ingress_loop(
         match socket.recv_from(&mut buffer) {
             Ok((size, source)) => {
                 let observed_at = timestamp()?;
-                match handle_rudp_health_datagram(&socket, &mut sessions, &buffer[..size], source)
-                {
+                match handle_rudp_health_datagram(&socket, &mut sessions, &buffer[..size], source) {
                     Ok(frames) => {
                         for frame in frames {
                             let message = decode_cultnet_message_from_slice(
@@ -783,11 +784,11 @@ fn swarm_surgery_plan(
             "5. Delete or demote compatibility probes once every target has daemon-owned publication and advertised lifecycle authority.".to_string(),
         ],
         current_phase:
-            "Phase 7: move Weksa provider health from HTTP compatibility evidence to daemon-published RUDP state."
+            "Phase 7: move Weksa provider health from HTTP compatibility evidence to daemon-published RUDP state, with Raven Muninn scheduled-task action repair queued as a background-only ops invariant."
                 .to_string(),
         next_target: next_target.to_string(),
         cut_line:
-            "Muninn, Idunn, Odin, and Stonks now exercise daemon-owned RUDP health locally. Weksa is the next JavaScript provider cut; Raven task repairs remain queued until the host is reachable."
+            "Muninn, Idunn, Odin, and Stonks now exercise daemon-owned RUDP health locally. Weksa is the next JavaScript provider cut. Live Raven still needs GameCult-Muninn, GameCult-Muninn-Activate, and GameCult-Muninn-VideoProof task actions repaired to execute wscript.exe hidden launchers directly; application is blocked while Raven SSH is unreachable."
                 .to_string(),
         verification_layer:
             "CultMesh keepalive store records plus live Idunn decision cycles, not process exit codes or chat summaries."
@@ -988,7 +989,31 @@ fn daemon_surgery_plan(target: &DaemonTarget, updated_at: &str) -> IdunnDaemonSu
                 "VoidBot publishes internal swarm, repo-face, and provider health over CultNet/RUDP; Discord delivery remains a boundary adapter, never daemon truth."
                     .to_string();
         }
-        "starfire-muninn" | "muninn" | "nightwing-muninn" => {
+        "muninn" => {
+            status = "partial-rudp-health-live";
+            owner = "Muninn Rust runtime plus Raven background-only launcher surface";
+            current_mechanism =
+                "Muninn can publish daemon health over CultNet/RUDP, and Odin has a repair actuator that registers Raven scheduled tasks with wscript.exe hidden launcher actions. Live Raven still has reported raw .cmd task actions for GameCult-Muninn, GameCult-Muninn-Activate, and GameCult-Muninn-VideoProof until the repair can be applied on the host."
+                    .to_string();
+            intended_authority =
+                "Muninn publishes telemetry and daemon health over CultNet/RUDP; Raven Task Scheduler owns only background launch of hidden WScript/PowerShell launchers and never visible .cmd trampoline execution."
+                    .to_string();
+            cut_line =
+                "Cut raw .cmd scheduled-task actions on Raven. .cmd files may remain manual compatibility trampolines only when Task Scheduler executes the hidden VBS launcher directly."
+                    .to_string();
+            steps = vec![
+                "Apply scripts/repair-raven-muninn-task-actions.ps1 when Raven SSH is reachable.".to_string(),
+                "Verify GameCult-Muninn action executes wscript.exe with start-muninn-serve-hidden.vbs arguments.".to_string(),
+                "Verify GameCult-Muninn-Activate action executes wscript.exe with activate-raven-av-srt-hidden.vbs arguments.".to_string(),
+                "Verify GameCult-Muninn-VideoProof action executes wscript.exe with muninn-raven-video-to-starfire-obs-hidden.vbs arguments.".to_string(),
+                "Keep Raven health/restart actuators background-only; no visible terminals or interactive windows on the shared host.".to_string(),
+            ];
+            blockers.push(
+                "Raven SSH currently times out, so the prepared task-action repair cannot be applied live."
+                    .to_string(),
+            );
+        }
+        "starfire-muninn" | "nightwing-muninn" => {
             owner = "Muninn Rust runtime";
             current_mechanism =
                 "Muninn has typed telemetry state, but Idunn still validates continuity through local or remote script probes."
@@ -1910,7 +1935,14 @@ mod tests {
 
         let plan = swarm_surgery_plan(
             "starfire-local",
-            &[odin, stonks, weksa, starfire_muninn, nightwing_muninn, raven_muninn],
+            &[
+                odin,
+                stonks,
+                weksa,
+                starfire_muninn,
+                nightwing_muninn,
+                raven_muninn.clone(),
+            ],
             "unix:100",
         );
 
@@ -1919,6 +1951,9 @@ mod tests {
         assert_eq!(plan.next_target, "weksa");
         assert!(plan.current_phase.contains("Weksa"));
         assert!(plan.cut_line.contains("Muninn, Idunn, Odin, and Stonks"));
+        assert!(plan.cut_line.contains("GameCult-Muninn-Activate"));
+        assert!(plan.cut_line.contains("GameCult-Muninn-VideoProof"));
+        assert!(plan.cut_line.contains("Raven SSH is unreachable"));
         assert!(plan.verification_layer.contains("CultMesh keepalive store"));
         assert!(
             plan.invariants
@@ -1933,9 +1968,33 @@ mod tests {
                     && invariant.contains("visible terminal"))
         );
         assert!(
-            plan.invariants.iter().any(|invariant| invariant.contains("Raven")
-                && invariant.contains("Task Scheduler")
-                && invariant.contains(".cmd"))
+            plan.invariants
+                .iter()
+                .any(|invariant| invariant.contains("Raven")
+                    && invariant.contains("Task Scheduler")
+                    && invariant.contains(".cmd"))
+        );
+
+        let raven_plan = daemon_surgery_plan(&raven_muninn, "unix:100");
+        assert_eq!(raven_plan.status, "partial-rudp-health-live");
+        assert!(
+            raven_plan
+                .current_mechanism
+                .contains("raw .cmd task actions")
+        );
+        assert!(
+            raven_plan
+                .cut_line
+                .contains("Cut raw .cmd scheduled-task actions")
+        );
+        assert!(raven_plan.steps.iter().any(
+            |step| step.contains("GameCult-Muninn-VideoProof") && step.contains("wscript.exe")
+        ));
+        assert!(
+            raven_plan
+                .blockers
+                .iter()
+                .any(|blocker| blocker.contains("Raven SSH currently times out"))
         );
     }
 
@@ -1999,7 +2058,11 @@ mod tests {
         let profile = daemon_transport_profile(&stonks, "unix:100");
 
         assert_eq!(profile.state, "partial-rudp-health-live");
-        assert!(profile.current_transport.contains("daemon-published-rudp-health"));
+        assert!(
+            profile
+                .current_transport
+                .contains("daemon-published-rudp-health")
+        );
         assert!(profile.cut_line.contains("provider advertisement"));
     }
 

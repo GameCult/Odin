@@ -273,14 +273,18 @@ local Idunn, while Nightwing and Raven publish over WireGuard to
 publishes `odin.cultnet-rudp-provider-health` after each provider refresh.
 Stonks publishes `stonks.cultnet-rudp-market-health` after each serialized
 market refresh. Live Idunn cycles accept these records before command-probe
-fallback.
+fallback. Raven's Muninn scheduled-task repair is a separate ops invariant:
+`GameCult-Muninn`, `GameCult-Muninn-Activate`, and
+`GameCult-Muninn-VideoProof` must execute `wscript.exe` hidden launcher actions,
+not raw `.cmd` task actions.
 
 Next: move Weksa provider health off HTTP compatibility evidence and onto
 daemon-owned RUDP state, then continue runtime-by-runtime until compatibility
 probes can be deleted or demoted. Stonks still owes provider advertisement and
 command-boundary RUDP publication before its HTTP surfaces can be purely
 display/debug lowerings. Raven Muninn task action repair is queued separately
-and remains blocked while Raven is unreachable.
+and remains blocked while Raven is unreachable over SSH; the prepared actuator is
+`scripts\repair-raven-muninn-task-actions.ps1`.
 
 No ad hoc JSON manifest, HTTP endpoint, TCP socket, or WebSocket bridge may
 become the live state owner. Debug projections are fine when they name the
