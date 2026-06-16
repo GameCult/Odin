@@ -748,6 +748,21 @@ fn handle_rudp_health_datagram(
         ));
     }
 
+    let now = unix_epoch_millis()?;
+
+    if packet.packet_type == CultNetRudpPacketType::Connect {
+        let mut session = CultNetRudpSession::new(CultNetRudpSessionOptions {
+            connection_id: IDUNN_HEALTH_RUDP_CONNECTION_ID,
+            initial_sequence: 1,
+            resend_delay_ms: 100,
+            max_pending_reliable_packets: None,
+        });
+        let accept = session.accept_connect(&packet, now, Vec::new())?;
+        socket.send_to(&encode_rudp_packet(&accept)?, source)?;
+        sessions.insert(source, session);
+        return Ok(Vec::new());
+    }
+
     let session = sessions.entry(source).or_insert_with(|| {
         CultNetRudpSession::new(CultNetRudpSessionOptions {
             connection_id: IDUNN_HEALTH_RUDP_CONNECTION_ID,
@@ -756,13 +771,6 @@ fn handle_rudp_health_datagram(
             max_pending_reliable_packets: None,
         })
     });
-    let now = unix_epoch_millis()?;
-
-    if packet.packet_type == CultNetRudpPacketType::Connect {
-        let accept = session.accept_connect(&packet, now, Vec::new())?;
-        socket.send_to(&encode_rudp_packet(&accept)?, source)?;
-        return Ok(Vec::new());
-    }
 
     let result = session.receive(&packet, now)?;
     if let Some(reply) = result.reply {
@@ -949,9 +957,9 @@ fn daemon_transport_profile(
             "Vili has an in-process CultNet/RUDP Idunn health publisher plus local CultCache provider, operator, command_boundary, and transport_profile records; live Raven deployment and scheduled-task restart are blocked while Raven SSH is unreachable.",
         ),
         "yggdrasil-streampixels" => (
-            "daemon-owned-cultcache-service-boundary + compatibility.ssh-systemd-http fallback",
-            "provider-store-prepared-rudp-health-required",
-            "StreamPixels service runtime publishes a daemon-owned CultCache boundary with provider advertisement, command_boundary, transport_profile, and Idunn health summary; Yggdrasil SSH/systemd/HTTP checks remain fallback witnesses until the service publishes health over CultNet/RUDP.",
+            "daemon-owned-cultcache-service-boundary + implemented-rudp-health-publisher + compatibility.ssh-systemd-http fallback",
+            "publisher-implemented-ingress-acceptance-required",
+            "StreamPixels service runtime publishes a daemon-owned CultCache boundary with provider advertisement, command_boundary, transport_profile, and Idunn health summary; the service now has an in-process CultNet/RUDP health publisher, but local one-shot acceptance and Yggdrasil deployment still need proof before SSH/systemd/HTTP checks can be demoted.",
         ),
         _ => (
             "compatibility.local-command",
@@ -1266,21 +1274,22 @@ fn daemon_surgery_plan(target: &DaemonTarget, updated_at: &str) -> IdunnDaemonSu
         }
         "yggdrasil-streampixels" => {
             severity = "medium";
-            status = "provider-store-prepared-rudp-health-required";
+            status = "publisher-implemented-ingress-acceptance-required";
             owner = "StreamPixels service runtime plus gamecult-ops deploy lane";
             current_mechanism =
-                "StreamPixels now publishes a daemon-owned CultCache boundary store with provider advertisement, command_boundary, transport_profile, and Idunn health summary from the service runtime. Yggdrasil deployment freshness is still checked and deployed through SSH/systemd/source-artifact compatibility scripts."
+                "StreamPixels now publishes a daemon-owned CultCache boundary store with provider advertisement, command_boundary, transport_profile, and Idunn health summary from the service runtime. The service has an in-process CultNet/RUDP Idunn health publisher wired behind STREAMPIXELS_IDUNN_RUDP_HEALTH, but local one-shot publisher acceptance is still failing while resident Idunn publishers succeed. Yggdrasil deployment freshness is still checked and deployed through SSH/systemd/source-artifact compatibility scripts."
                     .to_string();
             intended_authority =
                 "StreamPixels publishes service health, provider state, command boundary, and transport profile over cultnet.transport.rudp.v0, with the service-owned CultCache boundary as durable local state and HTTP/SSH/systemd as fallback witnesses."
                     .to_string();
             cut_line =
-                "Keep the StreamPixels service boundary store; add CultNet/RUDP Idunn health publication from the service process, deploy it on Yggdrasil, then demote SSH/systemd/HTTP checks to deployment/debug witnesses."
+                "Keep the StreamPixels service boundary store and in-process RUDP publisher; fix/prove Idunn acceptance for StreamPixels one-shot health publication, deploy it on Yggdrasil, then demote SSH/systemd/HTTP checks to deployment/debug witnesses."
                     .to_string();
             steps = vec![
                 "Keep apps/service/src/verse-state.ts publishing streampixels.service.cc from the StreamPixels service runtime.".to_string(),
                 "Teach Odin to ingest StreamPixels provider advertisement, command_boundary, and transport_profile records from the service-owned CultCache boundary store.".to_string(),
-                "Add StreamPixels Idunn RUDP health publication using contract streampixels.cultnet-rudp-service-health.".to_string(),
+                "Keep the StreamPixels in-process Idunn RUDP health publisher using contract streampixels.cultnet-rudp-service-health.".to_string(),
+                "Fix or prove Idunn acceptance for fresh one-shot RUDP health publishers; current resident publishers are accepted, but StreamPixels/Odin one-shot probes time out before accept.".to_string(),
                 "Deploy the updated service to Yggdrasil through the source artifact lane and verify the live store/health publication.".to_string(),
                 "Demote health-yggdrasil-streampixels.cmd to deployment/debug witness once RUDP health is live.".to_string(),
             ];
@@ -2533,7 +2542,7 @@ mod tests {
 
         assert_eq!(
             profile.state,
-            "provider-store-prepared-rudp-health-required"
+            "publisher-implemented-ingress-acceptance-required"
         );
         assert!(
             profile
