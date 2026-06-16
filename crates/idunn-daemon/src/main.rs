@@ -636,9 +636,9 @@ fn swarm_surgery_plan(
     targets: &[DaemonTarget],
     updated_at: &str,
 ) -> IdunnSwarmSurgeryPlanRecord {
-    let has_raven_muninn = targets.iter().any(|target| target.daemon_id == "muninn");
-    let next_target = if has_raven_muninn {
-        "muninn"
+    let has_odin = targets.iter().any(|target| target.daemon_id == "odin");
+    let next_target = if has_odin {
+        "odin"
     } else if let Some(target) = targets.iter().find(|target| target.enabled) {
         target.daemon_id.as_str()
     } else {
@@ -670,11 +670,11 @@ fn swarm_surgery_plan(
             "5. Delete or demote compatibility probes once every target has daemon-owned publication and advertised lifecycle authority.".to_string(),
         ],
         current_phase:
-            "Phase 4: extend daemon-published RUDP health from Starfire and Nightwing Muninn to the Raven Muninn lane."
+            "Phase 5: move Odin's own provider health from compatibility command evidence to daemon-published RUDP state."
                 .to_string(),
         next_target: next_target.to_string(),
         cut_line:
-            "Starfire and Nightwing Muninn now publish daemon-owned RUDP health. Raven Muninn still needs the same route before its SSH command probe can be demoted."
+            "All Muninn lanes now publish daemon-owned RUDP health. Odin remains the next critical provider-health cut before its local command probe can be demoted."
                 .to_string(),
         verification_layer:
             "CultMesh keepalive store records plus live Idunn decision cycles, not process exit codes or chat summaries."
@@ -1686,7 +1686,7 @@ mod tests {
     }
 
     #[test]
-    fn swarm_surgery_plan_names_raven_muninn_after_starfire_and_nightwing_cuts() {
+    fn swarm_surgery_plan_names_odin_after_muninn_cuts() {
         let starfire_muninn = DaemonTarget {
             daemon_id: "starfire-muninn".to_string(),
             verse_id: "starfire.local".to_string(),
@@ -1749,9 +1749,9 @@ mod tests {
 
         assert_eq!(plan.plan_id, "swarm-surgery:starfire-local");
         assert_eq!(plan.status, "active-transport-migration");
-        assert_eq!(plan.next_target, "muninn");
-        assert!(plan.current_phase.contains("Raven Muninn"));
-        assert!(plan.cut_line.contains("Raven Muninn"));
+        assert_eq!(plan.next_target, "odin");
+        assert!(plan.current_phase.contains("Odin"));
+        assert!(plan.cut_line.contains("All Muninn lanes"));
         assert!(plan.verification_layer.contains("CultMesh keepalive store"));
         assert!(
             plan.invariants

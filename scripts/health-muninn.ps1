@@ -2,13 +2,14 @@ param(
   [string] $RavenHost = "raven",
   [string] $MuninnExe = "C:\Meta\Odin\Muninn\muninn.exe",
   [string] $StorePath = "C:\Meta\Odin\state\muninn.telemetry.cc",
-  [string] $LocalStorePath = "C:\Meta\Odin\state\muninn.telemetry.cc"
+  [string] $IdunnRudpHealth = "10.77.0.2:17870"
 )
 
 $ErrorActionPreference = "Stop"
 
 $remoteScript = @"
 `$ErrorActionPreference = "Stop"
+`$ProgressPreference = "SilentlyContinue"
 if (-not (Test-Path -LiteralPath "$MuninnExe")) {
   throw "Muninn executable not found at $MuninnExe"
 }
@@ -18,18 +19,16 @@ if (-not (Test-Path -LiteralPath "$MuninnExe")) {
 if (`$null -eq `$process) {
   throw "Muninn serve process is not running"
 }
-& "$MuninnExe" --health --store "$StorePath"
+`$healthArgs = @(
+  "--health",
+  "--store", "$StorePath",
+  "--idunn-rudp-health", "$IdunnRudpHealth",
+  "--idunn-daemon", "muninn",
+  "--idunn-health-contract", "muninn.cultnet-rudp-remote-telemetry-health"
+)
+& "$MuninnExe" @healthArgs
 "@
 
 $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($remoteScript))
-& ssh.exe -o BatchMode=yes -o ConnectTimeout=5 $RavenHost "powershell.exe -NoProfile -EncodedCommand $encoded"
-$healthExit = $LASTEXITCODE
-if ($healthExit -eq 0) {
-  $localParent = Split-Path -Parent $LocalStorePath
-  if (-not [string]::IsNullOrWhiteSpace($localParent)) {
-    New-Item -ItemType Directory -Force -Path $localParent | Out-Null
-  }
-  $remoteStore = "$RavenHost`:$StorePath"
-  & scp.exe $remoteStore "$LocalStorePath" | Out-Null
-}
-exit $healthExit
+& ssh.exe -o BatchMode=yes -o ConnectTimeout=5 $RavenHost "powershell.exe -NoProfile -NonInteractive -EncodedCommand $encoded"
+exit $LASTEXITCODE

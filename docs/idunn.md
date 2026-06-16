@@ -199,6 +199,11 @@ idunn.rudp_health_ingress.v1
   screen/audio streams as part of keepalive. Raven A/V over SRT is an explicit
   activation path through `activate-muninn-raven-av-srt.ps1`, not daemon
   startup behavior.
+- Raven is an operator-consented shared machine. Idunn restart and health
+  actuators for Raven must be background-only and must not open visible
+  terminals or interactive windows on that host. The Raven Muninn restart path
+  uses a hidden WScript/PowerShell trampoline; replacing it with an interactive
+  console launch violates the ops contract.
 - Nightwing Gjallar deployment freshness and visible composition health are now
   part of Idunn's ops role. `health-nightwing-gjallar.ps1` verifies
   `gjallar.service` liveness, the remote deployment manifest at
@@ -255,16 +260,16 @@ The local swarm mode owns:
    Yggdrasil checks.
 
 Current plan surface: `idunn.swarm_surgery_plan.v1` for profile
-`starfire-local` treats Starfire Muninn and Nightwing Muninn as completed Rust
-cuts. Muninn's `--health` mode publishes `idunn.daemon_health` over RUDP;
-Starfire publishes to local Idunn, and Nightwing publishes over WireGuard to
-`10.77.0.2:17870` using the `nightwing-muninn` daemon id and
-`muninn.cultnet-rudp-remote-telemetry-and-move-hid` contract. Live Idunn cycles
-accept both records before command-probe fallback. The plan's current phase now
-points at the Raven `muninn` lane.
+`starfire-local` treats the Muninn Rust lanes as completed cuts. Muninn's
+`--health` mode publishes `idunn.daemon_health` over RUDP; Starfire publishes to
+local Idunn, while Nightwing and Raven publish over WireGuard to
+`10.77.0.2:17870` using their target daemon ids and health contracts. Live Idunn
+cycles accept those records before command-probe fallback. The plan's current
+phase now points at Odin's own provider-health lane.
 
-Next: prove Idunn consumes Raven `muninn` daemon-published health, then continue
-runtime-by-runtime until compatibility probes can be deleted or demoted.
+Next: make Odin publish its own provider health over daemon-owned RUDP state,
+then continue runtime-by-runtime until compatibility probes can be deleted or
+demoted.
 
 No ad hoc JSON manifest, HTTP endpoint, TCP socket, or WebSocket bridge may
 become the live state owner. Debug projections are fine when they name the

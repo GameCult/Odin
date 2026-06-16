@@ -198,9 +198,13 @@ missing or the Quest is unavailable, Muninn publishes `muninn.quest_access` as
 Raven runs Muninn from `C:\Meta\Odin\Muninn`. `scripts/restart-muninn.ps1`
 recreates the `GameCult-Muninn` scheduled task and writes
 `start-muninn-serve.cmd` as a short trampoline into
-`start-muninn-serve.ps1`; the PowerShell launcher starts `muninn.exe` with
+`start-muninn-serve-hidden.vbs`, which launches `start-muninn-serve.ps1` with
+`wscript.exe //B //Nologo`. The PowerShell launcher starts `muninn.exe` with
 `-WindowStyle Hidden` and redirects logs under `C:\Meta\Odin\logs\muninn`.
-The `.cmd` file must not be the long-lived foreground process.
+Raven is an operator-consented host: Muninn operations on Raven must be
+background-only and must not create visible terminal windows. The `.cmd` file
+must not be the long-lived foreground process, and no restart/health path may
+flash an interactive console on Raven.
 
 Nightwing Muninn is kept alive by the single Idunn supervisor through the
 `nightwing-muninn` daemon target. Idunn learns that target through Odin's typed
