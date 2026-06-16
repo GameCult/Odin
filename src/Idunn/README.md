@@ -196,7 +196,12 @@ and freshness window; otherwise the compatibility probe remains fallback
 evidence.
 
 The current active cut has moved past Raven daemon launcher surgery and into the
-remaining Yggdrasil deployments. Vili now publishes RUDP health from Raven
+remaining Yggdrasil deployments, with Heimdall now the explicit next target and
+repixelizer after it. Heimdall is the honest next cut because its repo already
+contains redacted witness descriptors and a provider advertisement fixture in
+`src/verse-witness.ts`, but the live Yggdrasil service still lacks
+daemon-published Idunn health plus runtime-owned command_boundary and
+transport_profile records. Vili now publishes RUDP health from Raven
 through the hidden `GameCult\Vili` scheduled task, and live Idunn accepts
 `vili.cultnet-rudp-animation-health` from `10.77.0.4`. The Raven repair
 actuator in [restart-vili.ps1](/E:/Projects/Odin/scripts/restart-vili.ps1)
@@ -224,7 +229,10 @@ now lives at
 `/srv/streampixels/app/.streampixels-data/cultcache/streampixels.service.cc`.
 The remaining debt is only to demote SSH/systemd/HTTP probes from compatibility
 proof to deployment/debug witness once Odin consumes the typed store without
-fallback. Raven Muninn task actions are also an explicit ops invariant: Task
+fallback. Repixelizer is still plain GUI/systemd compatibility debt for now:
+`repixelizer-gui.service`, `/api/health`, `/api/config`, and nginx routing are
+still the live witnesses until the runtime publishes internal RUDP health and
+typed queue/provider state. Raven Muninn task actions are also an explicit ops invariant: Task
 Scheduler must execute `wscript.exe //B //Nologo` hidden launcher actions
 directly for `GameCult-Muninn`, `GameCult-Muninn-Activate`, and
 `GameCult-Muninn-VideoProof`, never raw `.cmd` wrappers. Those three live Raven

@@ -298,8 +298,12 @@ own `--idunn-rudp-health`, `--idunn-daemon`, and `--idunn-health-contract`
 arguments.
 
 Next: move the remaining Yggdrasil deployments off compatibility health/deck
-checks, then continue runtime-by-runtime until compatibility probes can be
-deleted or demoted. Weksa
+checks, starting with Heimdall and then repixelizer, then continue
+runtime-by-runtime until compatibility probes can be deleted or demoted.
+Heimdall is the honest next cut because its repo already advertises redacted
+CultCache witness descriptors and a provider surface in `src/verse-witness.ts`,
+but the live Yggdrasil service still lacks daemon-published Idunn health plus
+runtime-owned command_boundary and transport_profile records. Weksa
 now publishes daemon-owned provider advertisement, operator state, Eve surface,
 command boundary, and transport profile records in its provider store, and Odin
 local discovery can ingest those records. Weksa still owes CultNet/RUDP command
@@ -320,7 +324,11 @@ Yggdrasil deployment now keeps
 and has live Idunn acceptance proof for `yggdrasil-streampixels` from
 `10.77.0.1`. StreamPixels now owes only the final demotion of
 SSH/systemd/HTTP checks from compatibility proof to deployment/debug witness
-once Odin consumes the typed store without fallback. VoidBot, Gjallar, Mimir, and
+once Odin consumes the typed store without fallback. Repixelizer still remains
+plain GUI/systemd compatibility debt today: `repixelizer-gui.service`,
+`/api/health`, `/api/config`, and nginx routing are still the live witnesses
+until the runtime publishes internal RUDP health and typed queue/provider
+state. VoidBot, Gjallar, Mimir, and
 the Nightwing Eve runtime services still owe provider advertisement and
 command-boundary RUDP publication before their compatibility surfaces can be
 purely display/debug lowerings; Gjallar also owes native CultMesh/RUDP deck

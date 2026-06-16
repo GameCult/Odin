@@ -890,10 +890,8 @@ fn swarm_surgery_plan(
     updated_at: &str,
 ) -> IdunnSwarmSurgeryPlanRecord {
     let next_target = [
-        "yggdrasil-streampixels",
-        "yggdrasil-repixelizer",
         "yggdrasil-heimdall",
-        "vili",
+        "yggdrasil-repixelizer",
     ]
     .iter()
     .copied()
@@ -937,11 +935,11 @@ fn swarm_surgery_plan(
             "5. Delete or demote compatibility probes once every target has daemon-owned publication and advertised lifecycle authority.".to_string(),
         ],
         current_phase:
-            "Phase 12: Vili and all live Muninn keepalive lanes now publish daemon-owned RUDP health from their long-running bodies; StreamPixels Yggdrasil deployment is the next cross-host cut."
+            "Phase 13: StreamPixels now publishes daemon-owned RUDP health from the live Yggdrasil service runtime; Heimdall is the next cross-host cut because it already advertises a typed redacted witness surface but still lacks daemon-published Idunn health and command-boundary transport records."
                 .to_string(),
         next_target: next_target.to_string(),
         cut_line:
-            "Muninn, Vili, Idunn, Odin, Stonks, Weksa, VoidBot, Nightwing Gjallar, Mimir Eve dashboard, Nightwing Eve dashboard, and Nightwing Eve browser reference now exercise daemon-owned RUDP health. Raven GameCult\\Vili has been refreshed from Odin, the hidden scheduled task now launches start-vili-daemon.ps1 with Idunn RUDP arguments, and live Idunn accepts vili.cultnet-rudp-animation-health from 10.77.0.4. Live Raven Muninn task actions remain repaired and verified to execute wscript.exe hidden launchers directly for GameCult-Muninn, GameCult-Muninn-Activate, and GameCult-Muninn-VideoProof, and the long-running Muninn serve bodies on Raven, Nightwing, and Starfire now carry their own --idunn-rudp-health, --idunn-daemon, and --idunn-health-contract identity while Idunn accepts muninn from 10.77.0.4, nightwing-muninn from 10.77.0.3, and starfire-muninn from 127.0.0.1."
+            "Muninn, Vili, Idunn, Odin, Stonks, Weksa, VoidBot, Nightwing Gjallar, Mimir Eve dashboard, Nightwing Eve dashboard, Nightwing Eve browser reference, and Yggdrasil StreamPixels now exercise daemon-owned RUDP health. Raven GameCult\\Vili has been refreshed from Odin, the hidden scheduled task now launches start-vili-daemon.ps1 with Idunn RUDP arguments, and live Idunn accepts vili.cultnet-rudp-animation-health from 10.77.0.4. Live Raven Muninn task actions remain repaired and verified to execute wscript.exe hidden launchers directly for GameCult-Muninn, GameCult-Muninn-Activate, and GameCult-Muninn-VideoProof, the long-running Muninn serve bodies on Raven, Nightwing, and Starfire now carry their own --idunn-rudp-health, --idunn-daemon, and --idunn-health-contract identity while Idunn accepts muninn from 10.77.0.4, nightwing-muninn from 10.77.0.3, and starfire-muninn from 127.0.0.1, and live Yggdrasil StreamPixels publishes yggdrasil-streampixels from 10.77.0.1. Heimdall and repixelizer remain the cross-host compatibility debt."
                 .to_string(),
         verification_layer:
             "CultMesh keepalive store records plus live Idunn decision cycles, not process exit codes or chat summaries."
@@ -1017,6 +1015,16 @@ fn daemon_transport_profile(
             "daemon-published-rudp-health + daemon-owned-cultcache-service-boundary + compatibility.ssh-systemd-http fallback",
             "partial-rudp-health-and-provider-store-live",
             "StreamPixels now publishes daemon-owned RUDP health and a daemon-owned CultCache boundary from the live Yggdrasil service runtime; Idunn accepts yggdrasil-streampixels from 10.77.0.1 and the boundary store at /srv/streampixels/app/.streampixels-data/cultcache/streampixels.service.cc remains the service-owned witness behind the compatibility checks.",
+        ),
+        "yggdrasil-heimdall" => (
+            "compatibility.ssh-systemd-http + read-only-redacted-cultcache-witness-planned",
+            "transport-surgery-required",
+            "Heimdall is still observed through systemd, /healthz, JWKS, discovery, and nginx compatibility checks on Yggdrasil. The repo already defines redacted CultCache witness descriptors and a Heimdall provider advertisement fixture, but the live service does not yet publish daemon-owned Idunn health, command_boundary, or transport_profile records over CultNet/RUDP.",
+        ),
+        "yggdrasil-repixelizer" => (
+            "compatibility.ssh-systemd-http fallback",
+            "transport-surgery-required",
+            "Repixelizer is still observed through systemd plus Heimdall-authenticated GUI HTTP health/config routing on Yggdrasil; it has no daemon-owned RUDP health or typed provider/command-boundary publication yet, and Heimdall-backed browser truth remains compatibility evidence.",
         ),
         _ => (
             "compatibility.local-command",
@@ -1368,18 +1376,45 @@ fn daemon_surgery_plan(target: &DaemonTarget, updated_at: &str) -> IdunnDaemonSu
                 "Demote health-yggdrasil-streampixels.cmd, SSH/systemd, and HTTP checks to deployment/debug witnesses once Odin and Idunn consume the typed store and daemon-published RUDP health without compatibility help.".to_string(),
             ];
         }
-        "yggdrasil-heimdall" | "yggdrasil-repixelizer" => {
+        "yggdrasil-heimdall" => {
             severity = "medium";
-            owner = "Yggdrasil service owner plus gamecult-ops deploy lane";
+            owner = "Heimdall service runtime plus Yggdrasil source-artifact lane";
             current_mechanism =
-                "Yggdrasil source apps are currently checked and deployed through SSH/systemd/source-artifact compatibility scripts."
+                "Heimdall is currently checked on Yggdrasil through systemd liveness, /healthz, JWKS, discovery, and nginx routing via check-heimdall.sh. Its repo already defines redacted CultCache witness descriptors and a Heimdall provider advertisement fixture in src/verse-witness.ts, but the live service still lacks daemon-published Idunn health and runtime-published command_boundary / transport_profile records."
                     .to_string();
             intended_authority =
-                "Public HTTP remains the product boundary, but deployment freshness, daemon health, and lifecycle commands publish as internal CultNet/RUDP state."
+                "Heimdall keeps public HTTP as the product boundary while publishing daemon health, provider advertisement, redacted witness surfaces, command boundary, and transport profile as internal CultNet/RUDP state."
                     .to_string();
             cut_line =
-                "SSH/systemd probes stop deciding freshness once hosted services publish internal RUDP health and deployment manifests."
+                "Systemd, /healthz, JWKS, discovery, and nginx routing stop deciding daemon truth once Heimdall publishes internal RUDP health and runtime-owned command_boundary / transport_profile records alongside its redacted witness surface."
                     .to_string();
+            steps = vec![
+                "Promote Heimdall's src/verse-witness.ts advertisement from planned fixture/export into a runtime-owned provider surface with daemon-owned update timestamps.".to_string(),
+                "Publish Heimdall daemon health over CultNet/RUDP from the live Yggdrasil service runtime with a dedicated Idunn health contract instead of yggdrasil.source-deployment-freshness.".to_string(),
+                "Publish Heimdall command_boundary and transport_profile records from the runtime so deploy/restart authority is inspectable without the compatibility scripts.".to_string(),
+                "Teach Odin to ingest Heimdall's provider advertisement and redacted witness surfaces as typed state instead of treating HTTP discovery and JWKS as daemon truth.".to_string(),
+                "Demote check-heimdall.sh, systemd, /healthz, JWKS, discovery, and nginx routing to deployment/debug witnesses once the runtime publications are live.".to_string(),
+            ];
+        }
+        "yggdrasil-repixelizer" => {
+            severity = "medium";
+            owner = "Repixelizer GUI runtime plus Yggdrasil source-artifact lane";
+            current_mechanism =
+                "Repixelizer is currently checked on Yggdrasil through repixelizer-gui.service plus HTTP GUI /api/health, /api/config, and nginx routing via check-repixelizer-gui.sh. The runtime is still a hosted GUI with Heimdall-authenticated HTTP truth and no daemon-owned RUDP health or typed provider/command-boundary publication."
+                    .to_string();
+            intended_authority =
+                "Repixelizer keeps HTTP GUI delivery as the product boundary while publishing internal daemon health, queue/provider state, command boundary, and transport profile over CultNet/RUDP for Idunn and Odin."
+                    .to_string();
+            cut_line =
+                "Systemd and GUI HTTP probes stop deciding daemon truth once Repixelizer publishes internal RUDP health plus runtime-owned command_boundary / transport_profile state."
+                    .to_string();
+            steps = vec![
+                "Add a daemon-owned Repixelizer health contract and publish it over CultNet/RUDP from the live GUI/service runtime on Yggdrasil.".to_string(),
+                "Publish Repixelizer command_boundary and transport_profile records from the runtime so deploy/restart authority is explicit typed state instead of an ops-only assumption.".to_string(),
+                "Publish typed queue/provider state for Odin to ingest without treating /api/health and /api/config as the source of truth.".to_string(),
+                "Keep Heimdall-backed browser auth as a product boundary adapter, not the keepalive truth surface.".to_string(),
+                "Demote check-repixelizer-gui.sh, systemd, /api/health, /api/config, and nginx routing to deployment/debug witnesses once the runtime publications are live.".to_string(),
+            ];
         }
         "idunn-swarm-deployment-coverage" => {
             severity = "medium";
@@ -2348,6 +2383,34 @@ mod tests {
             enabled: true,
             interval_seconds: 300,
         };
+        let yggdrasil_heimdall = DaemonTarget {
+            daemon_id: "yggdrasil-heimdall".to_string(),
+            verse_id: "yggdrasil.local".to_string(),
+            name: "Yggdrasil Heimdall".to_string(),
+            health_contract: health_contract(
+                "yggdrasil.source-deployment-freshness",
+                "stale-deployment",
+            ),
+            health_command: Some("health-yggdrasil-heimdall.cmd".to_string()),
+            deploy_command: Some("deploy-yggdrasil-heimdall.cmd".to_string()),
+            restart_command: None,
+            enabled: true,
+            interval_seconds: 300,
+        };
+        let yggdrasil_repixelizer = DaemonTarget {
+            daemon_id: "yggdrasil-repixelizer".to_string(),
+            verse_id: "yggdrasil.local".to_string(),
+            name: "Yggdrasil repixelizer".to_string(),
+            health_contract: health_contract(
+                "yggdrasil.source-deployment-freshness",
+                "stale-deployment",
+            ),
+            health_command: Some("health-yggdrasil-repixelizer.cmd".to_string()),
+            deploy_command: Some("deploy-yggdrasil-repixelizer.cmd".to_string()),
+            restart_command: None,
+            enabled: true,
+            interval_seconds: 300,
+        };
 
         let plan = swarm_surgery_plan(
             "starfire-local",
@@ -2364,17 +2427,20 @@ mod tests {
                 starfire_muninn.clone(),
                 nightwing_muninn.clone(),
                 raven_muninn.clone(),
+                yggdrasil_streampixels.clone(),
+                yggdrasil_heimdall.clone(),
+                yggdrasil_repixelizer.clone(),
             ],
             "unix:100",
         );
 
         assert_eq!(plan.plan_id, "swarm-surgery:starfire-local");
         assert_eq!(plan.status, "active-transport-migration");
-        assert_eq!(plan.next_target, "vili");
-        assert!(plan.current_phase.contains("StreamPixels"));
+        assert_eq!(plan.next_target, "yggdrasil-heimdall");
+        assert!(plan.current_phase.contains("Heimdall"));
         assert!(
             plan.cut_line
-                .contains("Muninn, Vili, Idunn, Odin, Stonks, Weksa, VoidBot, Nightwing Gjallar, Mimir Eve dashboard, Nightwing Eve dashboard, and Nightwing Eve browser reference")
+                .contains("Yggdrasil StreamPixels now exercise daemon-owned RUDP health")
         );
         assert!(plan.cut_line.contains("GameCult\\Vili"));
         assert!(plan.cut_line.contains("10.77.0.4"));
@@ -2386,6 +2452,9 @@ mod tests {
         assert!(plan.cut_line.contains("GameCult-Muninn-VideoProof"));
         assert!(plan.cut_line.contains("Muninn task actions"));
         assert!(plan.cut_line.contains("verified"));
+        assert!(plan.cut_line.contains("yggdrasil-streampixels"));
+        assert!(plan.cut_line.contains("10.77.0.1"));
+        assert!(plan.cut_line.contains("Heimdall and repixelizer"));
         assert!(plan.verification_layer.contains("CultMesh keepalive store"));
         assert!(
             plan.invariants
@@ -2563,6 +2632,40 @@ mod tests {
         assert!(streampixels_plan.steps.iter().any(
             |step| step.contains("serial pnpm workspace build")
         ));
+
+        let heimdall_plan = daemon_surgery_plan(&yggdrasil_heimdall, "unix:100");
+        assert_eq!(heimdall_plan.status, "transport-surgery-required");
+        assert!(
+            heimdall_plan
+                .current_mechanism
+                .contains("src/verse-witness.ts")
+        );
+        assert!(
+            heimdall_plan
+                .steps
+                .iter()
+                .any(|step| step.contains("redacted witness"))
+        );
+        assert!(
+            heimdall_plan
+                .steps
+                .iter()
+                .any(|step| step.contains("JWKS") && step.contains("discovery"))
+        );
+
+        let repixelizer_plan = daemon_surgery_plan(&yggdrasil_repixelizer, "unix:100");
+        assert_eq!(repixelizer_plan.status, "transport-surgery-required");
+        assert!(
+            repixelizer_plan
+                .current_mechanism
+                .contains("/api/health")
+        );
+        assert!(
+            repixelizer_plan
+                .steps
+                .iter()
+                .any(|step| step.contains("/api/config"))
+        );
     }
 
     #[test]
@@ -2693,6 +2796,58 @@ mod tests {
         assert!(!profile.current_transport.contains("local-proof"));
         assert!(profile.cut_line.contains("10.77.0.1"));
         assert!(profile.cut_line.contains("service-owned witness"));
+    }
+
+    #[test]
+    fn heimdall_transport_profile_marks_witness_planned_state() {
+        let heimdall = DaemonTarget {
+            daemon_id: "yggdrasil-heimdall".to_string(),
+            verse_id: "yggdrasil.local".to_string(),
+            name: "Yggdrasil Heimdall".to_string(),
+            health_contract: health_contract(
+                "yggdrasil.source-deployment-freshness",
+                "stale-deployment",
+            ),
+            health_command: Some("health-yggdrasil-heimdall.cmd".to_string()),
+            deploy_command: Some("deploy-yggdrasil-heimdall.cmd".to_string()),
+            restart_command: None,
+            enabled: true,
+            interval_seconds: 300,
+        };
+
+        let profile = daemon_transport_profile(&heimdall, "unix:100");
+
+        assert_eq!(profile.state, "transport-surgery-required");
+        assert!(
+            profile
+                .current_transport
+                .contains("read-only-redacted-cultcache-witness-planned")
+        );
+        assert!(profile.cut_line.contains("command_boundary"));
+    }
+
+    #[test]
+    fn repixelizer_transport_profile_marks_gui_http_fallback() {
+        let repixelizer = DaemonTarget {
+            daemon_id: "yggdrasil-repixelizer".to_string(),
+            verse_id: "yggdrasil.local".to_string(),
+            name: "Yggdrasil repixelizer".to_string(),
+            health_contract: health_contract(
+                "yggdrasil.source-deployment-freshness",
+                "stale-deployment",
+            ),
+            health_command: Some("health-yggdrasil-repixelizer.cmd".to_string()),
+            deploy_command: Some("deploy-yggdrasil-repixelizer.cmd".to_string()),
+            restart_command: None,
+            enabled: true,
+            interval_seconds: 300,
+        };
+
+        let profile = daemon_transport_profile(&repixelizer, "unix:100");
+
+        assert_eq!(profile.state, "transport-surgery-required");
+        assert!(profile.current_transport.contains("compatibility.ssh-systemd-http"));
+        assert!(profile.cut_line.contains("Heimdall-authenticated GUI"));
     }
 
     #[test]
