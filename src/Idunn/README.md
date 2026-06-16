@@ -179,8 +179,10 @@ loopback CultNet hello over `cultnet.transport.rudp.v0`. That proves Idunn's
 Rust body can use the RUDP substrate before it asks the rest of the swarm to
 walk through the same door.
 
-The local swarm also opens a RUDP health ingress at `127.0.0.1:17870` unless
-started with `--rudp-health-bind none`. It accepts raw
+The daemon itself defaults to `127.0.0.1:17870`, but
+`scripts/start-idunn-local.ps1` launches the local swarm with
+`--rudp-health-bind 0.0.0.0:17870` so WireGuard peers such as Raven and
+Nightwing can publish to `10.77.0.2:17870`. It accepts raw
 `idunn.daemon_health` document puts on the canonical CNR0 RUDP `schema` channel
 and writes them into the keepalive store. That is daemon-owned health
 publication, not restart/deploy authority. On Windows, UDP reset reports from
@@ -193,22 +195,26 @@ probe. The record must match the daemon id, health contract, RUDP transport,
 and freshness window; otherwise the compatibility probe remains fallback
 evidence.
 
-The current active cut is Vili plus Raven task-action repair, with Weksa's
-provider-store boundary now advanced locally. Vili publishes RUDP health locally
-and writes a daemon-owned `.vili\vili.service.cc` store with provider
-advertisement, operator state, Eve surface, command boundary, and transport
-profile records; Odin local discovery can ingest that typed store. Live Raven
-deployment remains blocked while SSH is unreachable. Weksa publishes RUDP health
-and a daemon-owned provider store containing provider advertisement, operator
-state, Eve surface, command boundary, and transport profile records; Odin local
-discovery can ingest that typed store too. Weksa still owes CultNet/RUDP command
-document ingress for MiMo VoiceDesign before its HTTP command route can become
-debug-only. Stonks publishes RUDP health and a daemon-owned CultCache store
-containing provider advertisement, market snapshot, Eve surface, command
-boundary, and transport profile records; Odin local discovery can ingest that
-store as provider truth. StreamPixels now publishes a service-owned CultCache
-boundary store with provider advertisement, command boundary, transport profile,
-and Idunn health summary; Odin local discovery can ingest that store, and local
+The current active cut has moved past Raven daemon launcher surgery and into the
+remaining Yggdrasil deployments. Vili now publishes RUDP health from Raven
+through the hidden `GameCult\Vili` scheduled task, and live Idunn accepts
+`vili.cultnet-rudp-animation-health` from `10.77.0.4`. The Raven repair
+actuator in [restart-vili.ps1](/E:/Projects/Odin/scripts/restart-vili.ps1)
+syncs the authoritative Vili runtime plus flattened CultLib node modules before
+reinstalling the hidden task. Vili also writes a daemon-owned
+`.vili\vili.service.cc` store with provider advertisement, operator state, Eve
+surface, command boundary, and transport profile records; Odin local discovery
+can ingest that typed store. Weksa publishes RUDP health and a daemon-owned
+provider store containing provider advertisement, operator state, Eve surface,
+command boundary, and transport profile records; Odin local discovery can ingest
+that typed store too. Weksa still owes CultNet/RUDP command document ingress
+for MiMo VoiceDesign before its HTTP command route can become debug-only.
+Stonks publishes RUDP health and a daemon-owned CultCache store containing
+provider advertisement, market snapshot, Eve surface, command boundary, and
+transport profile records; Odin local discovery can ingest that store as
+provider truth. StreamPixels now publishes a service-owned CultCache boundary
+store with provider advertisement, command boundary, transport profile, and
+Idunn health summary; Odin local discovery can ingest that store, and local
 Idunn has accepted StreamPixels daemon health over CultNet/RUDP. Yggdrasil
 deployment remains owed before SSH/systemd/HTTP probes are only debug
 witnesses. Raven Muninn task actions are also an explicit ops invariant: Task

@@ -1,2 +1,2 @@
 @echo off
-ssh -o BatchMode=yes raven "cmd /c E:\Projects\Vili\scripts\restart-vili-daemon.cmd"
+powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%~dp0restart-vili.ps1" %*

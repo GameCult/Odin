@@ -15,6 +15,52 @@ $errLog = Join-Path $StateDir "idunn.err.log"
 
 New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
 
+function Get-IdunnStartupDetail {
+  $detail = ""
+  if (Test-Path -LiteralPath $outLog) { $detail += Get-Content -Raw -LiteralPath $outLog }
+  if (Test-Path -LiteralPath $errLog) { $detail += Get-Content -Raw -LiteralPath $errLog }
+  return $detail
+}
+
+function Move-CorruptIdunnStoreAside {
+  param(
+    [string] $StorePath
+  )
+
+  if (-not (Test-Path -LiteralPath $StorePath)) {
+    return $null
+  }
+
+  $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
+  $corruptPath = Join-Path $StateDir "idunn.keepalive.corrupt-$timestamp.cc"
+  Move-Item -LiteralPath $StorePath -Destination $corruptPath -Force
+  Remove-Item -LiteralPath "$StorePath.lock" -Force -ErrorAction SilentlyContinue
+  Write-Host "Archived corrupt Idunn store to $corruptPath"
+  return $corruptPath
+}
+
+function Start-IdunnProcess {
+  param(
+    [string] $IdunnExe,
+    [object[]] $Arguments,
+    [string] $RepoRoot,
+    [string] $OutLog,
+    [string] $ErrLog,
+    [string] $PidPath
+  )
+
+  $process = Start-Process -FilePath $IdunnExe `
+    -ArgumentList $Arguments `
+    -WorkingDirectory $RepoRoot `
+    -WindowStyle Hidden `
+    -PassThru `
+    -RedirectStandardOutput $OutLog `
+    -RedirectStandardError $ErrLog
+  $process.Id | Set-Content -Encoding ASCII -LiteralPath $PidPath
+  Start-Sleep -Seconds 2
+  return $process
+}
+
 if (-not (Test-Path -LiteralPath $idunnExe)) {
   Push-Location -LiteralPath $repoRoot
   try {
@@ -89,20 +135,30 @@ if (Test-Path -LiteralPath $operatorAlarmCommand) {
   $arguments += @("--operator-alarm-command", $operatorAlarmCommand)
 }
 
-$process = Start-Process -FilePath $idunnExe `
-  -ArgumentList $arguments `
-  -WorkingDirectory $repoRoot `
-  -WindowStyle Hidden `
-  -PassThru `
-  -RedirectStandardOutput $outLog `
-  -RedirectStandardError $errLog
-$process.Id | Set-Content -Encoding ASCII -LiteralPath $pidPath
+$process = Start-IdunnProcess `
+  -IdunnExe $idunnExe `
+  -Arguments $arguments `
+  -RepoRoot $repoRoot `
+  -OutLog $outLog `
+  -ErrLog $errLog `
+  -PidPath $pidPath
 
-Start-Sleep -Seconds 2
 if ($process.HasExited) {
-  $detail = ""
-  if (Test-Path -LiteralPath $outLog) { $detail += Get-Content -Raw -LiteralPath $outLog }
-  if (Test-Path -LiteralPath $errLog) { $detail += Get-Content -Raw -LiteralPath $errLog }
+  $detail = Get-IdunnStartupDetail
+  if ($detail -like "*failed to decode MessagePack*" -and (Test-Path -LiteralPath $storePath)) {
+    Move-CorruptIdunnStoreAside -StorePath $storePath | Out-Null
+    $process = Start-IdunnProcess `
+      -IdunnExe $idunnExe `
+      -Arguments $arguments `
+      -RepoRoot $repoRoot `
+      -OutLog $outLog `
+      -ErrLog $errLog `
+      -PidPath $pidPath
+  }
+}
+
+if ($process.HasExited) {
+  $detail = Get-IdunnStartupDetail
   throw "Idunn swarm supervisor exited immediately with code $($process.ExitCode).`n$detail"
 }
 

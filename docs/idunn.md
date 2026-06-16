@@ -292,8 +292,9 @@ Raven's Muninn scheduled-task repair is a separate ops invariant:
 `GameCult-Muninn-VideoProof` must execute `wscript.exe` hidden launcher actions,
 not raw `.cmd` task actions.
 
-Next: move Vili off compatibility health/deck checks, then continue
-runtime-by-runtime until compatibility probes can be deleted or demoted. Weksa
+Next: move the remaining Yggdrasil deployments off compatibility health/deck
+checks, then continue runtime-by-runtime until compatibility probes can be
+deleted or demoted. Weksa
 now publishes daemon-owned provider advertisement, operator state, Eve surface,
 command boundary, and transport profile records in its provider store, and Odin
 local discovery can ingest those records. Weksa still owes CultNet/RUDP command
@@ -312,9 +313,10 @@ the Nightwing Eve runtime services still owe provider advertisement and
 command-boundary RUDP publication before their compatibility surfaces can be
 purely display/debug lowerings; Gjallar also owes native CultMesh/RUDP deck
 input to replace the current Odin WebSocket lowering bridge. Raven Muninn task
-action repair is queued separately and remains blocked while Raven is
-unreachable over SSH; the prepared actuator is
-`scripts\repair-raven-muninn-task-actions.ps1`.
+action repair is no longer queued: the live host now executes
+`GameCult-Muninn`, `GameCult-Muninn-Activate`, and
+`GameCult-Muninn-VideoProof` through hidden `wscript.exe` launchers, and the
+repair actuator remains `scripts\repair-raven-muninn-task-actions.ps1`.
 
 Vili's Node daemon now has an in-process Idunn RUDP publisher for
 `vili.cultnet-rudp-animation-health`, and local smoke proof shows Idunn accepts
@@ -322,11 +324,11 @@ that record over `cultnet.transport.rudp.v0`. Vili also writes
 `.vili\vili.service.cc` with daemon-owned provider advertisement, operator
 state, Eve surface, command boundary, and transport profile records. Odin local
 provider discovery can ingest that typed store, including the Vili command
-boundary and transport profile. That is implementation proof, not live Raven
-deployment proof. Vili remains the active cut until Raven is reachable, the
-updated package is deployed there, and
-`GameCult\Vili` is restarted with
-`--idunn-rudp-health 10.77.0.2:17870`.
+boundary and transport profile. That is now live Raven proof as well: Odin's
+`scripts\restart-vili.ps1` refreshes the Raven runtime from the authoritative
+local Vili and CultLib files, reinstalls the hidden `GameCult\Vili` task with
+`--idunn-rudp-health 10.77.0.2:17870`, and restarts it. Live Idunn accepts
+`vili.cultnet-rudp-animation-health` from `10.77.0.4`.
 
 No ad hoc JSON manifest, HTTP endpoint, TCP socket, or WebSocket bridge may
 become the live state owner. Debug projections are fine when they name the

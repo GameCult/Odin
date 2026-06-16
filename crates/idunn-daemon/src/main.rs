@@ -890,10 +890,10 @@ fn swarm_surgery_plan(
     updated_at: &str,
 ) -> IdunnSwarmSurgeryPlanRecord {
     let next_target = [
-        "vili",
         "yggdrasil-streampixels",
         "yggdrasil-repixelizer",
         "yggdrasil-heimdall",
+        "vili",
     ]
     .iter()
     .copied()
@@ -937,11 +937,11 @@ fn swarm_surgery_plan(
             "5. Delete or demote compatibility probes once every target has daemon-owned publication and advertised lifecycle authority.".to_string(),
         ],
         current_phase:
-            "Phase 12: move Vili and remaining runtime daemons from compatibility probes to daemon-published RUDP state; Raven Muninn scheduled-task actions are now verified background-only, while Vili Raven refresh remains the next shared-host deployment cut."
+            "Phase 12: Vili and Raven Muninn now run through verified background-only shared-host launch paths with live daemon-published RUDP health; StreamPixels Yggdrasil deployment is the next cross-host cut."
                 .to_string(),
         next_target: next_target.to_string(),
         cut_line:
-            "Muninn, Idunn, Odin, Stonks, Weksa, VoidBot, Nightwing Gjallar, Mimir Eve dashboard, Nightwing Eve dashboard, and Nightwing Eve browser reference now exercise daemon-owned RUDP health. Vili has an in-process RUDP health publisher with local Idunn acceptance proof, but live Raven deployment and GameCult\\Vili restart remain blocked until the Raven Vili task is refreshed and verified. Live Raven Muninn task actions have been repaired and verified to execute wscript.exe hidden launchers directly for GameCult-Muninn, GameCult-Muninn-Activate, and GameCult-Muninn-VideoProof."
+            "Muninn, Vili, Idunn, Odin, Stonks, Weksa, VoidBot, Nightwing Gjallar, Mimir Eve dashboard, Nightwing Eve dashboard, and Nightwing Eve browser reference now exercise daemon-owned RUDP health. Raven GameCult\\Vili has been refreshed from Odin, the hidden scheduled task now launches start-vili-daemon.ps1 with Idunn RUDP arguments, and live Idunn accepts vili.cultnet-rudp-animation-health from 10.77.0.4. Live Raven Muninn task actions remain repaired and verified to execute wscript.exe hidden launchers directly for GameCult-Muninn, GameCult-Muninn-Activate, and GameCult-Muninn-VideoProof."
                 .to_string(),
         verification_layer:
             "CultMesh keepalive store records plus live Idunn decision cycles, not process exit codes or chat summaries."
@@ -994,9 +994,9 @@ fn daemon_transport_profile(
             "Nightwing Eve browser reference health is published over CultNet/RUDP from the Mimir.EveBrowserReference service process; provider advertisement and command boundaries remain migration debt before the service probe can be deleted.",
         ),
         "vili" => (
-            "rudp-health-and-local-cultcache-implemented + live Raven compatibility.local-command",
-            "raven-deploy-blocked",
-            "Vili has an in-process CultNet/RUDP Idunn health publisher plus local CultCache provider, operator, command_boundary, and transport_profile records; live Raven deployment and scheduled-task restart are blocked while Raven SSH is unreachable.",
+            "daemon-published-rudp-health + daemon-owned-cultcache-service-boundary + compatibility.http-websocket fallback",
+            "partial-rudp-health-and-provider-store-live",
+            "Vili now publishes vili.cultnet-rudp-animation-health over CultNet/RUDP from the hidden Raven GameCult\\Vili task, and its daemon-owned vili.service.cc store contains provider advertisement, operator state, Eve surface, command_boundary, and transport_profile records; HTTP and WebSocket remain operator/debug lowerings.",
         ),
         "yggdrasil-streampixels" => (
             "daemon-published-rudp-health-local-proof + daemon-owned-cultcache-service-boundary + compatibility.ssh-systemd-http fallback",
@@ -1096,7 +1096,7 @@ fn daemon_surgery_plan(target: &DaemonTarget, updated_at: &str) -> IdunnDaemonSu
         "Switch Idunn from the compatibility health command to the daemon-owned RUDP health record.".to_string(),
         "Delete or demote the old probe to a xenos-boundary compatibility check with no lifecycle authority.".to_string(),
     ];
-    let mut blockers = Vec::new();
+    let blockers = Vec::new();
 
     match target.daemon_id.as_str() {
         "odin" => {
@@ -1248,29 +1248,25 @@ fn daemon_surgery_plan(target: &DaemonTarget, updated_at: &str) -> IdunnDaemonSu
                     .to_string();
         }
         "vili" => {
-            status = "rudp-health-and-cultcache-state-implemented-raven-deploy-blocked";
+            status = "partial-rudp-health-and-provider-store-live";
             owner = "Vili animation runtime";
             current_mechanism =
-                "Vili now has an in-process CultNet/RUDP Idunn health publisher in the Node animation daemon plus a Vili-owned vili.service.cc CultCache store containing provider advertisement, operator state, Eve surface, command_boundary, and transport_profile records. Local smoke proof shows Idunn accepts vili.cultnet-rudp-animation-health, and Odin local discovery can ingest the Vili provider advertisement plus command/transport records from that store. Live Raven still runs the compatibility health/deck path until the updated Vili task can be deployed and restarted on that host."
+                "Vili now runs on Raven through the hidden GameCult\\Vili scheduled task, which launches start-vili-daemon.ps1 with --idunn-rudp-health 10.77.0.2:17870 and contract vili.cultnet-rudp-animation-health. Live Idunn accepts that daemon-published health from 10.77.0.4, and Vili writes a daemon-owned vili.service.cc CultCache store containing provider advertisement, operator state, Eve surface, command_boundary, and transport_profile records."
                     .to_string();
             intended_authority =
                 "Vili publishes animation daemon health, provider advertisement, operator state, command boundary, and transport profile as typed CultMesh/CultNet records over cultnet.transport.rudp.v0; HTTP and WebSocket remain renderer/operator lowerings only."
                     .to_string();
             cut_line =
-                "Deploy the updated Vili daemon and scheduled-task startup path on Raven, then demote health-vili.cmd and the HTTP deck checks to compatibility witnesses with no lifecycle truth."
+                "Keep health-vili.cmd and the HTTP/WebSocket deck checks as fallback/operator lowerings only until Odin consumes Vili provider records natively and the compatibility health endpoint is demoted to a manual witness."
                     .to_string();
             steps = vec![
                 "Keep the in-process Vili idunn.daemon_health RUDP publisher wired through scripts/vili-daemon.mjs.".to_string(),
                 "Keep Vili's provider advertisement, operator state, Eve surface, command_boundary, and transport_profile records in the daemon-owned vili.service.cc store.".to_string(),
-                "Deploy the updated Vili package and npm dependency lock on Raven when SSH is reachable.".to_string(),
-                "Restart GameCult\\Vili so the task launches the daemon with --idunn-rudp-health 10.77.0.2:17870 and contract vili.cultnet-rudp-animation-health.".to_string(),
-                "Verify live Idunn accepts vili.cultnet-rudp-animation-health from Raven over cultnet.transport.rudp.v0 before compatibility probe fallback.".to_string(),
-                "Keep Odin provider discovery pointed at Vili's daemon-owned vili.service.cc store; after Raven deploy, demote health-vili.cmd and HTTP/WebSocket deck probes to fallback witnesses only.".to_string(),
+                "Keep scripts/restart-vili.ps1 syncing the authoritative Vili runtime plus flattened CultLib node_modules into Raven before reinstalling the hidden task.".to_string(),
+                "Keep GameCult\\Vili executing wscript.exe hidden launcher arguments that pass --idunn-rudp-health 10.77.0.2:17870, --idunn-daemon vili, and --idunn-health-contract vili.cultnet-rudp-animation-health.".to_string(),
+                "Keep Idunn bound on 0.0.0.0:17870 so WireGuard peers such as Raven can publish daemon-owned health over cultnet.transport.rudp.v0.".to_string(),
+                "Keep Odin provider discovery pointed at Vili's daemon-owned vili.service.cc store; then demote health-vili.cmd and HTTP/WebSocket deck probes to fallback witnesses only.".to_string(),
             ];
-            blockers.push(
-                "Raven SSH currently times out, so the updated Vili runtime cannot be deployed or restarted on the live host."
-                    .to_string(),
-            );
         }
         "nightwing-eve-dashboard" | "nightwing-eve-browser-reference" => {
             severity = "medium";
@@ -2321,11 +2317,13 @@ mod tests {
         assert_eq!(plan.plan_id, "swarm-surgery:starfire-local");
         assert_eq!(plan.status, "active-transport-migration");
         assert_eq!(plan.next_target, "vili");
-        assert!(plan.current_phase.contains("Vili"));
+        assert!(plan.current_phase.contains("StreamPixels"));
         assert!(
             plan.cut_line
-                .contains("Muninn, Idunn, Odin, Stonks, Weksa, VoidBot, Nightwing Gjallar, Mimir Eve dashboard, Nightwing Eve dashboard, and Nightwing Eve browser reference")
+                .contains("Muninn, Vili, Idunn, Odin, Stonks, Weksa, VoidBot, Nightwing Gjallar, Mimir Eve dashboard, Nightwing Eve dashboard, and Nightwing Eve browser reference")
         );
+        assert!(plan.cut_line.contains("GameCult\\Vili"));
+        assert!(plan.cut_line.contains("10.77.0.4"));
         assert!(plan.cut_line.contains("GameCult-Muninn-Activate"));
         assert!(plan.cut_line.contains("GameCult-Muninn-VideoProof"));
         assert!(plan.cut_line.contains("Muninn task actions"));
@@ -2442,21 +2440,20 @@ mod tests {
         let vili_plan = daemon_surgery_plan(&vili, "unix:100");
         assert_eq!(
             vili_plan.status,
-            "rudp-health-and-cultcache-state-implemented-raven-deploy-blocked"
+            "partial-rudp-health-and-provider-store-live"
         );
         assert!(vili_plan.current_mechanism.contains("vili.service.cc"));
+        assert!(vili_plan.current_mechanism.contains("GameCult\\Vili"));
         assert!(
             vili_plan
                 .steps
                 .iter()
                 .any(|step| step.contains("command_boundary"))
         );
-        assert!(
-            vili_plan
-                .blockers
-                .iter()
-                .any(|blocker| blocker.contains("Raven SSH currently times out"))
-        );
+        assert!(vili_plan.steps.iter().any(
+            |step| step.contains("0.0.0.0:17870") && step.contains("Raven")
+        ));
+        assert!(vili_plan.blockers.is_empty());
     }
 
     #[test]
