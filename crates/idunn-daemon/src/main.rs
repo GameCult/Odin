@@ -890,7 +890,7 @@ fn swarm_surgery_plan(
     updated_at: &str,
 ) -> IdunnSwarmSurgeryPlanRecord {
     let next_target = [
-        "yggdrasil-repixelizer",
+        "nightwing-gjallar",
     ]
     .iter()
     .copied()
@@ -934,11 +934,11 @@ fn swarm_surgery_plan(
             "5. Delete or demote compatibility probes once every target has daemon-owned publication and advertised lifecycle authority.".to_string(),
         ],
         current_phase:
-            "Phase 14: Heimdall now publishes daemon-owned RUDP health and a daemon-owned boundary witness store from the live Yggdrasil service runtime; repixelizer is the next cross-host cut because it still keeps daemon truth behind GUI/systemd compatibility checks."
+            "Phase 15: Repixelizer now publishes daemon-owned RUDP health and a daemon-owned boundary witness store from the live Yggdrasil GUI runtime; Nightwing Gjallar is the next compatibility cut because framebuffer composition truth still falls back to service/status probes."
                 .to_string(),
         next_target: next_target.to_string(),
         cut_line:
-            "Muninn, Vili, Idunn, Odin, Stonks, Weksa, VoidBot, Nightwing Gjallar, Mimir Eve dashboard, Nightwing Eve dashboard, Nightwing Eve browser reference, Yggdrasil StreamPixels, and Yggdrasil Heimdall now exercise daemon-owned RUDP health. Raven GameCult\\Vili has been refreshed from Odin, the hidden scheduled task now launches start-vili-daemon.ps1 with Idunn RUDP arguments, and live Idunn accepts vili.cultnet-rudp-animation-health from 10.77.0.4. Live Raven Muninn task actions remain repaired and verified to execute wscript.exe hidden launchers directly for GameCult-Muninn, GameCult-Muninn-Activate, and GameCult-Muninn-VideoProof, the long-running Muninn serve bodies on Raven, Nightwing, and Starfire now carry their own --idunn-rudp-health, --idunn-daemon, and --idunn-health-contract identity while Idunn accepts muninn from 10.77.0.4, nightwing-muninn from 10.77.0.3, and starfire-muninn from 127.0.0.1, live Yggdrasil StreamPixels publishes yggdrasil-streampixels from 10.77.0.1, and live Yggdrasil Heimdall publishes heimdall.cultnet-rudp-provider-health from 10.77.0.1 with a boundary store at /srv/heimdall/cultcache/heimdall.service.cc. Repixelizer remains the next cross-host compatibility debt."
+            "Muninn, Vili, Idunn, Odin, Stonks, Weksa, VoidBot, Nightwing Gjallar, Mimir Eve dashboard, Nightwing Eve dashboard, Nightwing Eve browser reference, yggdrasil-streampixels, yggdrasil-heimdall, and yggdrasil-repixelizer now exercise daemon-owned RUDP health. Raven GameCult\\Vili has been refreshed from Odin, the hidden scheduled task now launches start-vili-daemon.ps1 with Idunn RUDP arguments, and live Idunn accepts vili.cultnet-rudp-animation-health from 10.77.0.4. Live Raven Muninn task actions remain repaired and verified to execute wscript.exe hidden launchers directly for GameCult-Muninn, GameCult-Muninn-Activate, and GameCult-Muninn-VideoProof, the long-running Muninn serve bodies on Raven, Nightwing, and Starfire now carry their own --idunn-rudp-health, --idunn-daemon, and --idunn-health-contract identity while Idunn accepts muninn from 10.77.0.4, nightwing-muninn from 10.77.0.3, and starfire-muninn from 127.0.0.1, live yggdrasil-streampixels publishes streampixels.cultnet-rudp-service-health from 10.77.0.1, live yggdrasil-heimdall publishes heimdall.cultnet-rudp-provider-health from 10.77.0.1 with a boundary store at /srv/heimdall/cultcache/heimdall.service.cc, and live yggdrasil-repixelizer publishes repixelizer.cultnet-rudp-service-health from 10.77.0.1 with a boundary store at /srv/repixelizer/cultcache/repixelizer.service.cc. Nightwing Gjallar remains the next compatibility debt."
                 .to_string(),
         verification_layer:
             "CultMesh keepalive store records plus live Idunn decision cycles, not process exit codes or chat summaries."
@@ -1021,9 +1021,9 @@ fn daemon_transport_profile(
             "Heimdall now publishes daemon-owned Idunn health over CultNet/RUDP from the live Yggdrasil service runtime, and its daemon-owned boundary store at /srv/heimdall/cultcache/heimdall.service.cc carries provider advertisement, command_boundary, transport_profile, and daemon-health summary state. /healthz, JWKS, discovery, systemd, and nginx remain compatibility witnesses.",
         ),
         "yggdrasil-repixelizer" => (
-            "compatibility.ssh-systemd-http fallback",
-            "transport-surgery-required",
-            "Repixelizer is still observed through systemd plus Heimdall-authenticated GUI HTTP health/config routing on Yggdrasil; it has no daemon-owned RUDP health or typed provider/command-boundary publication yet, and Heimdall-backed browser truth remains compatibility evidence.",
+            "daemon-published-rudp-health + daemon-owned-cultcache-boundary-store + compatibility.ssh-systemd-http fallback",
+            "partial-rudp-health-and-provider-store-live",
+            "Repixelizer now publishes daemon-owned Idunn health over CultNet/RUDP from the live Yggdrasil GUI runtime, and its daemon-owned boundary store at /srv/repixelizer/cultcache/repixelizer.service.cc carries provider advertisement, Eve surface state, queue/auth/runtime projection, command_boundary, transport_profile, and daemon-health summary state. /api/health, /api/config, systemd, and nginx remain compatibility witnesses.",
         ),
         _ => (
             "compatibility.local-command",
@@ -1399,22 +1399,24 @@ fn daemon_surgery_plan(target: &DaemonTarget, updated_at: &str) -> IdunnDaemonSu
         }
         "yggdrasil-repixelizer" => {
             severity = "medium";
+            status = "partial-rudp-health-and-provider-store-live";
             owner = "Repixelizer GUI runtime plus Yggdrasil source-artifact lane";
             current_mechanism =
-                "Repixelizer is currently checked on Yggdrasil through repixelizer-gui.service plus HTTP GUI /api/health, /api/config, and nginx routing via check-repixelizer-gui.sh. The runtime is still a hosted GUI with Heimdall-authenticated HTTP truth and no daemon-owned RUDP health or typed provider/command-boundary publication."
+                "Repixelizer now publishes repixelizer.cultnet-rudp-service-health from the live Yggdrasil GUI runtime, and its daemon-owned boundary store at /srv/repixelizer/cultcache/repixelizer.service.cc carries provider advertisement, Eve surface state, queue/auth/runtime projection, command_boundary, transport_profile, and daemon-health summary state while check-repixelizer-gui.sh and systemd remain compatibility witnesses."
                     .to_string();
             intended_authority =
                 "Repixelizer keeps HTTP GUI delivery as the product boundary while publishing internal daemon health, queue/provider state, command boundary, and transport profile over CultNet/RUDP for Idunn and Odin."
                     .to_string();
             cut_line =
-                "Systemd and GUI HTTP probes stop deciding daemon truth once Repixelizer publishes internal RUDP health plus runtime-owned command_boundary / transport_profile state."
+                "Keep Repixelizer's runtime-owned RUDP health and boundary store live until Odin ingests the typed queue/provider state directly and Idunn no longer needs /api/health, /api/config, systemd, or nginx as compatibility witnesses."
                     .to_string();
             steps = vec![
-                "Add a daemon-owned Repixelizer health contract and publish it over CultNet/RUDP from the live GUI/service runtime on Yggdrasil.".to_string(),
-                "Publish Repixelizer command_boundary and transport_profile records from the runtime so deploy/restart authority is explicit typed state instead of an ops-only assumption.".to_string(),
-                "Publish typed queue/provider state for Odin to ingest without treating /api/health and /api/config as the source of truth.".to_string(),
+                "Keep Repixelizer daemon health published over CultNet/RUDP from the live GUI/service runtime on Yggdrasil with contract repixelizer.cultnet-rudp-service-health.".to_string(),
+                "Keep Repixelizer command_boundary and transport_profile records in the runtime-owned boundary store so deploy authority is inspectable typed state instead of an ops-only assumption.".to_string(),
+                "Keep the Yggdrasil Repixelizer source-artifact lane shipping the app artifact plus the CultLib cultcache-py snapshot through a tiny remote runner script instead of brittle inline SSH quoting.".to_string(),
+                "Teach Odin to ingest Repixelizer queue/auth/runtime state from the daemon-owned witness store instead of treating /api/health and /api/config as daemon truth.".to_string(),
                 "Keep Heimdall-backed browser auth as a product boundary adapter, not the keepalive truth surface.".to_string(),
-                "Demote check-repixelizer-gui.sh, systemd, /api/health, /api/config, and nginx routing to deployment/debug witnesses once the runtime publications are live.".to_string(),
+                "Demote check-repixelizer-gui.sh, systemd, /api/health, /api/config, and nginx routing to deployment/debug witnesses once Odin and Idunn consume the typed store without compatibility help.".to_string(),
             ];
         }
         "idunn-swarm-deployment-coverage" => {
@@ -1565,46 +1567,37 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 interval_seconds: 30,
             },
             DaemonTarget {
-                daemon_id: "yggdrasil-heimdall".to_string(),
-                verse_id: "yggdrasil.local".to_string(),
-                name: "Yggdrasil Heimdall".to_string(),
-                health_contract: health_contract(
-                    "yggdrasil.source-deployment-freshness",
-                    "stale-deployment",
-                ),
-                health_command: Some(script("health-yggdrasil-heimdall.cmd")),
-                deploy_command: Some(script("deploy-yggdrasil-heimdall.cmd")),
-                restart_command: None,
-                enabled: true,
-                interval_seconds: 300,
+            daemon_id: "yggdrasil-heimdall".to_string(),
+            verse_id: "yggdrasil.local".to_string(),
+            name: "Yggdrasil Heimdall".to_string(),
+            health_contract: health_contract("heimdall.cultnet-rudp-provider-health", "failed"),
+            health_command: Some(script("health-yggdrasil-heimdall.cmd")),
+            deploy_command: Some(script("deploy-yggdrasil-heimdall.cmd")),
+            restart_command: None,
+            enabled: true,
+            interval_seconds: 300,
             },
             DaemonTarget {
-                daemon_id: "yggdrasil-repixelizer".to_string(),
-                verse_id: "yggdrasil.local".to_string(),
-                name: "Yggdrasil Repixelizer".to_string(),
-                health_contract: health_contract(
-                    "yggdrasil.source-deployment-freshness",
-                    "stale-deployment",
-                ),
-                health_command: Some(script("health-yggdrasil-repixelizer.cmd")),
-                deploy_command: Some(script("deploy-yggdrasil-repixelizer.cmd")),
-                restart_command: None,
-                enabled: true,
-                interval_seconds: 300,
+            daemon_id: "yggdrasil-repixelizer".to_string(),
+            verse_id: "yggdrasil.local".to_string(),
+            name: "Yggdrasil Repixelizer".to_string(),
+            health_contract: health_contract("repixelizer.cultnet-rudp-service-health", "failed"),
+            health_command: Some(script("health-yggdrasil-repixelizer.cmd")),
+            deploy_command: Some(script("deploy-yggdrasil-repixelizer.cmd")),
+            restart_command: None,
+            enabled: true,
+            interval_seconds: 300,
             },
             DaemonTarget {
-                daemon_id: "yggdrasil-streampixels".to_string(),
-                verse_id: "yggdrasil.local".to_string(),
-                name: "Yggdrasil StreamPixels".to_string(),
-                health_contract: health_contract(
-                    "yggdrasil.source-deployment-freshness",
-                    "stale-deployment",
-                ),
-                health_command: Some(script("health-yggdrasil-streampixels.cmd")),
-                deploy_command: Some(script("deploy-yggdrasil-streampixels.cmd")),
-                restart_command: None,
-                enabled: true,
-                interval_seconds: 300,
+            daemon_id: "yggdrasil-streampixels".to_string(),
+            verse_id: "yggdrasil.local".to_string(),
+            name: "Yggdrasil StreamPixels".to_string(),
+            health_contract: health_contract("streampixels.cultnet-rudp-service-health", "failed"),
+            health_command: Some(script("health-yggdrasil-streampixels.cmd")),
+            deploy_command: Some(script("deploy-yggdrasil-streampixels.cmd")),
+            restart_command: None,
+            enabled: true,
+            interval_seconds: 300,
             },
             DaemonTarget {
                 daemon_id: "nightwing-gjallar".to_string(),
@@ -2219,7 +2212,7 @@ mod tests {
     }
 
     #[test]
-    fn swarm_surgery_plan_names_mimir_after_gjallar_cut() {
+    fn swarm_surgery_plan_names_gjallar_after_repixelizer_cut() {
         let starfire_muninn = DaemonTarget {
             daemon_id: "starfire-muninn".to_string(),
             verse_id: "starfire.local".to_string(),
@@ -2374,10 +2367,7 @@ mod tests {
             daemon_id: "yggdrasil-streampixels".to_string(),
             verse_id: "yggdrasil.local".to_string(),
             name: "Yggdrasil StreamPixels".to_string(),
-            health_contract: health_contract(
-                "yggdrasil.source-deployment-freshness",
-                "stale-deployment",
-            ),
+            health_contract: health_contract("streampixels.cultnet-rudp-service-health", "failed"),
             health_command: Some("health-yggdrasil-streampixels.cmd".to_string()),
             deploy_command: Some("deploy-yggdrasil-streampixels.cmd".to_string()),
             restart_command: None,
@@ -2388,10 +2378,7 @@ mod tests {
             daemon_id: "yggdrasil-heimdall".to_string(),
             verse_id: "yggdrasil.local".to_string(),
             name: "Yggdrasil Heimdall".to_string(),
-            health_contract: health_contract(
-                "yggdrasil.source-deployment-freshness",
-                "stale-deployment",
-            ),
+            health_contract: health_contract("heimdall.cultnet-rudp-provider-health", "failed"),
             health_command: Some("health-yggdrasil-heimdall.cmd".to_string()),
             deploy_command: Some("deploy-yggdrasil-heimdall.cmd".to_string()),
             restart_command: None,
@@ -2402,10 +2389,7 @@ mod tests {
             daemon_id: "yggdrasil-repixelizer".to_string(),
             verse_id: "yggdrasil.local".to_string(),
             name: "Yggdrasil repixelizer".to_string(),
-            health_contract: health_contract(
-                "yggdrasil.source-deployment-freshness",
-                "stale-deployment",
-            ),
+            health_contract: health_contract("repixelizer.cultnet-rudp-service-health", "failed"),
             health_command: Some("health-yggdrasil-repixelizer.cmd".to_string()),
             deploy_command: Some("deploy-yggdrasil-repixelizer.cmd".to_string()),
             restart_command: None,
@@ -2437,11 +2421,11 @@ mod tests {
 
         assert_eq!(plan.plan_id, "swarm-surgery:starfire-local");
         assert_eq!(plan.status, "active-transport-migration");
-        assert_eq!(plan.next_target, "yggdrasil-repixelizer");
-        assert!(plan.current_phase.contains("repixelizer"));
+        assert_eq!(plan.next_target, "nightwing-gjallar");
+        assert!(plan.current_phase.contains("Nightwing Gjallar"));
         assert!(
             plan.cut_line
-                .contains("Yggdrasil Heimdall now exercise daemon-owned RUDP health")
+                .contains("live yggdrasil-heimdall publishes heimdall.cultnet-rudp-provider-health")
         );
         assert!(plan.cut_line.contains("GameCult\\Vili"));
         assert!(plan.cut_line.contains("10.77.0.4"));
@@ -2457,7 +2441,9 @@ mod tests {
         assert!(plan.cut_line.contains("10.77.0.1"));
         assert!(plan.cut_line.contains("heimdall.cultnet-rudp-provider-health"));
         assert!(plan.cut_line.contains("/srv/heimdall/cultcache/heimdall.service.cc"));
-        assert!(plan.cut_line.contains("Repixelizer remains"));
+        assert!(plan.cut_line.contains("repixelizer.cultnet-rudp-service-health"));
+        assert!(plan.cut_line.contains("/srv/repixelizer/cultcache/repixelizer.service.cc"));
+        assert!(plan.cut_line.contains("Nightwing Gjallar remains"));
         assert!(plan.verification_layer.contains("CultMesh keepalive store"));
         assert!(
             plan.invariants
@@ -2657,17 +2643,20 @@ mod tests {
         );
 
         let repixelizer_plan = daemon_surgery_plan(&yggdrasil_repixelizer, "unix:100");
-        assert_eq!(repixelizer_plan.status, "transport-surgery-required");
+        assert_eq!(
+            repixelizer_plan.status,
+            "partial-rudp-health-and-provider-store-live"
+        );
         assert!(
             repixelizer_plan
                 .current_mechanism
-                .contains("/api/health")
+                .contains("/srv/repixelizer/cultcache/repixelizer.service.cc")
         );
         assert!(
             repixelizer_plan
                 .steps
                 .iter()
-                .any(|step| step.contains("/api/config"))
+                .any(|step| step.contains("CultLib cultcache-py snapshot"))
         );
     }
 
@@ -2774,10 +2763,7 @@ mod tests {
             daemon_id: "yggdrasil-streampixels".to_string(),
             verse_id: "yggdrasil.local".to_string(),
             name: "Yggdrasil StreamPixels".to_string(),
-            health_contract: health_contract(
-                "yggdrasil.source-deployment-freshness",
-                "stale-deployment",
-            ),
+            health_contract: health_contract("streampixels.cultnet-rudp-service-health", "failed"),
             health_command: Some("health-yggdrasil-streampixels.cmd".to_string()),
             deploy_command: Some("deploy-yggdrasil-streampixels.cmd".to_string()),
             restart_command: None,
@@ -2807,10 +2793,7 @@ mod tests {
             daemon_id: "yggdrasil-heimdall".to_string(),
             verse_id: "yggdrasil.local".to_string(),
             name: "Yggdrasil Heimdall".to_string(),
-            health_contract: health_contract(
-                "yggdrasil.source-deployment-freshness",
-                "stale-deployment",
-            ),
+            health_contract: health_contract("heimdall.cultnet-rudp-provider-health", "failed"),
             health_command: Some("health-yggdrasil-heimdall.cmd".to_string()),
             deploy_command: Some("deploy-yggdrasil-heimdall.cmd".to_string()),
             restart_command: None,
@@ -2830,15 +2813,12 @@ mod tests {
     }
 
     #[test]
-    fn repixelizer_transport_profile_marks_gui_http_fallback() {
+    fn repixelizer_transport_profile_marks_rudp_boundary_store_live() {
         let repixelizer = DaemonTarget {
             daemon_id: "yggdrasil-repixelizer".to_string(),
             verse_id: "yggdrasil.local".to_string(),
             name: "Yggdrasil repixelizer".to_string(),
-            health_contract: health_contract(
-                "yggdrasil.source-deployment-freshness",
-                "stale-deployment",
-            ),
+            health_contract: health_contract("repixelizer.cultnet-rudp-service-health", "failed"),
             health_command: Some("health-yggdrasil-repixelizer.cmd".to_string()),
             deploy_command: Some("deploy-yggdrasil-repixelizer.cmd".to_string()),
             restart_command: None,
@@ -2848,9 +2828,9 @@ mod tests {
 
         let profile = daemon_transport_profile(&repixelizer, "unix:100");
 
-        assert_eq!(profile.state, "transport-surgery-required");
-        assert!(profile.current_transport.contains("compatibility.ssh-systemd-http"));
-        assert!(profile.cut_line.contains("Heimdall-authenticated GUI"));
+        assert_eq!(profile.state, "partial-rudp-health-and-provider-store-live");
+        assert!(profile.current_transport.contains("daemon-published-rudp-health"));
+        assert!(profile.cut_line.contains("/srv/repixelizer/cultcache/repixelizer.service.cc"));
     }
 
     #[test]
