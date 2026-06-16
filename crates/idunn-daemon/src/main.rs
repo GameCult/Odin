@@ -1014,9 +1014,9 @@ fn daemon_transport_profile(
             "Vili now publishes vili.cultnet-rudp-animation-health over CultNet/RUDP from the hidden Raven GameCult\\Vili task, and its daemon-owned vili.service.cc store contains provider advertisement, operator state, Eve surface, command_boundary, and transport_profile records; HTTP and WebSocket remain operator/debug lowerings.",
         ),
         "yggdrasil-streampixels" => (
-            "daemon-published-rudp-health-local-proof + daemon-owned-cultcache-service-boundary + compatibility.ssh-systemd-http fallback",
+            "daemon-published-rudp-health + daemon-owned-cultcache-service-boundary + compatibility.ssh-systemd-http fallback",
             "partial-rudp-health-and-provider-store-live",
-            "StreamPixels service runtime publishes a daemon-owned CultCache boundary with provider advertisement, command_boundary, transport_profile, and Idunn health summary; the service now has local Idunn acceptance proof for its in-process CultNet/RUDP health publisher. Yggdrasil deployment still needs proof before SSH/systemd/HTTP checks can be demoted.",
+            "StreamPixels now publishes daemon-owned RUDP health and a daemon-owned CultCache boundary from the live Yggdrasil service runtime; Idunn accepts yggdrasil-streampixels from 10.77.0.1 and the boundary store at /srv/streampixels/app/.streampixels-data/cultcache/streampixels.service.cc remains the service-owned witness behind the compatibility checks.",
         ),
         _ => (
             "compatibility.local-command",
@@ -1350,21 +1350,22 @@ fn daemon_surgery_plan(target: &DaemonTarget, updated_at: &str) -> IdunnDaemonSu
             status = "partial-rudp-health-and-provider-store-live";
             owner = "StreamPixels service runtime plus gamecult-ops deploy lane";
             current_mechanism =
-                "StreamPixels publishes a daemon-owned CultCache boundary store with provider advertisement, command_boundary, transport_profile, and Idunn health summary from the service runtime. The service has local Idunn acceptance proof for its in-process CultNet/RUDP Idunn health publisher wired behind STREAMPIXELS_IDUNN_RUDP_HEALTH. Yggdrasil deployment freshness is still checked and deployed through SSH/systemd/source-artifact compatibility scripts."
+                "StreamPixels publishes a daemon-owned CultCache boundary store with provider advertisement, command_boundary, transport_profile, and Idunn health summary from the live Yggdrasil service runtime. The deployed service keeps STREAMPIXELS_IDUNN_RUDP_HEALTH=10.77.0.2:17870 and contract streampixels.cultnet-rudp-service-health in /srv/streampixels/env/service.env, the source-artifact lane now ships the required CultLib snapshot beside the app artifact, and live Idunn accepts yggdrasil-streampixels from 10.77.0.1."
                     .to_string();
             intended_authority =
                 "StreamPixels publishes service health, provider state, command boundary, and transport profile over cultnet.transport.rudp.v0, with the service-owned CultCache boundary as durable local state and HTTP/SSH/systemd as fallback witnesses."
                     .to_string();
             cut_line =
-                "Keep the StreamPixels service boundary store and in-process RUDP publisher; deploy it on Yggdrasil and verify live health publication, then demote SSH/systemd/HTTP checks to deployment/debug witnesses."
+                "Keep the StreamPixels service boundary store and in-process RUDP publisher live on Yggdrasil; SSH/systemd/HTTP checks and deployment-manifest freshness remain deployment/debug witnesses only until Odin consumes the typed store and Idunn no longer needs compatibility proof."
                     .to_string();
             steps = vec![
                 "Keep apps/service/src/verse-state.ts publishing streampixels.service.cc from the StreamPixels service runtime.".to_string(),
                 "Teach Odin to ingest StreamPixels provider advertisement, command_boundary, and transport_profile records from the service-owned CultCache boundary store.".to_string(),
                 "Keep the StreamPixels in-process Idunn RUDP health publisher using contract streampixels.cultnet-rudp-service-health.".to_string(),
-                "Keep the local Idunn acceptance proof for StreamPixels RUDP health; the publisher sends the health document after a short accept grace period so one-shot pulses do not depend on receiving the accept reply.".to_string(),
-                "Deploy the updated service to Yggdrasil through the source artifact lane and verify the live store/health publication.".to_string(),
-                "Demote health-yggdrasil-streampixels.cmd to deployment/debug witness once RUDP health is live.".to_string(),
+                "Keep the Yggdrasil source-artifact lane shipping the StreamPixels app artifact plus the CultLib cultnet-ts/cultcache-ts snapshot through a tiny remote runner script instead of brittle inline SSH quoting.".to_string(),
+                "Keep the Yggdrasil deploy lane using a serial pnpm workspace build and the deployment-manifest freshness check so failed builds cannot masquerade as fresh restarts.".to_string(),
+                "Keep live Idunn acceptance proof for StreamPixels RUDP health on Yggdrasil; the publisher sends the health document after a short accept grace period so one-shot pulses do not depend on receiving the accept reply.".to_string(),
+                "Demote health-yggdrasil-streampixels.cmd, SSH/systemd, and HTTP checks to deployment/debug witnesses once Odin and Idunn consume the typed store and daemon-published RUDP health without compatibility help.".to_string(),
             ];
         }
         "yggdrasil-heimdall" | "yggdrasil-repixelizer" => {
@@ -2333,6 +2334,20 @@ mod tests {
             enabled: true,
             interval_seconds: 30,
         };
+        let yggdrasil_streampixels = DaemonTarget {
+            daemon_id: "yggdrasil-streampixels".to_string(),
+            verse_id: "yggdrasil.local".to_string(),
+            name: "Yggdrasil StreamPixels".to_string(),
+            health_contract: health_contract(
+                "yggdrasil.source-deployment-freshness",
+                "stale-deployment",
+            ),
+            health_command: Some("health-yggdrasil-streampixels.cmd".to_string()),
+            deploy_command: Some("deploy-yggdrasil-streampixels.cmd".to_string()),
+            restart_command: None,
+            enabled: true,
+            interval_seconds: 300,
+        };
 
         let plan = swarm_surgery_plan(
             "starfire-local",
@@ -2520,6 +2535,34 @@ mod tests {
             |step| step.contains("0.0.0.0:17870") && step.contains("Raven")
         ));
         assert!(vili_plan.blockers.is_empty());
+
+        let streampixels_plan = daemon_surgery_plan(&yggdrasil_streampixels, "unix:100");
+        assert_eq!(
+            streampixels_plan.status,
+            "partial-rudp-health-and-provider-store-live"
+        );
+        assert!(
+            streampixels_plan
+                .current_mechanism
+                .contains("10.77.0.2:17870")
+        );
+        assert!(
+            streampixels_plan
+                .current_mechanism
+                .contains("10.77.0.1")
+        );
+        assert!(
+            streampixels_plan
+                .current_mechanism
+                .contains("/srv/streampixels/env/service.env")
+        );
+        assert!(streampixels_plan.cut_line.contains("deployment/debug witnesses"));
+        assert!(streampixels_plan.steps.iter().any(
+            |step| step.contains("CultLib cultnet-ts/cultcache-ts snapshot")
+        ));
+        assert!(streampixels_plan.steps.iter().any(
+            |step| step.contains("serial pnpm workspace build")
+        ));
     }
 
     #[test]
@@ -2620,7 +2663,7 @@ mod tests {
     }
 
     #[test]
-    fn streampixels_transport_profile_marks_provider_store_prepared() {
+    fn streampixels_transport_profile_marks_provider_store_live() {
         let streampixels = DaemonTarget {
             daemon_id: "yggdrasil-streampixels".to_string(),
             verse_id: "yggdrasil.local".to_string(),
@@ -2647,7 +2690,9 @@ mod tests {
                 .current_transport
                 .contains("daemon-owned-cultcache-service-boundary")
         );
-        assert!(profile.cut_line.contains("CultNet/RUDP"));
+        assert!(!profile.current_transport.contains("local-proof"));
+        assert!(profile.cut_line.contains("10.77.0.1"));
+        assert!(profile.cut_line.contains("service-owned witness"));
     }
 
     #[test]

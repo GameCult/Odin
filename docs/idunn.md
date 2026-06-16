@@ -311,9 +311,16 @@ HTTP/WebSocket endpoints are renderer/debug lowerings. StreamPixels now has a
 service-owned CultCache boundary store at
 `E:\Projects\StreamPixels\.streampixels-data\cultcache\streampixels.service.cc`
 containing provider advertisement, command boundary, transport profile, and an
-Idunn health summary, and Odin local discovery can ingest it. StreamPixels still
-owes real Idunn health publication over CultNet/RUDP and Yggdrasil deployment
-before its SSH/systemd/HTTP checks can be demoted. VoidBot, Gjallar, Mimir, and
+Idunn health summary, and Odin local discovery can ingest it. The live
+Yggdrasil deployment now keeps
+`/srv/streampixels/env/service.env` wired for
+`STREAMPIXELS_IDUNN_RUDP_HEALTH=10.77.0.2:17870` with contract
+`streampixels.cultnet-rudp-service-health`, publishes the boundary store at
+`/srv/streampixels/app/.streampixels-data/cultcache/streampixels.service.cc`,
+and has live Idunn acceptance proof for `yggdrasil-streampixels` from
+`10.77.0.1`. StreamPixels now owes only the final demotion of
+SSH/systemd/HTTP checks from compatibility proof to deployment/debug witness
+once Odin consumes the typed store without fallback. VoidBot, Gjallar, Mimir, and
 the Nightwing Eve runtime services still owe provider advertisement and
 command-boundary RUDP publication before their compatibility surfaces can be
 purely display/debug lowerings; Gjallar also owes native CultMesh/RUDP deck

@@ -52,10 +52,38 @@ $remoteDeploy = "/home/gamecultadmin/$([IO.Path]::GetFileName($DeployScript))"
 $remoteCheck = "/home/gamecultadmin/$([IO.Path]::GetFileName($CheckScript))"
 $remoteTarball = "/home/gamecultadmin/$RemoteTarballName"
 $remoteManifest = "/home/gamecultadmin/$AppId-deployment-manifest.txt"
+$remoteRunner = "/home/gamecultadmin/run-$AppId-deploy.sh"
 $targetTarball = "$RemoteAppHome/$RemoteTarballName"
 $targetManifest = "$RemoteAppHome/deployment-manifest.txt"
 $sshArgs = @("-o", "BatchMode=yes", "-o", "ConnectTimeout=10", $SshTarget)
 $scpArgs = @("-o", "BatchMode=yes", "-o", "ConnectTimeout=10")
+$runnerPath = Join-Path $scratch "run-$AppId-deploy.sh"
+
+$runnerScript = @"
+#!/usr/bin/env bash
+set -euo pipefail
+
+sudo -n install -d -o '$AppUser' -g '$AppUser' '$RemoteAppHome'
+sudo -n install -o '$AppUser' -g '$AppUser' -m 600 '$remoteTarball' '$targetTarball'
+sudo -n install -m 644 '$remoteManifest' '$targetManifest'
+chmod +x '$remoteDeploy' '$remoteCheck'
+sudo -n bash '$remoteDeploy'
+
+check_ok=0
+for i in `$(seq 1 30); do
+  if sudo -n bash '$remoteCheck'; then
+    check_ok=1
+    break
+  fi
+  sleep 2
+done
+
+if [ "`$check_ok" -ne 1 ]; then
+  sudo -n bash '$remoteCheck'
+  exit 1
+fi
+"@.Replace("`r`n", "`n")
+[System.IO.File]::WriteAllText($runnerPath, $runnerScript, [System.Text.Encoding]::ASCII)
 
 scp.exe @scpArgs $tarPath "${SshTarget}:$remoteTarball"
 if ($LASTEXITCODE -ne 0) { throw "scp source tarball failed for $AppId" }
@@ -65,20 +93,17 @@ scp.exe @scpArgs $CheckScript "${SshTarget}:$remoteCheck"
 if ($LASTEXITCODE -ne 0) { throw "scp check script failed for $AppId" }
 scp.exe @scpArgs $manifestPath "${SshTarget}:$remoteManifest"
 if ($LASTEXITCODE -ne 0) { throw "scp manifest failed for $AppId" }
+scp.exe @scpArgs $runnerPath "${SshTarget}:$remoteRunner"
+if ($LASTEXITCODE -ne 0) { throw "scp runner script failed for $AppId" }
 
-$remoteCommand = @(
-  "sudo -n install -d -o '$AppUser' -g '$AppUser' '$RemoteAppHome'",
-  "sudo -n install -o '$AppUser' -g '$AppUser' -m 600 '$remoteTarball' '$targetTarball'",
-  "chmod +x '$remoteDeploy' '$remoteCheck'",
-  "sudo -n bash '$remoteDeploy'",
-  "check_ok=0; for i in `$(seq 1 30); do if sudo -n bash '$remoteCheck'; then check_ok=1; break; fi; sleep 2; done; if [ `$check_ok -ne 1 ]; then sudo -n bash '$remoteCheck'; fi",
-  "sudo -n install -m 644 '$remoteManifest' '$targetManifest'"
-) -join " && "
-
-ssh.exe @sshArgs $remoteCommand
-if ($LASTEXITCODE -ne 0) {
+ssh.exe @sshArgs "chmod +x '$remoteRunner' && bash '$remoteRunner'"
+$remoteExit = $LASTEXITCODE
+ssh.exe @sshArgs "rm -f '$remoteRunner'"
+if ($remoteExit -ne 0) {
   throw "remote deploy/check failed for $AppId"
 }
+
+Remove-Item -LiteralPath $runnerPath -Force -ErrorAction SilentlyContinue
 
 Write-Host "$AppId deployed to Yggdrasil at $commit."
 Write-Host "  artifactSha256=$hash"

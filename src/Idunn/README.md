@@ -214,10 +214,17 @@ provider advertisement, market snapshot, Eve surface, command boundary, and
 transport profile records; Odin local discovery can ingest that store as
 provider truth. StreamPixels now publishes a service-owned CultCache boundary
 store with provider advertisement, command boundary, transport profile, and
-Idunn health summary; Odin local discovery can ingest that store, and local
-Idunn has accepted StreamPixels daemon health over CultNet/RUDP. Yggdrasil
-deployment remains owed before SSH/systemd/HTTP probes are only debug
-witnesses. Raven Muninn task actions are also an explicit ops invariant: Task
+Idunn health summary; Odin local discovery can ingest that store, and the live
+Yggdrasil service now publishes daemon health over CultNet/RUDP with
+`STREAMPIXELS_IDUNN_RUDP_HEALTH=10.77.0.2:17870` and contract
+`streampixels.cultnet-rudp-service-health` in
+`/srv/streampixels/env/service.env`. Live Idunn accepts
+`yggdrasil-streampixels` from `10.77.0.1`, and the service-owned boundary store
+now lives at
+`/srv/streampixels/app/.streampixels-data/cultcache/streampixels.service.cc`.
+The remaining debt is only to demote SSH/systemd/HTTP probes from compatibility
+proof to deployment/debug witness once Odin consumes the typed store without
+fallback. Raven Muninn task actions are also an explicit ops invariant: Task
 Scheduler must execute `wscript.exe //B //Nologo` hidden launcher actions
 directly for `GameCult-Muninn`, `GameCult-Muninn-Activate`, and
 `GameCult-Muninn-VideoProof`, never raw `.cmd` wrappers. Those three live Raven
