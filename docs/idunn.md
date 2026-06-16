@@ -279,15 +279,17 @@ serialized provider witness refresh. VoidBot publishes
 `voidbot.cultnet-rudp-stack-health` after each GameCult Local Orchestrator
 pulse. Gjallar publishes
 `gjallar.cultnet-rudp-framebuffer-composition-health` from the C# Nightwing
-framebuffer service. Live Idunn cycles accept these records before command-probe fallback.
+framebuffer service. Mimir Eve dashboard publishes
+`mimir.cultnet-rudp-provider-health` from the Nightwing systemd broker. Live
+Idunn cycles accept these records before command-probe fallback.
 Raven's Muninn scheduled-task repair is a separate ops invariant:
 `GameCult-Muninn`, `GameCult-Muninn-Activate`, and
 `GameCult-Muninn-VideoProof` must execute `wscript.exe` hidden launcher actions,
 not raw `.cmd` task actions.
 
-Next: move Mimir Eve dashboard health off local compatibility evidence and onto
-daemon-owned RUDP state, then continue runtime-by-runtime until compatibility
-probes can be deleted or demoted. Stonks, Weksa, VoidBot, and Gjallar still owe
+Next: move the remaining Nightwing Eve runtime surfaces off compatibility
+service probes, then continue runtime-by-runtime until compatibility probes can
+be deleted or demoted. Stonks, Weksa, VoidBot, Gjallar, and Mimir still owe
 provider advertisement and command-boundary RUDP publication before their
 compatibility surfaces can be purely display/debug lowerings; Gjallar also owes
 native CultMesh/RUDP deck input to replace the current Odin WebSocket lowering

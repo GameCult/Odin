@@ -372,10 +372,10 @@ fn is_fresh_daemon_published_health(
     if health.transport != CULTNET_RUDP_PROTOCOL_ID {
         return false;
     }
-    let Some(now_seconds) = parse_unix_timestamp(now) else {
+    let Some(now_seconds) = parse_timestamp_seconds(now) else {
         return false;
     };
-    let Some(observed_seconds) = parse_unix_timestamp(&health.observed_at) else {
+    let Some(observed_seconds) = parse_timestamp_seconds(&health.observed_at) else {
         return false;
     };
     if observed_seconds > now_seconds {
@@ -386,6 +386,61 @@ fn is_fresh_daemon_published_health(
 
 fn parse_unix_timestamp(value: &str) -> Option<u64> {
     value.strip_prefix("unix:")?.parse().ok()
+}
+
+fn parse_timestamp_seconds(value: &str) -> Option<u64> {
+    parse_unix_timestamp(value).or_else(|| parse_utc_iso_timestamp_seconds(value))
+}
+
+fn parse_utc_iso_timestamp_seconds(value: &str) -> Option<u64> {
+    if value.len() < 19 {
+        return None;
+    }
+    if !value.ends_with('Z') && !value.contains("+00:00") {
+        return None;
+    }
+
+    let year = value.get(0..4)?.parse::<i32>().ok()?;
+    let month = value.get(5..7)?.parse::<u32>().ok()?;
+    let day = value.get(8..10)?.parse::<u32>().ok()?;
+    let hour = value.get(11..13)?.parse::<u32>().ok()?;
+    let minute = value.get(14..16)?.parse::<u32>().ok()?;
+    let second = value.get(17..19)?.parse::<u32>().ok()?;
+    if value.as_bytes().get(4) != Some(&b'-')
+        || value.as_bytes().get(7) != Some(&b'-')
+        || value.as_bytes().get(10) != Some(&b'T')
+        || value.as_bytes().get(13) != Some(&b':')
+        || value.as_bytes().get(16) != Some(&b':')
+        || !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour > 23
+        || minute > 59
+        || second > 60
+    {
+        return None;
+    }
+
+    let days = days_from_civil(year, month, day)?;
+    let seconds = days
+        .checked_mul(86_400)?
+        .checked_add(i64::from(hour) * 3_600)?
+        .checked_add(i64::from(minute) * 60)?
+        .checked_add(i64::from(second))?;
+    u64::try_from(seconds).ok()
+}
+
+fn days_from_civil(year: i32, month: u32, day: u32) -> Option<i64> {
+    let year = i64::from(year) - if month <= 2 { 1 } else { 0 };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400;
+    let month = i64::from(month);
+    let day = i64::from(day);
+    let day_of_year = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+    if !(0..=365).contains(&day_of_year) {
+        return None;
+    }
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    Some(era * 146_097 + day_of_era - 719_468)
 }
 
 fn publish_runtime_transport_check(
@@ -580,53 +635,67 @@ fn run_rudp_health_ingress_loop(
                 match handle_rudp_health_datagram(&socket, &mut sessions, &buffer[..size], source) {
                     Ok(frames) => {
                         for frame in frames {
-                            let message = decode_cultnet_message_from_slice(
+                            let message = match decode_cultnet_message_from_slice(
                                 &frame.payload,
                                 CultNetWireContract::CultNetSchemaV0,
-                            )?;
+                            ) {
+                                Ok(message) => message,
+                                Err(error) => {
+                                    publish_rudp_ingress_failure(
+                                        &options,
+                                        &store_lock,
+                                        local_addr,
+                                        &format!(
+                                            "rejected RUDP health schema bytes from {source}: {error}"
+                                        ),
+                                        &observed_at,
+                                    );
+                                    continue;
+                                }
+                            };
                             match health_from_rudp_message(&message) {
                                 Ok(mut health) => {
                                     health.publication_source = "daemon-published".to_string();
                                     health.transport = CULTNET_RUDP_PROTOCOL_ID.to_string();
-                                    with_store_node(&options, &store_lock, |node| {
-                                        node.put(&health.daemon_id, &health)?;
-                                        Ok(())
-                                    })?;
-                                    println!(
-                                        "Idunn accepted RUDP health for {} from {} over {}.",
-                                        health.daemon_id, source, frame.channel_id
-                                    );
+                                    if let Err(error) =
+                                        with_store_node(&options, &store_lock, |node| {
+                                            node.put(&health.daemon_id, &health)?;
+                                            Ok(())
+                                        })
+                                    {
+                                        eprintln!(
+                                            "Idunn RUDP health ingress failed to persist {} from {}: {}",
+                                            health.daemon_id, source, error
+                                        );
+                                    } else {
+                                        println!(
+                                            "Idunn accepted RUDP health for {} from {} over {}.",
+                                            health.daemon_id, source, frame.channel_id
+                                        );
+                                    }
                                 }
                                 Err(error) => {
-                                    let failed = rudp_health_ingress_record(
-                                        "idunn-rudp-health-ingress",
+                                    publish_rudp_ingress_failure(
+                                        &options,
+                                        &store_lock,
                                         local_addr,
-                                        "degraded",
                                         &format!(
                                             "rejected RUDP health schema frame from {source}: {error}"
                                         ),
                                         &observed_at,
                                     );
-                                    with_store_node(&options, &store_lock, |node| {
-                                        node.put(&failed.ingress_id, &failed)?;
-                                        Ok(())
-                                    })?;
                                 }
                             }
                         }
                     }
                     Err(error) => {
-                        let failed = rudp_health_ingress_record(
-                            "idunn-rudp-health-ingress",
+                        publish_rudp_ingress_failure(
+                            &options,
+                            &store_lock,
                             local_addr,
-                            "degraded",
                             &format!("rejected RUDP health datagram from {source}: {error}"),
                             &observed_at,
                         );
-                        with_store_node(&options, &store_lock, |node| {
-                            node.put(&failed.ingress_id, &failed)?;
-                            Ok(())
-                        })?;
                     }
                 }
             }
@@ -640,6 +709,28 @@ fn run_rudp_health_ingress_loop(
                 ) => {}
             Err(error) => return Err(error.into()),
         }
+    }
+}
+
+fn publish_rudp_ingress_failure(
+    options: &CommonOptions,
+    store_lock: &Arc<Mutex<()>>,
+    local_addr: SocketAddr,
+    detail: &str,
+    observed_at: &str,
+) {
+    let failed = rudp_health_ingress_record(
+        "idunn-rudp-health-ingress",
+        local_addr,
+        "degraded",
+        detail,
+        observed_at,
+    );
+    if let Err(error) = with_store_node(options, store_lock, |node| {
+        node.put(&failed.ingress_id, &failed)?;
+        Ok(())
+    }) {
+        eprintln!("Idunn RUDP health ingress failed to persist ingress failure: {error}");
     }
 }
 
@@ -748,11 +839,23 @@ fn swarm_surgery_plan(
     targets: &[DaemonTarget],
     updated_at: &str,
 ) -> IdunnSwarmSurgeryPlanRecord {
-    let has_mimir_eve_dashboard = targets
-        .iter()
-        .any(|target| target.daemon_id == "mimir-eve-dashboard");
-    let next_target = if has_mimir_eve_dashboard {
-        "mimir-eve-dashboard"
+    let next_target = [
+        "nightwing-eve-dashboard",
+        "nightwing-eve-browser-reference",
+        "vili",
+        "yggdrasil-streampixels",
+        "yggdrasil-repixelizer",
+        "yggdrasil-heimdall",
+    ]
+    .iter()
+    .copied()
+    .find(|candidate| {
+        targets
+            .iter()
+            .any(|target| target.enabled && target.daemon_id == *candidate)
+    });
+    let next_target = if let Some(target) = next_target {
+        target
     } else if let Some(target) = targets.iter().find(|target| target.enabled) {
         target.daemon_id.as_str()
     } else {
@@ -786,11 +889,11 @@ fn swarm_surgery_plan(
             "5. Delete or demote compatibility probes once every target has daemon-owned publication and advertised lifecycle authority.".to_string(),
         ],
         current_phase:
-            "Phase 10: move Mimir Eve dashboard health from local compatibility probes to daemon-published RUDP state, with Raven Muninn scheduled-task action repair queued as a background-only ops invariant."
+            "Phase 11: move Nightwing Eve runtime surfaces from compatibility service probes to daemon-published RUDP state, with Raven Muninn scheduled-task action repair queued as a background-only ops invariant."
                 .to_string(),
         next_target: next_target.to_string(),
         cut_line:
-            "Muninn, Idunn, Odin, Stonks, Weksa, VoidBot, and Nightwing Gjallar now exercise daemon-owned RUDP health. Mimir Eve dashboard is the next local runtime cut. Live Raven still needs GameCult-Muninn, GameCult-Muninn-Activate, and GameCult-Muninn-VideoProof task actions repaired to execute wscript.exe hidden launchers directly; application is blocked while Raven SSH is unreachable."
+            "Muninn, Idunn, Odin, Stonks, Weksa, VoidBot, Nightwing Gjallar, and Mimir Eve dashboard now exercise daemon-owned RUDP health. Nightwing Eve runtime surfaces are the next local runtime cut. Live Raven still needs GameCult-Muninn, GameCult-Muninn-Activate, and GameCult-Muninn-VideoProof task actions repaired to execute wscript.exe hidden launchers directly; application is blocked while Raven SSH is unreachable."
                 .to_string(),
         verification_layer:
             "CultMesh keepalive store records plus live Idunn decision cycles, not process exit codes or chat summaries."
@@ -986,14 +1089,25 @@ fn daemon_surgery_plan(target: &DaemonTarget, updated_at: &str) -> IdunnDaemonSu
             ];
         }
         "mimir-eve-dashboard" => {
+            status = "partial-rudp-health-live";
             severity = "high";
             owner = "Mimir dashboard runtime";
             current_mechanism =
-                "Mimir dashboard health is currently a local compatibility probe with no Idunn restart authority."
+                "Mimir Eve dashboard publishes mimir.cultnet-rudp-provider-health over CultNet/RUDP from the Nightwing systemd broker; provider advertisement and command boundary still retain compatibility projections."
                     .to_string();
-            blockers.push(
-                "No restart/deploy command authority is currently advertised to Idunn.".to_string(),
-            );
+            intended_authority =
+                "Mimir dashboard publishes daemon health, provider catalog, Eve dashboard state, command boundary, and transport profile as typed CultMesh/CultNet records over cultnet.transport.rudp.v0; HTTP/WebSocket remain lowerings for clients only."
+                    .to_string();
+            cut_line =
+                "Keep the local HTTP probe as fallback only until Mimir provider advertisement and command_boundary records are also daemon-owned RUDP publications."
+                    .to_string();
+            steps = vec![
+                "Keep live mimir.cultnet-rudp-provider-health publication running from the Nightwing Eve dashboard broker.".to_string(),
+                "Publish Mimir Eve dashboard provider advertisement and retained state records over cultnet.transport.rudp.v0.".to_string(),
+                "Publish Mimir Eve dashboard command_boundary and transport_profile records from the daemon runtime.".to_string(),
+                "Teach Odin to prefer Mimir RUDP/CultMesh provider records over compatibility HTTP catalog ingestion.".to_string(),
+                "Delete or demote health-mimir-eve-dashboard.cmd to a manual compatibility probe with no lifecycle truth.".to_string(),
+            ];
         }
         "weksa" => {
             status = "partial-rudp-health-live";
@@ -2016,12 +2130,27 @@ mod tests {
             enabled: true,
             interval_seconds: 30,
         };
+        let nightwing_eve_dashboard = DaemonTarget {
+            daemon_id: "nightwing-eve-dashboard".to_string(),
+            verse_id: "nightwing.local".to_string(),
+            name: "Nightwing Eve dashboard".to_string(),
+            health_contract: health_contract(
+                "nightwing.cultnet-rudp-eve-dashboard-health",
+                "failed",
+            ),
+            health_command: Some("health-nightwing-eve-dashboard.cmd".to_string()),
+            deploy_command: None,
+            restart_command: Some("restart-nightwing-eve-dashboard.cmd".to_string()),
+            enabled: true,
+            interval_seconds: 30,
+        };
 
         let plan = swarm_surgery_plan(
             "starfire-local",
             &[
                 odin,
                 mimir,
+                nightwing_eve_dashboard,
                 stonks,
                 weksa.clone(),
                 voidbot.clone(),
@@ -2035,11 +2164,11 @@ mod tests {
 
         assert_eq!(plan.plan_id, "swarm-surgery:starfire-local");
         assert_eq!(plan.status, "active-transport-migration");
-        assert_eq!(plan.next_target, "mimir-eve-dashboard");
-        assert!(plan.current_phase.contains("Mimir Eve dashboard"));
+        assert_eq!(plan.next_target, "nightwing-eve-dashboard");
+        assert!(plan.current_phase.contains("Nightwing Eve"));
         assert!(
             plan.cut_line
-                .contains("Muninn, Idunn, Odin, Stonks, Weksa, VoidBot, and Nightwing Gjallar")
+                .contains("Muninn, Idunn, Odin, Stonks, Weksa, VoidBot, Nightwing Gjallar, and Mimir Eve dashboard")
         );
         assert!(plan.cut_line.contains("GameCult-Muninn-Activate"));
         assert!(plan.cut_line.contains("GameCult-Muninn-VideoProof"));
@@ -2150,6 +2279,11 @@ mod tests {
             transport: CULTNET_RUDP_PROTOCOL_ID.to_string(),
         };
 
+        assert!(is_fresh_daemon_published_health(
+            &health, &desired, "unix:100"
+        ));
+
+        health.observed_at = "1970-01-01T00:01:35.0000000+00:00".to_string();
         assert!(is_fresh_daemon_published_health(
             &health, &desired, "unix:100"
         ));
