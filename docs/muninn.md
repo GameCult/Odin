@@ -199,15 +199,17 @@ missing or the Quest is unavailable, Muninn publishes `muninn.quest_access` as
 
 Raven runs Muninn from `C:\Meta\Odin\Muninn`. `scripts/restart-muninn.ps1`
 recreates the `GameCult-Muninn` scheduled task with `wscript.exe` as the task
-action and `start-muninn-serve-hidden.vbs` as its argument. The VBS launches
-`start-muninn-serve.ps1` with noninteractive hidden PowerShell. The PowerShell
-launcher starts `muninn.exe` with `-WindowStyle Hidden` and redirects logs under
-`C:\Meta\Odin\logs\muninn`.
+action and `start-muninn-serve-hidden.vbs` as its argument. It also repairs
+`GameCult-Muninn-Activate` and `GameCult-Muninn-VideoProof` to execute their
+hidden VBS launchers directly when those compatibility commands exist on Raven.
+The serve VBS launches `start-muninn-serve.ps1` with noninteractive hidden
+PowerShell. The PowerShell launcher starts `muninn.exe` with
+`-WindowStyle Hidden` and redirects logs under `C:\Meta\Odin\logs\muninn`.
 Raven is an operator-consented host: Muninn operations on Raven must be
 background-only and must not create visible terminal windows. `.cmd` files may
 exist only as manual compatibility trampolines; Task Scheduler must execute
 hidden launchers directly and must not flash an interactive console on Raven.
-The repair actuator for live Raven task drift is
+The standalone repair actuator for live Raven task drift is
 `E:\Projects\Odin\scripts\repair-raven-muninn-task-actions.ps1`. It must
 register `GameCult-Muninn`, `GameCult-Muninn-Activate`, and
 `GameCult-Muninn-VideoProof` with `wscript.exe` as the task action and the
