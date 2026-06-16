@@ -298,12 +298,15 @@ own `--idunn-rudp-health`, `--idunn-daemon`, and `--idunn-health-contract`
 arguments.
 
 Next: move the remaining Yggdrasil deployments off compatibility health/deck
-checks, starting with Heimdall and then repixelizer, then continue
+checks, with repixelizer now the explicit next cut, then continue
 runtime-by-runtime until compatibility probes can be deleted or demoted.
-Heimdall is the honest next cut because its repo already advertises redacted
-CultCache witness descriptors and a provider surface in `src/verse-witness.ts`,
-but the live Yggdrasil service still lacks daemon-published Idunn health plus
-runtime-owned command_boundary and transport_profile records. Weksa
+Heimdall has now crossed the first live transport line: the Yggdrasil runtime
+publishes `heimdall.cultnet-rudp-provider-health`, writes a daemon-owned
+boundary witness at `/srv/heimdall/cultcache/heimdall.service.cc`, and the
+deploy lane ships the required `CultLib` snapshot beside the app artifact.
+Heimdall still owes Odin ingestion of that boundary store plus the later
+redacted auth-document witness export, but it is no longer waiting on basic
+RUDP keepalive surgery. Weksa
 now publishes daemon-owned provider advertisement, operator state, Eve surface,
 command boundary, and transport profile records in its provider store, and Odin
 local discovery can ingest those records. Weksa still owes CultNet/RUDP command
@@ -328,7 +331,7 @@ once Odin consumes the typed store without fallback. Repixelizer still remains
 plain GUI/systemd compatibility debt today: `repixelizer-gui.service`,
 `/api/health`, `/api/config`, and nginx routing are still the live witnesses
 until the runtime publishes internal RUDP health and typed queue/provider
-state. VoidBot, Gjallar, Mimir, and
+state, so it is the next Yggdrasil target. VoidBot, Gjallar, Mimir, and
 the Nightwing Eve runtime services still owe provider advertisement and
 command-boundary RUDP publication before their compatibility surfaces can be
 purely display/debug lowerings; Gjallar also owes native CultMesh/RUDP deck

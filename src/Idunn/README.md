@@ -196,12 +196,14 @@ and freshness window; otherwise the compatibility probe remains fallback
 evidence.
 
 The current active cut has moved past Raven daemon launcher surgery and into the
-remaining Yggdrasil deployments, with Heimdall now the explicit next target and
-repixelizer after it. Heimdall is the honest next cut because its repo already
-contains redacted witness descriptors and a provider advertisement fixture in
-`src/verse-witness.ts`, but the live Yggdrasil service still lacks
-daemon-published Idunn health plus runtime-owned command_boundary and
-transport_profile records. Vili now publishes RUDP health from Raven
+remaining Yggdrasil deployments, with repixelizer now the explicit next target.
+Heimdall has crossed the first live transport cut: the Yggdrasil runtime now
+publishes `heimdall.cultnet-rudp-provider-health`, writes a daemon-owned
+boundary witness at `/srv/heimdall/cultcache/heimdall.service.cc`, and ships
+the required `CultLib` snapshot through the source-artifact lane. Heimdall
+still owes Odin ingestion of that typed store plus the later redacted
+auth-document witness export, but it is no longer blocked on basic daemon
+health publication. Vili now publishes RUDP health from Raven
 through the hidden `GameCult\Vili` scheduled task, and live Idunn accepts
 `vili.cultnet-rudp-animation-health` from `10.77.0.4`. The Raven repair
 actuator in [restart-vili.ps1](/E:/Projects/Odin/scripts/restart-vili.ps1)
@@ -229,7 +231,8 @@ now lives at
 `/srv/streampixels/app/.streampixels-data/cultcache/streampixels.service.cc`.
 The remaining debt is only to demote SSH/systemd/HTTP probes from compatibility
 proof to deployment/debug witness once Odin consumes the typed store without
-fallback. Repixelizer is still plain GUI/systemd compatibility debt for now:
+fallback. Repixelizer is still plain GUI/systemd compatibility debt for now,
+which makes it the next Yggdrasil surgery target:
 `repixelizer-gui.service`, `/api/health`, `/api/config`, and nginx routing are
 still the live witnesses until the runtime publishes internal RUDP health and
 typed queue/provider state. Raven Muninn task actions are also an explicit ops invariant: Task
