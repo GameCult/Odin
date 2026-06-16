@@ -238,8 +238,9 @@ still the live witnesses until the runtime publishes internal RUDP health and
 typed queue/provider state. Raven Muninn task actions are also an explicit ops invariant: Task
 Scheduler must execute `wscript.exe //B //Nologo` hidden launcher actions
 directly for `GameCult-Muninn`, `GameCult-Muninn-Activate`, and
-`GameCult-Muninn-VideoProof`, never raw `.cmd` wrappers. Those three live Raven
-tasks have been repaired and verified. The repair actuator now uploads its
+`GameCult-Muninn-VideoProof`, never raw `.cmd` wrappers, and the hidden VBS
+layer must call `.ps1` launchers directly instead of `cmdPath` trampolines.
+Those three live Raven tasks have been repaired and verified. The repair actuator now uploads its
 Raven PowerShell body with `sftp` and runs a tiny cleanup wrapper, so the
 hidden-task repair does not hit Windows command-line limits before it can run.
 The long-running Muninn serve bodies on Raven, Nightwing, and Starfire now also

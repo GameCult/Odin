@@ -934,11 +934,11 @@ fn swarm_surgery_plan(
             "5. Delete or demote compatibility probes once every target has daemon-owned publication and advertised lifecycle authority.".to_string(),
         ],
         current_phase:
-            "Phase 19: VoidBot now publishes its daemon-owned provider catalog, command boundary, and transport profile from the live swarm surface organ; Raven Muninn is the next compatibility cut because hidden launch is repaired but its scheduled-task actions still lean on visible .cmd trampolines instead of owning the invariant directly."
+            "Phase 20: VoidBot now publishes its daemon-owned provider catalog, command boundary, and transport profile from the live swarm surface organ; Raven Muninn's task chain now launches hidden PowerShell entrypoints directly, and Muninn remains the next compatibility cut until its provider advertisement, command_boundary, and transport_profile become daemon-owned typed state."
                 .to_string(),
         next_target: next_target.to_string(),
         cut_line:
-            "Muninn, Vili, Idunn, Odin, Stonks, Weksa, VoidBot, Nightwing Gjallar, Mimir Eve dashboard, Nightwing Eve dashboard, Nightwing Eve browser reference, yggdrasil-streampixels, yggdrasil-heimdall, and yggdrasil-repixelizer now exercise daemon-owned RUDP health. Raven GameCult\\Vili has been refreshed from Odin, the hidden scheduled task now launches start-vili-daemon.ps1 with Idunn RUDP arguments, and live Idunn accepts vili.cultnet-rudp-animation-health from 10.77.0.4. VoidBot now publishes a daemon-owned provider catalog, provider advertisements, command_boundary, and transport_profile records from E:\\Projects\\VoidBot\\.voidbot\\status\\cultmesh\\voidbot-swarm-state.cc while health-voidbot.cmd is demoted to a fast compatibility witness. The long-running Muninn serve bodies on Raven, Nightwing, and Starfire now carry their own --idunn-rudp-health, --idunn-daemon, and --idunn-health-contract identity while Idunn accepts muninn from 10.77.0.4, nightwing-muninn from 10.77.0.3, and starfire-muninn from 127.0.0.1, but Raven's GameCult-Muninn, GameCult-Muninn-Activate, and GameCult-Muninn-VideoProof task actions still need the visible .cmd trampoline deleted so the background-only invariant is structural. Live yggdrasil-streampixels publishes streampixels.cultnet-rudp-service-health from 10.77.0.1, live yggdrasil-heimdall publishes heimdall.cultnet-rudp-provider-health from 10.77.0.1 with a boundary store at /srv/heimdall/cultcache/heimdall.service.cc, live yggdrasil-repixelizer publishes repixelizer.cultnet-rudp-service-health from 10.77.0.1 with a boundary store at /srv/repixelizer/cultcache/repixelizer.service.cc, live Nightwing Gjallar publishes a boundary store at /var/lib/gamecult/gjallar/cultcache/gjallar.service.cc, live Mimir Eve dashboard now publishes CultMesh state at /var/lib/gamecult/eve-dashboard/cultmesh/eve-dashboard.ccmp plus a boundary store at /var/lib/gamecult/eve-dashboard/cultcache/eve-dashboard.service.cc, and live Nightwing Eve browser reference now publishes a boundary store at /var/lib/gamecult/eve-browser-reference/cultcache/eve-browser-reference.service.cc. Raven Muninn remains the next compatibility debt."
+            "Muninn, Vili, Idunn, Odin, Stonks, Weksa, VoidBot, Nightwing Gjallar, Mimir Eve dashboard, Nightwing Eve dashboard, Nightwing Eve browser reference, yggdrasil-streampixels, yggdrasil-heimdall, and yggdrasil-repixelizer now exercise daemon-owned RUDP health. Raven GameCult\\Vili has been refreshed from Odin, the hidden scheduled task now launches start-vili-daemon.ps1 with Idunn RUDP arguments, and live Idunn accepts vili.cultnet-rudp-animation-health from 10.77.0.4. VoidBot now publishes a daemon-owned provider catalog, provider advertisements, command_boundary, and transport_profile records from E:\\Projects\\VoidBot\\.voidbot\\status\\cultmesh\\voidbot-swarm-state.cc while health-voidbot.cmd is demoted to a fast compatibility witness. The long-running Muninn serve bodies on Raven, Nightwing, and Starfire now carry their own --idunn-rudp-health, --idunn-daemon, and --idunn-health-contract identity while Idunn accepts muninn from 10.77.0.4, nightwing-muninn from 10.77.0.3, and starfire-muninn from 127.0.0.1. Raven's GameCult-Muninn, GameCult-Muninn-Activate, and GameCult-Muninn-VideoProof tasks now execute wscript.exe actions whose hidden VBS launchers call noninteractive hidden PowerShell entrypoints directly; .cmd wrappers, where present, are manual compatibility entrypoints only. Live yggdrasil-streampixels publishes streampixels.cultnet-rudp-service-health from 10.77.0.1, live yggdrasil-heimdall publishes heimdall.cultnet-rudp-provider-health from 10.77.0.1 with a boundary store at /srv/heimdall/cultcache/heimdall.service.cc, live yggdrasil-repixelizer publishes repixelizer.cultnet-rudp-service-health from 10.77.0.1 with a boundary store at /srv/repixelizer/cultcache/repixelizer.service.cc, live Nightwing Gjallar publishes a boundary store at /var/lib/gamecult/gjallar/cultcache/gjallar.service.cc, live Mimir Eve dashboard now publishes CultMesh state at /var/lib/gamecult/eve-dashboard/cultmesh/eve-dashboard.ccmp plus a boundary store at /var/lib/gamecult/eve-dashboard/cultcache/eve-dashboard.service.cc, and live Nightwing Eve browser reference now publishes a boundary store at /var/lib/gamecult/eve-browser-reference/cultcache/eve-browser-reference.service.cc. Muninn remains the next compatibility debt until the runtime family publishes provider advertisement, command_boundary, and transport_profile records daemon-owned typed state."
                 .to_string(),
         verification_layer:
             "CultMesh keepalive store records plus live Idunn decision cycles, not process exit codes or chat summaries."
@@ -1244,13 +1244,13 @@ fn daemon_surgery_plan(target: &DaemonTarget, updated_at: &str) -> IdunnDaemonSu
             status = "partial-rudp-health-live";
             owner = "Muninn Rust runtime plus Raven background-only launcher surface";
             current_mechanism =
-                "Raven Muninn now runs from the hidden GameCult-Muninn scheduled task with --idunn-rudp-health 10.77.0.2:17870, daemon id muninn, and contract muninn.cultnet-rudp-remote-telemetry-health on the long-running serve process. Live Idunn accepts that daemon-published health from 10.77.0.4, and GameCult-Muninn, GameCult-Muninn-Activate, and GameCult-Muninn-VideoProof remain repaired hidden-launcher task actions; .cmd wrappers are manual compatibility trampolines only."
+                "Raven Muninn now runs from the hidden GameCult-Muninn scheduled task with --idunn-rudp-health 10.77.0.2:17870, daemon id muninn, and contract muninn.cultnet-rudp-remote-telemetry-health on the long-running serve process. Live Idunn accepts that daemon-published health from 10.77.0.4, and GameCult-Muninn, GameCult-Muninn-Activate, and GameCult-Muninn-VideoProof now execute hidden VBS launchers whose bodies call noninteractive hidden PowerShell entrypoints directly; .cmd wrappers, where present, are manual compatibility entrypoints only."
                     .to_string();
             intended_authority =
                 "Muninn publishes telemetry and daemon health over CultNet/RUDP; Raven Task Scheduler owns only background launch of hidden WScript/PowerShell launchers and never visible .cmd trampoline execution."
                     .to_string();
             cut_line =
-                "Keep Raven's hidden task launch invariant and daemon-owned RUDP health publication together; health-muninn.cmd is fallback evidence only once the serve process keeps publishing muninn.cultnet-rudp-remote-telemetry-health."
+                "Keep Raven's hidden task launch invariant structural by verifying that scheduled-task actions and hidden VBS launchers never route through cmdPath trampolines; health-muninn.cmd is fallback evidence only while the serve process keeps publishing muninn.cultnet-rudp-remote-telemetry-health."
                     .to_string();
             steps = vec![
                 "Keep scripts/repair-raven-muninn-task-actions.ps1 using sftp plus a tiny remote runner so Windows command-line length does not block future hidden-task repair.".to_string(),
@@ -1258,6 +1258,7 @@ fn daemon_surgery_plan(target: &DaemonTarget, updated_at: &str) -> IdunnDaemonSu
                 "Keep the Raven Muninn serve process command line carrying --idunn-rudp-health 10.77.0.2:17870, --idunn-daemon muninn, and --idunn-health-contract muninn.cultnet-rudp-remote-telemetry-health.".to_string(),
                 "Keep GameCult-Muninn-Activate action executing wscript.exe with activate-raven-av-srt-hidden.vbs arguments.".to_string(),
                 "Keep GameCult-Muninn-VideoProof action executing wscript.exe with muninn-raven-video-to-starfire-obs-hidden.vbs arguments.".to_string(),
+                "Keep the Activate and VideoProof hidden VBS launchers calling PowerShell entrypoints directly instead of cmdPath trampolines.".to_string(),
                 "Keep Raven health/restart actuators background-only; no visible terminals or interactive windows on the shared host.".to_string(),
             ];
         }
@@ -2435,8 +2436,8 @@ mod tests {
         assert!(plan.cut_line.contains("127.0.0.1"));
         assert!(plan.cut_line.contains("GameCult-Muninn-Activate"));
         assert!(plan.cut_line.contains("GameCult-Muninn-VideoProof"));
-        assert!(plan.cut_line.contains("visible .cmd trampoline"));
-        assert!(plan.cut_line.contains("background-only invariant"));
+        assert!(plan.cut_line.contains("hidden PowerShell entrypoints directly"));
+        assert!(plan.cut_line.contains("manual compatibility entrypoints only"));
         assert!(plan.cut_line.contains("yggdrasil-streampixels"));
         assert!(plan.cut_line.contains("10.77.0.1"));
         assert!(plan.cut_line.contains("heimdall.cultnet-rudp-provider-health"));
@@ -2450,7 +2451,7 @@ mod tests {
         assert!(plan.cut_line.contains("/var/lib/gamecult/eve-dashboard/cultcache/eve-dashboard.service.cc"));
         assert!(plan.cut_line.contains("live Nightwing Eve browser reference now publishes a boundary store"));
         assert!(plan.cut_line.contains("/var/lib/gamecult/eve-browser-reference/cultcache/eve-browser-reference.service.cc"));
-        assert!(plan.cut_line.contains("Raven Muninn remains"));
+        assert!(plan.cut_line.contains("Muninn remains the next compatibility debt"));
         assert!(plan.verification_layer.contains("CultMesh keepalive store"));
         assert!(
             plan.invariants
@@ -2487,6 +2488,9 @@ mod tests {
         );
         assert!(raven_plan.steps.iter().any(
             |step| step.contains("GameCult-Muninn-VideoProof") && step.contains("wscript.exe")
+        ));
+        assert!(raven_plan.steps.iter().any(
+            |step| step.contains("PowerShell entrypoints directly") && step.contains("cmdPath")
         ));
         assert!(raven_plan.steps.iter().any(
             |step| step.contains("--idunn-rudp-health 10.77.0.2:17870")

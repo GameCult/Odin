@@ -43,39 +43,70 @@ function Assert-HiddenVbsTask {
   if (`$action.Arguments -notlike "*//B*" -or `$action.Arguments -notlike "*//Nologo*") {
     throw "`$TaskName action arguments `$(`$action.Arguments) do not force background WScript execution"
   }
+  `$vbs = Get-Content -LiteralPath `$VbsPath -Raw
+  if (`$vbs -match 'cmdPath\s*=') {
+    throw "`$TaskName hidden launcher at `$VbsPath still routes through a cmdPath trampoline"
+  }
+  if (`$vbs -notmatch '\.ps1') {
+    throw "`$TaskName hidden launcher at `$VbsPath does not reference a PowerShell launcher"
+  }
 }
 
 `$serveVbs = Join-Path "$MuninnDir" "start-muninn-serve-hidden.vbs"
 `$activateCmd = Join-Path "$MuninnDir" "activate-raven-av-srt.cmd"
+`$activatePs = Join-Path "$MuninnDir" "activate-raven-av-srt.ps1"
 `$activateVbs = Join-Path "$MuninnDir" "activate-raven-av-srt-hidden.vbs"
 `$videoProofCmd = Join-Path "$MuninnDir" "muninn-raven-video-to-starfire-obs.cmd"
+`$videoProofPs = Join-Path "$MuninnDir" "muninn-raven-video-to-starfire-obs.ps1"
 `$videoProofVbs = Join-Path "$MuninnDir" "muninn-raven-video-to-starfire-obs-hidden.vbs"
 
-function Write-HiddenCmdLauncher {
+function Write-HiddenPowerShellVbsLauncher {
   param(
-    [Parameter(Mandatory = `$true)] [string] `$CmdPath,
+    [Parameter(Mandatory = `$true)] [string] `$PsPath,
     [Parameter(Mandatory = `$true)] [string] `$VbsPath
   )
 
-  if (-not (Test-Path -LiteralPath `$CmdPath)) {
-    throw "Command launcher not found at `$CmdPath"
+  if (-not (Test-Path -LiteralPath `$PsPath)) {
+    throw "PowerShell launcher not found at `$PsPath"
   }
 
   `$lines = @(
     'Set fso = CreateObject("Scripting.FileSystemObject")',
+    'scriptDir = fso.GetParentFolderName(WScript.ScriptFullName)',
     'Set shell = CreateObject("WScript.Shell")',
-    "cmdPath = ""`$CmdPath""",
-    'shell.CurrentDirectory = fso.GetParentFolderName(cmdPath)',
-    'shell.Run """" & cmdPath & """", 0, False'
+    "psLauncher = ""`$PsPath""",
+    'shell.CurrentDirectory = scriptDir',
+    'shell.Run "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File """ & psLauncher & """", 0, False'
   )
   Set-Content -LiteralPath `$VbsPath -Value `$lines -Encoding ASCII
 }
 
-if (Test-Path -LiteralPath `$activateCmd) {
-  Write-HiddenCmdLauncher -CmdPath `$activateCmd -VbsPath `$activateVbs
+function Write-WscriptCmdLauncher {
+  param(
+    [Parameter(Mandatory = `$true)] [string] `$CmdPath,
+    [Parameter(Mandatory = `$true)] [string] `$WorkingDirectory,
+    [Parameter(Mandatory = `$true)] [string] `$VbsPath
+  )
+
+  `$cmdLines = @(
+    '@echo off',
+    "cd /d ""`$WorkingDirectory""",
+    "wscript.exe //B //Nologo ""`$VbsPath"""
+  )
+  Set-Content -LiteralPath `$CmdPath -Value `$cmdLines -Encoding ASCII
 }
-if (Test-Path -LiteralPath `$videoProofCmd) {
-  Write-HiddenCmdLauncher -CmdPath `$videoProofCmd -VbsPath `$videoProofVbs
+
+if (Test-Path -LiteralPath `$activatePs) {
+  Write-HiddenPowerShellVbsLauncher -PsPath `$activatePs -VbsPath `$activateVbs
+  if (Test-Path -LiteralPath `$activateCmd) {
+    Write-WscriptCmdLauncher -CmdPath `$activateCmd -WorkingDirectory "$MuninnDir" -VbsPath `$activateVbs
+  }
+}
+if (Test-Path -LiteralPath `$videoProofPs) {
+  Write-HiddenPowerShellVbsLauncher -PsPath `$videoProofPs -VbsPath `$videoProofVbs
+  if (Test-Path -LiteralPath `$videoProofCmd) {
+    Write-WscriptCmdLauncher -CmdPath `$videoProofCmd -WorkingDirectory "$MuninnDir" -VbsPath `$videoProofVbs
+  }
 }
 
 Register-HiddenVbsTask -TaskName "GameCult-Muninn" -VbsPath `$serveVbs

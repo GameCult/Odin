@@ -293,8 +293,10 @@ Live Idunn cycles accept these records before command-probe fallback.
 Raven's Muninn scheduled-task repair remains a separate ops invariant:
 `GameCult-Muninn`, `GameCult-Muninn-Activate`, and
 `GameCult-Muninn-VideoProof` must execute `wscript.exe` hidden launcher actions,
-not raw `.cmd` task actions, and the live Raven `serve` process must carry its
-own `--idunn-rudp-health`, `--idunn-daemon`, and `--idunn-health-contract`
+not raw `.cmd` task actions. Their hidden VBS launcher bodies must call
+PowerShell entrypoints directly rather than routing through `cmdPath`
+trampolines, and the live Raven `serve` process must carry its own
+`--idunn-rudp-health`, `--idunn-daemon`, and `--idunn-health-contract`
 arguments.
 
 Next: move the remaining Yggdrasil deployments off compatibility health/deck
@@ -338,8 +340,9 @@ purely display/debug lowerings; Gjallar also owes native CultMesh/RUDP deck
 input to replace the current Odin WebSocket lowering bridge. Raven Muninn task
 action repair is no longer queued: the live host now executes
 `GameCult-Muninn`, `GameCult-Muninn-Activate`, and
-`GameCult-Muninn-VideoProof` through hidden `wscript.exe` launchers, and the
-repair actuator remains `scripts\repair-raven-muninn-task-actions.ps1`.
+`GameCult-Muninn-VideoProof` through hidden `wscript.exe` launchers whose VBS
+bodies call `.ps1` launchers directly, and the repair actuator remains
+`scripts\repair-raven-muninn-task-actions.ps1`.
 
 Vili's Node daemon now has an in-process Idunn RUDP publisher for
 `vili.cultnet-rudp-animation-health`, and local smoke proof shows Idunn accepts

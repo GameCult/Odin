@@ -205,9 +205,9 @@ missing or the Quest is unavailable, Muninn publishes `muninn.quest_access` as
 Raven runs Muninn from `C:\Meta\Odin\Muninn`. `scripts/restart-muninn.ps1`
 recreates the `GameCult-Muninn` scheduled task with `wscript.exe` as the task
 action and `start-muninn-serve-hidden.vbs` as its argument. It also repairs
-`GameCult-Muninn-Activate` and `GameCult-Muninn-VideoProof` to execute their
-hidden VBS launchers directly when those compatibility commands exist on Raven.
-The serve VBS launches `start-muninn-serve.ps1` with noninteractive hidden
+`GameCult-Muninn-Activate` and `GameCult-Muninn-VideoProof` to execute hidden
+VBS launchers whose bodies call PowerShell entrypoints directly, not `.cmd`
+payloads. The serve VBS launches `start-muninn-serve.ps1` with noninteractive hidden
 PowerShell. The PowerShell launcher starts `muninn.exe` with
 `-WindowStyle Hidden`, passes `--idunn-rudp-health 10.77.0.2:17870`,
 `--idunn-daemon muninn`, and
@@ -215,14 +215,16 @@ PowerShell. The PowerShell launcher starts `muninn.exe` with
 redirects logs under `C:\Meta\Odin\logs\muninn`.
 Raven is an operator-consented host: Muninn operations on Raven must be
 background-only and must not create visible terminal windows. `.cmd` files may
-exist only as manual compatibility trampolines; Task Scheduler must execute
-hidden launchers directly and must not flash an interactive console on Raven.
+exist only as manual compatibility entrypoints that call the same hidden VBS
+launchers; neither Task Scheduler nor the hidden VBS layer may route through a
+`cmdPath` trampoline on Raven.
 The standalone repair actuator for live Raven task drift is
 `E:\Projects\Odin\scripts\repair-raven-muninn-task-actions.ps1`. It must
 register `GameCult-Muninn`, `GameCult-Muninn-Activate`, and
 `GameCult-Muninn-VideoProof` with `wscript.exe` as the task action and the
-corresponding `*-hidden.vbs` launcher as arguments. If Raven is unreachable, the
-repo is prepared but the live scheduler is not clean.
+corresponding `*-hidden.vbs` launcher as arguments while also verifying that the
+hidden VBS bodies reference `.ps1` launchers instead of `.cmd` payloads. If
+Raven is unreachable, the repo is prepared but the live scheduler is not clean.
 
 Nightwing Muninn is kept alive by the single Idunn supervisor through the
 `nightwing-muninn` daemon target. Idunn learns that target through Odin's typed
