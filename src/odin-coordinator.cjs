@@ -48,6 +48,7 @@ let lastRefresh = {
   error: null,
   startedAt: null,
 };
+let lastIdunnRudpHealthPublishedAt = null;
 
 main().catch((error) => {
   console.error(error);
@@ -135,8 +136,14 @@ async function publishOdinHealth(state, detail) {
       detail,
       observedAt: new Date().toISOString(),
     });
+    lastIdunnRudpHealthPublishedAt = Date.now();
   } catch (error) {
-    console.error("Idunn RUDP health publish failed:", error.message);
+    const lastPublishedAgeMs = lastIdunnRudpHealthPublishedAt === null
+      ? Number.POSITIVE_INFINITY
+      : Date.now() - lastIdunnRudpHealthPublishedAt;
+    if (lastPublishedAgeMs > Math.max(60_000, config.intervalMs * 4)) {
+      console.error("Idunn RUDP health publish failed:", error.message);
+    }
   }
 }
 
