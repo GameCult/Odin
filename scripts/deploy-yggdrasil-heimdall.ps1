@@ -7,7 +7,11 @@ param(
   [string] $RemoteTarballName = "heimdall-source.tar",
   [string] $RemoteCultLibTarballName = "heimdall-cultlib.tar",
   [string] $DeployScript = "E:\Projects\gamecult-ops\scripts\deploy-heimdall.sh",
-  [string] $CheckScript = "E:\Projects\gamecult-ops\scripts\check-heimdall.sh"
+  [string] $CheckScript = "E:\Projects\gamecult-ops\scripts\check-heimdall.sh",
+  [string] $UpstreamRemote = "origin",
+  [string] $UpstreamBranch = "main",
+  [string] $CultLibUpstreamRemote = "origin",
+  [string] $CultLibUpstreamBranch = "main"
 )
 
 $ErrorActionPreference = "Stop"
@@ -18,11 +22,18 @@ foreach ($path in @($RepoRoot, $CultLibRoot, $DeployScript, $CheckScript)) {
   }
 }
 
-$heimdallCommit = (git -C $RepoRoot rev-parse HEAD).Trim()
+$sourceRef = "$UpstreamRemote/$UpstreamBranch"
+$cultLibSourceRef = "$CultLibUpstreamRemote/$CultLibUpstreamBranch"
+git -C $RepoRoot fetch --prune $UpstreamRemote $UpstreamBranch
+if ($LASTEXITCODE -ne 0) { throw "git fetch failed for $RepoRoot $sourceRef" }
+git -C $CultLibRoot fetch --prune $CultLibUpstreamRemote $CultLibUpstreamBranch
+if ($LASTEXITCODE -ne 0) { throw "git fetch failed for $CultLibRoot $cultLibSourceRef" }
+
+$heimdallCommit = (git -C $RepoRoot rev-parse $sourceRef).Trim()
 if ([string]::IsNullOrWhiteSpace($heimdallCommit)) {
   throw "Could not determine Heimdall git revision."
 }
-$cultLibCommit = (git -C $CultLibRoot rev-parse HEAD).Trim()
+$cultLibCommit = (git -C $CultLibRoot rev-parse $cultLibSourceRef).Trim()
 if ([string]::IsNullOrWhiteSpace($cultLibCommit)) {
   throw "Could not determine CultLib git revision."
 }
@@ -33,17 +44,17 @@ $cultLibTarPath = Join-Path $scratch $RemoteCultLibTarballName
 $manifestPath = Join-Path $scratch "deployment-manifest.txt"
 New-Item -ItemType Directory -Force -Path $scratch | Out-Null
 
-git -C $RepoRoot archive --format=tar --output=$sourceTarPath HEAD
+git -C $RepoRoot archive --format=tar --output=$sourceTarPath $sourceRef
 if ($LASTEXITCODE -ne 0) {
-  throw "git archive failed for $RepoRoot"
+  throw "git archive failed for $RepoRoot $sourceRef"
 }
 
 if (Test-Path -LiteralPath $cultLibTarPath) {
   Remove-Item -LiteralPath $cultLibTarPath -Force
 }
-tar.exe -cf $cultLibTarPath -C $CultLibRoot packages/cultnet-ts packages/cultcache-ts
+git -C $CultLibRoot archive --format=tar --output=$cultLibTarPath $cultLibSourceRef packages/cultnet-ts packages/cultcache-ts
 if ($LASTEXITCODE -ne 0) {
-  throw "CultLib tar build failed for $CultLibRoot"
+  throw "CultLib tar build failed for $CultLibRoot $cultLibSourceRef"
 }
 
 $sourceHash = (Get-FileHash $sourceTarPath -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -53,10 +64,16 @@ $deployedAt = [DateTimeOffset]::UtcNow.ToString("O")
   "schema=gamecult.idunn.deployment_manifest.v1"
   "appId=yggdrasil-heimdall"
   "repoRoot=$RepoRoot"
+  "upstreamRemote=$UpstreamRemote"
+  "upstreamBranch=$UpstreamBranch"
+  "sourceRef=$sourceRef"
   "gitCommit=$heimdallCommit"
   "artifact=$RemoteTarballName"
   "sha256=$sourceHash"
   "cultLibRepoRoot=$CultLibRoot"
+  "cultLibUpstreamRemote=$CultLibUpstreamRemote"
+  "cultLibUpstreamBranch=$CultLibUpstreamBranch"
+  "cultLibSourceRef=$cultLibSourceRef"
   "cultLibGitCommit=$cultLibCommit"
   "cultLibArtifact=$RemoteCultLibTarballName"
   "cultLibSha256=$cultLibHash"

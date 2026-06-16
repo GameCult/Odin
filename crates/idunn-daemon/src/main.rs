@@ -8,9 +8,11 @@ use cultnet_rs::{
 };
 use odin_core::{
     IdunnCommandBoundaryRecord, IdunnDaemonHealthRecord, IdunnDaemonSurgeryPlanRecord,
-    IdunnDaemonTransportProfileRecord, IdunnDeploymentResultRecord, IdunnDesiredDaemonRecord,
-    IdunnOperatorAlarmRecord, IdunnRestartResultRecord, IdunnRudpHealthIngressRecord,
-    IdunnRuntimeTransportCheckRecord, IdunnSwarmSurgeryPlanRecord, OdinDocuments, plan_keepalive,
+    IdunnDaemonTransportProfileRecord, IdunnDeploymentArtifactRecord, IdunnDeploymentResultRecord,
+    IdunnDesiredDaemonRecord, IdunnOperatorAlarmRecord, IdunnReleaseTargetRecord,
+    IdunnRestartResultRecord, IdunnRolloutPlanRecord, IdunnRolloutResultRecord,
+    IdunnRudpHealthIngressRecord, IdunnRuntimeTransportCheckRecord, IdunnStateMigrationPlanRecord,
+    IdunnStateMigrationResultRecord, IdunnSwarmSurgeryPlanRecord, OdinDocuments, plan_keepalive,
 };
 use std::collections::HashMap;
 use std::env;
@@ -34,8 +36,20 @@ struct DaemonTarget {
     health_command: Option<String>,
     deploy_command: Option<String>,
     restart_command: Option<String>,
+    release: Option<ReleaseTarget>,
     enabled: bool,
     interval_seconds: u64,
+}
+
+#[derive(Clone, Debug)]
+struct ReleaseTarget {
+    repo: String,
+    repo_path: PathBuf,
+    upstream_remote: String,
+    upstream_branch: String,
+    rollout_strategy: String,
+    state_migration_command: Option<String>,
+    zero_downtime_capability: String,
 }
 
 #[derive(Clone, Debug)]
@@ -234,7 +248,33 @@ fn run_target_cycle(
 
     if let Some(request) = &plan.deployment_request {
         if options.execute {
-            let result = run_deployment(request, &now, options.command_timeout_seconds);
+            let migration_result = target.release.as_ref().and_then(|release| {
+                run_state_migration(target, release, &now, options.command_timeout_seconds)
+            });
+            if let Some(result) = &migration_result {
+                with_store_node(options, store_lock, |node| {
+                    node.put(&result.result_id, result)?;
+                    Ok(())
+                })?;
+            }
+            let migration_failed = migration_result
+                .as_ref()
+                .is_some_and(|result| result.state != "succeeded" && result.state != "noop");
+            let result = if migration_failed {
+                IdunnDeploymentResultRecord {
+                    result_id: format!("result:{}", request.request_id),
+                    request_id: request.request_id.clone(),
+                    daemon_id: request.daemon_id.clone(),
+                    state: "failed".to_string(),
+                    detail: "state migration failed; deployment command was not run".to_string(),
+                    completed_at: now.clone(),
+                }
+            } else {
+                run_deployment(request, &now, options.command_timeout_seconds)
+            };
+            let rollout_result = target.release.as_ref().map(|release| {
+                rollout_result_record(target, release, &result, migration_result.as_ref(), &now)
+            });
             let alarm = if result.state != "succeeded" {
                 Some(deployment_failure_alarm(&result, &now))
             } else {
@@ -242,6 +282,9 @@ fn run_target_cycle(
             };
             with_store_node(options, store_lock, |node| {
                 node.put(&result.result_id, &result)?;
+                if let Some(result) = &rollout_result {
+                    node.put(&result.result_id, result)?;
+                }
                 if let Some(alarm) = &alarm {
                     node.put(&alarm.alarm_id, alarm)?;
                 }
@@ -876,6 +919,24 @@ fn publish_surgery_plans(
             let command_boundary = command_boundary(target, updated_at);
             node.put(&transport_profile.profile_id, &transport_profile)?;
             node.put(&command_boundary.boundary_id, &command_boundary)?;
+            if let Some(release) = &target.release {
+                let release_record = release_target_record(target, release, updated_at);
+                let artifact = deployment_artifact_record(target, &release_record, updated_at);
+                let migration_plan =
+                    state_migration_plan_record(target, release, &release_record, updated_at);
+                let rollout_plan = rollout_plan_record(
+                    target,
+                    release,
+                    &release_record,
+                    &artifact,
+                    &migration_plan,
+                    updated_at,
+                );
+                node.put(&release_record.target_id, &release_record)?;
+                node.put(&artifact.artifact_id, &artifact)?;
+                node.put(&migration_plan.plan_id, &migration_plan)?;
+                node.put(&rollout_plan.plan_id, &rollout_plan)?;
+            }
         }
         for plan in &plans {
             node.put(&plan.plan_id, plan)?;
@@ -926,11 +987,11 @@ fn swarm_surgery_plan(
             "5. Delete or demote compatibility probes once every target has daemon-owned publication and advertised lifecycle authority.".to_string(),
         ],
         current_phase:
-            "Phase 23: Odin now ingests remote Vili and Nightwing Gjallar provider witnesses live, and /eve/deck/nightwing-gjallar reports honest missing-surface debt instead of silently omitting the daemon; Gjallar is the next cut until its daemon-owned witness publishes a provider-owned Eve surface."
+            "Phase 24: Nightwing Gjallar now publishes a daemon-owned gamecult.eve.surface_state witness, Odin proxies a real Nightwing Gjallar panel from the live remote store, and the remaining Gjallar debt is replacing the compatibility Odin WebSocket deck input with native CultMesh/CultNet intake."
                 .to_string(),
         next_target: next_target.to_string(),
         cut_line:
-            "Muninn, Vili, Idunn, Odin, Stonks, Weksa, VoidBot, Nightwing Gjallar, Mimir Eve dashboard, Nightwing Eve dashboard, Nightwing Eve browser reference, yggdrasil-streampixels, yggdrasil-heimdall, and yggdrasil-repixelizer now exercise daemon-owned RUDP health. Raven GameCult\\Vili has been refreshed from Odin, the hidden scheduled task now launches start-vili-daemon.ps1 with Idunn RUDP arguments, and live Idunn accepts vili.cultnet-rudp-animation-health from 10.77.0.4. VoidBot now publishes a daemon-owned provider catalog, provider advertisements, command_boundary, and transport_profile records from E:\\Projects\\VoidBot\\.voidbot\\status\\cultmesh\\voidbot-swarm-state.cc while health-voidbot.cmd is demoted to a fast compatibility witness. Raven Muninn now publishes provider advertisement, command_boundary, and transport_profile records from C:\\Meta\\Odin\\state\\muninn.telemetry.cc, Starfire Muninn now publishes the same daemon-owned witness records from C:\\Meta\\Odin\\state\\starfire.muninn.telemetry.cc, Nightwing Muninn now publishes the same daemon-owned witness records from /home/metacrat/.local/state/gamecult/muninn/muninn.telemetry.cc, and live Idunn accepts muninn from 10.77.0.4, starfire-muninn from 127.0.0.1, and nightwing-muninn from 10.77.0.3. Raven's GameCult-Muninn, GameCult-Muninn-Activate, and GameCult-Muninn-VideoProof tasks now execute wscript.exe actions whose hidden VBS launchers call noninteractive hidden PowerShell entrypoints directly; .cmd wrappers, where present, are manual compatibility entrypoints only. Live yggdrasil-streampixels publishes streampixels.cultnet-rudp-service-health from 10.77.0.1, live yggdrasil-heimdall publishes heimdall.cultnet-rudp-provider-health from 10.77.0.1 with a boundary store at /srv/heimdall/cultcache/heimdall.service.cc, live yggdrasil-repixelizer publishes repixelizer.cultnet-rudp-service-health from 10.77.0.1 with a boundary store at /srv/repixelizer/cultcache/repixelizer.service.cc, live Nightwing Gjallar publishes a boundary store at /var/lib/gamecult/gjallar/cultcache/gjallar.service.cc, live Odin now ingests remote Raven Vili and Nightwing Gjallar witness stores into the accepted provider catalog, and /eve/deck/nightwing-gjallar now reports that the provider advertisement is live while the provider-owned Eve surface is still missing. Live Mimir Eve dashboard now publishes CultMesh state at /var/lib/gamecult/eve-dashboard/cultmesh/eve-dashboard.ccmp plus a boundary store at /var/lib/gamecult/eve-dashboard/cultcache/eve-dashboard.service.cc, and live Nightwing Eve browser reference now publishes a boundary store at /var/lib/gamecult/eve-browser-reference/cultcache/eve-browser-reference.service.cc. Gjallar remains the next compatibility debt until its daemon-owned witness publishes gamecult.eve.surface_state and the Nightwing panel stops lowering an unavailable placeholder."
+            "Muninn, Vili, Idunn, Odin, Stonks, Weksa, VoidBot, Nightwing Gjallar, Mimir Eve dashboard, Nightwing Eve dashboard, Nightwing Eve browser reference, yggdrasil-streampixels, yggdrasil-heimdall, and yggdrasil-repixelizer now exercise daemon-owned RUDP health. Raven GameCult\\Vili has been refreshed from Odin, the hidden scheduled task now launches start-vili-daemon.ps1 with Idunn RUDP arguments, and live Idunn accepts vili.cultnet-rudp-animation-health from 10.77.0.4. VoidBot now publishes a daemon-owned provider catalog, provider advertisements, command_boundary, and transport_profile records from E:\\Projects\\VoidBot\\.voidbot\\status\\cultmesh\\voidbot-swarm-state.cc while health-voidbot.cmd is demoted to a fast compatibility witness. Raven Muninn now publishes provider advertisement, command_boundary, and transport_profile records from C:\\Meta\\Odin\\state\\muninn.telemetry.cc, Starfire Muninn now publishes the same daemon-owned witness records from C:\\Meta\\Odin\\state\\starfire.muninn.telemetry.cc, Nightwing Muninn now publishes the same daemon-owned witness records from /home/metacrat/.local/state/gamecult/muninn/muninn.telemetry.cc, and live Idunn accepts muninn from 10.77.0.4, starfire-muninn from 127.0.0.1, and nightwing-muninn from 10.77.0.3. Raven's GameCult-Muninn, GameCult-Muninn-Activate, and GameCult-Muninn-VideoProof tasks now execute wscript.exe actions whose hidden VBS launchers call noninteractive hidden PowerShell entrypoints directly; .cmd wrappers, where present, are manual compatibility entrypoints only. Live yggdrasil-streampixels publishes streampixels.cultnet-rudp-service-health from 10.77.0.1, live yggdrasil-heimdall publishes heimdall.cultnet-rudp-provider-health from 10.77.0.1 with a boundary store at /srv/heimdall/cultcache/heimdall.service.cc, live yggdrasil-repixelizer publishes repixelizer.cultnet-rudp-service-health from 10.77.0.1 with a boundary store at /srv/repixelizer/cultcache/repixelizer.service.cc, live Nightwing Gjallar publishes a boundary store at /var/lib/gamecult/gjallar/cultcache/gjallar.service.cc plus a daemon-owned gamecult.eve.surface_state witness, live Odin now ingests remote Raven Vili and Nightwing Gjallar witness stores into the accepted provider catalog, and /eve/deck/nightwing-gjallar now proxies a real Nightwing Gjallar panel from the live remote store. Live Mimir Eve dashboard now publishes CultMesh state at /var/lib/gamecult/eve-dashboard/cultmesh/eve-dashboard.ccmp plus a boundary store at /var/lib/gamecult/eve-dashboard/cultcache/eve-dashboard.service.cc, and live Nightwing Eve browser reference now publishes a boundary store at /var/lib/gamecult/eve-browser-reference/cultcache/eve-browser-reference.service.cc. Gjallar remains the next compatibility debt until its native CultMesh/CultNet input path replaces the Odin WebSocket deck bridge."
                 .to_string(),
         verification_layer:
             "CultMesh keepalive store records plus live Idunn decision cycles, not process exit codes or chat summaries."
@@ -973,6 +1034,187 @@ fn transport_profile_id(target: &DaemonTarget) -> String {
 
 fn command_boundary_id(target: &DaemonTarget) -> String {
     format!("command-boundary:{}", target.daemon_id)
+}
+
+fn release_target_id(target: &DaemonTarget) -> String {
+    format!("release-target:{}", target.daemon_id)
+}
+
+fn rollout_plan_id(target: &DaemonTarget) -> String {
+    format!("rollout:{}:main", target.daemon_id)
+}
+
+fn migration_plan_id(target: &DaemonTarget) -> String {
+    format!("migration:{}:main", target.daemon_id)
+}
+
+fn artifact_id(target: &DaemonTarget) -> String {
+    format!("artifact:{}:main", target.daemon_id)
+}
+
+fn release_target(
+    repo: &str,
+    repo_path: PathBuf,
+    rollout_strategy: &str,
+    state_migration_command: Option<&str>,
+    zero_downtime_capability: &str,
+) -> ReleaseTarget {
+    ReleaseTarget {
+        repo: repo.to_string(),
+        repo_path,
+        upstream_remote: "origin".to_string(),
+        upstream_branch: "main".to_string(),
+        rollout_strategy: rollout_strategy.to_string(),
+        state_migration_command: state_migration_command.map(ToString::to_string),
+        zero_downtime_capability: zero_downtime_capability.to_string(),
+    }
+}
+
+fn release_target_record(
+    target: &DaemonTarget,
+    release: &ReleaseTarget,
+    observed_at: &str,
+) -> IdunnReleaseTargetRecord {
+    let desired_revision = git_revision(
+        &release.repo_path,
+        &format!("{}/{}", release.upstream_remote, release.upstream_branch),
+    )
+    .unwrap_or_else(|| "unknown".to_string());
+
+    IdunnReleaseTargetRecord {
+        target_id: release_target_id(target),
+        daemon_id: target.daemon_id.clone(),
+        repo: release.repo.clone(),
+        repo_path: release.repo_path.display().to_string(),
+        upstream_remote: release.upstream_remote.clone(),
+        upstream_branch: release.upstream_branch.clone(),
+        desired_revision,
+        deployed_revision: "from-deployment-manifest".to_string(),
+        artifact_strategy: "source-archive-from-upstream-main".to_string(),
+        rollout_strategy: release.rollout_strategy.clone(),
+        state_migration_authority: if release.state_migration_command.is_some() {
+            "daemon-owned-command"
+        } else {
+            "daemon-declares-no-migration-required"
+        }
+        .to_string(),
+        zero_downtime_capability: release.zero_downtime_capability.clone(),
+        status: "tracked".to_string(),
+        observed_at: observed_at.to_string(),
+    }
+}
+
+fn deployment_artifact_record(
+    target: &DaemonTarget,
+    release: &IdunnReleaseTargetRecord,
+    built_at: &str,
+) -> IdunnDeploymentArtifactRecord {
+    IdunnDeploymentArtifactRecord {
+        artifact_id: artifact_id(target),
+        daemon_id: target.daemon_id.clone(),
+        source_revision: release.desired_revision.clone(),
+        source_branch: release.upstream_branch.clone(),
+        source_remote: release.upstream_remote.clone(),
+        artifact_kind: release.artifact_strategy.clone(),
+        artifact_uri: "built-by-deploy-command".to_string(),
+        sha256: "pending-deploy-command".to_string(),
+        built_at: built_at.to_string(),
+    }
+}
+
+fn state_migration_plan_record(
+    target: &DaemonTarget,
+    release: &ReleaseTarget,
+    _release_record: &IdunnReleaseTargetRecord,
+    planned_at: &str,
+) -> IdunnStateMigrationPlanRecord {
+    let command = release
+        .state_migration_command
+        .clone()
+        .unwrap_or_else(|| "none".to_string());
+    IdunnStateMigrationPlanRecord {
+        plan_id: migration_plan_id(target),
+        daemon_id: target.daemon_id.clone(),
+        from_schema_version: "deployed-state".to_string(),
+        to_schema_version: "target-revision-state".to_string(),
+        authority: if release.state_migration_command.is_some() {
+            "daemon-owned-migrator"
+        } else {
+            "daemon-declared-noop"
+        }
+        .to_string(),
+        command,
+        strategy: if release.state_migration_command.is_some() {
+            "backup-then-daemon-migrator"
+        } else {
+            "noop"
+        }
+        .to_string(),
+        backup_required: release.state_migration_command.is_some(),
+        zero_downtime_required: release.zero_downtime_capability == "zero-downtime",
+        status: "planned".to_string(),
+        planned_at: planned_at.to_string(),
+    }
+}
+
+fn rollout_plan_record(
+    target: &DaemonTarget,
+    release: &ReleaseTarget,
+    release_record: &IdunnReleaseTargetRecord,
+    artifact: &IdunnDeploymentArtifactRecord,
+    migration_plan: &IdunnStateMigrationPlanRecord,
+    planned_at: &str,
+) -> IdunnRolloutPlanRecord {
+    let mut phases = vec![
+        "fetch upstream main into a managed release view".to_string(),
+        "build source artifact from the desired upstream revision".to_string(),
+        "snapshot state before any non-noop migration".to_string(),
+        "run daemon-owned migration command when declared".to_string(),
+        "deploy through the advertised Idunn command boundary".to_string(),
+        "verify daemon-published RUDP health and deployment manifest".to_string(),
+    ];
+    if release.zero_downtime_capability == "zero-downtime" {
+        phases.insert(
+            4,
+            "shift traffic or reload in place without dropping the active service".to_string(),
+        );
+    } else {
+        phases.insert(
+            4,
+            "record restart-required because this daemon has no zero-downtime swap authority"
+                .to_string(),
+        );
+    }
+
+    IdunnRolloutPlanRecord {
+        plan_id: rollout_plan_id(target),
+        daemon_id: target.daemon_id.clone(),
+        desired_revision: release_record.desired_revision.clone(),
+        deployed_revision: release_record.deployed_revision.clone(),
+        strategy: release.rollout_strategy.clone(),
+        phases,
+        migration_plan_id: migration_plan.plan_id.clone(),
+        artifact_id: artifact.artifact_id.clone(),
+        status: "planned".to_string(),
+        planned_at: planned_at.to_string(),
+    }
+}
+
+fn git_revision(repo_path: &PathBuf, rev: &str) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .arg("rev-parse")
+        .arg(rev)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if value.is_empty() { None } else { Some(value) }
 }
 
 fn daemon_transport_profile(
@@ -1163,20 +1405,19 @@ fn daemon_surgery_plan(target: &DaemonTarget, updated_at: &str) -> IdunnDaemonSu
             severity = "critical";
             owner = "Gjallar C# runtime plus Odin provider feed";
             current_mechanism =
-                "Nightwing Gjallar publishes gjallar.cultnet-rudp-framebuffer-composition-health over CultNet/RUDP from the C# runtime, and the daemon-owned boundary store at /var/lib/gamecult/gjallar/cultcache/gjallar.service.cc now contains provider advertisement, runtime_config, frame_status, command_boundary, transport_profile, and daemon-health summary records. Live Odin now ingests that witness store and exposes /eve/deck/nightwing-gjallar, but the route still lowers an unavailable placeholder because Gjallar does not yet publish a provider-owned Eve surface."
+                "Nightwing Gjallar publishes gjallar.cultnet-rudp-framebuffer-composition-health over CultNet/RUDP from the C# runtime, and the daemon-owned boundary store at /var/lib/gamecult/gjallar/cultcache/gjallar.service.cc now contains provider advertisement, gamecult.eve.surface_state, runtime_config, frame_status, command_boundary, transport_profile, and daemon-health summary records. Live Odin ingests that witness store and now proxies /eve/deck/nightwing-gjallar as a real panel."
                     .to_string();
             intended_authority =
                 "Gjallar subscribes to Odin/provider deck state over CultNet/RUDP and publishes framebuffer composition health, provider advertisement, provider-owned Eve surface, runtime config, command boundary, and transport profile as typed CultMesh/CultNet state."
                     .to_string();
             cut_line =
-                "Keep the service/status probe as fallback only until Gjallar's native CultMesh/RUDP input path replaces the Odin WebSocket deck bridge; the daemon-owned witness already owns provider advertisement, command_boundary, and transport_profile truth, but it must also publish gamecult.eve.surface_state before Odin can proxy a real Nightwing Gjallar panel."
+                "Keep the service/status probe as fallback only until Gjallar's native CultMesh/RUDP input path replaces the Odin WebSocket deck bridge; the daemon-owned witness now owns provider advertisement, gamecult.eve.surface_state, command_boundary, and transport_profile truth, and the remaining debt is deleting the compatibility deck bridge from the live input path."
                     .to_string();
             steps = vec![
                 "Keep live gjallar.cultnet-rudp-framebuffer-composition-health publication running from Nightwing's Gjallar service.".to_string(),
-                "Keep Gjallar's daemon-owned boundary store at /var/lib/gamecult/gjallar/cultcache/gjallar.service.cc publishing provider advertisement, runtime_config, frame_status, command_boundary, transport_profile, and daemon-health summary records.".to_string(),
-                "Publish a daemon-owned gamecult.eve.surface_state witness for provider id nightwing-gjallar so Odin can proxy a real panel instead of an unavailable placeholder.".to_string(),
+                "Keep Gjallar's daemon-owned boundary store at /var/lib/gamecult/gjallar/cultcache/gjallar.service.cc publishing provider advertisement, gamecult.eve.surface_state, runtime_config, frame_status, command_boundary, transport_profile, and daemon-health summary records.".to_string(),
                 "Replace Odin WebSocket deck consumption with a native C# CultMesh/RUDP input path when the deck contract is ready.".to_string(),
-                "Keep Odin's hashed-store ingestion shim strictly as a xenos-boundary bridge until Gjallar publishes an interoperable provider-owned Eve surface.".to_string(),
+                "Keep Odin's hashed-store ingestion shim strictly as a xenos-boundary bridge until Gjallar's native CultMesh/CultNet input path and interoperable witness path make the compatibility deck bridge disposable.".to_string(),
                 "Delete or demote health-nightwing-gjallar.cmd to a manual deployment witness with no lifecycle truth.".to_string(),
             ];
         }
@@ -1484,6 +1725,7 @@ fn daemon_surgery_plan(target: &DaemonTarget, updated_at: &str) -> IdunnDaemonSu
 fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
     let repo_root = options.repo_root.display().to_string();
     let script = |name: &str| format!(r"{}\scripts\{}", repo_root, name);
+    let project = |name: &str| PathBuf::from(format!(r"E:\Projects\{name}"));
 
     match options.profile.as_str() {
         "starfire-local" => Ok(vec![
@@ -1495,6 +1737,7 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 health_command: Some(script("health-odin.cmd")),
                 deploy_command: None,
                 restart_command: Some(script("restart-odin.cmd")),
+                release: None,
                 enabled: true,
                 interval_seconds: 30,
             },
@@ -1506,6 +1749,7 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 health_command: Some(script("health-mimir-eve-dashboard.cmd")),
                 deploy_command: None,
                 restart_command: None,
+                release: None,
                 enabled: true,
                 interval_seconds: 30,
             },
@@ -1517,6 +1761,7 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 health_command: Some(script("health-stonks.cmd")),
                 deploy_command: None,
                 restart_command: Some(script("restart-stonks.cmd")),
+                release: None,
                 enabled: true,
                 interval_seconds: 30,
             },
@@ -1528,6 +1773,7 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 health_command: Some(script("health-voidbot.cmd")),
                 deploy_command: None,
                 restart_command: Some(script("restart-voidbot.cmd")),
+                release: None,
                 enabled: true,
                 interval_seconds: 300,
             },
@@ -1539,6 +1785,7 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 health_command: Some(script("health-weksa.cmd")),
                 deploy_command: None,
                 restart_command: Some(script("restart-weksa.cmd")),
+                release: None,
                 enabled: true,
                 interval_seconds: 60,
             },
@@ -1553,6 +1800,7 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 health_command: Some(script("health-starfire-muninn.cmd")),
                 deploy_command: None,
                 restart_command: Some(script("restart-starfire-muninn.cmd")),
+                release: None,
                 enabled: true,
                 interval_seconds: 30,
             },
@@ -1567,6 +1815,7 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 health_command: Some(script("health-muninn.cmd")),
                 deploy_command: None,
                 restart_command: Some(script("restart-muninn.cmd")),
+                release: None,
                 enabled: true,
                 interval_seconds: 30,
             },
@@ -1578,6 +1827,7 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 health_command: Some(script("health-vili.cmd")),
                 deploy_command: None,
                 restart_command: Some(script("restart-vili.cmd")),
+                release: None,
                 enabled: true,
                 interval_seconds: 60,
             },
@@ -1589,41 +1839,69 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 health_command: Some(script("health-idunn-swarm-deployment-coverage.cmd")),
                 deploy_command: None,
                 restart_command: None,
+                release: None,
                 enabled: true,
                 interval_seconds: 30,
             },
             DaemonTarget {
-            daemon_id: "yggdrasil-heimdall".to_string(),
-            verse_id: "yggdrasil.local".to_string(),
-            name: "Yggdrasil Heimdall".to_string(),
-            health_contract: health_contract("heimdall.cultnet-rudp-provider-health", "failed"),
-            health_command: Some(script("health-yggdrasil-heimdall.cmd")),
-            deploy_command: Some(script("deploy-yggdrasil-heimdall.cmd")),
-            restart_command: None,
-            enabled: true,
-            interval_seconds: 300,
+                daemon_id: "yggdrasil-heimdall".to_string(),
+                verse_id: "yggdrasil.local".to_string(),
+                name: "Yggdrasil Heimdall".to_string(),
+                health_contract: health_contract("heimdall.cultnet-rudp-provider-health", "failed"),
+                health_command: Some(script("health-yggdrasil-heimdall.cmd")),
+                deploy_command: Some(script("deploy-yggdrasil-heimdall.cmd")),
+                restart_command: None,
+                release: Some(release_target(
+                    "Heimdall",
+                    project("Heimdall"),
+                    "restart-after-verified-build",
+                    None,
+                    "restart-required",
+                )),
+                enabled: true,
+                interval_seconds: 300,
             },
             DaemonTarget {
-            daemon_id: "yggdrasil-repixelizer".to_string(),
-            verse_id: "yggdrasil.local".to_string(),
-            name: "Yggdrasil Repixelizer".to_string(),
-            health_contract: health_contract("repixelizer.cultnet-rudp-service-health", "failed"),
-            health_command: Some(script("health-yggdrasil-repixelizer.cmd")),
-            deploy_command: Some(script("deploy-yggdrasil-repixelizer.cmd")),
-            restart_command: None,
-            enabled: true,
-            interval_seconds: 300,
+                daemon_id: "yggdrasil-repixelizer".to_string(),
+                verse_id: "yggdrasil.local".to_string(),
+                name: "Yggdrasil Repixelizer".to_string(),
+                health_contract: health_contract(
+                    "repixelizer.cultnet-rudp-service-health",
+                    "failed",
+                ),
+                health_command: Some(script("health-yggdrasil-repixelizer.cmd")),
+                deploy_command: Some(script("deploy-yggdrasil-repixelizer.cmd")),
+                restart_command: None,
+                release: Some(release_target(
+                    "repixelizer",
+                    project("repixelizer"),
+                    "restart-after-verified-build",
+                    None,
+                    "restart-required",
+                )),
+                enabled: true,
+                interval_seconds: 300,
             },
             DaemonTarget {
-            daemon_id: "yggdrasil-streampixels".to_string(),
-            verse_id: "yggdrasil.local".to_string(),
-            name: "Yggdrasil StreamPixels".to_string(),
-            health_contract: health_contract("streampixels.cultnet-rudp-service-health", "failed"),
-            health_command: Some(script("health-yggdrasil-streampixels.cmd")),
-            deploy_command: Some(script("deploy-yggdrasil-streampixels.cmd")),
-            restart_command: None,
-            enabled: true,
-            interval_seconds: 300,
+                daemon_id: "yggdrasil-streampixels".to_string(),
+                verse_id: "yggdrasil.local".to_string(),
+                name: "Yggdrasil StreamPixels".to_string(),
+                health_contract: health_contract(
+                    "streampixels.cultnet-rudp-service-health",
+                    "failed",
+                ),
+                health_command: Some(script("health-yggdrasil-streampixels.cmd")),
+                deploy_command: Some(script("deploy-yggdrasil-streampixels.cmd")),
+                restart_command: None,
+                release: Some(release_target(
+                    "StreamPixels",
+                    project("StreamPixels"),
+                    "restart-after-verified-build",
+                    None,
+                    "restart-required",
+                )),
+                enabled: true,
+                interval_seconds: 300,
             },
             DaemonTarget {
                 daemon_id: "nightwing-gjallar".to_string(),
@@ -1636,6 +1914,13 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 health_command: Some(script("health-nightwing-gjallar.cmd")),
                 deploy_command: Some(script("deploy-nightwing-gjallar.cmd")),
                 restart_command: Some(script("restart-nightwing-gjallar.cmd")),
+                release: Some(release_target(
+                    "Gjallar",
+                    project("Gjallar"),
+                    "restart-after-verified-build",
+                    None,
+                    "restart-required",
+                )),
                 enabled: true,
                 interval_seconds: 30,
             },
@@ -1650,6 +1935,7 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 health_command: Some(script("health-nightwing-muninn.cmd")),
                 deploy_command: None,
                 restart_command: Some(script("restart-nightwing-muninn.cmd")),
+                release: None,
                 enabled: true,
                 interval_seconds: 30,
             },
@@ -1664,6 +1950,7 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 health_command: Some(script("health-nightwing-eve-dashboard.cmd")),
                 deploy_command: None,
                 restart_command: Some(script("restart-nightwing-eve-dashboard.cmd")),
+                release: None,
                 enabled: true,
                 interval_seconds: 30,
             },
@@ -1678,6 +1965,7 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 health_command: Some(script("health-nightwing-eve-browser-reference.cmd")),
                 deploy_command: None,
                 restart_command: Some(script("restart-nightwing-eve-browser-reference.cmd")),
+                release: None,
                 enabled: true,
                 interval_seconds: 30,
             },
@@ -1833,6 +2121,7 @@ impl Options {
                     health_command,
                     deploy_command,
                     restart_command,
+                    release: None,
                     enabled,
                     interval_seconds,
                 })
@@ -2024,6 +2313,83 @@ fn truncate_detail(value: &str, max_chars: usize) -> String {
     }
 }
 
+fn run_state_migration(
+    target: &DaemonTarget,
+    release: &ReleaseTarget,
+    requested_at: &str,
+    command_timeout_seconds: u64,
+) -> Option<IdunnStateMigrationResultRecord> {
+    let plan_id = migration_plan_id(target);
+    let result_id = format!("result:{plan_id}:{requested_at}");
+    let Some(command) = release.state_migration_command.as_deref() else {
+        return Some(IdunnStateMigrationResultRecord {
+            result_id,
+            plan_id,
+            daemon_id: target.daemon_id.clone(),
+            state: "noop".to_string(),
+            detail: "daemon declared no state migration command".to_string(),
+            completed_at: requested_at.to_string(),
+        });
+    };
+    match run_shell(command, command_timeout_seconds) {
+        Ok(output) if output.status.success() => Some(IdunnStateMigrationResultRecord {
+            result_id,
+            plan_id,
+            daemon_id: target.daemon_id.clone(),
+            state: "succeeded".to_string(),
+            detail: command_output_detail("state migration command exited successfully", &output),
+            completed_at: requested_at.to_string(),
+        }),
+        Ok(output) => Some(IdunnStateMigrationResultRecord {
+            result_id,
+            plan_id,
+            daemon_id: target.daemon_id.clone(),
+            state: "failed".to_string(),
+            detail: command_output_detail(
+                &format!("state migration command exited with {}", output.status),
+                &output,
+            ),
+            completed_at: requested_at.to_string(),
+        }),
+        Err(error) => Some(IdunnStateMigrationResultRecord {
+            result_id,
+            plan_id,
+            daemon_id: target.daemon_id.clone(),
+            state: "failed".to_string(),
+            detail: format!("state migration command could not run: {error}"),
+            completed_at: requested_at.to_string(),
+        }),
+    }
+}
+
+fn rollout_result_record(
+    target: &DaemonTarget,
+    release: &ReleaseTarget,
+    deployment: &IdunnDeploymentResultRecord,
+    migration: Option<&IdunnStateMigrationResultRecord>,
+    completed_at: &str,
+) -> IdunnRolloutResultRecord {
+    let migration_detail = migration
+        .map(|result| format!("migration {}: {}", result.state, result.detail))
+        .unwrap_or_else(|| "migration not declared".to_string());
+    let downtime_detail = if release.zero_downtime_capability == "zero-downtime" {
+        "zero-downtime strategy declared"
+    } else {
+        "restart-required strategy; zero downtime not claimed"
+    };
+    IdunnRolloutResultRecord {
+        result_id: format!("result:{}:{completed_at}", rollout_plan_id(target)),
+        plan_id: rollout_plan_id(target),
+        daemon_id: target.daemon_id.clone(),
+        state: deployment.state.clone(),
+        detail: format!(
+            "{migration_detail}; deployment {}: {}; {downtime_detail}",
+            deployment.state, deployment.detail
+        ),
+        completed_at: completed_at.to_string(),
+    }
+}
+
 fn run_shell(command: &str, timeout_seconds: u64) -> Result<std::process::Output> {
     let mut process = if cfg!(windows) {
         let path = windows_command_path();
@@ -2203,6 +2569,7 @@ mod tests {
             health_command: Some("exit 0".to_string()),
             deploy_command: deploy_command.map(ToString::to_string),
             restart_command: Some("restart test".to_string()),
+            release: None,
             enabled: true,
             interval_seconds: 30,
         }
@@ -2250,6 +2617,7 @@ mod tests {
             health_command: Some("health-starfire-muninn.cmd".to_string()),
             deploy_command: None,
             restart_command: Some("restart-starfire-muninn.cmd".to_string()),
+            release: None,
             enabled: true,
             interval_seconds: 30,
         };
@@ -2264,6 +2632,7 @@ mod tests {
             health_command: Some("health-nightwing-muninn.cmd".to_string()),
             deploy_command: None,
             restart_command: Some("restart-nightwing-muninn.cmd".to_string()),
+            release: None,
             enabled: true,
             interval_seconds: 30,
         };
@@ -2278,6 +2647,7 @@ mod tests {
             health_command: Some("health-muninn.cmd".to_string()),
             deploy_command: None,
             restart_command: Some("restart-muninn.cmd".to_string()),
+            release: None,
             enabled: true,
             interval_seconds: 30,
         };
@@ -2289,6 +2659,7 @@ mod tests {
             health_command: Some("health-odin.cmd".to_string()),
             deploy_command: None,
             restart_command: Some("restart-odin.cmd".to_string()),
+            release: None,
             enabled: true,
             interval_seconds: 30,
         };
@@ -2300,6 +2671,7 @@ mod tests {
             health_command: Some("health-stonks.cmd".to_string()),
             deploy_command: None,
             restart_command: Some("restart-stonks.cmd".to_string()),
+            release: None,
             enabled: true,
             interval_seconds: 30,
         };
@@ -2311,6 +2683,7 @@ mod tests {
             health_command: Some("health-weksa.cmd".to_string()),
             deploy_command: None,
             restart_command: Some("restart-weksa.cmd".to_string()),
+            release: None,
             enabled: true,
             interval_seconds: 60,
         };
@@ -2322,6 +2695,7 @@ mod tests {
             health_command: Some("health-voidbot.cmd".to_string()),
             deploy_command: None,
             restart_command: Some("restart-voidbot.cmd".to_string()),
+            release: None,
             enabled: true,
             interval_seconds: 60,
         };
@@ -2336,6 +2710,7 @@ mod tests {
             health_command: Some("health-nightwing-gjallar.cmd".to_string()),
             deploy_command: Some("deploy-nightwing-gjallar.cmd".to_string()),
             restart_command: Some("restart-nightwing-gjallar.cmd".to_string()),
+            release: None,
             enabled: true,
             interval_seconds: 30,
         };
@@ -2347,6 +2722,7 @@ mod tests {
             health_command: Some("health-mimir-eve-dashboard.cmd".to_string()),
             deploy_command: None,
             restart_command: None,
+            release: None,
             enabled: true,
             interval_seconds: 30,
         };
@@ -2361,6 +2737,7 @@ mod tests {
             health_command: Some("health-nightwing-eve-dashboard.cmd".to_string()),
             deploy_command: None,
             restart_command: Some("restart-nightwing-eve-dashboard.cmd".to_string()),
+            release: None,
             enabled: true,
             interval_seconds: 30,
         };
@@ -2375,6 +2752,7 @@ mod tests {
             health_command: Some("health-nightwing-eve-browser-reference.cmd".to_string()),
             deploy_command: None,
             restart_command: Some("restart-nightwing-eve-browser-reference.cmd".to_string()),
+            release: None,
             enabled: true,
             interval_seconds: 30,
         };
@@ -2386,6 +2764,7 @@ mod tests {
             health_command: Some("health-vili.cmd".to_string()),
             deploy_command: None,
             restart_command: Some("restart-vili.cmd".to_string()),
+            release: None,
             enabled: true,
             interval_seconds: 30,
         };
@@ -2397,6 +2776,7 @@ mod tests {
             health_command: Some("health-yggdrasil-streampixels.cmd".to_string()),
             deploy_command: Some("deploy-yggdrasil-streampixels.cmd".to_string()),
             restart_command: None,
+            release: None,
             enabled: true,
             interval_seconds: 300,
         };
@@ -2408,6 +2788,7 @@ mod tests {
             health_command: Some("health-yggdrasil-heimdall.cmd".to_string()),
             deploy_command: Some("deploy-yggdrasil-heimdall.cmd".to_string()),
             restart_command: None,
+            release: None,
             enabled: true,
             interval_seconds: 300,
         };
@@ -2419,6 +2800,7 @@ mod tests {
             health_command: Some("health-yggdrasil-repixelizer.cmd".to_string()),
             deploy_command: Some("deploy-yggdrasil-repixelizer.cmd".to_string()),
             restart_command: None,
+            release: None,
             enabled: true,
             interval_seconds: 300,
         };
@@ -2446,37 +2828,84 @@ mod tests {
         assert_eq!(plan.plan_id, "swarm-surgery:starfire-local");
         assert_eq!(plan.status, "active-transport-migration");
         assert_eq!(plan.next_target, "nightwing-gjallar");
-        assert!(plan.current_phase.contains("Odin now ingests remote Vili and Nightwing Gjallar provider witnesses live"));
+        assert!(plan.current_phase.contains(
+            "Nightwing Gjallar now publishes a daemon-owned gamecult.eve.surface_state witness"
+        ));
         assert!(
-            plan.cut_line
-                .contains("live yggdrasil-heimdall publishes heimdall.cultnet-rudp-provider-health")
+            plan.cut_line.contains(
+                "live yggdrasil-heimdall publishes heimdall.cultnet-rudp-provider-health"
+            )
         );
         assert!(plan.cut_line.contains("GameCult\\Vili"));
         assert!(plan.cut_line.contains("10.77.0.4"));
         assert!(plan.cut_line.contains("Nightwing Muninn"));
         assert!(plan.cut_line.contains("voidbot-swarm-state.cc"));
-        assert!(plan.cut_line.contains("/home/metacrat/.local/state/gamecult/muninn/muninn.telemetry.cc"));
+        assert!(
+            plan.cut_line
+                .contains("/home/metacrat/.local/state/gamecult/muninn/muninn.telemetry.cc")
+        );
         assert!(plan.cut_line.contains("starfire-muninn"));
         assert!(plan.cut_line.contains("127.0.0.1"));
         assert!(plan.cut_line.contains("10.77.0.3"));
         assert!(plan.cut_line.contains("GameCult-Muninn-Activate"));
         assert!(plan.cut_line.contains("GameCult-Muninn-VideoProof"));
-        assert!(plan.cut_line.contains("hidden PowerShell entrypoints directly"));
-        assert!(plan.cut_line.contains("manual compatibility entrypoints only"));
+        assert!(
+            plan.cut_line
+                .contains("hidden PowerShell entrypoints directly")
+        );
+        assert!(
+            plan.cut_line
+                .contains("manual compatibility entrypoints only")
+        );
         assert!(plan.cut_line.contains("yggdrasil-streampixels"));
         assert!(plan.cut_line.contains("10.77.0.1"));
-        assert!(plan.cut_line.contains("heimdall.cultnet-rudp-provider-health"));
-        assert!(plan.cut_line.contains("/srv/heimdall/cultcache/heimdall.service.cc"));
-        assert!(plan.cut_line.contains("repixelizer.cultnet-rudp-service-health"));
-        assert!(plan.cut_line.contains("/srv/repixelizer/cultcache/repixelizer.service.cc"));
-        assert!(plan.cut_line.contains("live Nightwing Gjallar publishes a boundary store"));
-        assert!(plan.cut_line.contains("/var/lib/gamecult/gjallar/cultcache/gjallar.service.cc"));
-        assert!(plan.cut_line.contains("Live Mimir Eve dashboard now publishes CultMesh state"));
-        assert!(plan.cut_line.contains("/var/lib/gamecult/eve-dashboard/cultmesh/eve-dashboard.ccmp"));
-        assert!(plan.cut_line.contains("/var/lib/gamecult/eve-dashboard/cultcache/eve-dashboard.service.cc"));
-        assert!(plan.cut_line.contains("live Nightwing Eve browser reference now publishes a boundary store"));
-        assert!(plan.cut_line.contains("/var/lib/gamecult/eve-browser-reference/cultcache/eve-browser-reference.service.cc"));
-        assert!(plan.cut_line.contains("Gjallar remains the next compatibility debt"));
+        assert!(
+            plan.cut_line
+                .contains("heimdall.cultnet-rudp-provider-health")
+        );
+        assert!(
+            plan.cut_line
+                .contains("/srv/heimdall/cultcache/heimdall.service.cc")
+        );
+        assert!(
+            plan.cut_line
+                .contains("repixelizer.cultnet-rudp-service-health")
+        );
+        assert!(
+            plan.cut_line
+                .contains("/srv/repixelizer/cultcache/repixelizer.service.cc")
+        );
+        assert!(
+            plan.cut_line
+                .contains("live Nightwing Gjallar publishes a boundary store")
+        );
+        assert!(
+            plan.cut_line
+                .contains("/var/lib/gamecult/gjallar/cultcache/gjallar.service.cc")
+        );
+        assert!(
+            plan.cut_line
+                .contains("Live Mimir Eve dashboard now publishes CultMesh state")
+        );
+        assert!(
+            plan.cut_line
+                .contains("/var/lib/gamecult/eve-dashboard/cultmesh/eve-dashboard.ccmp")
+        );
+        assert!(
+            plan.cut_line
+                .contains("/var/lib/gamecult/eve-dashboard/cultcache/eve-dashboard.service.cc")
+        );
+        assert!(
+            plan.cut_line
+                .contains("live Nightwing Eve browser reference now publishes a boundary store")
+        );
+        assert!(plan.cut_line.contains(
+            "/var/lib/gamecult/eve-browser-reference/cultcache/eve-browser-reference.service.cc"
+        ));
+        assert!(
+            plan.cut_line
+                .contains("Gjallar remains the next compatibility debt")
+        );
         assert!(plan.verification_layer.contains("CultMesh keepalive store"));
         assert!(
             plan.invariants
@@ -2499,55 +2928,78 @@ mod tests {
         );
 
         let raven_plan = daemon_surgery_plan(&raven_muninn, "unix:100");
-        assert_eq!(raven_plan.status, "partial-rudp-health-and-provider-store-live");
+        assert_eq!(
+            raven_plan.status,
+            "partial-rudp-health-and-provider-store-live"
+        );
+        assert!(raven_plan.current_mechanism.contains("10.77.0.2:17870"));
+        assert!(raven_plan.current_mechanism.contains("GameCult-Muninn"));
         assert!(
             raven_plan
                 .current_mechanism
-                .contains("10.77.0.2:17870")
+                .contains("C:\\Meta\\Odin\\state\\muninn.telemetry.cc")
         );
-        assert!(raven_plan.current_mechanism.contains("GameCult-Muninn"));
-        assert!(raven_plan.current_mechanism.contains("C:\\Meta\\Odin\\state\\muninn.telemetry.cc"));
-        assert!(
-            raven_plan
-                .cut_line
-                .contains("fallback evidence only")
-        );
+        assert!(raven_plan.cut_line.contains("fallback evidence only"));
         assert!(raven_plan.steps.iter().any(
             |step| step.contains("GameCult-Muninn-VideoProof") && step.contains("wscript.exe")
         ));
         assert!(raven_plan.steps.iter().any(
             |step| step.contains("PowerShell entrypoints directly") && step.contains("cmdPath")
         ));
-        assert!(raven_plan.steps.iter().any(
-            |step| step.contains("--idunn-rudp-health 10.77.0.2:17870")
-                && step.contains("muninn.cultnet-rudp-remote-telemetry-health")
-        ));
+        assert!(
+            raven_plan
+                .steps
+                .iter()
+                .any(|step| step.contains("--idunn-rudp-health 10.77.0.2:17870")
+                    && step.contains("muninn.cultnet-rudp-remote-telemetry-health"))
+        );
         assert!(raven_plan.blockers.is_empty());
 
         let starfire_plan = daemon_surgery_plan(&starfire_muninn, "unix:100");
-        assert_eq!(starfire_plan.status, "partial-rudp-health-and-provider-store-live");
+        assert_eq!(
+            starfire_plan.status,
+            "partial-rudp-health-and-provider-store-live"
+        );
         assert!(starfire_plan.current_mechanism.contains("127.0.0.1:17870"));
-        assert!(starfire_plan.current_mechanism.contains("archives a corrupt CultCache store"));
-        assert!(starfire_plan.current_mechanism.contains("C:\\Meta\\Odin\\state\\starfire.muninn.telemetry.cc"));
+        assert!(
+            starfire_plan
+                .current_mechanism
+                .contains("archives a corrupt CultCache store")
+        );
+        assert!(
+            starfire_plan
+                .current_mechanism
+                .contains("C:\\Meta\\Odin\\state\\starfire.muninn.telemetry.cc")
+        );
         assert!(starfire_plan.cut_line.contains("fallback evidence only"));
         assert!(starfire_plan.steps.iter().any(
             |step| step.contains("starfire.muninn.telemetry.cc") && step.contains(".lock")
         ));
 
         let nightwing_plan = daemon_surgery_plan(&nightwing_muninn, "unix:100");
-        assert_eq!(nightwing_plan.status, "partial-rudp-health-and-provider-store-live");
+        assert_eq!(
+            nightwing_plan.status,
+            "partial-rudp-health-and-provider-store-live"
+        );
         assert!(nightwing_plan.current_mechanism.contains("10.77.0.2:17870"));
         assert!(nightwing_plan.current_mechanism.contains("10.77.0.3"));
-        assert!(nightwing_plan.current_mechanism.contains("/home/metacrat/.local/state/gamecult/muninn/muninn.telemetry.cc"));
+        assert!(
+            nightwing_plan
+                .current_mechanism
+                .contains("/home/metacrat/.local/state/gamecult/muninn/muninn.telemetry.cc")
+        );
         assert!(nightwing_plan.cut_line.contains("fallback evidence only"));
-        assert!(nightwing_plan.steps.iter().any(
-            |step| step.contains("/home/metacrat/.local/state/gamecult/muninn/muninn.telemetry.cc")
+        assert!(nightwing_plan.steps.iter().any(|step| {
+            step.contains("/home/metacrat/.local/state/gamecult/muninn/muninn.telemetry.cc")
                 && step.contains("provider advertisement")
-        ));
-        assert!(nightwing_plan.steps.iter().any(
-            |step| step.contains("restart-nightwing-muninn.ps1")
-                && step.contains("long-running serve body")
-        ));
+        }));
+        assert!(
+            nightwing_plan
+                .steps
+                .iter()
+                .any(|step| step.contains("restart-nightwing-muninn.ps1")
+                    && step.contains("long-running serve body"))
+        );
 
         let weksa_plan = daemon_surgery_plan(&weksa, "unix:100");
         assert_eq!(
@@ -2585,11 +3037,7 @@ mod tests {
                 .current_mechanism
                 .contains("gjallar.cultnet-rudp-framebuffer-composition-health")
         );
-        assert!(
-            gjallar_plan
-                .cut_line
-                .contains("gamecult.eve.surface_state")
-        );
+        assert!(gjallar_plan.cut_line.contains("gamecult.eve.surface_state"));
 
         let nightwing_eve_dashboard_plan =
             daemon_surgery_plan(&nightwing_eve_dashboard, "unix:100");
@@ -2655,9 +3103,12 @@ mod tests {
                 .iter()
                 .any(|step| step.contains("command_boundary"))
         );
-        assert!(vili_plan.steps.iter().any(
-            |step| step.contains("0.0.0.0:17870") && step.contains("Raven")
-        ));
+        assert!(
+            vili_plan
+                .steps
+                .iter()
+                .any(|step| step.contains("0.0.0.0:17870") && step.contains("Raven"))
+        );
         assert!(vili_plan.blockers.is_empty());
 
         let streampixels_plan = daemon_surgery_plan(&yggdrasil_streampixels, "unix:100");
@@ -2670,26 +3121,35 @@ mod tests {
                 .current_mechanism
                 .contains("10.77.0.2:17870")
         );
-        assert!(
-            streampixels_plan
-                .current_mechanism
-                .contains("10.77.0.1")
-        );
+        assert!(streampixels_plan.current_mechanism.contains("10.77.0.1"));
         assert!(
             streampixels_plan
                 .current_mechanism
                 .contains("/srv/streampixels/env/service.env")
         );
-        assert!(streampixels_plan.cut_line.contains("deployment/debug witnesses"));
-        assert!(streampixels_plan.steps.iter().any(
-            |step| step.contains("CultLib cultnet-ts/cultcache-ts snapshot")
-        ));
-        assert!(streampixels_plan.steps.iter().any(
-            |step| step.contains("serial pnpm workspace build")
-        ));
+        assert!(
+            streampixels_plan
+                .cut_line
+                .contains("deployment/debug witnesses")
+        );
+        assert!(
+            streampixels_plan
+                .steps
+                .iter()
+                .any(|step| step.contains("CultLib cultnet-ts/cultcache-ts snapshot"))
+        );
+        assert!(
+            streampixels_plan
+                .steps
+                .iter()
+                .any(|step| step.contains("serial pnpm workspace build"))
+        );
 
         let heimdall_plan = daemon_surgery_plan(&yggdrasil_heimdall, "unix:100");
-        assert_eq!(heimdall_plan.status, "partial-rudp-health-and-provider-store-live");
+        assert_eq!(
+            heimdall_plan.status,
+            "partial-rudp-health-and-provider-store-live"
+        );
         assert!(
             heimdall_plan
                 .current_mechanism
@@ -2784,6 +3244,7 @@ mod tests {
             health_command: Some("health-stonks.cmd".to_string()),
             deploy_command: None,
             restart_command: Some("restart-stonks.cmd".to_string()),
+            release: None,
             enabled: true,
             interval_seconds: 30,
         };
@@ -2809,6 +3270,7 @@ mod tests {
             health_command: Some("health-weksa.cmd".to_string()),
             deploy_command: None,
             restart_command: Some("restart-weksa.cmd".to_string()),
+            release: None,
             enabled: true,
             interval_seconds: 60,
         };
@@ -2833,16 +3295,14 @@ mod tests {
             health_command: Some("health-yggdrasil-streampixels.cmd".to_string()),
             deploy_command: Some("deploy-yggdrasil-streampixels.cmd".to_string()),
             restart_command: None,
+            release: None,
             enabled: true,
             interval_seconds: 300,
         };
 
         let profile = daemon_transport_profile(&streampixels, "unix:100");
 
-        assert_eq!(
-            profile.state,
-            "partial-rudp-health-and-provider-store-live"
-        );
+        assert_eq!(profile.state, "partial-rudp-health-and-provider-store-live");
         assert!(
             profile
                 .current_transport
@@ -2863,6 +3323,7 @@ mod tests {
             health_command: Some("health-yggdrasil-heimdall.cmd".to_string()),
             deploy_command: Some("deploy-yggdrasil-heimdall.cmd".to_string()),
             restart_command: None,
+            release: None,
             enabled: true,
             interval_seconds: 300,
         };
@@ -2875,7 +3336,11 @@ mod tests {
                 .current_transport
                 .contains("daemon-owned-cultcache-boundary-store")
         );
-        assert!(profile.cut_line.contains("/srv/heimdall/cultcache/heimdall.service.cc"));
+        assert!(
+            profile
+                .cut_line
+                .contains("/srv/heimdall/cultcache/heimdall.service.cc")
+        );
     }
 
     #[test]
@@ -2888,6 +3353,7 @@ mod tests {
             health_command: Some("health-yggdrasil-repixelizer.cmd".to_string()),
             deploy_command: Some("deploy-yggdrasil-repixelizer.cmd".to_string()),
             restart_command: None,
+            release: None,
             enabled: true,
             interval_seconds: 300,
         };
@@ -2895,8 +3361,16 @@ mod tests {
         let profile = daemon_transport_profile(&repixelizer, "unix:100");
 
         assert_eq!(profile.state, "partial-rudp-health-and-provider-store-live");
-        assert!(profile.current_transport.contains("daemon-published-rudp-health"));
-        assert!(profile.cut_line.contains("/srv/repixelizer/cultcache/repixelizer.service.cc"));
+        assert!(
+            profile
+                .current_transport
+                .contains("daemon-published-rudp-health")
+        );
+        assert!(
+            profile
+                .cut_line
+                .contains("/srv/repixelizer/cultcache/repixelizer.service.cc")
+        );
     }
 
     #[test]
@@ -2909,6 +3383,7 @@ mod tests {
             health_command: Some("health-voidbot.cmd".to_string()),
             deploy_command: None,
             restart_command: Some("restart-voidbot.cmd".to_string()),
+            release: None,
             enabled: true,
             interval_seconds: 60,
         };
@@ -2920,11 +3395,7 @@ mod tests {
             profile.current_transport,
             "daemon-published-rudp-health + daemon-owned-cultmesh-provider-store + compatibility.local-command fallback"
         );
-        assert!(
-            profile
-                .cut_line
-                .contains("voidbot-swarm-state.cc")
-        );
+        assert!(profile.cut_line.contains("voidbot-swarm-state.cc"));
     }
 
     #[test]
@@ -2940,6 +3411,7 @@ mod tests {
             health_command: Some("health-nightwing-gjallar.cmd".to_string()),
             deploy_command: Some("deploy-nightwing-gjallar.cmd".to_string()),
             restart_command: Some("restart-nightwing-gjallar.cmd".to_string()),
+            release: None,
             enabled: true,
             interval_seconds: 30,
         };
@@ -2971,6 +3443,7 @@ mod tests {
             health_command: Some("health-muninn.cmd".to_string()),
             deploy_command: None,
             restart_command: Some("restart-muninn.cmd".to_string()),
+            release: None,
             enabled: true,
             interval_seconds: 30,
         };
@@ -2985,6 +3458,7 @@ mod tests {
             health_command: Some("health-starfire-muninn.cmd".to_string()),
             deploy_command: None,
             restart_command: Some("restart-starfire-muninn.cmd".to_string()),
+            release: None,
             enabled: true,
             interval_seconds: 30,
         };
@@ -2999,27 +3473,65 @@ mod tests {
             health_command: Some("health-nightwing-muninn.cmd".to_string()),
             deploy_command: None,
             restart_command: Some("restart-nightwing-muninn.cmd".to_string()),
+            release: None,
             enabled: true,
             interval_seconds: 30,
         };
 
         let raven_profile = daemon_transport_profile(&raven, "unix:100");
-        assert_eq!(raven_profile.state, "partial-rudp-health-and-provider-store-live");
-        assert!(raven_profile.current_transport.contains("daemon-owned-cultcache-telemetry-store"));
-        assert!(raven_profile.current_transport.contains("background-only hidden task launch"));
-        assert!(raven_profile.cut_line.contains("C:\\Meta\\Odin\\state\\muninn.telemetry.cc"));
+        assert_eq!(
+            raven_profile.state,
+            "partial-rudp-health-and-provider-store-live"
+        );
+        assert!(
+            raven_profile
+                .current_transport
+                .contains("daemon-owned-cultcache-telemetry-store")
+        );
+        assert!(
+            raven_profile
+                .current_transport
+                .contains("background-only hidden task launch")
+        );
+        assert!(
+            raven_profile
+                .cut_line
+                .contains("C:\\Meta\\Odin\\state\\muninn.telemetry.cc")
+        );
 
         let starfire_profile = daemon_transport_profile(&starfire, "unix:100");
-        assert_eq!(starfire_profile.state, "partial-rudp-health-and-provider-store-live");
-        assert!(starfire_profile.current_transport.contains("daemon-owned-cultcache-telemetry-store"));
+        assert_eq!(
+            starfire_profile.state,
+            "partial-rudp-health-and-provider-store-live"
+        );
+        assert!(
+            starfire_profile
+                .current_transport
+                .contains("daemon-owned-cultcache-telemetry-store")
+        );
         assert!(starfire_profile.cut_line.contains("Quest ADB availability"));
-        assert!(starfire_profile.cut_line.contains("C:\\Meta\\Odin\\state\\starfire.muninn.telemetry.cc"));
+        assert!(
+            starfire_profile
+                .cut_line
+                .contains("C:\\Meta\\Odin\\state\\starfire.muninn.telemetry.cc")
+        );
 
         let nightwing_profile = daemon_transport_profile(&nightwing, "unix:100");
-        assert_eq!(nightwing_profile.state, "partial-rudp-health-and-provider-store-live");
-        assert!(nightwing_profile.current_transport.contains("daemon-owned-cultcache-telemetry-store"));
+        assert_eq!(
+            nightwing_profile.state,
+            "partial-rudp-health-and-provider-store-live"
+        );
+        assert!(
+            nightwing_profile
+                .current_transport
+                .contains("daemon-owned-cultcache-telemetry-store")
+        );
         assert!(nightwing_profile.cut_line.contains("Move HID evidence"));
-        assert!(nightwing_profile.cut_line.contains("/home/metacrat/.local/state/gamecult/muninn/muninn.telemetry.cc"));
+        assert!(
+            nightwing_profile
+                .cut_line
+                .contains("/home/metacrat/.local/state/gamecult/muninn/muninn.telemetry.cc")
+        );
     }
 
     #[test]

@@ -26,6 +26,8 @@ Idunn centralizes that lifecycle work:
 - watch health and freshness signals;
 - avoid restarting services when authority is unclear;
 - record every deployment/restart request and result as typed state;
+- record release targets, deployment artifacts, state migrations, and rollout
+  results as typed state;
 - escalate to an operator through Bifrost when human action is needed.
 
 The desired shape is simple:
@@ -142,10 +144,13 @@ For the repo swarm, deployment ownership begins with catalog coverage. Use:
 ```
 
 The enforced targets are Nightwing Gjallar plus the Yggdrasil source artifact
-lanes whose ops runbooks can produce and verify deployment manifests. Bifrost
-is blocked until its production database migration path is coherent; mobile
-device installs remain blocked at their physical approval boundaries; GitHub
-Pages remains external-owned.
+lanes whose ops runbooks can produce and verify deployment manifests. Each
+enforced target must declare upstream remote/branch, rollout strategy, state
+migration authority, and zero-downtime capability. Idunn deploys the declared
+upstream `main` revision, not arbitrary local `HEAD`. Bifrost is blocked until
+its production database migration path is coherent; mobile device installs
+remain blocked at their physical approval boundaries; GitHub Pages remains
+external-owned.
 
 ## Typed Records
 
@@ -154,6 +159,12 @@ Pages remains external-owned.
 - `idunn.keepalive_decision.v1`
 - `idunn.deployment_request.v1`
 - `idunn.deployment_result.v1`
+- `idunn.release_target.v1`
+- `idunn.deployment_artifact.v1`
+- `idunn.state_migration_plan.v1`
+- `idunn.state_migration_result.v1`
+- `idunn.rollout_plan.v1`
+- `idunn.rollout_result.v1`
 - `idunn.restart_request.v1`
 - `idunn.restart_result.v1`
 - `idunn.operator_alarm.v1`
@@ -178,6 +189,14 @@ At startup Idunn also publishes `idunn.runtime_transport_check.v1`, currently a
 loopback CultNet hello over `cultnet.transport.rudp.v0`. That proves Idunn's
 Rust body can use the RUDP substrate before it asks the rest of the swarm to
 walk through the same door.
+
+For deploy-enforced targets, startup also publishes `idunn.release_target.v1`,
+`idunn.deployment_artifact.v1`, `idunn.state_migration_plan.v1`, and
+`idunn.rollout_plan.v1`. During deployment, Idunn runs any declared
+daemon-owned migration command before the deploy command; a failed migration
+stops the rollout and raises an operator alarm. Zero downtime is recorded only
+when the target declares a real in-place, blue/green, or rolling strategy;
+otherwise Idunn says `restart-required` and verifies that path honestly.
 
 The daemon itself defaults to `127.0.0.1:17870`, but
 `scripts/start-idunn-local.ps1` launches the local swarm with

@@ -7,7 +7,11 @@ param(
   [string] $RemoteTarballName = "repixelizer-source.tar",
   [string] $RemoteCultLibTarballName = "repixelizer-cultlib.tar",
   [string] $DeployScript = "E:\Projects\gamecult-ops\scripts\deploy-repixelizer-gui.sh",
-  [string] $CheckScript = "E:\Projects\gamecult-ops\scripts\check-repixelizer-gui.sh"
+  [string] $CheckScript = "E:\Projects\gamecult-ops\scripts\check-repixelizer-gui.sh",
+  [string] $UpstreamRemote = "origin",
+  [string] $UpstreamBranch = "main",
+  [string] $CultLibUpstreamRemote = "origin",
+  [string] $CultLibUpstreamBranch = "main"
 )
 
 $ErrorActionPreference = "Stop"
@@ -18,12 +22,19 @@ foreach ($path in @($RepoRoot, $CultLibRoot, $DeployScript, $CheckScript)) {
   }
 }
 
-$repixelizerCommit = (git -C $RepoRoot rev-parse HEAD).Trim()
+$sourceRef = "$UpstreamRemote/$UpstreamBranch"
+$cultLibSourceRef = "$CultLibUpstreamRemote/$CultLibUpstreamBranch"
+git -C $RepoRoot fetch --prune $UpstreamRemote $UpstreamBranch
+if ($LASTEXITCODE -ne 0) { throw "git fetch failed for $RepoRoot $sourceRef" }
+git -C $CultLibRoot fetch --prune $CultLibUpstreamRemote $CultLibUpstreamBranch
+if ($LASTEXITCODE -ne 0) { throw "git fetch failed for $CultLibRoot $cultLibSourceRef" }
+
+$repixelizerCommit = (git -C $RepoRoot rev-parse $sourceRef).Trim()
 if ([string]::IsNullOrWhiteSpace($repixelizerCommit)) {
   throw "Could not determine Repixelizer git revision."
 }
 
-$cultLibCommit = (git -C $CultLibRoot rev-parse HEAD).Trim()
+$cultLibCommit = (git -C $CultLibRoot rev-parse $cultLibSourceRef).Trim()
 if ([string]::IsNullOrWhiteSpace($cultLibCommit)) {
   throw "Could not determine CultLib git revision."
 }
@@ -34,17 +45,17 @@ $cultLibTarPath = Join-Path $scratch $RemoteCultLibTarballName
 $manifestPath = Join-Path $scratch "deployment-manifest.txt"
 New-Item -ItemType Directory -Force -Path $scratch | Out-Null
 
-git -C $RepoRoot archive --format=tar --output=$sourceTarPath HEAD
+git -C $RepoRoot archive --format=tar --output=$sourceTarPath $sourceRef
 if ($LASTEXITCODE -ne 0) {
-  throw "git archive failed for $RepoRoot"
+  throw "git archive failed for $RepoRoot $sourceRef"
 }
 
 if (Test-Path -LiteralPath $cultLibTarPath) {
   Remove-Item -LiteralPath $cultLibTarPath -Force
 }
-tar.exe -cf $cultLibTarPath -C $CultLibRoot packages/cultcache-py
+git -C $CultLibRoot archive --format=tar --output=$cultLibTarPath $cultLibSourceRef packages/cultcache-py
 if ($LASTEXITCODE -ne 0) {
-  throw "CultLib tar build failed for $CultLibRoot"
+  throw "CultLib tar build failed for $CultLibRoot $cultLibSourceRef"
 }
 
 $sourceHash = (Get-FileHash $sourceTarPath -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -54,10 +65,16 @@ $deployedAt = [DateTimeOffset]::UtcNow.ToString("O")
   "schema=gamecult.idunn.deployment_manifest.v1"
   "appId=yggdrasil-repixelizer"
   "repoRoot=$RepoRoot"
+  "upstreamRemote=$UpstreamRemote"
+  "upstreamBranch=$UpstreamBranch"
+  "sourceRef=$sourceRef"
   "gitCommit=$repixelizerCommit"
   "artifact=$RemoteTarballName"
   "sha256=$sourceHash"
   "cultLibRepoRoot=$CultLibRoot"
+  "cultLibUpstreamRemote=$CultLibUpstreamRemote"
+  "cultLibUpstreamBranch=$CultLibUpstreamBranch"
+  "cultLibSourceRef=$cultLibSourceRef"
   "cultLibGitCommit=$cultLibCommit"
   "cultLibArtifact=$RemoteCultLibTarballName"
   "cultLibSha256=$cultLibHash"

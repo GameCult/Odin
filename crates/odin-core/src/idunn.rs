@@ -177,9 +177,12 @@ mod tests {
     use super::*;
     use crate::documents::{
         IDUNN_COMMAND_BOUNDARY_SCHEMA, IDUNN_DAEMON_SURGERY_PLAN_SCHEMA,
-        IDUNN_DAEMON_TRANSPORT_PROFILE_SCHEMA, IDUNN_DESIRED_DAEMON_SCHEMA,
-        IDUNN_SWARM_SURGERY_PLAN_SCHEMA, IdunnCommandBoundaryRecord, IdunnDaemonSurgeryPlanRecord,
-        IdunnDaemonTransportProfileRecord, IdunnRuntimeTransportCheckRecord,
+        IDUNN_DAEMON_TRANSPORT_PROFILE_SCHEMA, IDUNN_DEPLOYMENT_ARTIFACT_SCHEMA,
+        IDUNN_DESIRED_DAEMON_SCHEMA, IDUNN_RELEASE_TARGET_SCHEMA, IDUNN_ROLLOUT_PLAN_SCHEMA,
+        IDUNN_STATE_MIGRATION_PLAN_SCHEMA, IDUNN_SWARM_SURGERY_PLAN_SCHEMA,
+        IdunnCommandBoundaryRecord, IdunnDaemonSurgeryPlanRecord,
+        IdunnDaemonTransportProfileRecord, IdunnDeploymentArtifactRecord, IdunnReleaseTargetRecord,
+        IdunnRolloutPlanRecord, IdunnRuntimeTransportCheckRecord, IdunnStateMigrationPlanRecord,
         IdunnSwarmSurgeryPlanRecord, OdinDocuments,
     };
     use anyhow::Result;
@@ -398,6 +401,65 @@ mod tests {
             observed_at: "2026-06-04T00:00:02Z".to_string(),
         };
         node.put(&command_boundary.boundary_id, &command_boundary)?;
+        let release_target = IdunnReleaseTargetRecord {
+            target_id: "release-target:voidbot".to_string(),
+            daemon_id: "voidbot".to_string(),
+            repo: "VoidBot".to_string(),
+            repo_path: "E:\\Projects\\VoidBot".to_string(),
+            upstream_remote: "origin".to_string(),
+            upstream_branch: "main".to_string(),
+            desired_revision: "abc123".to_string(),
+            deployed_revision: "old123".to_string(),
+            artifact_strategy: "source-archive-from-upstream-main".to_string(),
+            rollout_strategy: "restart-after-verified-build".to_string(),
+            state_migration_authority: "daemon-owned-command".to_string(),
+            zero_downtime_capability: "restart-required".to_string(),
+            status: "tracked".to_string(),
+            observed_at: "2026-06-04T00:00:02Z".to_string(),
+        };
+        let artifact = IdunnDeploymentArtifactRecord {
+            artifact_id: "artifact:voidbot:main".to_string(),
+            daemon_id: "voidbot".to_string(),
+            source_revision: "abc123".to_string(),
+            source_branch: "main".to_string(),
+            source_remote: "origin".to_string(),
+            artifact_kind: "source-archive-from-upstream-main".to_string(),
+            artifact_uri: "built-by-deploy-command".to_string(),
+            sha256: "pending-deploy-command".to_string(),
+            built_at: "2026-06-04T00:00:02Z".to_string(),
+        };
+        let migration_plan = IdunnStateMigrationPlanRecord {
+            plan_id: "migration:voidbot:main".to_string(),
+            daemon_id: "voidbot".to_string(),
+            from_schema_version: "deployed-state".to_string(),
+            to_schema_version: "target-revision-state".to_string(),
+            authority: "daemon-owned-migrator".to_string(),
+            command: "voidbot migrate-state".to_string(),
+            strategy: "backup-then-daemon-migrator".to_string(),
+            backup_required: true,
+            zero_downtime_required: false,
+            status: "planned".to_string(),
+            planned_at: "2026-06-04T00:00:02Z".to_string(),
+        };
+        let rollout_plan = IdunnRolloutPlanRecord {
+            plan_id: "rollout:voidbot:main".to_string(),
+            daemon_id: "voidbot".to_string(),
+            desired_revision: "abc123".to_string(),
+            deployed_revision: "old123".to_string(),
+            strategy: "restart-after-verified-build".to_string(),
+            phases: vec![
+                "fetch upstream main".to_string(),
+                "verify health".to_string(),
+            ],
+            migration_plan_id: migration_plan.plan_id.clone(),
+            artifact_id: artifact.artifact_id.clone(),
+            status: "planned".to_string(),
+            planned_at: "2026-06-04T00:00:02Z".to_string(),
+        };
+        node.put(&release_target.target_id, &release_target)?;
+        node.put(&artifact.artifact_id, &artifact)?;
+        node.put(&migration_plan.plan_id, &migration_plan)?;
+        node.put(&rollout_plan.plan_id, &rollout_plan)?;
         let runtime_check = IdunnRuntimeTransportCheckRecord {
             check_id: "idunn-runtime-rudp-loopback".to_string(),
             runtime_id: "idunn-daemon".to_string(),
@@ -457,6 +519,38 @@ mod tests {
                 .as_deref(),
             Some(IDUNN_COMMAND_BOUNDARY_SCHEMA)
         );
+        assert_eq!(
+            reloaded
+                .documents()
+                .binding("idunn.release_target")
+                .and_then(|binding| binding.payload_schema_version.clone())
+                .as_deref(),
+            Some(IDUNN_RELEASE_TARGET_SCHEMA)
+        );
+        assert_eq!(
+            reloaded
+                .documents()
+                .binding("idunn.deployment_artifact")
+                .and_then(|binding| binding.payload_schema_version.clone())
+                .as_deref(),
+            Some(IDUNN_DEPLOYMENT_ARTIFACT_SCHEMA)
+        );
+        assert_eq!(
+            reloaded
+                .documents()
+                .binding("idunn.state_migration_plan")
+                .and_then(|binding| binding.payload_schema_version.clone())
+                .as_deref(),
+            Some(IDUNN_STATE_MIGRATION_PLAN_SCHEMA)
+        );
+        assert_eq!(
+            reloaded
+                .documents()
+                .binding("idunn.rollout_plan")
+                .and_then(|binding| binding.payload_schema_version.clone())
+                .as_deref(),
+            Some(IDUNN_ROLLOUT_PLAN_SCHEMA)
+        );
         let reloaded_desired =
             reloaded.get_required::<IdunnDesiredDaemonRecord>(&desired.daemon_id)?;
         assert_eq!(reloaded_desired.transport_profile_id, "transport:voidbot");
@@ -499,6 +593,18 @@ mod tests {
                 .get_required::<IdunnRuntimeTransportCheckRecord>(&runtime_check.check_id)?
                 .state,
             "available"
+        );
+        assert_eq!(
+            reloaded
+                .get_required::<IdunnReleaseTargetRecord>(&release_target.target_id)?
+                .upstream_branch,
+            "main"
+        );
+        assert_eq!(
+            reloaded
+                .get_required::<IdunnRolloutPlanRecord>(&rollout_plan.plan_id)?
+                .migration_plan_id,
+            "migration:voidbot:main"
         );
         assert_eq!(
             reloaded

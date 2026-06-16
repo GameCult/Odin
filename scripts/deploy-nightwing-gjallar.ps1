@@ -5,19 +5,49 @@ param(
   [string] $CultCachePath = "/var/lib/gamecult/gjallar/cultcache/gjallar.service.cc",
   [string] $IdunnRudpHealth = "10.77.0.2:17870",
   [string] $IdunnDaemon = "nightwing-gjallar",
-  [string] $IdunnHealthContract = "gjallar.cultnet-rudp-framebuffer-composition-health"
+  [string] $IdunnHealthContract = "gjallar.cultnet-rudp-framebuffer-composition-health",
+  [string] $UpstreamRemote = "origin",
+  [string] $UpstreamBranch = "main"
 )
 
 $ErrorActionPreference = "Stop"
 
-$publishDir = Join-Path $GjallarRoot "scratch\publish\gjallar"
+$sourceRef = "$UpstreamRemote/$UpstreamBranch"
+$scratchRoot = Join-Path $GjallarRoot "scratch"
+$releaseSource = Join-Path $scratchRoot "idunn-release-source"
+$releaseTarPath = Join-Path $scratchRoot "gjallar-source-release.tar"
+$publishDir = Join-Path $scratchRoot "publish\gjallar"
 $tarPath = Join-Path $GjallarRoot "scratch\gjallar-publish.tar"
-$projectPath = Join-Path $GjallarRoot "src\Gjallar\Gjallar.csproj"
+$projectPath = Join-Path $releaseSource "src\Gjallar\Gjallar.csproj"
 $manifestPath = Join-Path $publishDir "gamecult-gjallar-deploy-manifest.txt"
 
-$commit = (git -C $GjallarRoot rev-parse HEAD).Trim()
+git -C $GjallarRoot fetch --prune $UpstreamRemote $UpstreamBranch
+if ($LASTEXITCODE -ne 0) {
+  throw "git fetch failed for $GjallarRoot $sourceRef"
+}
+
+$commit = (git -C $GjallarRoot rev-parse $sourceRef).Trim()
 if ([string]::IsNullOrWhiteSpace($commit)) {
   throw "Could not determine Gjallar git revision."
+}
+
+New-Item -ItemType Directory -Force -Path $scratchRoot | Out-Null
+if (Test-Path -LiteralPath $releaseSource) {
+  $resolvedScratch = (Resolve-Path -LiteralPath $scratchRoot).Path
+  $resolvedRelease = (Resolve-Path -LiteralPath $releaseSource).Path
+  if (-not $resolvedRelease.StartsWith($resolvedScratch, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Refusing to remove release source outside scratch: $resolvedRelease"
+  }
+  Remove-Item -LiteralPath $releaseSource -Recurse -Force
+}
+New-Item -ItemType Directory -Force -Path $releaseSource | Out-Null
+git -C $GjallarRoot archive --format=tar --output=$releaseTarPath $sourceRef
+if ($LASTEXITCODE -ne 0) {
+  throw "git archive failed for $GjallarRoot $sourceRef"
+}
+tar -xf $releaseTarPath -C $releaseSource
+if ($LASTEXITCODE -ne 0) {
+  throw "source extraction failed for $releaseTarPath"
 }
 
 dotnet publish $projectPath -c Release -r linux-x64 --self-contained true -o $publishDir
@@ -30,6 +60,9 @@ $hash = (Get-FileHash $dllPath -Algorithm SHA256).Hash.ToLowerInvariant()
 $deployedAt = [DateTimeOffset]::UtcNow.ToString("O")
 @(
   "schema=gamecult.gjallar.deployment_manifest.v1"
+  "upstreamRemote=$UpstreamRemote"
+  "upstreamBranch=$UpstreamBranch"
+  "sourceRef=$sourceRef"
   "gitCommit=$commit"
   "artifact=Gjallar.dll"
   "sha256=$hash"

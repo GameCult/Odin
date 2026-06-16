@@ -22,8 +22,9 @@ escalation, and continuity witness state.
   compatibility probes only while daemon CultLib dependencies still lack the
   shared RUDP health publication path.
 - Outputs: typed keepalive observations, deployment requests/results, restart
-  requests/results, denied-action records, operator alarms, Bifrost
-  operator-notification requests, and an Eve/CultUI keepalive surface.
+  requests/results, release targets, deployment artifacts, state migration
+  plans/results, rollout plans/results, denied-action records, operator alarms,
+  Bifrost operator-notification requests, and an Eve/CultUI keepalive surface.
 - Derived state: dashboard cells, Bifrost receipts, Discord or owner-DM
   lowerings, agent summaries, and Odin service projections are
   notification-only views of Idunn-owned keepalive records.
@@ -55,8 +56,10 @@ Idunn now shares Odin's Rust body:
   staleness, and lets Rust own the target catalog and per-target scheduling.
 - `scripts/deploy-yggdrasil-source-app.ps1` and
   `scripts/health-yggdrasil-source-app.ps1` are the generic Yggdrasil source
-  artifact lane. They package committed local `HEAD` with `git archive`, run
-  the existing ops-owned deploy/check scripts on Yggdrasil, and stamp a remote
+  artifact lane. They fetch the declared upstream branch, package
+  `origin/main` with `git archive`, run any declared daemon-owned migration
+  script before the deploy script, run the existing ops-owned deploy/check
+  scripts on Yggdrasil, and stamp a remote
   `gamecult.idunn.deployment_manifest.v1` only after the remote check passes.
 - `scripts/idunn-deployment-targets.ps1` is the current swarm deployment target
   catalog. Every known deployable target is either `enforced`, `blocked`,
@@ -83,6 +86,12 @@ idunn.daemon_health.v1
 idunn.keepalive_decision.v1
 idunn.deployment_request.v1
 idunn.deployment_result.v1
+idunn.release_target.v1
+idunn.deployment_artifact.v1
+idunn.state_migration_plan.v1
+idunn.state_migration_result.v1
+idunn.rollout_plan.v1
+idunn.rollout_result.v1
 idunn.restart_request.v1
 idunn.restart_result.v1
 idunn.operator_alarm.v1
@@ -225,11 +234,25 @@ idunn.rudp_health_ingress.v1
   failure emits `idunn.health.state=dependency-unavailable` so Idunn does not
   redeploy Gjallar for an Odin/provider input outage.
 - Swarm-wide deployment ownership means Idunn owns the target catalog and the
-  freshness contract for the repo swarm. It does not mean Idunn invents deploy
-  authority for every repo immediately. A target without a safe noninteractive
-  deploy command must remain `blocked` or `external-owned` with the missing
-  authority named until a wrapper can produce a deployment manifest and route
-  through Idunn's typed deployment request/result path.
+  freshness contract for the repo swarm. For enforced deploy targets, the
+  catalog must name upstream remote/branch, rollout strategy, state migration
+  authority, and whether zero downtime is actually available. Idunn deploys the
+  desired upstream revision, not arbitrary local developer `HEAD`. It does not
+  mean Idunn invents deploy authority for every repo immediately. A target
+  without a safe noninteractive deploy command must remain `blocked` or
+  `external-owned` with the missing authority named until a wrapper can produce
+  a deployment manifest and route through Idunn's typed deployment
+  request/result path.
+- State migration is daemon-owned. Idunn may run and witness a declared
+  migration command before deployment, but the daemon/repo owns schema meaning,
+  backups, and the migrator. If migration fails, Idunn records
+  `idunn.state_migration_result.v1`, stops the deployment, records a failed
+  rollout/deployment result, and alarms instead of trying to repair state
+  behind the daemon's back.
+- Zero downtime is a declared rollout capability, not a slogan. If a daemon
+  lacks hot reload, blue/green routing, rolling instances, or another named
+  in-place swap mechanism, Idunn records `restart-required` and verifies the
+  restart path honestly.
 - Yggdrasil Heimdall, repixelizer, and StreamPixels are enforced through the
   generic source artifact lane and their existing `gamecult-ops` runbooks.
   Bifrost is explicitly blocked as of 2026-06-09: committed Bifrost `HEAD`

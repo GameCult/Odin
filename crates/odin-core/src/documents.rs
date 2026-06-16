@@ -18,6 +18,12 @@ pub const IDUNN_RESTART_REQUEST_SCHEMA: &str = "idunn.restart_request.v1";
 pub const IDUNN_RESTART_RESULT_SCHEMA: &str = "idunn.restart_result.v1";
 pub const IDUNN_DEPLOYMENT_REQUEST_SCHEMA: &str = "idunn.deployment_request.v1";
 pub const IDUNN_DEPLOYMENT_RESULT_SCHEMA: &str = "idunn.deployment_result.v1";
+pub const IDUNN_RELEASE_TARGET_SCHEMA: &str = "idunn.release_target.v1";
+pub const IDUNN_DEPLOYMENT_ARTIFACT_SCHEMA: &str = "idunn.deployment_artifact.v1";
+pub const IDUNN_STATE_MIGRATION_PLAN_SCHEMA: &str = "idunn.state_migration_plan.v1";
+pub const IDUNN_STATE_MIGRATION_RESULT_SCHEMA: &str = "idunn.state_migration_result.v1";
+pub const IDUNN_ROLLOUT_PLAN_SCHEMA: &str = "idunn.rollout_plan.v1";
+pub const IDUNN_ROLLOUT_RESULT_SCHEMA: &str = "idunn.rollout_result.v1";
 pub const IDUNN_OPERATOR_ALARM_SCHEMA: &str = "idunn.operator_alarm.v1";
 pub const IDUNN_SWARM_SURGERY_PLAN_SCHEMA: &str = "idunn.swarm_surgery_plan.v1";
 pub const IDUNN_DAEMON_SURGERY_PLAN_SCHEMA: &str = "idunn.daemon_surgery_plan.v1";
@@ -330,6 +336,157 @@ pub struct IdunnDeploymentResultRecord {
     pub result_id: String,
     #[cultcache(key = 1)]
     pub request_id: String,
+    #[cultcache(key = 2)]
+    pub daemon_id: String,
+    #[cultcache(key = 3)]
+    pub state: String,
+    #[cultcache(key = 4)]
+    pub detail: String,
+    #[cultcache(key = 5)]
+    pub completed_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(type = "idunn.release_target", schema = "idunn.release_target.v1")]
+pub struct IdunnReleaseTargetRecord {
+    #[cultcache(key = 0)]
+    pub target_id: String,
+    #[cultcache(key = 1)]
+    pub daemon_id: String,
+    #[cultcache(key = 2)]
+    pub repo: String,
+    #[cultcache(key = 3)]
+    pub repo_path: String,
+    #[cultcache(key = 4)]
+    pub upstream_remote: String,
+    #[cultcache(key = 5)]
+    pub upstream_branch: String,
+    #[cultcache(key = 6)]
+    pub desired_revision: String,
+    #[cultcache(key = 7)]
+    pub deployed_revision: String,
+    #[cultcache(key = 8)]
+    pub artifact_strategy: String,
+    #[cultcache(key = 9)]
+    pub rollout_strategy: String,
+    #[cultcache(key = 10)]
+    pub state_migration_authority: String,
+    #[cultcache(key = 11)]
+    pub zero_downtime_capability: String,
+    #[cultcache(key = 12)]
+    pub status: String,
+    #[cultcache(key = 13)]
+    pub observed_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(
+    type = "idunn.deployment_artifact",
+    schema = "idunn.deployment_artifact.v1"
+)]
+pub struct IdunnDeploymentArtifactRecord {
+    #[cultcache(key = 0)]
+    pub artifact_id: String,
+    #[cultcache(key = 1)]
+    pub daemon_id: String,
+    #[cultcache(key = 2)]
+    pub source_revision: String,
+    #[cultcache(key = 3)]
+    pub source_branch: String,
+    #[cultcache(key = 4)]
+    pub source_remote: String,
+    #[cultcache(key = 5)]
+    pub artifact_kind: String,
+    #[cultcache(key = 6)]
+    pub artifact_uri: String,
+    #[cultcache(key = 7)]
+    pub sha256: String,
+    #[cultcache(key = 8)]
+    pub built_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(
+    type = "idunn.state_migration_plan",
+    schema = "idunn.state_migration_plan.v1"
+)]
+pub struct IdunnStateMigrationPlanRecord {
+    #[cultcache(key = 0)]
+    pub plan_id: String,
+    #[cultcache(key = 1)]
+    pub daemon_id: String,
+    #[cultcache(key = 2)]
+    pub from_schema_version: String,
+    #[cultcache(key = 3)]
+    pub to_schema_version: String,
+    #[cultcache(key = 4)]
+    pub authority: String,
+    #[cultcache(key = 5)]
+    pub command: String,
+    #[cultcache(key = 6)]
+    pub strategy: String,
+    #[cultcache(key = 7)]
+    pub backup_required: bool,
+    #[cultcache(key = 8)]
+    pub zero_downtime_required: bool,
+    #[cultcache(key = 9)]
+    pub status: String,
+    #[cultcache(key = 10)]
+    pub planned_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(
+    type = "idunn.state_migration_result",
+    schema = "idunn.state_migration_result.v1"
+)]
+pub struct IdunnStateMigrationResultRecord {
+    #[cultcache(key = 0)]
+    pub result_id: String,
+    #[cultcache(key = 1)]
+    pub plan_id: String,
+    #[cultcache(key = 2)]
+    pub daemon_id: String,
+    #[cultcache(key = 3)]
+    pub state: String,
+    #[cultcache(key = 4)]
+    pub detail: String,
+    #[cultcache(key = 5)]
+    pub completed_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(type = "idunn.rollout_plan", schema = "idunn.rollout_plan.v1")]
+pub struct IdunnRolloutPlanRecord {
+    #[cultcache(key = 0)]
+    pub plan_id: String,
+    #[cultcache(key = 1)]
+    pub daemon_id: String,
+    #[cultcache(key = 2)]
+    pub desired_revision: String,
+    #[cultcache(key = 3)]
+    pub deployed_revision: String,
+    #[cultcache(key = 4)]
+    pub strategy: String,
+    #[cultcache(key = 5)]
+    pub phases: Vec<String>,
+    #[cultcache(key = 6)]
+    pub migration_plan_id: String,
+    #[cultcache(key = 7)]
+    pub artifact_id: String,
+    #[cultcache(key = 8)]
+    pub status: String,
+    #[cultcache(key = 9)]
+    pub planned_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(type = "idunn.rollout_result", schema = "idunn.rollout_result.v1")]
+pub struct IdunnRolloutResultRecord {
+    #[cultcache(key = 0)]
+    pub result_id: String,
+    #[cultcache(key = 1)]
+    pub plan_id: String,
     #[cultcache(key = 2)]
     pub daemon_id: String,
     #[cultcache(key = 3)]
@@ -772,6 +929,12 @@ cultmesh_rs::cultmesh_documents!(OdinDocuments {
     IdunnRestartResultRecord => IDUNN_RESTART_RESULT_SCHEMA,
     IdunnDeploymentRequestRecord => IDUNN_DEPLOYMENT_REQUEST_SCHEMA,
     IdunnDeploymentResultRecord => IDUNN_DEPLOYMENT_RESULT_SCHEMA,
+    IdunnReleaseTargetRecord => IDUNN_RELEASE_TARGET_SCHEMA,
+    IdunnDeploymentArtifactRecord => IDUNN_DEPLOYMENT_ARTIFACT_SCHEMA,
+    IdunnStateMigrationPlanRecord => IDUNN_STATE_MIGRATION_PLAN_SCHEMA,
+    IdunnStateMigrationResultRecord => IDUNN_STATE_MIGRATION_RESULT_SCHEMA,
+    IdunnRolloutPlanRecord => IDUNN_ROLLOUT_PLAN_SCHEMA,
+    IdunnRolloutResultRecord => IDUNN_ROLLOUT_RESULT_SCHEMA,
     IdunnOperatorAlarmRecord => IDUNN_OPERATOR_ALARM_SCHEMA,
     IdunnSwarmSurgeryPlanRecord => IDUNN_SWARM_SURGERY_PLAN_SCHEMA,
     IdunnDaemonSurgeryPlanRecord => IDUNN_DAEMON_SURGERY_PLAN_SCHEMA,

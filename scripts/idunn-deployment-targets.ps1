@@ -35,6 +35,11 @@ $IdunnDeploymentTargets = @(
     Health = "$repoRoot\scripts\health-nightwing-gjallar.cmd"
     Deploy = "$repoRoot\scripts\deploy-nightwing-gjallar.cmd"
     Restart = "$repoRoot\scripts\restart-nightwing-gjallar.cmd"
+    UpstreamRemote = "origin"
+    UpstreamBranch = "main"
+    RolloutStrategy = "restart-after-verified-build"
+    StateMigration = "daemon-owned-noop"
+    ZeroDowntime = "restart-required"
     Reason = "Nightwing framebuffer compositor has a committed artifact manifest and automatic Idunn deploy lane."
   },
   [pscustomobject]@{
@@ -59,7 +64,12 @@ $IdunnDeploymentTargets = @(
     Health = "$repoRoot\scripts\health-yggdrasil-streampixels.cmd"
     Deploy = "$repoRoot\scripts\deploy-yggdrasil-streampixels.cmd"
     Restart = $null
-    Reason = "Idunn packages committed local StreamPixels HEAD, runs the existing ops deploy/check scripts, and verifies the remote manifest."
+    UpstreamRemote = "origin"
+    UpstreamBranch = "main"
+    RolloutStrategy = "restart-after-verified-build"
+    StateMigration = "daemon-owned-noop"
+    ZeroDowntime = "restart-required"
+    Reason = "Idunn packages upstream origin/main for StreamPixels, runs the existing ops deploy/check scripts, and verifies the remote manifest."
   },
   [pscustomobject]@{
     Id = "yggdrasil-heimdall"
@@ -71,7 +81,12 @@ $IdunnDeploymentTargets = @(
     Health = "$repoRoot\scripts\health-yggdrasil-heimdall.cmd"
     Deploy = "$repoRoot\scripts\deploy-yggdrasil-heimdall.cmd"
     Restart = $null
-    Reason = "Idunn packages committed local Heimdall HEAD, runs the existing ops deploy/check scripts, and verifies the remote manifest."
+    UpstreamRemote = "origin"
+    UpstreamBranch = "main"
+    RolloutStrategy = "restart-after-verified-build"
+    StateMigration = "daemon-owned-noop"
+    ZeroDowntime = "restart-required"
+    Reason = "Idunn packages upstream origin/main for Heimdall, runs the existing ops deploy/check scripts, and verifies the remote manifest."
   },
   [pscustomobject]@{
     Id = "yggdrasil-repixelizer"
@@ -83,7 +98,12 @@ $IdunnDeploymentTargets = @(
     Health = "$repoRoot\scripts\health-yggdrasil-repixelizer.cmd"
     Deploy = "$repoRoot\scripts\deploy-yggdrasil-repixelizer.cmd"
     Restart = $null
-    Reason = "Idunn packages committed local repixelizer HEAD, runs the existing ops deploy/check scripts, and verifies the remote manifest."
+    UpstreamRemote = "origin"
+    UpstreamBranch = "main"
+    RolloutStrategy = "restart-after-verified-build"
+    StateMigration = "daemon-owned-noop"
+    ZeroDowntime = "restart-required"
+    Reason = "Idunn packages upstream origin/main for repixelizer, runs the existing ops deploy/check scripts, and verifies the remote manifest."
   },
   [pscustomobject]@{
     Id = "github-pages-gamecult-site"

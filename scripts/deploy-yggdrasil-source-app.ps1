@@ -6,7 +6,10 @@ param(
   [Parameter(Mandatory = $true)] [string] $RemoteTarballName,
   [Parameter(Mandatory = $true)] [string] $DeployScript,
   [Parameter(Mandatory = $true)] [string] $CheckScript,
-  [string] $SshTarget = "yggdrasil"
+  [string] $SshTarget = "yggdrasil",
+  [string] $UpstreamRemote = "origin",
+  [string] $UpstreamBranch = "main",
+  [string] $StateMigrationScript = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -20,10 +23,19 @@ if (-not (Test-Path -LiteralPath $DeployScript)) {
 if (-not (Test-Path -LiteralPath $CheckScript)) {
   throw "Check script not found: $CheckScript"
 }
+if (-not [string]::IsNullOrWhiteSpace($StateMigrationScript) -and -not (Test-Path -LiteralPath $StateMigrationScript)) {
+  throw "State migration script not found: $StateMigrationScript"
+}
 
-$commit = (git -C $RepoRoot rev-parse HEAD).Trim()
+git -C $RepoRoot fetch --prune $UpstreamRemote $UpstreamBranch
+if ($LASTEXITCODE -ne 0) {
+  throw "git fetch failed for $RepoRoot $UpstreamRemote/$UpstreamBranch"
+}
+
+$sourceRef = "$UpstreamRemote/$UpstreamBranch"
+$commit = (git -C $RepoRoot rev-parse $sourceRef).Trim()
 if ([string]::IsNullOrWhiteSpace($commit)) {
-  throw "Could not determine git revision for $RepoRoot"
+  throw "Could not determine git revision for $RepoRoot $sourceRef"
 }
 
 $scratch = Join-Path "E:\Projects\Odin\scratch\idunn-deploy" $AppId
@@ -31,9 +43,9 @@ $tarPath = Join-Path $scratch $RemoteTarballName
 $manifestPath = Join-Path $scratch "deployment-manifest.txt"
 New-Item -ItemType Directory -Force -Path $scratch | Out-Null
 
-git -C $RepoRoot archive --format=tar --output=$tarPath HEAD
+git -C $RepoRoot archive --format=tar --output=$tarPath $sourceRef
 if ($LASTEXITCODE -ne 0) {
-  throw "git archive failed for $RepoRoot"
+  throw "git archive failed for $RepoRoot $sourceRef"
 }
 
 $hash = (Get-FileHash $tarPath -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -42,6 +54,9 @@ $deployedAt = [DateTimeOffset]::UtcNow.ToString("O")
   "schema=gamecult.idunn.deployment_manifest.v1"
   "appId=$AppId"
   "repoRoot=$RepoRoot"
+  "upstreamRemote=$UpstreamRemote"
+  "upstreamBranch=$UpstreamBranch"
+  "sourceRef=$sourceRef"
   "gitCommit=$commit"
   "artifact=$RemoteTarballName"
   "sha256=$hash"
@@ -50,6 +65,7 @@ $deployedAt = [DateTimeOffset]::UtcNow.ToString("O")
 
 $remoteDeploy = "/home/gamecultadmin/$([IO.Path]::GetFileName($DeployScript))"
 $remoteCheck = "/home/gamecultadmin/$([IO.Path]::GetFileName($CheckScript))"
+$remoteMigration = if ([string]::IsNullOrWhiteSpace($StateMigrationScript)) { "" } else { "/home/gamecultadmin/$([IO.Path]::GetFileName($StateMigrationScript))" }
 $remoteTarball = "/home/gamecultadmin/$RemoteTarballName"
 $remoteManifest = "/home/gamecultadmin/$AppId-deployment-manifest.txt"
 $remoteRunner = "/home/gamecultadmin/run-$AppId-deploy.sh"
@@ -67,6 +83,10 @@ sudo -n install -d -o '$AppUser' -g '$AppUser' '$RemoteAppHome'
 sudo -n install -o '$AppUser' -g '$AppUser' -m 600 '$remoteTarball' '$targetTarball'
 sudo -n install -m 644 '$remoteManifest' '$targetManifest'
 chmod +x '$remoteDeploy' '$remoteCheck'
+if [ -n '$remoteMigration' ]; then
+  chmod +x '$remoteMigration'
+  sudo -n bash '$remoteMigration'
+fi
 sudo -n bash '$remoteDeploy'
 
 check_ok=0
@@ -91,6 +111,10 @@ scp.exe @scpArgs $DeployScript "${SshTarget}:$remoteDeploy"
 if ($LASTEXITCODE -ne 0) { throw "scp deploy script failed for $AppId" }
 scp.exe @scpArgs $CheckScript "${SshTarget}:$remoteCheck"
 if ($LASTEXITCODE -ne 0) { throw "scp check script failed for $AppId" }
+if (-not [string]::IsNullOrWhiteSpace($StateMigrationScript)) {
+  scp.exe @scpArgs $StateMigrationScript "${SshTarget}:$remoteMigration"
+  if ($LASTEXITCODE -ne 0) { throw "scp state migration script failed for $AppId" }
+}
 scp.exe @scpArgs $manifestPath "${SshTarget}:$remoteManifest"
 if ($LASTEXITCODE -ne 0) { throw "scp manifest failed for $AppId" }
 scp.exe @scpArgs $runnerPath "${SshTarget}:$remoteRunner"
@@ -105,5 +129,5 @@ if ($remoteExit -ne 0) {
 
 Remove-Item -LiteralPath $runnerPath -Force -ErrorAction SilentlyContinue
 
-Write-Host "$AppId deployed to Yggdrasil at $commit."
+Write-Host "$AppId deployed to Yggdrasil from $sourceRef at $commit."
 Write-Host "  artifactSha256=$hash"
