@@ -748,9 +748,9 @@ fn swarm_surgery_plan(
     targets: &[DaemonTarget],
     updated_at: &str,
 ) -> IdunnSwarmSurgeryPlanRecord {
-    let has_weksa = targets.iter().any(|target| target.daemon_id == "weksa");
-    let next_target = if has_weksa {
-        "weksa"
+    let has_voidbot = targets.iter().any(|target| target.daemon_id == "voidbot");
+    let next_target = if has_voidbot {
+        "voidbot"
     } else if let Some(target) = targets.iter().find(|target| target.enabled) {
         target.daemon_id.as_str()
     } else {
@@ -784,11 +784,11 @@ fn swarm_surgery_plan(
             "5. Delete or demote compatibility probes once every target has daemon-owned publication and advertised lifecycle authority.".to_string(),
         ],
         current_phase:
-            "Phase 7: move Weksa provider health from HTTP compatibility evidence to daemon-published RUDP state, with Raven Muninn scheduled-task action repair queued as a background-only ops invariant."
+            "Phase 8: move VoidBot local stack health from compatibility command evidence to daemon-published RUDP state, with Raven Muninn scheduled-task action repair queued as a background-only ops invariant."
                 .to_string(),
         next_target: next_target.to_string(),
         cut_line:
-            "Muninn, Idunn, Odin, and Stonks now exercise daemon-owned RUDP health locally. Weksa is the next JavaScript provider cut. Live Raven still needs GameCult-Muninn, GameCult-Muninn-Activate, and GameCult-Muninn-VideoProof task actions repaired to execute wscript.exe hidden launchers directly; application is blocked while Raven SSH is unreachable."
+            "Muninn, Idunn, Odin, Stonks, and Weksa now exercise daemon-owned RUDP health locally. VoidBot is the next local stack cut. Live Raven still needs GameCult-Muninn, GameCult-Muninn-Activate, and GameCult-Muninn-VideoProof task actions repaired to execute wscript.exe hidden launchers directly; application is blocked while Raven SSH is unreachable."
                 .to_string(),
         verification_layer:
             "CultMesh keepalive store records plus live Idunn decision cycles, not process exit codes or chat summaries."
@@ -814,6 +814,11 @@ fn daemon_transport_profile(
             "daemon-published-rudp-health + compatibility.local-command fallback",
             "partial-rudp-health-live",
             "Stonks daemon health is published over CultNet/RUDP; provider advertisement and command_boundary publication remain migration debt before the HTTP probe can be deleted.",
+        ),
+        "weksa" => (
+            "daemon-published-rudp-health + compatibility.local-command fallback",
+            "partial-rudp-health-live",
+            "Weksa daemon health is published over CultNet/RUDP; provider advertisement and command_boundary publication remain migration debt before the HTTP probe can be deleted.",
         ),
         _ => (
             "compatibility.local-command",
@@ -973,11 +978,25 @@ fn daemon_surgery_plan(target: &DaemonTarget, updated_at: &str) -> IdunnDaemonSu
             );
         }
         "weksa" => {
+            status = "partial-rudp-health-live";
             severity = "medium-high";
             owner = "Weksa provider runtime";
             current_mechanism =
-                "Weksa has provider advertisement bones, but Idunn still relies on compatibility process/health probes."
+                "Weksa publishes weksa.cultnet-rudp-provider-health over CultNet/RUDP after each serialized witness refresh; provider advertisement and command boundary still retain compatibility HTTP projections."
                     .to_string();
+            intended_authority =
+                "Weksa publishes daemon health, provider advertisement, operator state, Eve surfaces, and command boundary as typed CultMesh/CultNet records over cultnet.transport.rudp.v0; HTTP remains operator/debug projection only."
+                    .to_string();
+            cut_line =
+                "Keep the HTTP probe as fallback only until Weksa provider advertisement and command_boundary records are also daemon-owned RUDP publications."
+                    .to_string();
+            steps = vec![
+                "Keep live weksa.cultnet-rudp-provider-health publication running from the Weksa daemon.".to_string(),
+                "Publish Weksa provider advertisement and operator-state records over cultnet.transport.rudp.v0.".to_string(),
+                "Publish Weksa command_boundary and transport_profile records from the daemon runtime.".to_string(),
+                "Teach Odin to prefer Weksa RUDP provider records over compatibility HTTP ingestion.".to_string(),
+                "Delete or demote health-weksa.cmd to a manual compatibility probe with no lifecycle truth.".to_string(),
+            ];
         }
         "voidbot" => {
             severity = "medium-high";
@@ -1856,7 +1875,7 @@ mod tests {
     }
 
     #[test]
-    fn swarm_surgery_plan_names_weksa_after_stonks_cut() {
+    fn swarm_surgery_plan_names_voidbot_after_weksa_cut() {
         let starfire_muninn = DaemonTarget {
             daemon_id: "starfire-muninn".to_string(),
             verse_id: "starfire.local".to_string(),
@@ -1932,13 +1951,25 @@ mod tests {
             enabled: true,
             interval_seconds: 60,
         };
+        let voidbot = DaemonTarget {
+            daemon_id: "voidbot".to_string(),
+            verse_id: "starfire.local".to_string(),
+            name: "VoidBot local stack".to_string(),
+            health_contract: health_contract("voidbot.cultnet-rudp-stack-health", "failed"),
+            health_command: Some("health-voidbot.cmd".to_string()),
+            deploy_command: None,
+            restart_command: Some("restart-voidbot.cmd".to_string()),
+            enabled: true,
+            interval_seconds: 60,
+        };
 
         let plan = swarm_surgery_plan(
             "starfire-local",
             &[
                 odin,
                 stonks,
-                weksa,
+                weksa.clone(),
+                voidbot,
                 starfire_muninn,
                 nightwing_muninn,
                 raven_muninn.clone(),
@@ -1948,9 +1979,12 @@ mod tests {
 
         assert_eq!(plan.plan_id, "swarm-surgery:starfire-local");
         assert_eq!(plan.status, "active-transport-migration");
-        assert_eq!(plan.next_target, "weksa");
-        assert!(plan.current_phase.contains("Weksa"));
-        assert!(plan.cut_line.contains("Muninn, Idunn, Odin, and Stonks"));
+        assert_eq!(plan.next_target, "voidbot");
+        assert!(plan.current_phase.contains("VoidBot"));
+        assert!(
+            plan.cut_line
+                .contains("Muninn, Idunn, Odin, Stonks, and Weksa")
+        );
         assert!(plan.cut_line.contains("GameCult-Muninn-Activate"));
         assert!(plan.cut_line.contains("GameCult-Muninn-VideoProof"));
         assert!(plan.cut_line.contains("Raven SSH is unreachable"));
@@ -1996,6 +2030,15 @@ mod tests {
                 .iter()
                 .any(|blocker| blocker.contains("Raven SSH currently times out"))
         );
+
+        let weksa_plan = daemon_surgery_plan(&weksa, "unix:100");
+        assert_eq!(weksa_plan.status, "partial-rudp-health-live");
+        assert!(
+            weksa_plan
+                .current_mechanism
+                .contains("weksa.cultnet-rudp-provider-health")
+        );
+        assert!(weksa_plan.cut_line.contains("HTTP probe as fallback"));
     }
 
     #[test]
@@ -2064,6 +2107,34 @@ mod tests {
                 .contains("daemon-published-rudp-health")
         );
         assert!(profile.cut_line.contains("provider advertisement"));
+    }
+
+    #[test]
+    fn weksa_transport_profile_marks_partial_rudp_health() {
+        let weksa = DaemonTarget {
+            daemon_id: "weksa".to_string(),
+            verse_id: "starfire.local".to_string(),
+            name: "Weksa".to_string(),
+            health_contract: health_contract("weksa.cultnet-rudp-provider-health", "failed"),
+            health_command: Some("health-weksa.cmd".to_string()),
+            deploy_command: None,
+            restart_command: Some("restart-weksa.cmd".to_string()),
+            enabled: true,
+            interval_seconds: 60,
+        };
+
+        let profile = daemon_transport_profile(&weksa, "unix:100");
+
+        assert_eq!(profile.state, "partial-rudp-health-live");
+        assert_eq!(
+            profile.current_transport,
+            "daemon-published-rudp-health + compatibility.local-command fallback"
+        );
+        assert!(
+            profile
+                .cut_line
+                .contains("Weksa daemon health is published over CultNet/RUDP")
+        );
     }
 
     #[test]
