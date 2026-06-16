@@ -1,2 +1,2 @@
 @echo off
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File E:\Projects\Odin\scripts\deploy-yggdrasil-source-app.ps1 -AppId yggdrasil-repixelizer -RepoRoot E:\Projects\repixelizer -AppUser repixelizer -RemoteAppHome /srv/repixelizer -RemoteTarballName repixelizer-source.tar -DeployScript E:\Projects\gamecult-ops\scripts\deploy-repixelizer-gui.sh -CheckScript E:\Projects\gamecult-ops\scripts\check-repixelizer-gui.sh
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File E:\Projects\Odin\scripts\deploy-yggdrasil-repixelizer.ps1
