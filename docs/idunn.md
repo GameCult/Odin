@@ -280,21 +280,23 @@ serialized provider witness refresh. VoidBot publishes
 pulse. Gjallar publishes
 `gjallar.cultnet-rudp-framebuffer-composition-health` from the C# Nightwing
 framebuffer service. Mimir Eve dashboard publishes
-`mimir.cultnet-rudp-provider-health` from the Nightwing systemd broker. Live
-Idunn cycles accept these records before command-probe fallback.
+`mimir.cultnet-rudp-provider-health` from the Nightwing systemd broker, and the
+same process publishes `nightwing.cultnet-rudp-eve-dashboard-health` for the
+Nightwing dashboard service itself. Live Idunn cycles accept these records
+before command-probe fallback.
 Raven's Muninn scheduled-task repair is a separate ops invariant:
 `GameCult-Muninn`, `GameCult-Muninn-Activate`, and
 `GameCult-Muninn-VideoProof` must execute `wscript.exe` hidden launcher actions,
 not raw `.cmd` task actions.
 
-Next: move the remaining Nightwing Eve runtime surfaces off compatibility
-service probes, then continue runtime-by-runtime until compatibility probes can
-be deleted or demoted. Stonks, Weksa, VoidBot, Gjallar, and Mimir still owe
-provider advertisement and command-boundary RUDP publication before their
-compatibility surfaces can be purely display/debug lowerings; Gjallar also owes
-native CultMesh/RUDP deck input to replace the current Odin WebSocket lowering
-bridge. Raven Muninn task action repair is queued separately and remains blocked
-while Raven is unreachable over SSH; the prepared actuator is
+Next: move the Nightwing Eve browser reference off compatibility service probes,
+then continue runtime-by-runtime until compatibility probes can be deleted or
+demoted. Stonks, Weksa, VoidBot, Gjallar, Mimir, and the Nightwing Eve dashboard
+service still owe provider advertisement and command-boundary RUDP publication
+before their compatibility surfaces can be purely display/debug lowerings;
+Gjallar also owes native CultMesh/RUDP deck input to replace the current Odin
+WebSocket lowering bridge. Raven Muninn task action repair is queued separately
+and remains blocked while Raven is unreachable over SSH; the prepared actuator is
 `scripts\repair-raven-muninn-task-actions.ps1`.
 
 No ad hoc JSON manifest, HTTP endpoint, TCP socket, or WebSocket bridge may

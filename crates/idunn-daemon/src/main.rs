@@ -840,7 +840,6 @@ fn swarm_surgery_plan(
     updated_at: &str,
 ) -> IdunnSwarmSurgeryPlanRecord {
     let next_target = [
-        "nightwing-eve-dashboard",
         "nightwing-eve-browser-reference",
         "vili",
         "yggdrasil-streampixels",
@@ -893,7 +892,7 @@ fn swarm_surgery_plan(
                 .to_string(),
         next_target: next_target.to_string(),
         cut_line:
-            "Muninn, Idunn, Odin, Stonks, Weksa, VoidBot, Nightwing Gjallar, and Mimir Eve dashboard now exercise daemon-owned RUDP health. Nightwing Eve runtime surfaces are the next local runtime cut. Live Raven still needs GameCult-Muninn, GameCult-Muninn-Activate, and GameCult-Muninn-VideoProof task actions repaired to execute wscript.exe hidden launchers directly; application is blocked while Raven SSH is unreachable."
+            "Muninn, Idunn, Odin, Stonks, Weksa, VoidBot, Nightwing Gjallar, Mimir Eve dashboard, and Nightwing Eve dashboard now exercise daemon-owned RUDP health. Nightwing Eve browser reference is the next local runtime cut. Live Raven still needs GameCult-Muninn, GameCult-Muninn-Activate, and GameCult-Muninn-VideoProof task actions repaired to execute wscript.exe hidden launchers directly; application is blocked while Raven SSH is unreachable."
                 .to_string(),
         verification_layer:
             "CultMesh keepalive store records plus live Idunn decision cycles, not process exit codes or chat summaries."
@@ -934,6 +933,11 @@ fn daemon_transport_profile(
             "daemon-published-rudp-health + compatibility.local-command fallback",
             "partial-rudp-health-live",
             "Gjallar framebuffer composition health is published over CultNet/RUDP from Nightwing; native CultMesh/RUDP input and provider advertisement remain migration debt before the service/status probe can be deleted.",
+        ),
+        "nightwing-eve-dashboard" => (
+            "daemon-published-rudp-health + compatibility.local-command fallback",
+            "partial-rudp-health-live",
+            "Nightwing Eve dashboard service health is published over CultNet/RUDP from the Mimir.EveDashboard systemd process; browser/runtime lowering state and command boundaries remain migration debt before the service probe can be deleted.",
         ),
         _ => (
             "compatibility.local-command",
@@ -1193,15 +1197,32 @@ fn daemon_surgery_plan(target: &DaemonTarget, updated_at: &str) -> IdunnDaemonSu
         "nightwing-eve-dashboard" | "nightwing-eve-browser-reference" => {
             severity = "medium";
             owner = "Eve lowering/runtime owner";
-            current_mechanism =
-                "Nightwing Eve runtime services are watched through local service probes; browser-facing transports are lowering bridges."
-                    .to_string();
             intended_authority =
                 "Eve runtimes subscribe to provider-owned CultMesh/CultNet state; any browser/WebSocket bridge is display-only and does not own daemon health."
                     .to_string();
             cut_line =
                 "Cut display/runtime liveness from provider truth. Browser-compatible bridges may remain only as lowering targets."
                     .to_string();
+            if target.daemon_id == "nightwing-eve-dashboard" {
+                status = "partial-rudp-health-live";
+                current_mechanism =
+                    "Nightwing Eve dashboard publishes nightwing.cultnet-rudp-eve-dashboard-health over CultNet/RUDP from the Mimir.EveDashboard systemd process; the local service probe remains fallback evidence only."
+                        .to_string();
+                cut_line =
+                    "Keep the service probe as fallback only until the Nightwing Eve dashboard lowering surface publishes provider advertisement, command_boundary, and transport_profile records over CultNet/RUDP."
+                        .to_string();
+                steps = vec![
+                    "Keep live nightwing.cultnet-rudp-eve-dashboard-health publication running from the Mimir.EveDashboard systemd process.".to_string(),
+                    "Publish Nightwing Eve dashboard provider advertisement and lowering-state records over cultnet.transport.rudp.v0.".to_string(),
+                    "Publish Nightwing Eve dashboard command_boundary and transport_profile records from the runtime.".to_string(),
+                    "Teach Odin and Nightwing projections to prefer the dashboard RUDP/CultMesh records over service compatibility probes.".to_string(),
+                    "Delete or demote health-nightwing-eve-dashboard.cmd to a manual compatibility probe with no lifecycle truth.".to_string(),
+                ];
+            } else {
+                current_mechanism =
+                    "Nightwing Eve browser reference is watched through a local service probe; browser-facing transports are lowering bridges."
+                        .to_string();
+            }
         }
         "yggdrasil-heimdall" | "yggdrasil-repixelizer" | "yggdrasil-streampixels" => {
             severity = "medium";
@@ -2144,13 +2165,28 @@ mod tests {
             enabled: true,
             interval_seconds: 30,
         };
+        let nightwing_eve_browser_reference = DaemonTarget {
+            daemon_id: "nightwing-eve-browser-reference".to_string(),
+            verse_id: "nightwing.local".to_string(),
+            name: "Nightwing Eve browser reference".to_string(),
+            health_contract: health_contract(
+                "nightwing.cultnet-rudp-browser-reference-health",
+                "failed",
+            ),
+            health_command: Some("health-nightwing-eve-browser-reference.cmd".to_string()),
+            deploy_command: None,
+            restart_command: Some("restart-nightwing-eve-browser-reference.cmd".to_string()),
+            enabled: true,
+            interval_seconds: 30,
+        };
 
         let plan = swarm_surgery_plan(
             "starfire-local",
             &[
                 odin,
                 mimir,
-                nightwing_eve_dashboard,
+                nightwing_eve_dashboard.clone(),
+                nightwing_eve_browser_reference,
                 stonks,
                 weksa.clone(),
                 voidbot.clone(),
@@ -2164,11 +2200,11 @@ mod tests {
 
         assert_eq!(plan.plan_id, "swarm-surgery:starfire-local");
         assert_eq!(plan.status, "active-transport-migration");
-        assert_eq!(plan.next_target, "nightwing-eve-dashboard");
+        assert_eq!(plan.next_target, "nightwing-eve-browser-reference");
         assert!(plan.current_phase.contains("Nightwing Eve"));
         assert!(
             plan.cut_line
-                .contains("Muninn, Idunn, Odin, Stonks, Weksa, VoidBot, Nightwing Gjallar, and Mimir Eve dashboard")
+                .contains("Muninn, Idunn, Odin, Stonks, Weksa, VoidBot, Nightwing Gjallar, Mimir Eve dashboard, and Nightwing Eve dashboard")
         );
         assert!(plan.cut_line.contains("GameCult-Muninn-Activate"));
         assert!(plan.cut_line.contains("GameCult-Muninn-VideoProof"));
@@ -2249,6 +2285,24 @@ mod tests {
             gjallar_plan
                 .cut_line
                 .contains("service/status probe as fallback")
+        );
+
+        let nightwing_eve_dashboard_plan =
+            daemon_surgery_plan(&nightwing_eve_dashboard, "unix:100");
+        assert_eq!(
+            nightwing_eve_dashboard_plan.status,
+            "partial-rudp-health-live"
+        );
+        assert!(
+            nightwing_eve_dashboard_plan
+                .current_mechanism
+                .contains("nightwing.cultnet-rudp-eve-dashboard-health")
+        );
+        assert!(
+            nightwing_eve_dashboard_plan
+                .steps
+                .iter()
+                .any(|step| step.contains("Mimir.EveDashboard systemd process"))
         );
     }
 
