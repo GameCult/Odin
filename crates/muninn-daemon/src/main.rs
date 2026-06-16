@@ -1424,7 +1424,7 @@ fn default_move_light_path(source_path: &str) -> Option<String> {
 fn joystick_light_hidraw_path(joystick_path: &str) -> Option<String> {
     let joystick_name = Path::new(joystick_path).file_name()?.to_str()?;
     let mut cursor = fs::canonicalize(format!("/sys/class/input/{joystick_name}/device")).ok()?;
-    for _ in 0..4 {
+    for _ in 0..12 {
         let hidraw_dir = cursor.join("hidraw");
         if let Ok(entries) = fs::read_dir(hidraw_dir) {
             for entry in entries.flatten() {
@@ -1576,6 +1576,7 @@ fn controller_id_from_hidraw(hidraw_path: &str) -> Option<String> {
 #[cfg(unix)]
 fn hid_iocgfeature(length: usize) -> libc::c_ulong {
     const IOC_READ: libc::c_ulong = 2;
+    const IOC_WRITE: libc::c_ulong = 1;
     const IOC_NRBITS: libc::c_ulong = 8;
     const IOC_TYPEBITS: libc::c_ulong = 8;
     const IOC_SIZEBITS: libc::c_ulong = 14;
@@ -1583,7 +1584,7 @@ fn hid_iocgfeature(length: usize) -> libc::c_ulong {
     const IOC_TYPESHIFT: libc::c_ulong = IOC_NRSHIFT + IOC_NRBITS;
     const IOC_SIZESHIFT: libc::c_ulong = IOC_TYPESHIFT + IOC_TYPEBITS;
     const IOC_DIRSHIFT: libc::c_ulong = IOC_SIZESHIFT + IOC_SIZEBITS;
-    (IOC_READ << IOC_DIRSHIFT)
+    ((IOC_READ | IOC_WRITE) << IOC_DIRSHIFT)
         | ((length as libc::c_ulong) << IOC_SIZESHIFT)
         | ((b'H' as libc::c_ulong) << IOC_TYPESHIFT)
         | (0x07 << IOC_NRSHIFT)
@@ -2585,7 +2586,8 @@ fn publish_idunn_rudp_health(
 }
 
 fn verify_move_sources_fresh(options: &Options, node: &cultmesh_rs::CultMeshNode) -> Result<()> {
-    if options.move_state_sources.is_empty() {
+    let move_state_sources = live_move_state_sources(options);
+    if move_state_sources.is_empty() {
         return Ok(());
     }
 
@@ -2600,7 +2602,7 @@ fn verify_move_sources_fresh(options: &Options, node: &cultmesh_rs::CultMeshNode
         .max(30);
     let states = node.cache().get_all::<MuninnMoveControllerStateRecord>()?;
 
-    for source in &options.move_state_sources {
+    for source in &move_state_sources {
         let latest = states
             .iter()
             .filter(|state| {
