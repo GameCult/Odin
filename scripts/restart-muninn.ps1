@@ -2,7 +2,10 @@ param(
   [string] $RavenHost = "raven",
   [string] $MuninnExe = "C:\Meta\Odin\Muninn\muninn.exe",
   [string] $StorePath = "C:\Meta\Odin\state\muninn.telemetry.cc",
-  [string] $LogRoot = "C:\Meta\Odin\logs\muninn"
+  [string] $LogRoot = "C:\Meta\Odin\logs\muninn",
+  [string] $IdunnRudpHealth = "10.77.0.2:17870",
+  [string] $IdunnDaemon = "muninn",
+  [string] $IdunnHealthContract = "muninn.cultnet-rudp-remote-telemetry-health"
 )
 
 $ErrorActionPreference = "Stop"
@@ -32,7 +35,7 @@ New-Item -ItemType Directory -Force -Path (Split-Path -Parent "$StorePath") | Ou
 `$psLines = @(
   '`$ErrorActionPreference = "Stop"',
   '`$ProgressPreference = "SilentlyContinue"',
-  '`$process = Start-Process -FilePath "$MuninnExe" -ArgumentList @("serve", "--store", "$StorePath", "--log-root", "$LogRoot", "--host", "raven", "--interval-seconds", "15") -WindowStyle Hidden -PassThru -RedirectStandardOutput "$LogRoot\muninn-serve.out.log" -RedirectStandardError "$LogRoot\muninn-serve.err.log"',
+  '`$process = Start-Process -FilePath "$MuninnExe" -ArgumentList @("serve", "--store", "$StorePath", "--log-root", "$LogRoot", "--host", "raven", "--interval-seconds", "15", "--idunn-rudp-health", "$IdunnRudpHealth", "--idunn-daemon", "$IdunnDaemon", "--idunn-health-contract", "$IdunnHealthContract") -WindowStyle Hidden -PassThru -RedirectStandardOutput "$LogRoot\muninn-serve.out.log" -RedirectStandardError "$LogRoot\muninn-serve.err.log"',
   '`$process.Id | Set-Content -Encoding ASCII -LiteralPath "$LogRoot\muninn-serve.pid"'
 )
 Set-Content -LiteralPath `$psLauncher -Value `$psLines -Encoding ASCII
@@ -120,6 +123,25 @@ Assert-HiddenVbsTask -TaskName "GameCult-Muninn" -VbsPath `$vbsLauncher
 Assert-HiddenVbsTask -TaskName "GameCult-Muninn-Activate" -VbsPath `$activateVbs
 Assert-HiddenVbsTask -TaskName "GameCult-Muninn-VideoProof" -VbsPath `$videoProofVbs
 Start-ScheduledTask -TaskName "GameCult-Muninn"
+Start-Sleep -Seconds 2
+`$process = Get-CimInstance Win32_Process |
+  Where-Object { `$_.Name -ieq "muninn.exe" -and `$_.CommandLine -like "*serve*" -and `$_.CommandLine -like "*--host*raven*" } |
+  Select-Object -First 1
+if (`$null -eq `$process) {
+  throw "Muninn serve process is not running on Raven"
+}
+foreach (`$pattern in @(
+  "--idunn-rudp-health",
+  "$IdunnRudpHealth",
+  "--idunn-daemon",
+  "$IdunnDaemon",
+  "--idunn-health-contract",
+  "$IdunnHealthContract"
+)) {
+  if (`$process.CommandLine -notlike "*`$pattern*") {
+    throw "Muninn Raven serve command line is missing `${pattern}: `$(`$process.CommandLine)"
+  }
+}
 "@
 
 $uploadId = [guid]::NewGuid().ToString("N")

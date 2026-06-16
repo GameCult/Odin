@@ -937,11 +937,11 @@ fn swarm_surgery_plan(
             "5. Delete or demote compatibility probes once every target has daemon-owned publication and advertised lifecycle authority.".to_string(),
         ],
         current_phase:
-            "Phase 12: Vili and Raven Muninn now run through verified background-only shared-host launch paths with live daemon-published RUDP health; StreamPixels Yggdrasil deployment is the next cross-host cut."
+            "Phase 12: Vili and all live Muninn keepalive lanes now publish daemon-owned RUDP health from their long-running bodies; StreamPixels Yggdrasil deployment is the next cross-host cut."
                 .to_string(),
         next_target: next_target.to_string(),
         cut_line:
-            "Muninn, Vili, Idunn, Odin, Stonks, Weksa, VoidBot, Nightwing Gjallar, Mimir Eve dashboard, Nightwing Eve dashboard, and Nightwing Eve browser reference now exercise daemon-owned RUDP health. Raven GameCult\\Vili has been refreshed from Odin, the hidden scheduled task now launches start-vili-daemon.ps1 with Idunn RUDP arguments, and live Idunn accepts vili.cultnet-rudp-animation-health from 10.77.0.4. Live Raven Muninn task actions remain repaired and verified to execute wscript.exe hidden launchers directly for GameCult-Muninn, GameCult-Muninn-Activate, and GameCult-Muninn-VideoProof."
+            "Muninn, Vili, Idunn, Odin, Stonks, Weksa, VoidBot, Nightwing Gjallar, Mimir Eve dashboard, Nightwing Eve dashboard, and Nightwing Eve browser reference now exercise daemon-owned RUDP health. Raven GameCult\\Vili has been refreshed from Odin, the hidden scheduled task now launches start-vili-daemon.ps1 with Idunn RUDP arguments, and live Idunn accepts vili.cultnet-rudp-animation-health from 10.77.0.4. Live Raven Muninn task actions remain repaired and verified to execute wscript.exe hidden launchers directly for GameCult-Muninn, GameCult-Muninn-Activate, and GameCult-Muninn-VideoProof, and the long-running Muninn serve bodies on Raven, Nightwing, and Starfire now carry their own --idunn-rudp-health, --idunn-daemon, and --idunn-health-contract identity while Idunn accepts muninn from 10.77.0.4, nightwing-muninn from 10.77.0.3, and starfire-muninn from 127.0.0.1."
                 .to_string(),
         verification_layer:
             "CultMesh keepalive store records plus live Idunn decision cycles, not process exit codes or chat summaries."
@@ -992,6 +992,21 @@ fn daemon_transport_profile(
             "daemon-published-rudp-health + compatibility.local-command fallback",
             "partial-rudp-health-live",
             "Nightwing Eve browser reference health is published over CultNet/RUDP from the Mimir.EveBrowserReference service process; provider advertisement and command boundaries remain migration debt before the service probe can be deleted.",
+        ),
+        "muninn" => (
+            "daemon-published-rudp-health + background-only hidden task launch + compatibility.local-command fallback",
+            "partial-rudp-health-live",
+            "Raven Muninn now publishes muninn.cultnet-rudp-remote-telemetry-health over CultNet/RUDP from the long-running hidden GameCult-Muninn serve task; HTTP-free background launch remains an ops invariant and the command probe is fallback evidence only.",
+        ),
+        "starfire-muninn" => (
+            "daemon-published-rudp-health + compatibility.local-command fallback",
+            "partial-rudp-health-live",
+            "Starfire Muninn now publishes muninn.cultnet-rudp-local-telemetry-and-quest-access over CultNet/RUDP from the long-running local serve process; Quest ADB availability stays telemetry state, not daemon liveness.",
+        ),
+        "nightwing-muninn" => (
+            "daemon-published-rudp-health + compatibility.local-command fallback",
+            "partial-rudp-health-live",
+            "Nightwing Muninn now publishes muninn.cultnet-rudp-remote-telemetry-and-move-hid over CultNet/RUDP from the long-running serve process while Move HID and evidence remain local telemetry authority.",
         ),
         "vili" => (
             "daemon-published-rudp-health + daemon-owned-cultcache-service-boundary + compatibility.http-websocket fallback",
@@ -1222,30 +1237,54 @@ fn daemon_surgery_plan(target: &DaemonTarget, updated_at: &str) -> IdunnDaemonSu
             status = "partial-rudp-health-live";
             owner = "Muninn Rust runtime plus Raven background-only launcher surface";
             current_mechanism =
-                "Muninn can publish daemon health over CultNet/RUDP. Live Raven scheduled tasks GameCult-Muninn, GameCult-Muninn-Activate, and GameCult-Muninn-VideoProof have been repaired and verified to execute wscript.exe //B //Nologo hidden launcher actions directly; .cmd wrappers are manual compatibility trampolines only."
+                "Raven Muninn now runs from the hidden GameCult-Muninn scheduled task with --idunn-rudp-health 10.77.0.2:17870, daemon id muninn, and contract muninn.cultnet-rudp-remote-telemetry-health on the long-running serve process. Live Idunn accepts that daemon-published health from 10.77.0.4, and GameCult-Muninn, GameCult-Muninn-Activate, and GameCult-Muninn-VideoProof remain repaired hidden-launcher task actions; .cmd wrappers are manual compatibility trampolines only."
                     .to_string();
             intended_authority =
                 "Muninn publishes telemetry and daemon health over CultNet/RUDP; Raven Task Scheduler owns only background launch of hidden WScript/PowerShell launchers and never visible .cmd trampoline execution."
                     .to_string();
             cut_line =
-                "Cut raw .cmd scheduled-task actions on Raven. .cmd files may remain manual compatibility trampolines only when Task Scheduler executes the hidden VBS launcher directly."
+                "Keep Raven's hidden task launch invariant and daemon-owned RUDP health publication together; health-muninn.cmd is fallback evidence only once the serve process keeps publishing muninn.cultnet-rudp-remote-telemetry-health."
                     .to_string();
             steps = vec![
                 "Keep scripts/repair-raven-muninn-task-actions.ps1 using sftp plus a tiny remote runner so Windows command-line length does not block future hidden-task repair.".to_string(),
                 "Keep GameCult-Muninn action executing wscript.exe with start-muninn-serve-hidden.vbs arguments.".to_string(),
+                "Keep the Raven Muninn serve process command line carrying --idunn-rudp-health 10.77.0.2:17870, --idunn-daemon muninn, and --idunn-health-contract muninn.cultnet-rudp-remote-telemetry-health.".to_string(),
                 "Keep GameCult-Muninn-Activate action executing wscript.exe with activate-raven-av-srt-hidden.vbs arguments.".to_string(),
                 "Keep GameCult-Muninn-VideoProof action executing wscript.exe with muninn-raven-video-to-starfire-obs-hidden.vbs arguments.".to_string(),
                 "Keep Raven health/restart actuators background-only; no visible terminals or interactive windows on the shared host.".to_string(),
             ];
         }
         "starfire-muninn" | "nightwing-muninn" => {
+            status = "partial-rudp-health-live";
             owner = "Muninn Rust runtime";
-            current_mechanism =
-                "Muninn has typed telemetry state, but Idunn still validates continuity through local or remote script probes."
-                    .to_string();
             intended_authority =
                 "Muninn publishes telemetry, Quest/Move access, and daemon health over CultNet/RUDP; activation commands remain separate from keepalive."
                     .to_string();
+            if target.daemon_id == "starfire-muninn" {
+                current_mechanism =
+                    "Starfire Muninn now runs as a long-lived local serve process with --quest-adb, --idunn-rudp-health 127.0.0.1:17870, daemon id starfire-muninn, and contract muninn.cultnet-rudp-local-telemetry-and-quest-access. Live Idunn accepts that daemon-published health from 127.0.0.1, and restart-starfire-muninn.ps1 now archives a corrupt CultCache store before relaunch instead of leaving the daemon dead on decode faults."
+                        .to_string();
+                cut_line =
+                    "Keep health-starfire-muninn.cmd as fallback evidence only; Quest availability remains telemetry state while the serve process owns muninn.cultnet-rudp-local-telemetry-and-quest-access publication."
+                        .to_string();
+                steps = vec![
+                    "Keep the Starfire Muninn serve process command line carrying --idunn-rudp-health 127.0.0.1:17870, --idunn-daemon starfire-muninn, and --idunn-health-contract muninn.cultnet-rudp-local-telemetry-and-quest-access.".to_string(),
+                    "Keep restart-starfire-muninn.ps1 clearing stale .lock files and archiving corrupt starfire.muninn.telemetry.cc before relaunch.".to_string(),
+                    "Keep health-starfire-muninn.cmd as a compatibility witness for Quest telemetry and process shape, not daemon truth.".to_string(),
+                ];
+            } else {
+                current_mechanism =
+                    "Nightwing Muninn now runs as a long-lived serve process with Move HID input, --idunn-rudp-health 10.77.0.2:17870, daemon id nightwing-muninn, and contract muninn.cultnet-rudp-remote-telemetry-and-move-hid. Live Idunn accepts that daemon-published health from 10.77.0.3 while the daemon continues to own the Move evidence stream and HID telemetry state."
+                        .to_string();
+                cut_line =
+                    "Keep health-nightwing-muninn.cmd as fallback evidence only; the Nightwing serve process itself now owns muninn.cultnet-rudp-remote-telemetry-and-move-hid publication."
+                        .to_string();
+                steps = vec![
+                    "Keep the Nightwing Muninn serve process command line carrying --idunn-rudp-health 10.77.0.2:17870, --idunn-daemon nightwing-muninn, and --idunn-health-contract muninn.cultnet-rudp-remote-telemetry-and-move-hid.".to_string(),
+                    "Keep restart-nightwing-muninn.ps1 launching the long-running serve body instead of one-shot health publication.".to_string(),
+                    "Keep health-nightwing-muninn.cmd as a compatibility witness for Move HID freshness, not daemon truth.".to_string(),
+                ];
+            }
         }
         "vili" => {
             status = "partial-rudp-health-and-provider-store-live";
@@ -2307,8 +2346,8 @@ mod tests {
                 weksa.clone(),
                 voidbot.clone(),
                 nightwing_gjallar.clone(),
-                starfire_muninn,
-                nightwing_muninn,
+                starfire_muninn.clone(),
+                nightwing_muninn.clone(),
                 raven_muninn.clone(),
             ],
             "unix:100",
@@ -2324,6 +2363,10 @@ mod tests {
         );
         assert!(plan.cut_line.contains("GameCult\\Vili"));
         assert!(plan.cut_line.contains("10.77.0.4"));
+        assert!(plan.cut_line.contains("nightwing-muninn"));
+        assert!(plan.cut_line.contains("10.77.0.3"));
+        assert!(plan.cut_line.contains("starfire-muninn"));
+        assert!(plan.cut_line.contains("127.0.0.1"));
         assert!(plan.cut_line.contains("GameCult-Muninn-Activate"));
         assert!(plan.cut_line.contains("GameCult-Muninn-VideoProof"));
         assert!(plan.cut_line.contains("Muninn task actions"));
@@ -2354,18 +2397,41 @@ mod tests {
         assert!(
             raven_plan
                 .current_mechanism
-                .contains("repaired and verified")
+                .contains("10.77.0.2:17870")
         );
-        assert!(raven_plan.current_mechanism.contains("wscript.exe"));
+        assert!(raven_plan.current_mechanism.contains("GameCult-Muninn"));
         assert!(
             raven_plan
                 .cut_line
-                .contains("Cut raw .cmd scheduled-task actions")
+                .contains("fallback evidence only")
         );
         assert!(raven_plan.steps.iter().any(
             |step| step.contains("GameCult-Muninn-VideoProof") && step.contains("wscript.exe")
         ));
+        assert!(raven_plan.steps.iter().any(
+            |step| step.contains("--idunn-rudp-health 10.77.0.2:17870")
+                && step.contains("muninn.cultnet-rudp-remote-telemetry-health")
+        ));
         assert!(raven_plan.blockers.is_empty());
+
+        let starfire_plan = daemon_surgery_plan(&starfire_muninn, "unix:100");
+        assert_eq!(starfire_plan.status, "partial-rudp-health-live");
+        assert!(starfire_plan.current_mechanism.contains("127.0.0.1:17870"));
+        assert!(starfire_plan.current_mechanism.contains("archives a corrupt CultCache store"));
+        assert!(starfire_plan.cut_line.contains("fallback evidence only"));
+        assert!(starfire_plan.steps.iter().any(
+            |step| step.contains("starfire.muninn.telemetry.cc") && step.contains(".lock")
+        ));
+
+        let nightwing_plan = daemon_surgery_plan(&nightwing_muninn, "unix:100");
+        assert_eq!(nightwing_plan.status, "partial-rudp-health-live");
+        assert!(nightwing_plan.current_mechanism.contains("10.77.0.2:17870"));
+        assert!(nightwing_plan.current_mechanism.contains("10.77.0.3"));
+        assert!(nightwing_plan.cut_line.contains("fallback evidence only"));
+        assert!(nightwing_plan.steps.iter().any(
+            |step| step.contains("restart-nightwing-muninn.ps1")
+                && step.contains("long-running serve body")
+        ));
 
         let weksa_plan = daemon_surgery_plan(&weksa, "unix:100");
         assert_eq!(
@@ -2641,6 +2707,65 @@ mod tests {
                 .cut_line
                 .contains("Gjallar framebuffer composition health is published over CultNet/RUDP")
         );
+    }
+
+    #[test]
+    fn muninn_transport_profiles_mark_live_rudp_health() {
+        let raven = DaemonTarget {
+            daemon_id: "muninn".to_string(),
+            verse_id: "raven.local".to_string(),
+            name: "Raven Muninn".to_string(),
+            health_contract: health_contract(
+                "muninn.cultnet-rudp-remote-telemetry-health",
+                "failed",
+            ),
+            health_command: Some("health-muninn.cmd".to_string()),
+            deploy_command: None,
+            restart_command: Some("restart-muninn.cmd".to_string()),
+            enabled: true,
+            interval_seconds: 30,
+        };
+        let starfire = DaemonTarget {
+            daemon_id: "starfire-muninn".to_string(),
+            verse_id: "starfire.local".to_string(),
+            name: "Starfire Muninn".to_string(),
+            health_contract: health_contract(
+                "muninn.cultnet-rudp-local-telemetry-and-quest-access",
+                "failed",
+            ),
+            health_command: Some("health-starfire-muninn.cmd".to_string()),
+            deploy_command: None,
+            restart_command: Some("restart-starfire-muninn.cmd".to_string()),
+            enabled: true,
+            interval_seconds: 30,
+        };
+        let nightwing = DaemonTarget {
+            daemon_id: "nightwing-muninn".to_string(),
+            verse_id: "nightwing.local".to_string(),
+            name: "Nightwing Muninn".to_string(),
+            health_contract: health_contract(
+                "muninn.cultnet-rudp-remote-telemetry-and-move-hid",
+                "failed",
+            ),
+            health_command: Some("health-nightwing-muninn.cmd".to_string()),
+            deploy_command: None,
+            restart_command: Some("restart-nightwing-muninn.cmd".to_string()),
+            enabled: true,
+            interval_seconds: 30,
+        };
+
+        let raven_profile = daemon_transport_profile(&raven, "unix:100");
+        assert_eq!(raven_profile.state, "partial-rudp-health-live");
+        assert!(raven_profile.current_transport.contains("background-only hidden task launch"));
+        assert!(raven_profile.cut_line.contains("hidden GameCult-Muninn serve task"));
+
+        let starfire_profile = daemon_transport_profile(&starfire, "unix:100");
+        assert_eq!(starfire_profile.state, "partial-rudp-health-live");
+        assert!(starfire_profile.cut_line.contains("Quest ADB availability"));
+
+        let nightwing_profile = daemon_transport_profile(&nightwing, "unix:100");
+        assert_eq!(nightwing_profile.state, "partial-rudp-health-live");
+        assert!(nightwing_profile.cut_line.contains("Move HID and evidence"));
     }
 
     #[test]

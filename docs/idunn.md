@@ -197,8 +197,10 @@ idunn.rudp_health_ingress.v1
   environment variables to `E:\Projects\Bifrost\tools\operator-notification.mjs
   publish-idunn-alarm`. Bifrost publishes the typed CultMesh command document;
   Idunn only decides that an alarm exists.
-- Muninn continuity on Raven is a remote keepalive path. Idunn probes the
-  deployed Odin `muninn.exe --health` through the `raven` SSH alias and
+- Muninn continuity on Raven is a remote keepalive path. The long-running Raven
+  `muninn.exe serve` process now carries its own Idunn RUDP identity and
+  publishes `muninn.cultnet-rudp-remote-telemetry-health` directly; the
+  `muninn.exe --health` command remains fallback/manual proof only. Idunn still
   restarts Muninn's idle `serve` posture when needed. Raven is the host/body;
   Muninn is the local telemetry Verse assembler. Idunn must not activate
   screen/audio streams as part of keepalive. Raven A/V over SRT is an explicit
@@ -268,10 +270,11 @@ Current plan surface: `idunn.swarm_surgery_plan.v1` for profile
 `starfire-local` treats the Muninn Rust lanes, Odin's local provider-health
 lane, Stonks daemon health, Weksa daemon health, VoidBot stack health, and
 Nightwing Gjallar framebuffer composition health as completed substrate cuts.
-Muninn's `--health` mode publishes
-`idunn.daemon_health` over RUDP; Starfire publishes to local Idunn, while
-Nightwing and Raven publish over WireGuard to
-`10.77.0.2:17870` using their target daemon ids and health contracts. Odin
+Muninn's long-running `serve` bodies now publish
+`idunn.daemon_health` over RUDP themselves; Starfire publishes to local Idunn,
+while Nightwing and Raven publish over WireGuard to `10.77.0.2:17870` using
+their target daemon ids and health contracts. `muninn --health` keeps the same
+path as fallback/manual proof, but it is no longer the live owner. Odin
 publishes `odin.cultnet-rudp-provider-health` after each provider refresh.
 Stonks publishes `stonks.cultnet-rudp-market-health` after each serialized
 market refresh. Weksa publishes `weksa.cultnet-rudp-provider-health` after each
@@ -287,10 +290,12 @@ as `Mimir.EveBrowserReference` instead of raw `python3 -m http.server`, serving
 the same static lowering and publishing
 `nightwing.cultnet-rudp-browser-reference-health` from its own service process.
 Live Idunn cycles accept these records before command-probe fallback.
-Raven's Muninn scheduled-task repair is a separate ops invariant:
+Raven's Muninn scheduled-task repair remains a separate ops invariant:
 `GameCult-Muninn`, `GameCult-Muninn-Activate`, and
 `GameCult-Muninn-VideoProof` must execute `wscript.exe` hidden launcher actions,
-not raw `.cmd` task actions.
+not raw `.cmd` task actions, and the live Raven `serve` process must carry its
+own `--idunn-rudp-health`, `--idunn-daemon`, and `--idunn-health-contract`
+arguments.
 
 Next: move the remaining Yggdrasil deployments off compatibility health/deck
 checks, then continue runtime-by-runtime until compatibility probes can be

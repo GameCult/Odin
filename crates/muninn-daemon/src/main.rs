@@ -198,6 +198,7 @@ fn serve(options: Options) -> Result<()> {
     let mut move_evidence_stream = create_move_evidence_stream(&options)?;
     let mut active_move_lights = Vec::new();
     let mut last_default_move_light_write_at = None;
+    let mut last_idunn_health_publish_attempt_at = None;
     let mut active_move_states: Vec<ActiveMoveStateSource> = options
         .move_state_sources
         .iter()
@@ -230,6 +231,11 @@ fn serve(options: Options) -> Result<()> {
         )?;
         publish_quest_access_if_requested(&mut node, &options)?;
         publish_surface(&mut node, &options, "idle", &[])?;
+        publish_daemon_health_if_configured(
+            &options,
+            &node,
+            &mut last_idunn_health_publish_attempt_at,
+        )?;
         let has_platform_default_move_lights = platform_default_move_lights_enabled();
         if options.interval_seconds.is_none()
             && active_move_lights.is_empty()
@@ -2014,6 +2020,10 @@ fn health_check(options: &Options) -> Result<()> {
 
 fn evaluate_health(options: &Options) -> Result<String> {
     let node = open_node(options, "muninn-health")?;
+    evaluate_health_from_node(options, &node)
+}
+
+fn evaluate_health_from_node(options: &Options, node: &cultmesh_rs::CultMeshNode) -> Result<String> {
     let surface = node
         .get_required::<MuninnTelemetrySurfaceRecord>("latest")
         .context("Muninn telemetry surface is unavailable")?;
@@ -2031,6 +2041,39 @@ fn evaluate_health(options: &Options) -> Result<String> {
         "Muninn healthy: {} on {} ({})",
         surface.surface_id, surface.host_id, surface.state
     ))
+}
+
+fn publish_daemon_health_if_configured(
+    options: &Options,
+    node: &cultmesh_rs::CultMeshNode,
+    last_attempt_at: &mut Option<Instant>,
+) -> Result<()> {
+    let Some(idunn) = options.idunn_rudp_health.as_ref() else {
+        return Ok(());
+    };
+
+    let cadence = Duration::from_secs(options.interval_seconds.unwrap_or(15).max(1));
+    if last_attempt_at
+        .as_ref()
+        .is_some_and(|instant| instant.elapsed() < cadence)
+    {
+        return Ok(());
+    }
+
+    let observed_at = idunn_timestamp()?;
+    let health = evaluate_health_from_node(options, node);
+    let (state, detail) = match health {
+        Ok(detail) => ("active", detail),
+        Err(error) => ("failed", error.to_string()),
+    };
+    *last_attempt_at = Some(Instant::now());
+    if let Err(error) = publish_idunn_rudp_health(idunn, state, &detail, &observed_at) {
+        eprintln!(
+            "Muninn could not publish Idunn RUDP health for {} at {}: {error:#}",
+            options.host_id, observed_at
+        );
+    }
+    Ok(())
 }
 
 fn publish_idunn_rudp_health(

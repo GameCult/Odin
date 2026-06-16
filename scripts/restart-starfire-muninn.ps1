@@ -5,7 +5,10 @@ param(
   [string] $QuestSerial = "1WMHHB68PG1515",
   [string] $MoveBluetoothHost = "5C:93:A2:9C:A8:A8",
   [string[]] $MoveState = @(),
-  [switch] $EnableUsbMoveState
+  [switch] $EnableUsbMoveState,
+  [string] $IdunnRudpHealth = "127.0.0.1:17870",
+  [string] $IdunnDaemon = "starfire-muninn",
+  [string] $IdunnHealthContract = "muninn.cultnet-rudp-local-telemetry-and-quest-access"
 )
 
 $ErrorActionPreference = "Stop"
@@ -41,7 +44,10 @@ $arguments = @(
   "--host", "starfire",
   "--interval-seconds", "15",
   "--quest-adb",
-  "--quest-serial", $QuestSerial
+  "--quest-serial", $QuestSerial,
+  "--idunn-rudp-health", $IdunnRudpHealth,
+  "--idunn-daemon", $IdunnDaemon,
+  "--idunn-health-contract", $IdunnHealthContract
 )
 foreach ($source in $MoveState) {
   if (-not [string]::IsNullOrWhiteSpace($source)) {
@@ -52,17 +58,83 @@ if ($EnableUsbMoveState) {
   $arguments += @("--move-state", "move-starfire-usb=windows-psmove")
 }
 
-$process = Start-Process `
-  -FilePath $MuninnExe `
-  -ArgumentList $arguments `
-  -WindowStyle Hidden `
-  -PassThru `
-  -RedirectStandardOutput (Join-Path $LogRoot "muninn-serve.out.log") `
-  -RedirectStandardError (Join-Path $LogRoot "muninn-serve.err.log")
+$serveOutLog = Join-Path $LogRoot "muninn-serve.out.log"
+$serveErrLog = Join-Path $LogRoot "muninn-serve.err.log"
+$pidPath = Join-Path $LogRoot "muninn-serve.pid"
+$lockPath = "$StorePath.lock"
 
-$process.Id | Set-Content -Encoding ASCII -LiteralPath (Join-Path $LogRoot "muninn-serve.pid")
+function Start-MuninnServeProcess {
+  param([string[]] $ArgumentList)
+
+  $process = Start-Process `
+    -FilePath $MuninnExe `
+    -ArgumentList $ArgumentList `
+    -WindowStyle Hidden `
+    -PassThru `
+    -RedirectStandardOutput $serveOutLog `
+    -RedirectStandardError $serveErrLog
+  $process.Id | Set-Content -Encoding ASCII -LiteralPath $pidPath
+  return $process
+}
+
+function Get-StarfireMuninnServeProcess {
+  return Get-CimInstance Win32_Process |
+    Where-Object {
+      $_.Name -ieq "muninn.exe" -and
+      $_.CommandLine -like "*serve*" -and
+      $_.CommandLine -like "*--host*starfire*"
+    } |
+    Select-Object -First 1
+}
+
+function Reset-CorruptMuninnStore {
+  $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
+  if (Test-Path -LiteralPath $StorePath) {
+    Move-Item -LiteralPath $StorePath -Destination "$StorePath.corrupt-$timestamp" -Force
+  }
+  Remove-Item -LiteralPath $lockPath -Force -ErrorAction SilentlyContinue
+  $storeLeaf = Split-Path -Leaf $StorePath
+  Get-ChildItem -LiteralPath $storeParent -ErrorAction SilentlyContinue | Where-Object {
+    $_.Name -like "$storeLeaf.*.tmp"
+  } | ForEach-Object {
+    Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
+  }
+}
+
+Remove-Item -LiteralPath $lockPath -Force -ErrorAction SilentlyContinue
+
+$null = Start-MuninnServeProcess -ArgumentList $arguments
 
 Start-Sleep -Seconds 2
+$processCheck = Get-StarfireMuninnServeProcess
+if ($null -eq $processCheck) {
+  $serveError = if (Test-Path -LiteralPath $serveErrLog) {
+    Get-Content -LiteralPath $serveErrLog -Raw
+  } else {
+    ""
+  }
+  if ($serveError -like "*failed to decode MessagePack*") {
+    Reset-CorruptMuninnStore
+    $null = Start-MuninnServeProcess -ArgumentList $arguments
+    Start-Sleep -Seconds 2
+    $processCheck = Get-StarfireMuninnServeProcess
+  }
+}
+if ($null -eq $processCheck) {
+  throw "Starfire Muninn serve process is not running after restart"
+}
+foreach ($pattern in @(
+  "--idunn-rudp-health",
+  $IdunnRudpHealth,
+  "--idunn-daemon",
+  $IdunnDaemon,
+  "--idunn-health-contract",
+  $IdunnHealthContract
+)) {
+  if ($processCheck.CommandLine -notlike "*$pattern*") {
+    throw "Starfire Muninn serve command line is missing ${pattern}: $($processCheck.CommandLine)"
+  }
+}
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "health-starfire-muninn.ps1") `
   -MuninnExe $MuninnExe `
   -StorePath $StorePath

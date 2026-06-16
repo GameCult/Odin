@@ -5,7 +5,10 @@ param(
   [string] $LogRoot = "/home/metacrat/.local/state/gamecult/muninn",
   [string[]] $MoveState = @(),
   [string] $MoveEvidenceStream = "muninn:nightwing:move-evidence",
-  [int] $IntervalSeconds = 15
+  [int] $IntervalSeconds = 15,
+  [string] $IdunnRudpHealth = "10.77.0.2:17870",
+  [string] $IdunnDaemon = "nightwing-muninn",
+  [string] $IdunnHealthContract = "muninn.cultnet-rudp-remote-telemetry-and-move-hid"
 )
 
 $ErrorActionPreference = "Stop"
@@ -47,7 +50,10 @@ set -- serve \
 $moveStateSetLines
 set -- "`$@" \
   --move-evidence-stream '$MoveEvidenceStream' \
-  --interval-seconds '$IntervalSeconds'
+  --interval-seconds '$IntervalSeconds' \
+  --idunn-rudp-health '$IdunnRudpHealth' \
+  --idunn-daemon '$IdunnDaemon' \
+  --idunn-health-contract '$IdunnHealthContract'
 nohup '$MuninnExe' "`$@" \
   > '$LogRoot/muninn-serve.out.log' \
   2> '$LogRoot/muninn-serve.err.log' \
@@ -55,6 +61,10 @@ nohup '$MuninnExe' "`$@" \
 echo `$! > '$LogRoot/muninn.pid'
 sleep 1
 kill -0 "`$(cat '$LogRoot/muninn.pid')" 2>/dev/null
+if ! pgrep -af '[m]uninn serve .*--host nightwing' | grep -F -- '--idunn-rudp-health $IdunnRudpHealth' >/dev/null 2>&1; then
+  echo 'Nightwing Muninn serve command line is missing Idunn RUDP health arguments' >&2
+  exit 1
+fi
 "@
 
 ssh.exe -o BatchMode=yes -o ConnectTimeout=5 $SshTarget $remoteScript

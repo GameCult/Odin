@@ -22,7 +22,7 @@ microphones, cameras, and future sensors.
 
 ```powershell
 cargo build -p muninn-daemon
-muninn serve --store C:\Meta\Odin\state\muninn.telemetry.cc --interval-seconds 15
+muninn serve --store C:\Meta\Odin\state\muninn.telemetry.cc --interval-seconds 15 --idunn-rudp-health 127.0.0.1:17870 --idunn-daemon starfire-muninn --idunn-health-contract muninn.cultnet-rudp-local-telemetry-and-quest-access
 muninn --health --store C:\Meta\Odin\state\muninn.telemetry.cc
 ```
 
@@ -97,8 +97,13 @@ E:\Projects\Odin\scripts\restart-starfire-muninn.cmd
 E:\Projects\Odin\scripts\health-starfire-muninn.cmd
 ```
 
-The restart script launches Muninn hidden with `--host starfire --quest-adb`
-and stores state in `C:\Meta\Odin\state\starfire.muninn.telemetry.cc`.
+The restart script launches Muninn hidden with `--host starfire --quest-adb`,
+`--idunn-rudp-health 127.0.0.1:17870`, `--idunn-daemon starfire-muninn`, and
+`--idunn-health-contract muninn.cultnet-rudp-local-telemetry-and-quest-access`.
+If the CultCache store at `C:\Meta\Odin\state\starfire.muninn.telemetry.cc`
+fails MessagePack decode on boot, the restart path archives the corrupt file,
+clears the stale `.lock`, and relaunches the daemon instead of leaving the lane
+dead.
 
 The deployed loopback helper must accept Muninn's command contract:
 
@@ -186,11 +191,11 @@ muninn move-light-status \
 Idunn keeps the Muninn daemon alive. Idunn does not learn a Move-specific
 watcher, and Mimir does not write HID directly except through temporary smoke
 scripts used to prove hardware behavior before a Muninn daemon is available.
-In `--health` mode, Muninn can also publish `idunn.daemon_health` directly to
-Idunn over `cultnet.transport.rudp.v0` with `--idunn-rudp-health`,
-`--idunn-daemon`, and `--idunn-health-contract`. Starfire uses this path for
-the `starfire-muninn` target; the command probe remains compatibility evidence,
-not daemon truth.
+When `serve` is launched with `--idunn-rudp-health`, `--idunn-daemon`, and
+`--idunn-health-contract`, the long-running Muninn body publishes
+`idunn.daemon_health` directly to Idunn over `cultnet.transport.rudp.v0` on its
+normal cadence. `--health` keeps the same publication path for manual proof and
+compatibility probes, but the live owner is the daemon's `serve` process.
 Quest ADB probing is a telemetry input, not daemon liveness. If `adb` is
 missing or the Quest is unavailable, Muninn publishes `muninn.quest_access` as
 `unavailable` and keeps serving the local telemetry surface.
@@ -204,7 +209,10 @@ action and `start-muninn-serve-hidden.vbs` as its argument. It also repairs
 hidden VBS launchers directly when those compatibility commands exist on Raven.
 The serve VBS launches `start-muninn-serve.ps1` with noninteractive hidden
 PowerShell. The PowerShell launcher starts `muninn.exe` with
-`-WindowStyle Hidden` and redirects logs under `C:\Meta\Odin\logs\muninn`.
+`-WindowStyle Hidden`, passes `--idunn-rudp-health 10.77.0.2:17870`,
+`--idunn-daemon muninn`, and
+`--idunn-health-contract muninn.cultnet-rudp-remote-telemetry-health`, and
+redirects logs under `C:\Meta\Odin\logs\muninn`.
 Raven is an operator-consented host: Muninn operations on Raven must be
 background-only and must not create visible terminal windows. `.cmd` files may
 exist only as manual compatibility trampolines; Task Scheduler must execute
@@ -225,6 +233,9 @@ actuators only, not lifecycle owners. The binary is installed at
 `/home/metacrat/.local/state/gamecult/muninn/muninn.telemetry.cc`, and the
 restart actuator launches `serve --host nightwing --interval-seconds 15` with
 `--move-state move-usb=/dev/input/by-id/usb-Sony_Computer_Entertainment_Motion_Controller-joystick`,
+`--idunn-rudp-health 10.77.0.2:17870`,
+`--idunn-daemon nightwing-muninn`,
+`--idunn-health-contract muninn.cultnet-rudp-remote-telemetry-and-move-hid`,
 PID, and logs under
 `/home/metacrat/.local/state/gamecult/muninn`.
 With that Move state source attached, `serve` also publishes the
@@ -236,4 +247,5 @@ separate `/dev/input/js*` paths; `nightwing-move-state-sources.sh` prefers the
 Bluetooth `HID_ID=0005:0000054C:000003D5` path so Idunn health does not demand
 fresh records from two faces of the same controller. The Nightwing health
 actuator publishes `nightwing-muninn` health over RUDP to Starfire Idunn at
-`10.77.0.2:17870`.
+`10.77.0.2:17870`, but that command is fallback proof only; the live keepalive
+contract is now published by the long-running Nightwing `serve` process.

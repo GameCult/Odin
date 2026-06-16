@@ -224,6 +224,11 @@ directly for `GameCult-Muninn`, `GameCult-Muninn-Activate`, and
 tasks have been repaired and verified. The repair actuator now uploads its
 Raven PowerShell body with `sftp` and runs a tiny cleanup wrapper, so the
 hidden-task repair does not hit Windows command-line limits before it can run.
+The long-running Muninn serve bodies on Raven, Nightwing, and Starfire now also
+carry their own `--idunn-rudp-health`, `--idunn-daemon`, and
+`--idunn-health-contract` arguments, and live Idunn accepts those daemon-owned
+health records directly instead of relying on one-shot health commands for the
+truth.
 After those live cuts, continue daemon-by-daemon until compatibility HTTP, TCP,
 WebSocket, and command probes are fallback witnesses only.
 
