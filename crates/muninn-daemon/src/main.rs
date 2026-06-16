@@ -39,6 +39,7 @@ use std::os::windows::ffi::OsStrExt;
 
 const CULTNET_RUDP_PROTOCOL_ID: &str = "cultnet.transport.rudp.v0";
 const IDUNN_HEALTH_RUDP_CONNECTION_ID: u32 = 0x1d0d_0001;
+const PS_MOVE_LED_REPORT_LEN: usize = 49;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Mode {
@@ -1212,7 +1213,7 @@ fn tick_move_light_commands(
 
         let command_id = active[index].command.command_id.clone();
         let (red, green, blue) = active[index].colors[active[index].step_index];
-        let report = [0x06, 0, red, green, blue, 0, 0, 0, 0];
+        let report = move_light_report(red, green, blue);
         if let Err(error) = writer.write_report(&active[index].command.hidraw_path, &report) {
             let failed = command_failed(active[index].command.clone(), &format!("{error:#}"))?;
             node.put(&command_id, &failed)?;
@@ -1327,19 +1328,22 @@ fn default_move_color_for_identity(identity: &str) -> (u8, u8, u8) {
     DEFAULT_MOVE_LIGHT_COLORS[hash as usize % DEFAULT_MOVE_LIGHT_COLORS.len()]
 }
 
-fn default_move_light_report(color: (u8, u8, u8), seconds: f64) -> [u8; 9] {
+fn default_move_light_report(color: (u8, u8, u8), seconds: f64) -> [u8; PS_MOVE_LED_REPORT_LEN] {
     let intensity = seconds.sin().abs() * 0.5 + 0.5;
-    [
-        0x06,
-        0,
+    move_light_report(
         scale_color_channel(color.0, intensity),
         scale_color_channel(color.1, intensity),
         scale_color_channel(color.2, intensity),
-        0,
-        0,
-        0,
-        0,
-    ]
+    )
+}
+
+fn move_light_report(red: u8, green: u8, blue: u8) -> [u8; PS_MOVE_LED_REPORT_LEN] {
+    let mut report = [0u8; PS_MOVE_LED_REPORT_LEN];
+    report[0] = 0x06;
+    report[2] = red;
+    report[3] = green;
+    report[4] = blue;
+    report
 }
 
 fn scale_color_channel(channel: u8, intensity: f64) -> u8 {
@@ -1558,9 +1562,7 @@ fn format_bluetooth_address_little_endian(address: &[u8]) -> String {
 }
 
 #[cfg(windows)]
-fn windows_ps_move_bluetooth_addresses(
-    handle: *mut std::ffi::c_void,
-) -> Option<(String, String)> {
+fn windows_ps_move_bluetooth_addresses(handle: *mut std::ffi::c_void) -> Option<(String, String)> {
     use windows_sys::Win32::Devices::HumanInterfaceDevice::HidD_GetFeature;
 
     let mut report = [0u8; 16];
@@ -1686,7 +1688,8 @@ fn windows_claim_ps_move_host(host: &[u8; 6]) -> Result<usize> {
         let mut report = [0u8; 23];
         report[0] = 0x05;
         report[1..7].copy_from_slice(host);
-        let ok = unsafe { HidD_SetFeature(handle, report.as_mut_ptr().cast(), report.len() as u32) };
+        let ok =
+            unsafe { HidD_SetFeature(handle, report.as_mut_ptr().cast(), report.len() as u32) };
         if ok == 0 {
             let error = std::io::Error::last_os_error();
             unsafe { CloseHandle(handle) };
@@ -1993,7 +1996,7 @@ fn execute_move_light_command(
 
     for _ in 0..active.command.repeat_count {
         for (index, (red, green, blue)) in active.colors.iter().copied().enumerate() {
-            let report = [0x06, 0, red, green, blue, 0, 0, 0, 0];
+            let report = move_light_report(red, green, blue);
             if let Err(error) = writer.write_report(&active.command.hidraw_path, &report) {
                 return command_failed(active.command, &format!("{error:#}"));
             }
@@ -2250,7 +2253,10 @@ fn evaluate_health(options: &Options) -> Result<String> {
     evaluate_health_from_node(options, &node)
 }
 
-fn evaluate_health_from_node(options: &Options, node: &cultmesh_rs::CultMeshNode) -> Result<String> {
+fn evaluate_health_from_node(
+    options: &Options,
+    node: &cultmesh_rs::CultMeshNode,
+) -> Result<String> {
     let surface = node
         .get_required::<MuninnTelemetrySurfaceRecord>("latest")
         .context("Muninn telemetry surface is unavailable")?;
@@ -2344,14 +2350,13 @@ fn publish_idunn_rudp_health(
     let socket = UdpSocket::bind(bind_address)
         .with_context(|| format!("binding Muninn RUDP sender at {bind_address}"))?;
     socket.set_read_timeout(Some(Duration::from_millis(100)))?;
-    let mut transport = CultNetRudpSocketTransportConnection::new(
-        CultNetRudpSocketTransportOptions::client(
+    let mut transport =
+        CultNetRudpSocketTransportConnection::new(CultNetRudpSocketTransportOptions::client(
             "muninn-daemon",
             socket,
             options.endpoint,
             IDUNN_HEALTH_RUDP_CONNECTION_ID,
-        ),
-    )?;
+        ))?;
     transport.connect(Vec::new())?;
     let deadline = Instant::now() + Duration::from_secs(2);
     while !transport.connected() {
@@ -3213,19 +3218,22 @@ mod tests {
         assert_eq!(result.state, "completed");
         assert_eq!(writer.writes.len(), 1);
         assert_eq!(writer.writes[0].0, "/dev/hidraw3");
-        assert_eq!(writer.writes[0].1, vec![0x06, 0, 255, 64, 8, 0, 0, 0, 0]);
+        assert_eq!(writer.writes[0].1.len(), PS_MOVE_LED_REPORT_LEN);
+        assert_eq!(&writer.writes[0].1[..5], &[0x06, 0, 255, 64, 8]);
+        assert!(writer.writes[0].1[5..].iter().all(|byte| *byte == 0));
     }
 
     #[test]
     fn default_move_light_report_pulses_between_half_and_full_brightness() {
-        assert_eq!(
-            default_move_light_report((100, 80, 60), 0.0),
-            [0x06, 0, 50, 40, 30, 0, 0, 0, 0]
-        );
-        assert_eq!(
-            default_move_light_report((100, 80, 60), std::f64::consts::FRAC_PI_2),
-            [0x06, 0, 100, 80, 60, 0, 0, 0, 0]
-        );
+        let half = default_move_light_report((100, 80, 60), 0.0);
+        assert_eq!(half.len(), PS_MOVE_LED_REPORT_LEN);
+        assert_eq!(&half[..5], &[0x06, 0, 50, 40, 30]);
+        assert!(half[5..].iter().all(|byte| *byte == 0));
+
+        let full = default_move_light_report((100, 80, 60), std::f64::consts::FRAC_PI_2);
+        assert_eq!(full.len(), PS_MOVE_LED_REPORT_LEN);
+        assert_eq!(&full[..5], &[0x06, 0, 100, 80, 60]);
+        assert!(full[5..].iter().all(|byte| *byte == 0));
     }
 
     #[test]
@@ -3345,13 +3353,9 @@ mod tests {
     #[test]
     fn claim_move_host_accepts_target_bluetooth_address() {
         let options = Options::parse(
-            [
-                "claim-move-host",
-                "--move-host",
-                "5C:93:A2:9C:A8:A8",
-            ]
-            .into_iter()
-            .map(String::from),
+            ["claim-move-host", "--move-host", "5C:93:A2:9C:A8:A8"]
+                .into_iter()
+                .map(String::from),
         )
         .unwrap();
 
