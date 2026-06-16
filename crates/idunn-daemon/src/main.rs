@@ -1123,24 +1123,24 @@ fn daemon_surgery_plan(target: &DaemonTarget, updated_at: &str) -> IdunnDaemonSu
             ];
         }
         "weksa" => {
-            status = "partial-rudp-health-live";
+            status = "partial-rudp-health-and-provider-store-live";
             severity = "medium-high";
             owner = "Weksa provider runtime";
             current_mechanism =
-                "Weksa publishes weksa.cultnet-rudp-provider-health over CultNet/RUDP after each serialized witness refresh; provider advertisement and command boundary still retain compatibility HTTP projections."
+                "Weksa publishes weksa.cultnet-rudp-provider-health over CultNet/RUDP after each serialized witness refresh, and its daemon-owned provider store contains provider advertisement, operator state, Eve surface, command_boundary, and transport_profile records that Odin can ingest. The remaining command ingress debt is the MiMo VoiceDesign compatibility HTTP route."
                     .to_string();
             intended_authority =
-                "Weksa publishes daemon health, provider advertisement, operator state, Eve surfaces, and command boundary as typed CultMesh/CultNet records over cultnet.transport.rudp.v0; HTTP remains operator/debug projection only."
+                "Weksa publishes daemon health, provider advertisement, operator state, Eve surfaces, command boundary, and transport profile as typed CultMesh/CultNet records over cultnet.transport.rudp.v0; HTTP remains operator/debug and temporary command lowering only."
                     .to_string();
             cut_line =
-                "Keep the HTTP probe as fallback only until Weksa provider advertisement and command_boundary records are also daemon-owned RUDP publications."
+                "Replace the MiMo VoiceDesign compatibility HTTP command route with CultNet/RUDP command document ingress, then demote health-weksa.cmd and HTTP endpoints to manual/debug lowerings with no lifecycle truth."
                     .to_string();
             steps = vec![
                 "Keep live weksa.cultnet-rudp-provider-health publication running from the Weksa daemon.".to_string(),
-                "Publish Weksa provider advertisement and operator-state records over cultnet.transport.rudp.v0.".to_string(),
-                "Publish Weksa command_boundary and transport_profile records from the daemon runtime.".to_string(),
-                "Teach Odin to prefer Weksa RUDP provider records over compatibility HTTP ingestion.".to_string(),
-                "Delete or demote health-weksa.cmd to a manual compatibility probe with no lifecycle truth.".to_string(),
+                "Keep Weksa provider advertisement, operator-state, Eve surface, command_boundary, and transport_profile records in the daemon-owned provider store.".to_string(),
+                "Keep Odin provider discovery accepting Weksa's typed provider store instead of relying on compatibility HTTP ingestion.".to_string(),
+                "Add CultNet/RUDP command document ingress for speech_provider.mimo.voicedesign.".to_string(),
+                "Delete or demote health-weksa.cmd and HTTP endpoints to manual/debug compatibility paths with no lifecycle truth.".to_string(),
             ];
         }
         "voidbot" => {
@@ -2301,13 +2301,12 @@ mod tests {
         );
 
         let weksa_plan = daemon_surgery_plan(&weksa, "unix:100");
-        assert_eq!(weksa_plan.status, "partial-rudp-health-live");
-        assert!(
-            weksa_plan
-                .current_mechanism
-                .contains("weksa.cultnet-rudp-provider-health")
+        assert_eq!(
+            weksa_plan.status,
+            "partial-rudp-health-and-provider-store-live"
         );
-        assert!(weksa_plan.cut_line.contains("HTTP probe as fallback"));
+        assert!(weksa_plan.current_mechanism.contains("command_boundary"));
+        assert!(weksa_plan.cut_line.contains("MiMo VoiceDesign"));
 
         let voidbot_plan = daemon_surgery_plan(&voidbot, "unix:100");
         assert_eq!(voidbot_plan.status, "partial-rudp-health-live");

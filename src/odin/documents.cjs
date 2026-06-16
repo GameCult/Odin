@@ -11,6 +11,9 @@ function defineOdinDocuments(defineDocumentType) {
       surfaceDefinition: null,
       viliCommandBoundaryDefinition: null,
       viliTransportProfileDefinition: null,
+      weksaCommandBoundaryDefinition: null,
+      weksaOperatorStateDefinition: null,
+      weksaTransportProfileDefinition: null,
       voidbotSwarmSnapshotDefinition: null,
     };
   }
@@ -76,6 +79,33 @@ function defineOdinDocuments(defineDocumentType) {
     name: (value) => value?.profileId || value?.daemonId || "vili",
     schema: parseObjectDocument("Vili transport profile"),
   });
+  const weksaOperatorStateDefinition = defineDocumentType({
+    type: "weksa.operator_state",
+    schemaName: "weksa.operator_state",
+    schemaId: "weksa.operator_state.v0",
+    schemaVersion: "weksa.operator_state.v0",
+    global: false,
+    name: (value) => value?.daemon_id || value?.daemonId || value?.provider_id || value?.providerId || "weksa",
+    schema: parseObjectDocument("Weksa operator state"),
+  });
+  const weksaCommandBoundaryDefinition = defineDocumentType({
+    type: "weksa.command_boundary",
+    schemaName: "weksa.command_boundary",
+    schemaId: "weksa.command_boundary.v1",
+    schemaVersion: "weksa.command_boundary.v1",
+    global: false,
+    name: (value) => value?.boundary_id || value?.boundaryId || value?.daemon_id || value?.daemonId || "weksa",
+    schema: parseObjectDocument("Weksa command boundary"),
+  });
+  const weksaTransportProfileDefinition = defineDocumentType({
+    type: "weksa.transport_profile",
+    schemaName: "weksa.transport_profile",
+    schemaId: "weksa.transport_profile.v1",
+    schemaVersion: "weksa.transport_profile.v1",
+    global: false,
+    name: (value) => value?.profile_id || value?.profileId || value?.daemon_id || value?.daemonId || "weksa",
+    schema: parseObjectDocument("Weksa transport profile"),
+  });
   const voidbotSwarmSnapshotDefinition = defineDocumentType({
     type: "voidbot.swarm_state_snapshot",
     schemaName: "voidbot.swarm_state_snapshot",
@@ -92,6 +122,9 @@ function defineOdinDocuments(defineDocumentType) {
     surfaceDefinition,
     viliCommandBoundaryDefinition,
     viliTransportProfileDefinition,
+    weksaCommandBoundaryDefinition,
+    weksaOperatorStateDefinition,
+    weksaTransportProfileDefinition,
     voidbotSwarmSnapshotDefinition,
   };
 }

@@ -193,14 +193,19 @@ probe. The record must match the daemon id, health contract, RUDP transport,
 and freshness window; otherwise the compatibility probe remains fallback
 evidence.
 
-The current active cut is Vili plus Raven task-action repair. Vili publishes
-RUDP health locally and writes a daemon-owned `.vili\vili.service.cc` store with
-provider advertisement, operator state, Eve surface, command boundary, and
-transport profile records; Odin local discovery can ingest that typed store.
-Live Raven deployment remains blocked while SSH is unreachable. Raven Muninn
-task actions are also an explicit ops invariant: Task Scheduler must execute
-`wscript.exe //B //Nologo` hidden launcher actions directly for
-`GameCult-Muninn`, `GameCult-Muninn-Activate`, and
+The current active cut is Vili plus Raven task-action repair, with Weksa's
+provider-store boundary now advanced locally. Vili publishes RUDP health locally
+and writes a daemon-owned `.vili\vili.service.cc` store with provider
+advertisement, operator state, Eve surface, command boundary, and transport
+profile records; Odin local discovery can ingest that typed store. Live Raven
+deployment remains blocked while SSH is unreachable. Weksa publishes RUDP health
+and a daemon-owned provider store containing provider advertisement, operator
+state, Eve surface, command boundary, and transport profile records; Odin local
+discovery can ingest that typed store too. Weksa still owes CultNet/RUDP command
+document ingress for MiMo VoiceDesign before its HTTP command route can become
+debug-only. Raven Muninn task actions are also an explicit ops invariant: Task
+Scheduler must execute `wscript.exe //B //Nologo` hidden launcher actions
+directly for `GameCult-Muninn`, `GameCult-Muninn-Activate`, and
 `GameCult-Muninn-VideoProof`, never raw `.cmd` wrappers. After those live cuts,
 continue daemon-by-daemon until compatibility HTTP, TCP, WebSocket, and command
 probes are fallback witnesses only.

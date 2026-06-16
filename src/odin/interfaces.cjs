@@ -58,9 +58,12 @@ function createInterfaceDiscovery({
       surfaceDefinition,
       viliCommandBoundaryDefinition,
       viliTransportProfileDefinition,
+      weksaCommandBoundaryDefinition,
+      weksaOperatorStateDefinition,
+      weksaTransportProfileDefinition,
       voidbotSwarmSnapshotDefinition,
     } = documents;
-    if (!CultMesh || !interfaceBindingDefinition || !operatorStateDefinition || !surfaceDefinition || !viliCommandBoundaryDefinition || !viliTransportProfileDefinition || !voidbotSwarmSnapshotDefinition || !providerAdvertisementDefinition) {
+    if (!CultMesh || !interfaceBindingDefinition || !operatorStateDefinition || !surfaceDefinition || !viliCommandBoundaryDefinition || !viliTransportProfileDefinition || !weksaCommandBoundaryDefinition || !weksaOperatorStateDefinition || !weksaTransportProfileDefinition || !voidbotSwarmSnapshotDefinition || !providerAdvertisementDefinition) {
       return [];
     }
 
@@ -79,6 +82,9 @@ function createInterfaceDiscovery({
             operatorStateDefinition,
             viliCommandBoundaryDefinition,
             viliTransportProfileDefinition,
+            weksaOperatorStateDefinition,
+            weksaCommandBoundaryDefinition,
+            weksaTransportProfileDefinition,
           ],
         });
         const advertisements = typeof node.cache?.getAll === "function"
@@ -104,13 +110,18 @@ function createInterfaceDiscovery({
               || advertisement.provider?.endpoint
               || `cultmesh:${storePath}`,
             capabilities: advertisement.provider?.capabilities || advertisement.capabilities || [],
-            operatorState: node.get?.(operatorStateDefinition, "vili") || null,
-            commandBoundary: node.get?.(viliCommandBoundaryDefinition, advertisement.providerId)
-              || node.get?.(viliCommandBoundaryDefinition, advertisement.daemonId || "vili")
-              || null,
-            transportProfile: node.get?.(viliTransportProfileDefinition, advertisement.providerId)
-              || node.get?.(viliTransportProfileDefinition, advertisement.daemonId || "vili")
-              || null,
+            operatorState: providerRecord(node, [
+              operatorStateDefinition,
+              weksaOperatorStateDefinition,
+            ], advertisement) || null,
+            commandBoundary: providerRecord(node, [
+              viliCommandBoundaryDefinition,
+              weksaCommandBoundaryDefinition,
+            ], advertisement) || null,
+            transportProfile: providerRecord(node, [
+              viliTransportProfileDefinition,
+              weksaTransportProfileDefinition,
+            ], advertisement) || null,
             usesCultMesh: true,
             transport: advertisement.provider?.transport || "CultMesh provider advertisement",
             status: advertisement.status || "unknown",
@@ -137,9 +148,12 @@ function createInterfaceDiscovery({
       surfaceDefinition,
       viliCommandBoundaryDefinition,
       viliTransportProfileDefinition,
+      weksaCommandBoundaryDefinition,
+      weksaOperatorStateDefinition,
+      weksaTransportProfileDefinition,
       voidbotSwarmSnapshotDefinition,
     } = documents;
-    if (!CultMesh || !interfaceBindingDefinition || !operatorStateDefinition || !surfaceDefinition || !viliCommandBoundaryDefinition || !viliTransportProfileDefinition || !voidbotSwarmSnapshotDefinition || !providerAdvertisementDefinition) {
+    if (!CultMesh || !interfaceBindingDefinition || !operatorStateDefinition || !surfaceDefinition || !viliCommandBoundaryDefinition || !viliTransportProfileDefinition || !weksaCommandBoundaryDefinition || !weksaOperatorStateDefinition || !weksaTransportProfileDefinition || !voidbotSwarmSnapshotDefinition || !providerAdvertisementDefinition) {
       return [];
     }
     const interfaces = [];
@@ -157,6 +171,9 @@ function createInterfaceDiscovery({
             operatorStateDefinition,
             viliCommandBoundaryDefinition,
             viliTransportProfileDefinition,
+            weksaOperatorStateDefinition,
+            weksaCommandBoundaryDefinition,
+            weksaTransportProfileDefinition,
           ],
         });
         const advertisements = typeof node.cache?.getAll === "function"
@@ -174,13 +191,18 @@ function createInterfaceDiscovery({
             advertisement,
             state,
             storePath,
-            operatorState: node.get?.(operatorStateDefinition, "vili") || null,
-            commandBoundary: node.get?.(viliCommandBoundaryDefinition, advertisement.providerId)
-              || node.get?.(viliCommandBoundaryDefinition, advertisement.daemonId || "vili")
-              || null,
-            transportProfile: node.get?.(viliTransportProfileDefinition, advertisement.providerId)
-              || node.get?.(viliTransportProfileDefinition, advertisement.daemonId || "vili")
-              || null,
+            operatorState: providerRecord(node, [
+              operatorStateDefinition,
+              weksaOperatorStateDefinition,
+            ], advertisement) || null,
+            commandBoundary: providerRecord(node, [
+              viliCommandBoundaryDefinition,
+              weksaCommandBoundaryDefinition,
+            ], advertisement) || null,
+            transportProfile: providerRecord(node, [
+              viliTransportProfileDefinition,
+              weksaTransportProfileDefinition,
+            ], advertisement) || null,
           }));
         }
         const bindings = typeof node.cache?.getAll === "function"
@@ -269,6 +291,33 @@ function cultMeshProviderInterface({
     transportProfile,
     surface,
   };
+}
+
+function providerRecord(node, definitions, advertisement) {
+  const keys = providerRecordKeys(advertisement);
+  for (const definition of definitions) {
+    if (!definition) continue;
+    for (const key of keys) {
+      const record = node.get?.(definition, key);
+      if (record) return record;
+    }
+  }
+  return null;
+}
+
+function providerRecordKeys(advertisement) {
+  const keys = [
+    advertisement?.providerId,
+    advertisement?.daemonId,
+    advertisement?.daemon_id,
+    advertisement?.serviceId,
+    advertisement?.service_id,
+    advertisement?.canonicalService,
+    advertisement?.locatedService,
+  ];
+  if (advertisement?.providerId === "vili.animation") keys.push("vili");
+  if (advertisement?.providerId === "weksa.intent.service") keys.push("weksa");
+  return [...new Set(keys.filter(Boolean).map(String))];
 }
 
 function localIpv4Prefixes() {
