@@ -890,7 +890,7 @@ fn swarm_surgery_plan(
     updated_at: &str,
 ) -> IdunnSwarmSurgeryPlanRecord {
     let next_target = [
-        "voidbot",
+        "muninn",
     ]
     .iter()
     .copied()
@@ -934,11 +934,11 @@ fn swarm_surgery_plan(
             "5. Delete or demote compatibility probes once every target has daemon-owned publication and advertised lifecycle authority.".to_string(),
         ],
         current_phase:
-            "Phase 18: Nightwing Eve browser reference now publishes a daemon-owned boundary witness store from the live static-lowering runtime; VoidBot is the next compatibility cut because provider advertisement and command boundary publication still sit outside the daemon."
+            "Phase 19: VoidBot now publishes its daemon-owned provider catalog, command boundary, and transport profile from the live swarm surface organ; Raven Muninn is the next compatibility cut because hidden launch is repaired but its scheduled-task actions still lean on visible .cmd trampolines instead of owning the invariant directly."
                 .to_string(),
         next_target: next_target.to_string(),
         cut_line:
-            "Muninn, Vili, Idunn, Odin, Stonks, Weksa, VoidBot, Nightwing Gjallar, Mimir Eve dashboard, Nightwing Eve dashboard, Nightwing Eve browser reference, yggdrasil-streampixels, yggdrasil-heimdall, and yggdrasil-repixelizer now exercise daemon-owned RUDP health. Raven GameCult\\Vili has been refreshed from Odin, the hidden scheduled task now launches start-vili-daemon.ps1 with Idunn RUDP arguments, and live Idunn accepts vili.cultnet-rudp-animation-health from 10.77.0.4. Live Raven Muninn task actions remain repaired and verified to execute wscript.exe hidden launchers directly for GameCult-Muninn, GameCult-Muninn-Activate, and GameCult-Muninn-VideoProof, the long-running Muninn serve bodies on Raven, Nightwing, and Starfire now carry their own --idunn-rudp-health, --idunn-daemon, and --idunn-health-contract identity while Idunn accepts muninn from 10.77.0.4, nightwing-muninn from 10.77.0.3, and starfire-muninn from 127.0.0.1, live yggdrasil-streampixels publishes streampixels.cultnet-rudp-service-health from 10.77.0.1, live yggdrasil-heimdall publishes heimdall.cultnet-rudp-provider-health from 10.77.0.1 with a boundary store at /srv/heimdall/cultcache/heimdall.service.cc, live yggdrasil-repixelizer publishes repixelizer.cultnet-rudp-service-health from 10.77.0.1 with a boundary store at /srv/repixelizer/cultcache/repixelizer.service.cc, live Nightwing Gjallar publishes a boundary store at /var/lib/gamecult/gjallar/cultcache/gjallar.service.cc, live Mimir Eve dashboard now publishes CultMesh state at /var/lib/gamecult/eve-dashboard/cultmesh/eve-dashboard.ccmp plus a boundary store at /var/lib/gamecult/eve-dashboard/cultcache/eve-dashboard.service.cc, and live Nightwing Eve browser reference now publishes a boundary store at /var/lib/gamecult/eve-browser-reference/cultcache/eve-browser-reference.service.cc. VoidBot remains the next compatibility debt."
+            "Muninn, Vili, Idunn, Odin, Stonks, Weksa, VoidBot, Nightwing Gjallar, Mimir Eve dashboard, Nightwing Eve dashboard, Nightwing Eve browser reference, yggdrasil-streampixels, yggdrasil-heimdall, and yggdrasil-repixelizer now exercise daemon-owned RUDP health. Raven GameCult\\Vili has been refreshed from Odin, the hidden scheduled task now launches start-vili-daemon.ps1 with Idunn RUDP arguments, and live Idunn accepts vili.cultnet-rudp-animation-health from 10.77.0.4. VoidBot now publishes a daemon-owned provider catalog, provider advertisements, command_boundary, and transport_profile records from E:\\Projects\\VoidBot\\.voidbot\\status\\cultmesh\\voidbot-swarm-state.cc while health-voidbot.cmd is demoted to a fast compatibility witness. The long-running Muninn serve bodies on Raven, Nightwing, and Starfire now carry their own --idunn-rudp-health, --idunn-daemon, and --idunn-health-contract identity while Idunn accepts muninn from 10.77.0.4, nightwing-muninn from 10.77.0.3, and starfire-muninn from 127.0.0.1, but Raven's GameCult-Muninn, GameCult-Muninn-Activate, and GameCult-Muninn-VideoProof task actions still need the visible .cmd trampoline deleted so the background-only invariant is structural. Live yggdrasil-streampixels publishes streampixels.cultnet-rudp-service-health from 10.77.0.1, live yggdrasil-heimdall publishes heimdall.cultnet-rudp-provider-health from 10.77.0.1 with a boundary store at /srv/heimdall/cultcache/heimdall.service.cc, live yggdrasil-repixelizer publishes repixelizer.cultnet-rudp-service-health from 10.77.0.1 with a boundary store at /srv/repixelizer/cultcache/repixelizer.service.cc, live Nightwing Gjallar publishes a boundary store at /var/lib/gamecult/gjallar/cultcache/gjallar.service.cc, live Mimir Eve dashboard now publishes CultMesh state at /var/lib/gamecult/eve-dashboard/cultmesh/eve-dashboard.ccmp plus a boundary store at /var/lib/gamecult/eve-dashboard/cultcache/eve-dashboard.service.cc, and live Nightwing Eve browser reference now publishes a boundary store at /var/lib/gamecult/eve-browser-reference/cultcache/eve-browser-reference.service.cc. Raven Muninn remains the next compatibility debt."
                 .to_string(),
         verification_layer:
             "CultMesh keepalive store records plus live Idunn decision cycles, not process exit codes or chat summaries."
@@ -971,9 +971,9 @@ fn daemon_transport_profile(
             "Weksa daemon health is published over CultNet/RUDP, and provider advertisement, operator state, Eve surface, command_boundary, and transport_profile records are in the daemon-owned CultCache store; MiMo VoiceDesign command ingress remains compatibility HTTP debt.",
         ),
         "voidbot" => (
-            "daemon-published-rudp-health + compatibility.local-command fallback",
-            "partial-rudp-health-live",
-            "VoidBot stack health is published over CultNet/RUDP from the local orchestrator pulse; provider advertisement and command_boundary publication remain migration debt before the operations probe can be deleted.",
+            "daemon-published-rudp-health + daemon-owned-cultmesh-provider-store + compatibility.local-command fallback",
+            "partial-rudp-health-and-provider-store-live",
+            "VoidBot stack health is published over CultNet/RUDP from the local orchestrator pulse, and the daemon-owned CultMesh witness store at E:\\Projects\\VoidBot\\.voidbot\\status\\cultmesh\\voidbot-swarm-state.cc now carries provider advertisement catalog, provider advertisement, command_boundary, and transport_profile records. The operations probe remains fallback evidence only.",
         ),
         "nightwing-gjallar" => (
             "daemon-published-rudp-health + daemon-owned-cultcache-service-boundary + compatibility.local-command fallback",
@@ -1220,23 +1220,23 @@ fn daemon_surgery_plan(target: &DaemonTarget, updated_at: &str) -> IdunnDaemonSu
             ];
         }
         "voidbot" => {
-            status = "partial-rudp-health-live";
+            status = "partial-rudp-health-and-provider-store-live";
             severity = "medium-high";
             owner = "VoidBot internal provider stack";
             current_mechanism =
-                "VoidBot publishes voidbot.cultnet-rudp-stack-health over CultNet/RUDP after each local orchestrator pulse; swarm provider state already has a CultMesh witness, while operations watchdog and command boundary still retain compatibility projections."
+                "VoidBot publishes voidbot.cultnet-rudp-stack-health over CultNet/RUDP after each local orchestrator pulse, and the always-run voidbot-swarm-surface organ writes daemon-owned provider catalog, provider advertisement, command_boundary, and transport_profile records into E:\\Projects\\VoidBot\\.voidbot\\status\\cultmesh\\voidbot-swarm-state.cc."
                     .to_string();
             intended_authority =
                 "VoidBot publishes internal swarm, repo-face, and provider health over CultNet/RUDP; Discord delivery remains a boundary adapter, never daemon truth."
                     .to_string();
             cut_line =
-                "Keep the operations probe as fallback only until VoidBot provider advertisement and command_boundary records are also daemon-owned RUDP/CultMesh publications."
+                "Keep the operations probe as fallback only while it verifies the daemon-owned CultMesh witness store; it no longer owns VoidBot lifecycle truth."
                     .to_string();
             steps = vec![
                 "Keep live voidbot.cultnet-rudp-stack-health publication running from the GameCult Local Orchestrator pulse.".to_string(),
-                "Publish VoidBot swarm, Discord, archive, source, and repo-face provider records over cultnet.transport.rudp.v0.".to_string(),
-                "Publish VoidBot command_boundary and transport_profile records from the provider runtime.".to_string(),
-                "Teach Odin to prefer VoidBot RUDP/CultMesh provider records over compatibility status ingestion.".to_string(),
+                "Keep VoidBot swarm, Discord, archive, source, and repo-face provider records published from the daemon-owned CultMesh witness store.".to_string(),
+                "Keep VoidBot command_boundary and transport_profile records published from the provider runtime.".to_string(),
+                "Teach Odin to prefer the daemon-owned VoidBot CultMesh witness store over compatibility status ingestion.".to_string(),
                 "Delete or demote health-voidbot.cmd to a manual compatibility probe with no lifecycle truth.".to_string(),
             ];
         }
@@ -2211,7 +2211,7 @@ mod tests {
     }
 
     #[test]
-    fn swarm_surgery_plan_names_voidbot_after_browser_reference_cut() {
+    fn swarm_surgery_plan_names_muninn_after_voidbot_cut() {
         let starfire_muninn = DaemonTarget {
             daemon_id: "starfire-muninn".to_string(),
             verse_id: "starfire.local".to_string(),
@@ -2420,8 +2420,8 @@ mod tests {
 
         assert_eq!(plan.plan_id, "swarm-surgery:starfire-local");
         assert_eq!(plan.status, "active-transport-migration");
-        assert_eq!(plan.next_target, "voidbot");
-        assert!(plan.current_phase.contains("Nightwing Eve browser reference"));
+        assert_eq!(plan.next_target, "muninn");
+        assert!(plan.current_phase.contains("VoidBot now publishes"));
         assert!(
             plan.cut_line
                 .contains("live yggdrasil-heimdall publishes heimdall.cultnet-rudp-provider-health")
@@ -2429,13 +2429,14 @@ mod tests {
         assert!(plan.cut_line.contains("GameCult\\Vili"));
         assert!(plan.cut_line.contains("10.77.0.4"));
         assert!(plan.cut_line.contains("nightwing-muninn"));
+        assert!(plan.cut_line.contains("voidbot-swarm-state.cc"));
         assert!(plan.cut_line.contains("10.77.0.3"));
         assert!(plan.cut_line.contains("starfire-muninn"));
         assert!(plan.cut_line.contains("127.0.0.1"));
         assert!(plan.cut_line.contains("GameCult-Muninn-Activate"));
         assert!(plan.cut_line.contains("GameCult-Muninn-VideoProof"));
-        assert!(plan.cut_line.contains("Muninn task actions"));
-        assert!(plan.cut_line.contains("verified"));
+        assert!(plan.cut_line.contains("visible .cmd trampoline"));
+        assert!(plan.cut_line.contains("background-only invariant"));
         assert!(plan.cut_line.contains("yggdrasil-streampixels"));
         assert!(plan.cut_line.contains("10.77.0.1"));
         assert!(plan.cut_line.contains("heimdall.cultnet-rudp-provider-health"));
@@ -2449,7 +2450,7 @@ mod tests {
         assert!(plan.cut_line.contains("/var/lib/gamecult/eve-dashboard/cultcache/eve-dashboard.service.cc"));
         assert!(plan.cut_line.contains("live Nightwing Eve browser reference now publishes a boundary store"));
         assert!(plan.cut_line.contains("/var/lib/gamecult/eve-browser-reference/cultcache/eve-browser-reference.service.cc"));
-        assert!(plan.cut_line.contains("VoidBot remains"));
+        assert!(plan.cut_line.contains("Raven Muninn remains"));
         assert!(plan.verification_layer.contains("CultMesh keepalive store"));
         assert!(
             plan.invariants
@@ -2521,11 +2522,19 @@ mod tests {
         assert!(weksa_plan.cut_line.contains("MiMo VoiceDesign"));
 
         let voidbot_plan = daemon_surgery_plan(&voidbot, "unix:100");
-        assert_eq!(voidbot_plan.status, "partial-rudp-health-live");
+        assert_eq!(
+            voidbot_plan.status,
+            "partial-rudp-health-and-provider-store-live"
+        );
         assert!(
             voidbot_plan
                 .current_mechanism
                 .contains("voidbot.cultnet-rudp-stack-health")
+        );
+        assert!(
+            voidbot_plan
+                .current_mechanism
+                .contains("voidbot-swarm-state.cc")
         );
         assert!(
             voidbot_plan
@@ -2855,7 +2864,7 @@ mod tests {
     }
 
     #[test]
-    fn voidbot_transport_profile_marks_partial_rudp_health() {
+    fn voidbot_transport_profile_marks_provider_store_live() {
         let voidbot = DaemonTarget {
             daemon_id: "voidbot".to_string(),
             verse_id: "starfire.local".to_string(),
@@ -2870,15 +2879,15 @@ mod tests {
 
         let profile = daemon_transport_profile(&voidbot, "unix:100");
 
-        assert_eq!(profile.state, "partial-rudp-health-live");
+        assert_eq!(profile.state, "partial-rudp-health-and-provider-store-live");
         assert_eq!(
             profile.current_transport,
-            "daemon-published-rudp-health + compatibility.local-command fallback"
+            "daemon-published-rudp-health + daemon-owned-cultmesh-provider-store + compatibility.local-command fallback"
         );
         assert!(
             profile
                 .cut_line
-                .contains("VoidBot stack health is published over CultNet/RUDP")
+                .contains("voidbot-swarm-state.cc")
         );
     }
 
