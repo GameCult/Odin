@@ -1,2 +1,2 @@
 @echo off
-ssh.exe -o BatchMode=yes -o ConnectTimeout=5 nightwing systemctl is-active --quiet nightwing-eve-dashboard.service
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0health-nightwing-eve-dashboard.ps1" %*
