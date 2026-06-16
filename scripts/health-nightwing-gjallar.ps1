@@ -3,6 +3,7 @@ param(
   [string] $SshTarget = "nightwing",
   [string] $RemoteManifest = "/opt/gamecult/gjallar/gamecult-gjallar-deploy-manifest.txt",
   [string] $RemoteStatus = "/var/log/gjallar.status",
+  [string] $RemoteCultCache = "/var/lib/gamecult/gjallar/cultcache/gjallar.service.cc",
   [int] $MaxStatusAgeSeconds = 120,
   [int] $MinCatalogProviders = 1,
   [int] $MinComposedProviders = 1
@@ -66,6 +67,11 @@ if ($status.status -ne "rendered") {
   Fail-IdunnHealth -State "failed" -Message "Nightwing Gjallar framebuffer status is '$($status.status)', expected rendered."
 }
 
+if ($null -eq $status.cultCacheWitness -or $status.cultCacheWitness.status -ne "published") {
+  $detail = if ($null -eq $status.cultCacheWitness) { "missing cultCacheWitness status" } else { $status.cultCacheWitness.error }
+  Fail-IdunnHealth -State "degraded" -Message "Nightwing Gjallar has not published the daemon-owned CultCache witness. $detail"
+}
+
 if ($status.receive.status -ne "catalog-composed") {
   $detail = $status.receive.error
   if ([string]::IsNullOrWhiteSpace($detail)) {
@@ -85,6 +91,27 @@ if ([int]$status.receive.composedProviders -lt $MinComposedProviders) {
 if ($null -eq $status.idunnRudpHealth -or $status.idunnRudpHealth.status -ne "published") {
   $detail = if ($null -eq $status.idunnRudpHealth) { "missing idunnRudpHealth status" } else { $status.idunnRudpHealth.error }
   Fail-IdunnHealth -State "degraded" -Message "Nightwing Gjallar has not published daemon-owned Idunn RUDP health. $detail"
+}
+
+$cultCacheStat = ssh.exe -o BatchMode=yes -o ConnectTimeout=5 $SshTarget "stat -c '%s %Y' '$RemoteCultCache' 2>/dev/null"
+if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($cultCacheStat)) {
+  Fail-IdunnHealth -State "failed" -Message "Nightwing Gjallar CultCache witness is missing at $RemoteCultCache."
+}
+
+$cultCacheParts = $cultCacheStat.Trim() -split '\s+'
+if ($cultCacheParts.Length -lt 2) {
+  Fail-IdunnHealth -State "failed" -Message "Nightwing Gjallar CultCache witness stat output was malformed: $cultCacheStat"
+}
+
+$cultCacheSize = [int64]$cultCacheParts[0]
+$cultCacheModifiedUtc = [DateTimeOffset]::FromUnixTimeSeconds([int64]$cultCacheParts[1])
+$cultCacheAgeSeconds = ([DateTimeOffset]::UtcNow - $cultCacheModifiedUtc).TotalSeconds
+if ($cultCacheSize -le 0) {
+  Fail-IdunnHealth -State "failed" -Message "Nightwing Gjallar CultCache witness at $RemoteCultCache is empty."
+}
+
+if ($cultCacheAgeSeconds -gt $MaxStatusAgeSeconds) {
+  Fail-IdunnHealth -State "failed" -Message "Nightwing Gjallar CultCache witness is stale ($([math]::Round($cultCacheAgeSeconds))s old)."
 }
 
 Write-Host "Nightwing Gjallar is active, deployed at $localCommit, and composing $($status.receive.composedProviders)/$($status.receive.catalogProviders) providers."
