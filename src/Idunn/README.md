@@ -198,6 +198,12 @@ stops the rollout and raises an operator alarm. Zero downtime is recorded only
 when the target declares a real in-place, blue/green, or rolling strategy;
 otherwise Idunn says `restart-required` and verifies that path honestly.
 
+Deploy scripts are Idunn actuators. Agents should configure the target catalog,
+release target, command boundary, migration command, and daemon publication
+surface, then let Idunn run the rollout. Direct script execution without
+`IDUNN_ACTUATOR=1` fails on purpose; the little hand reaching for the deploy
+button has been removed from the machine.
+
 The daemon itself defaults to `127.0.0.1:17870`, but
 `scripts/start-idunn-local.ps1` launches the local swarm with
 `--rudp-health-bind 0.0.0.0:17870` so WireGuard peers such as Raven and

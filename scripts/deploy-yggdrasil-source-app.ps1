@@ -14,6 +14,10 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+if ($env:IDUNN_ACTUATOR -ne "1") {
+  throw "This deployment script is an Idunn actuator. Agents must configure Idunn release targets and let Idunn run deployment; do not invoke deploy scripts manually."
+}
+
 if (-not (Test-Path -LiteralPath $RepoRoot)) {
   throw "Repo root not found: $RepoRoot"
 }

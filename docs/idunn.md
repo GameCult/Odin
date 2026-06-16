@@ -33,6 +33,9 @@ escalation, and continuity witness state.
   restarts behind Odin refresh logic. Individual daemons should not carry
   independent crash-recovery loops once Idunn owns their lifecycle path; they
   publish health, surfaces, state witnesses, and command boundaries instead.
+  Agents are also forbidden deploy writers: they configure Idunn release
+  targets, command boundaries, migration commands, and rollout policy, then let
+  Idunn actuate and witness deployment. They do not run deploy scripts by hand.
 - Shared paths: manual operator deploy/restart, scheduled deploy/restart,
   degraded-health repair, boot rehydration, and future remote worker recovery
   must pass through the same Idunn command primitive.
@@ -249,6 +252,10 @@ idunn.rudp_health_ingress.v1
   `idunn.state_migration_result.v1`, stops the deployment, records a failed
   rollout/deployment result, and alarms instead of trying to repair state
   behind the daemon's back.
+- Deploy scripts are Idunn actuators, not agent tools. They refuse to run
+  unless Idunn invokes them with `IDUNN_ACTUATOR=1`. Agent work is to update the
+  target catalog, release target, command boundary, migration plan, and daemon
+  publication surfaces so Idunn can run the shared command primitive.
 - Zero downtime is a declared rollout capability, not a slogan. If a daemon
   lacks hot reload, blue/green routing, rolling instances, or another named
   in-place swap mechanism, Idunn records `restart-required` and verifies the

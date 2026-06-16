@@ -3,6 +3,7 @@ param(
   [string] $SshTarget = "nwroot",
   [string] $RemoteDir = "/opt/gamecult/gjallar",
   [string] $CultCachePath = "/var/lib/gamecult/gjallar/cultcache/gjallar.service.cc",
+  [string] $OdinCultNetRudp = "192.168.1.66:17871",
   [string] $IdunnRudpHealth = "10.77.0.2:17870",
   [string] $IdunnDaemon = "nightwing-gjallar",
   [string] $IdunnHealthContract = "gjallar.cultnet-rudp-framebuffer-composition-health",
@@ -11,6 +12,10 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+if ($env:IDUNN_ACTUATOR -ne "1") {
+  throw "This deployment script is an Idunn actuator. Agents must configure Idunn release targets and let Idunn run deployment; do not invoke deploy scripts manually."
+}
 
 $sourceRef = "$UpstreamRemote/$UpstreamBranch"
 $scratchRoot = Join-Path $GjallarRoot "scratch"
@@ -83,6 +88,7 @@ $cultCacheDir = if ($CultCachePath.LastIndexOf('/') -gt 0) { $CultCachePath.Subs
 $dropIn = @"
 [Service]
 Environment=GJALLAR_CULTCACHE_PATH=$CultCachePath
+Environment=GJALLAR_ODIN_CULTNET_RUDP=$OdinCultNetRudp
 Environment=GJALLAR_IDUNN_RUDP_HEALTH=$IdunnRudpHealth
 Environment=GJALLAR_IDUNN_DAEMON=$IdunnDaemon
 Environment=GJALLAR_IDUNN_HEALTH_CONTRACT=$IdunnHealthContract

@@ -49,6 +49,9 @@ Idunn brings them up after reboots or crashes, watches health, and escalates
 operator-needed failures through Bifrost's CultMesh bridge. VoidBot owner-DM
 delivery is a demoted compatibility actuator, not the owner; the command belongs
 in Bifrost's Verse. Odin sees the daemons; Idunn keeps the apples from rotting.
+Agents do not deploy daemons directly. They configure Idunn's target catalog,
+release targets, migration commands, and command boundaries so Idunn can run
+the shared rollout primitive and leave typed witnesses behind.
 
 Local package surfaces:
 

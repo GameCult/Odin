@@ -2405,6 +2405,8 @@ fn run_shell(command: &str, timeout_seconds: u64) -> Result<std::process::Output
     };
 
     let child = process
+        .env("IDUNN_ACTUATOR", "1")
+        .env("IDUNN_COMMAND_AUTHORITY", "idunn-daemon")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()

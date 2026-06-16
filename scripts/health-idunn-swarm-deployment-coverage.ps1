@@ -8,6 +8,14 @@ $enforcedWithoutHealth = @($IdunnDeploymentTargets | Where-Object { $_.Status -i
 $enforcedWithoutUpstream = @($IdunnDeploymentTargets | Where-Object { $_.Status -eq "enforced" -and ([string]::IsNullOrWhiteSpace($_.UpstreamRemote) -or [string]::IsNullOrWhiteSpace($_.UpstreamBranch)) })
 $enforcedWithoutRollout = @($IdunnDeploymentTargets | Where-Object { $_.Status -eq "enforced" -and ([string]::IsNullOrWhiteSpace($_.RolloutStrategy) -or [string]::IsNullOrWhiteSpace($_.StateMigration) -or [string]::IsNullOrWhiteSpace($_.ZeroDowntime)) })
 $blockedWithoutReason = @($IdunnDeploymentTargets | Where-Object { $_.Status -in @("blocked", "external-owned") -and [string]::IsNullOrWhiteSpace($_.Reason) })
+$deployScriptsWithoutIdunnGuard = @(
+  $IdunnDeploymentTargets |
+    Where-Object { $_.Status -eq "enforced" -and -not [string]::IsNullOrWhiteSpace($_.Deploy) } |
+    Where-Object {
+      -not (Test-Path -LiteralPath $_.Deploy) -or
+      -not ((Get-Content -Raw -LiteralPath $_.Deploy) -match 'IDUNN_ACTUATOR')
+    }
+)
 
 $issues = @()
 if ($unknown.Count) {
@@ -24,6 +32,9 @@ if ($enforcedWithoutUpstream.Count) {
 }
 if ($enforcedWithoutRollout.Count) {
   $issues += "enforced target missing rollout/migration/downtime contract: $($enforcedWithoutRollout.Id -join ', ')"
+}
+if ($deployScriptsWithoutIdunnGuard.Count) {
+  $issues += "enforced deploy script missing Idunn actuator guard: $($deployScriptsWithoutIdunnGuard.Id -join ', ')"
 }
 if ($blockedWithoutReason.Count) {
   $issues += "blocked/external target missing reason: $($blockedWithoutReason.Id -join ', ')"
