@@ -298,13 +298,16 @@ now publishes daemon-owned provider advertisement, operator state, Eve surface,
 command boundary, and transport profile records in its provider store, and Odin
 local discovery can ingest those records. Weksa still owes CultNet/RUDP command
 document ingress for MiMo VoiceDesign before its HTTP command route can become a
-debug-only lowering. Stonks, VoidBot, Gjallar, Mimir, and the Nightwing Eve
-runtime services still owe provider advertisement and command-boundary RUDP
-publication before their compatibility surfaces can be purely display/debug
-lowerings; Gjallar also owes native CultMesh/RUDP deck input to replace the
-current Odin WebSocket lowering bridge. Raven Muninn task action repair is
-queued separately and remains blocked while Raven is unreachable over SSH; the
-prepared actuator is
+debug-only lowering. Stonks now publishes daemon-owned provider advertisement,
+market snapshot, Eve surface, command boundary, and transport profile records in
+its CultCache store, and Odin local discovery can ingest those records; its
+HTTP/WebSocket endpoints are renderer/debug lowerings. VoidBot, Gjallar, Mimir,
+and the Nightwing Eve runtime services still owe provider advertisement and
+command-boundary RUDP publication before their compatibility surfaces can be
+purely display/debug lowerings; Gjallar also owes native CultMesh/RUDP deck
+input to replace the current Odin WebSocket lowering bridge. Raven Muninn task
+action repair is queued separately and remains blocked while Raven is
+unreachable over SSH; the prepared actuator is
 `scripts\repair-raven-muninn-task-actions.ps1`.
 
 Vili's Node daemon now has an in-process Idunn RUDP publisher for

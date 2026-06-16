@@ -8,6 +8,10 @@ function defineOdinDocuments(defineDocumentType) {
       interfaceBindingDefinition: null,
       operatorStateDefinition: null,
       providerAdvertisementDefinition: null,
+      stonksCommandBoundaryDefinition: null,
+      stonksMarketSnapshotDefinition: null,
+      stonksRequestEventDefinition: null,
+      stonksTransportProfileDefinition: null,
       surfaceDefinition: null,
       viliCommandBoundaryDefinition: null,
       viliTransportProfileDefinition: null,
@@ -106,6 +110,41 @@ function defineOdinDocuments(defineDocumentType) {
     name: (value) => value?.profile_id || value?.profileId || value?.daemon_id || value?.daemonId || "weksa",
     schema: parseObjectDocument("Weksa transport profile"),
   });
+  const stonksRequestEventDefinition = defineDocumentType({
+    type: "stonks.request_event",
+    schemaName: "stonks.request_event",
+    schemaId: "stonks.request_event.v1",
+    schemaVersion: "stonks.request_event.v1",
+    global: false,
+    name: (value) => value?.id || "request",
+    schema: parseObjectDocument("Stonks request event"),
+  });
+  const stonksMarketSnapshotDefinition = defineDocumentType({
+    type: "stonks.market_snapshot",
+    schemaName: "stonks.market_snapshot",
+    schemaId: "stonks.market_snapshot.v1",
+    schemaVersion: "stonks.market_snapshot.v1",
+    global: true,
+    schema: parseObjectDocument("Stonks market snapshot"),
+  });
+  const stonksCommandBoundaryDefinition = defineDocumentType({
+    type: "stonks.command_boundary",
+    schemaName: "stonks.command_boundary",
+    schemaId: "stonks.command_boundary.v1",
+    schemaVersion: "stonks.command_boundary.v1",
+    global: false,
+    name: (value) => value?.boundaryId || value?.daemonId || "stonks",
+    schema: parseObjectDocument("Stonks command boundary"),
+  });
+  const stonksTransportProfileDefinition = defineDocumentType({
+    type: "stonks.transport_profile",
+    schemaName: "stonks.transport_profile",
+    schemaId: "stonks.transport_profile.v1",
+    schemaVersion: "stonks.transport_profile.v1",
+    global: false,
+    name: (value) => value?.profileId || value?.daemonId || "stonks",
+    schema: parseObjectDocument("Stonks transport profile"),
+  });
   const voidbotSwarmSnapshotDefinition = defineDocumentType({
     type: "voidbot.swarm_state_snapshot",
     schemaName: "voidbot.swarm_state_snapshot",
@@ -119,6 +158,10 @@ function defineOdinDocuments(defineDocumentType) {
     interfaceBindingDefinition,
     operatorStateDefinition,
     providerAdvertisementDefinition,
+    stonksCommandBoundaryDefinition,
+    stonksMarketSnapshotDefinition,
+    stonksRequestEventDefinition,
+    stonksTransportProfileDefinition,
     surfaceDefinition,
     viliCommandBoundaryDefinition,
     viliTransportProfileDefinition,

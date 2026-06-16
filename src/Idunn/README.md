@@ -203,12 +203,15 @@ and a daemon-owned provider store containing provider advertisement, operator
 state, Eve surface, command boundary, and transport profile records; Odin local
 discovery can ingest that typed store too. Weksa still owes CultNet/RUDP command
 document ingress for MiMo VoiceDesign before its HTTP command route can become
-debug-only. Raven Muninn task actions are also an explicit ops invariant: Task
-Scheduler must execute `wscript.exe //B //Nologo` hidden launcher actions
-directly for `GameCult-Muninn`, `GameCult-Muninn-Activate`, and
-`GameCult-Muninn-VideoProof`, never raw `.cmd` wrappers. After those live cuts,
-continue daemon-by-daemon until compatibility HTTP, TCP, WebSocket, and command
-probes are fallback witnesses only.
+debug-only. Stonks publishes RUDP health and a daemon-owned CultCache store
+containing provider advertisement, market snapshot, Eve surface, command
+boundary, and transport profile records; Odin local discovery can ingest that
+store as provider truth. Raven Muninn task actions are also an explicit ops
+invariant: Task Scheduler must execute `wscript.exe //B //Nologo` hidden
+launcher actions directly for `GameCult-Muninn`, `GameCult-Muninn-Activate`,
+and `GameCult-Muninn-VideoProof`, never raw `.cmd` wrappers. After those live
+cuts, continue daemon-by-daemon until compatibility HTTP, TCP, WebSocket, and
+command probes are fallback witnesses only.
 
 Rust no longer gets to claim the transport is imaginary:
 `vendor/cultnet-rs` includes the canonical CNR0 `cultnet.transport.rudp.v0`

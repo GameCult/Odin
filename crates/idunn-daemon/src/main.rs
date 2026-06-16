@@ -914,14 +914,14 @@ fn daemon_transport_profile(
 ) -> IdunnDaemonTransportProfileRecord {
     let (current_transport, state, cut_line) = match target.daemon_id.as_str() {
         "stonks" => (
-            "daemon-published-rudp-health + compatibility.local-command fallback",
-            "partial-rudp-health-live",
-            "Stonks daemon health is published over CultNet/RUDP; provider advertisement and command_boundary publication remain migration debt before the HTTP probe can be deleted.",
+            "daemon-published-rudp-health + daemon-owned-cultcache-provider-store + compatibility.local-command fallback",
+            "partial-rudp-health-and-provider-store-live",
+            "Stonks daemon health is published over CultNet/RUDP, and provider advertisement, market snapshot, Eve surface, command_boundary, and transport_profile records are in the daemon-owned CultCache store; HTTP/WebSocket are renderer/debug lowerings.",
         ),
         "weksa" => (
-            "daemon-published-rudp-health + compatibility.local-command fallback",
-            "partial-rudp-health-live",
-            "Weksa daemon health is published over CultNet/RUDP; provider advertisement and command_boundary publication remain migration debt before the HTTP probe can be deleted.",
+            "daemon-published-rudp-health + daemon-owned-cultcache-provider-store + compatibility.local-command fallback",
+            "partial-rudp-health-and-provider-store-live",
+            "Weksa daemon health is published over CultNet/RUDP, and provider advertisement, operator state, Eve surface, command_boundary, and transport_profile records are in the daemon-owned CultCache store; MiMo VoiceDesign command ingress remains compatibility HTTP debt.",
         ),
         "voidbot" => (
             "daemon-published-rudp-health + compatibility.local-command fallback",
@@ -1082,22 +1082,21 @@ fn daemon_surgery_plan(target: &DaemonTarget, updated_at: &str) -> IdunnDaemonSu
             ];
         }
         "stonks" => {
-            status = "partial-rudp-health-live";
+            status = "partial-rudp-health-and-provider-store-live";
             owner = "Stonks TypeScript runtime";
             current_mechanism =
-                "Stonks publishes daemon health over CultNet/RUDP after each serialized market refresh; provider manifest, market state, and command boundary still retain HTTP/WebSocket compatibility surfaces."
+                "Stonks publishes daemon health over CultNet/RUDP after each serialized market refresh, and its daemon-owned CultCache store contains provider advertisement, market snapshot, Eve surface, command_boundary, and transport_profile records that Odin can ingest. HTTP and WebSocket remain renderer/debug lowerings."
                     .to_string();
             intended_authority =
-                "Stonks publishes daemon health, provider advertisement, market snapshot, and command boundary as typed CultMesh/CultNet records over cultnet.transport.rudp.v0; HTTP/WebSocket remain renderer/debug lowerings."
+                "Stonks publishes daemon health, provider advertisement, market snapshot, Eve surface, command boundary, and transport profile as typed CultMesh/CultNet records over cultnet.transport.rudp.v0; HTTP/WebSocket remain renderer/debug lowerings."
                     .to_string();
             cut_line =
-                "Keep the HTTP probe as fallback only until Stonks provider advertisement and command_boundary records are also daemon-owned RUDP publications."
+                "Keep HTTP/WebSocket as lowerings over Stonks CultCache records; demote health-stonks.cmd to a manual compatibility probe with no lifecycle truth once Idunn and Odin consistently consume the typed store."
                     .to_string();
             steps = vec![
                 "Keep live stonks.cultnet-rudp-market-health publication running from the Stonks daemon.".to_string(),
-                "Publish Stonks provider advertisement and market snapshot records over cultnet.transport.rudp.v0.".to_string(),
-                "Publish Stonks command_boundary and transport_profile records from the daemon runtime.".to_string(),
-                "Teach Odin to prefer the Stonks RUDP provider records over HTTP manifest ingestion.".to_string(),
+                "Keep Stonks provider advertisement, market snapshot, Eve surface, command_boundary, and transport_profile records in the daemon-owned CultCache store.".to_string(),
+                "Keep Odin provider discovery accepting Stonks' typed store instead of relying on HTTP manifest ingestion.".to_string(),
                 "Delete or demote health-stonks.cmd to a manual compatibility probe with no lifecycle truth.".to_string(),
             ];
         }
@@ -2439,7 +2438,7 @@ mod tests {
     }
 
     #[test]
-    fn stonks_transport_profile_marks_partial_rudp_health() {
+    fn stonks_transport_profile_marks_provider_store_live() {
         let stonks = DaemonTarget {
             daemon_id: "stonks".to_string(),
             verse_id: "starfire.local".to_string(),
@@ -2454,17 +2453,17 @@ mod tests {
 
         let profile = daemon_transport_profile(&stonks, "unix:100");
 
-        assert_eq!(profile.state, "partial-rudp-health-live");
+        assert_eq!(profile.state, "partial-rudp-health-and-provider-store-live");
         assert!(
             profile
                 .current_transport
-                .contains("daemon-published-rudp-health")
+                .contains("daemon-owned-cultcache-provider-store")
         );
-        assert!(profile.cut_line.contains("provider advertisement"));
+        assert!(profile.cut_line.contains("HTTP/WebSocket"));
     }
 
     #[test]
-    fn weksa_transport_profile_marks_partial_rudp_health() {
+    fn weksa_transport_profile_marks_provider_store_live() {
         let weksa = DaemonTarget {
             daemon_id: "weksa".to_string(),
             verse_id: "starfire.local".to_string(),
@@ -2479,16 +2478,12 @@ mod tests {
 
         let profile = daemon_transport_profile(&weksa, "unix:100");
 
-        assert_eq!(profile.state, "partial-rudp-health-live");
+        assert_eq!(profile.state, "partial-rudp-health-and-provider-store-live");
         assert_eq!(
             profile.current_transport,
-            "daemon-published-rudp-health + compatibility.local-command fallback"
+            "daemon-published-rudp-health + daemon-owned-cultcache-provider-store + compatibility.local-command fallback"
         );
-        assert!(
-            profile
-                .cut_line
-                .contains("Weksa daemon health is published over CultNet/RUDP")
-        );
+        assert!(profile.cut_line.contains("MiMo VoiceDesign"));
     }
 
     #[test]

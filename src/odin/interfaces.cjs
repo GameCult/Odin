@@ -55,6 +55,10 @@ function createInterfaceDiscovery({
       interfaceBindingDefinition,
       operatorStateDefinition,
       providerAdvertisementDefinition,
+      stonksCommandBoundaryDefinition,
+      stonksMarketSnapshotDefinition,
+      stonksRequestEventDefinition,
+      stonksTransportProfileDefinition,
       surfaceDefinition,
       viliCommandBoundaryDefinition,
       viliTransportProfileDefinition,
@@ -63,7 +67,7 @@ function createInterfaceDiscovery({
       weksaTransportProfileDefinition,
       voidbotSwarmSnapshotDefinition,
     } = documents;
-    if (!CultMesh || !interfaceBindingDefinition || !operatorStateDefinition || !surfaceDefinition || !viliCommandBoundaryDefinition || !viliTransportProfileDefinition || !weksaCommandBoundaryDefinition || !weksaOperatorStateDefinition || !weksaTransportProfileDefinition || !voidbotSwarmSnapshotDefinition || !providerAdvertisementDefinition) {
+    if (!CultMesh || !interfaceBindingDefinition || !operatorStateDefinition || !stonksCommandBoundaryDefinition || !stonksMarketSnapshotDefinition || !stonksRequestEventDefinition || !stonksTransportProfileDefinition || !surfaceDefinition || !viliCommandBoundaryDefinition || !viliTransportProfileDefinition || !weksaCommandBoundaryDefinition || !weksaOperatorStateDefinition || !weksaTransportProfileDefinition || !voidbotSwarmSnapshotDefinition || !providerAdvertisementDefinition) {
       return [];
     }
 
@@ -76,9 +80,13 @@ function createInterfaceDiscovery({
         const node = await CultMesh.createNode(storePath, {
           documents: [
             voidbotSwarmSnapshotDefinition,
+            stonksRequestEventDefinition,
+            stonksMarketSnapshotDefinition,
             providerAdvertisementDefinition,
             interfaceBindingDefinition,
             surfaceDefinition,
+            stonksCommandBoundaryDefinition,
+            stonksTransportProfileDefinition,
             operatorStateDefinition,
             viliCommandBoundaryDefinition,
             viliTransportProfileDefinition,
@@ -117,10 +125,12 @@ function createInterfaceDiscovery({
             commandBoundary: providerRecord(node, [
               viliCommandBoundaryDefinition,
               weksaCommandBoundaryDefinition,
+              stonksCommandBoundaryDefinition,
             ], advertisement) || null,
             transportProfile: providerRecord(node, [
               viliTransportProfileDefinition,
               weksaTransportProfileDefinition,
+              stonksTransportProfileDefinition,
             ], advertisement) || null,
             usesCultMesh: true,
             transport: advertisement.provider?.transport || "CultMesh provider advertisement",
@@ -145,6 +155,10 @@ function createInterfaceDiscovery({
       interfaceBindingDefinition,
       operatorStateDefinition,
       providerAdvertisementDefinition,
+      stonksCommandBoundaryDefinition,
+      stonksMarketSnapshotDefinition,
+      stonksRequestEventDefinition,
+      stonksTransportProfileDefinition,
       surfaceDefinition,
       viliCommandBoundaryDefinition,
       viliTransportProfileDefinition,
@@ -153,7 +167,7 @@ function createInterfaceDiscovery({
       weksaTransportProfileDefinition,
       voidbotSwarmSnapshotDefinition,
     } = documents;
-    if (!CultMesh || !interfaceBindingDefinition || !operatorStateDefinition || !surfaceDefinition || !viliCommandBoundaryDefinition || !viliTransportProfileDefinition || !weksaCommandBoundaryDefinition || !weksaOperatorStateDefinition || !weksaTransportProfileDefinition || !voidbotSwarmSnapshotDefinition || !providerAdvertisementDefinition) {
+    if (!CultMesh || !interfaceBindingDefinition || !operatorStateDefinition || !stonksCommandBoundaryDefinition || !stonksMarketSnapshotDefinition || !stonksRequestEventDefinition || !stonksTransportProfileDefinition || !surfaceDefinition || !viliCommandBoundaryDefinition || !viliTransportProfileDefinition || !weksaCommandBoundaryDefinition || !weksaOperatorStateDefinition || !weksaTransportProfileDefinition || !voidbotSwarmSnapshotDefinition || !providerAdvertisementDefinition) {
       return [];
     }
     const interfaces = [];
@@ -165,9 +179,13 @@ function createInterfaceDiscovery({
         const node = await CultMesh.createNode(storePath, {
           documents: [
             voidbotSwarmSnapshotDefinition,
+            stonksRequestEventDefinition,
+            stonksMarketSnapshotDefinition,
             providerAdvertisementDefinition,
             interfaceBindingDefinition,
             surfaceDefinition,
+            stonksCommandBoundaryDefinition,
+            stonksTransportProfileDefinition,
             operatorStateDefinition,
             viliCommandBoundaryDefinition,
             viliTransportProfileDefinition,
@@ -198,10 +216,12 @@ function createInterfaceDiscovery({
             commandBoundary: providerRecord(node, [
               viliCommandBoundaryDefinition,
               weksaCommandBoundaryDefinition,
+              stonksCommandBoundaryDefinition,
             ], advertisement) || null,
             transportProfile: providerRecord(node, [
               viliTransportProfileDefinition,
               weksaTransportProfileDefinition,
+              stonksTransportProfileDefinition,
             ], advertisement) || null,
           }));
         }
@@ -317,6 +337,7 @@ function providerRecordKeys(advertisement) {
   ];
   if (advertisement?.providerId === "vili.animation") keys.push("vili");
   if (advertisement?.providerId === "weksa.intent.service") keys.push("weksa");
+  if (advertisement?.providerId === "stonks.market") keys.push("stonks");
   return [...new Set(keys.filter(Boolean).map(String))];
 }
 

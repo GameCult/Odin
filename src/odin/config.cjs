@@ -39,6 +39,7 @@ function buildConfig(argv) {
     path.join(repoRoot, "..", "Bifrost", ".bifrost", "provider-advertisement.cc"),
     path.join(repoRoot, "..", "weksa", ".weksa", "provider-advertisement-store.cc"),
     path.join(repoRoot, "..", "Vili", ".vili", "vili.service.cc"),
+    path.join(repoRoot, "..", "Stonks", "scratch", "stonks", "stonks-state.cc"),
   ].join(",");
   const interfaceBindingStores = String(
     args.interfaceBindingStore ||
