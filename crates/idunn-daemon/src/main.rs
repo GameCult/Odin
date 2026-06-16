@@ -890,7 +890,7 @@ fn swarm_surgery_plan(
     updated_at: &str,
 ) -> IdunnSwarmSurgeryPlanRecord {
     let next_target = [
-        "nightwing-eve-browser-reference",
+        "voidbot",
     ]
     .iter()
     .copied()
@@ -934,11 +934,11 @@ fn swarm_surgery_plan(
             "5. Delete or demote compatibility probes once every target has daemon-owned publication and advertised lifecycle authority.".to_string(),
         ],
         current_phase:
-            "Phase 17: Mimir Eve dashboard now publishes daemon-owned CultMesh state plus a daemon-owned boundary witness store from the live Nightwing C# broker runtime; the browser reference is the next compatibility cut because its lowering surface still lacks a daemon-owned boundary witness."
+            "Phase 18: Nightwing Eve browser reference now publishes a daemon-owned boundary witness store from the live static-lowering runtime; VoidBot is the next compatibility cut because provider advertisement and command boundary publication still sit outside the daemon."
                 .to_string(),
         next_target: next_target.to_string(),
         cut_line:
-            "Muninn, Vili, Idunn, Odin, Stonks, Weksa, VoidBot, Nightwing Gjallar, Mimir Eve dashboard, Nightwing Eve dashboard, Nightwing Eve browser reference, yggdrasil-streampixels, yggdrasil-heimdall, and yggdrasil-repixelizer now exercise daemon-owned RUDP health. Raven GameCult\\Vili has been refreshed from Odin, the hidden scheduled task now launches start-vili-daemon.ps1 with Idunn RUDP arguments, and live Idunn accepts vili.cultnet-rudp-animation-health from 10.77.0.4. Live Raven Muninn task actions remain repaired and verified to execute wscript.exe hidden launchers directly for GameCult-Muninn, GameCult-Muninn-Activate, and GameCult-Muninn-VideoProof, the long-running Muninn serve bodies on Raven, Nightwing, and Starfire now carry their own --idunn-rudp-health, --idunn-daemon, and --idunn-health-contract identity while Idunn accepts muninn from 10.77.0.4, nightwing-muninn from 10.77.0.3, and starfire-muninn from 127.0.0.1, live yggdrasil-streampixels publishes streampixels.cultnet-rudp-service-health from 10.77.0.1, live yggdrasil-heimdall publishes heimdall.cultnet-rudp-provider-health from 10.77.0.1 with a boundary store at /srv/heimdall/cultcache/heimdall.service.cc, live yggdrasil-repixelizer publishes repixelizer.cultnet-rudp-service-health from 10.77.0.1 with a boundary store at /srv/repixelizer/cultcache/repixelizer.service.cc, live Nightwing Gjallar publishes a boundary store at /var/lib/gamecult/gjallar/cultcache/gjallar.service.cc, and live Mimir Eve dashboard now publishes CultMesh state at /var/lib/gamecult/eve-dashboard/cultmesh/eve-dashboard.ccmp plus a boundary store at /var/lib/gamecult/eve-dashboard/cultcache/eve-dashboard.service.cc. Nightwing Eve browser reference remains the next compatibility debt."
+            "Muninn, Vili, Idunn, Odin, Stonks, Weksa, VoidBot, Nightwing Gjallar, Mimir Eve dashboard, Nightwing Eve dashboard, Nightwing Eve browser reference, yggdrasil-streampixels, yggdrasil-heimdall, and yggdrasil-repixelizer now exercise daemon-owned RUDP health. Raven GameCult\\Vili has been refreshed from Odin, the hidden scheduled task now launches start-vili-daemon.ps1 with Idunn RUDP arguments, and live Idunn accepts vili.cultnet-rudp-animation-health from 10.77.0.4. Live Raven Muninn task actions remain repaired and verified to execute wscript.exe hidden launchers directly for GameCult-Muninn, GameCult-Muninn-Activate, and GameCult-Muninn-VideoProof, the long-running Muninn serve bodies on Raven, Nightwing, and Starfire now carry their own --idunn-rudp-health, --idunn-daemon, and --idunn-health-contract identity while Idunn accepts muninn from 10.77.0.4, nightwing-muninn from 10.77.0.3, and starfire-muninn from 127.0.0.1, live yggdrasil-streampixels publishes streampixels.cultnet-rudp-service-health from 10.77.0.1, live yggdrasil-heimdall publishes heimdall.cultnet-rudp-provider-health from 10.77.0.1 with a boundary store at /srv/heimdall/cultcache/heimdall.service.cc, live yggdrasil-repixelizer publishes repixelizer.cultnet-rudp-service-health from 10.77.0.1 with a boundary store at /srv/repixelizer/cultcache/repixelizer.service.cc, live Nightwing Gjallar publishes a boundary store at /var/lib/gamecult/gjallar/cultcache/gjallar.service.cc, live Mimir Eve dashboard now publishes CultMesh state at /var/lib/gamecult/eve-dashboard/cultmesh/eve-dashboard.ccmp plus a boundary store at /var/lib/gamecult/eve-dashboard/cultcache/eve-dashboard.service.cc, and live Nightwing Eve browser reference now publishes a boundary store at /var/lib/gamecult/eve-browser-reference/cultcache/eve-browser-reference.service.cc. VoidBot remains the next compatibility debt."
                 .to_string(),
         verification_layer:
             "CultMesh keepalive store records plus live Idunn decision cycles, not process exit codes or chat summaries."
@@ -986,9 +986,9 @@ fn daemon_transport_profile(
             "Nightwing Eve dashboard service health is published over CultNet/RUDP from the Mimir.EveDashboard systemd process, and the live broker now publishes CultMesh state at /var/lib/gamecult/eve-dashboard/cultmesh/eve-dashboard.ccmp plus a daemon-owned boundary store at /var/lib/gamecult/eve-dashboard/cultcache/eve-dashboard.service.cc carrying provider manifest, command_boundary, transport_profile, and daemon-health summary state. HTTP/WebSocket remain client lowerings and the local service probe is fallback evidence only.",
         ),
         "nightwing-eve-browser-reference" => (
-            "daemon-published-rudp-health + compatibility.local-command fallback",
-            "partial-rudp-health-live",
-            "Nightwing Eve browser reference health is published over CultNet/RUDP from the Mimir.EveBrowserReference service process; provider advertisement and command boundaries remain migration debt before the service probe can be deleted.",
+            "daemon-published-rudp-health + daemon-owned-cultcache-boundary-store + compatibility.local-command fallback",
+            "partial-rudp-health-and-provider-store-live",
+            "Nightwing Eve browser reference health is published over CultNet/RUDP from the Mimir.EveBrowserReference service process, and the runtime now publishes a daemon-owned boundary store at /var/lib/gamecult/eve-browser-reference/cultcache/eve-browser-reference.service.cc carrying manifest, static-surface, command_boundary, transport_profile, and daemon-health summary state. HTTP remains a browser lowering and the local service probe is fallback evidence only.",
         ),
         "muninn" => (
             "daemon-published-rudp-health + background-only hidden task launch + compatibility.local-command fallback",
@@ -1336,18 +1336,17 @@ fn daemon_surgery_plan(target: &DaemonTarget, updated_at: &str) -> IdunnDaemonSu
                     "Delete or demote health-nightwing-eve-dashboard.cmd to a manual compatibility probe with no lifecycle truth.".to_string(),
                 ];
             } else {
-                status = "partial-rudp-health-live";
+                status = "partial-rudp-health-and-provider-store-live";
                 current_mechanism =
-                    "Nightwing Eve browser reference publishes nightwing.cultnet-rudp-browser-reference-health over CultNet/RUDP from the Mimir.EveBrowserReference service process; the local service probe remains fallback evidence only."
+                    "Nightwing Eve browser reference publishes nightwing.cultnet-rudp-browser-reference-health over CultNet/RUDP from the Mimir.EveBrowserReference service process, and the runtime now writes a daemon-owned boundary store at /var/lib/gamecult/eve-browser-reference/cultcache/eve-browser-reference.service.cc."
                         .to_string();
                 cut_line =
-                    "Keep the service probe as fallback only until the Nightwing Eve browser reference publishes provider advertisement, command_boundary, and transport_profile records over CultNet/RUDP."
+                    "Keep the service probe as fallback only until Nightwing projections and Odin consume the browser reference CultCache witness directly instead of treating the service probe as primary truth."
                         .to_string();
                 steps = vec![
                     "Keep live nightwing.cultnet-rudp-browser-reference-health publication running from the Mimir.EveBrowserReference service process.".to_string(),
-                    "Publish Nightwing Eve browser reference provider advertisement and static-lowering state over cultnet.transport.rudp.v0.".to_string(),
-                    "Publish Nightwing Eve browser reference command_boundary and transport_profile records from the runtime.".to_string(),
-                    "Teach Odin and Nightwing projections to prefer the browser reference RUDP/CultMesh records over service compatibility probes.".to_string(),
+                    "Keep the daemon-owned boundary store at /var/lib/gamecult/eve-browser-reference/cultcache/eve-browser-reference.service.cc publishing manifest, static-surface, command_boundary, transport_profile, and daemon-health summary records.".to_string(),
+                    "Teach Odin and Nightwing projections to prefer the browser reference CultCache witness over service compatibility probes.".to_string(),
                     "Delete or demote health-nightwing-eve-browser-reference.cmd to a manual compatibility probe with no lifecycle truth.".to_string(),
                 ];
             }
@@ -2212,7 +2211,7 @@ mod tests {
     }
 
     #[test]
-    fn swarm_surgery_plan_names_browser_reference_after_mimir_dashboard_cut() {
+    fn swarm_surgery_plan_names_voidbot_after_browser_reference_cut() {
         let starfire_muninn = DaemonTarget {
             daemon_id: "starfire-muninn".to_string(),
             verse_id: "starfire.local".to_string(),
@@ -2421,8 +2420,8 @@ mod tests {
 
         assert_eq!(plan.plan_id, "swarm-surgery:starfire-local");
         assert_eq!(plan.status, "active-transport-migration");
-        assert_eq!(plan.next_target, "nightwing-eve-browser-reference");
-        assert!(plan.current_phase.contains("Mimir Eve dashboard"));
+        assert_eq!(plan.next_target, "voidbot");
+        assert!(plan.current_phase.contains("Nightwing Eve browser reference"));
         assert!(
             plan.cut_line
                 .contains("live yggdrasil-heimdall publishes heimdall.cultnet-rudp-provider-health")
@@ -2448,7 +2447,9 @@ mod tests {
         assert!(plan.cut_line.contains("live Mimir Eve dashboard now publishes CultMesh state"));
         assert!(plan.cut_line.contains("/var/lib/gamecult/eve-dashboard/cultmesh/eve-dashboard.ccmp"));
         assert!(plan.cut_line.contains("/var/lib/gamecult/eve-dashboard/cultcache/eve-dashboard.service.cc"));
-        assert!(plan.cut_line.contains("Nightwing Eve browser reference remains"));
+        assert!(plan.cut_line.contains("live Nightwing Eve browser reference now publishes a boundary store"));
+        assert!(plan.cut_line.contains("/var/lib/gamecult/eve-browser-reference/cultcache/eve-browser-reference.service.cc"));
+        assert!(plan.cut_line.contains("VoidBot remains"));
         assert!(plan.verification_layer.contains("CultMesh keepalive store"));
         assert!(
             plan.invariants
@@ -2577,12 +2578,17 @@ mod tests {
             daemon_surgery_plan(&nightwing_eve_browser_reference, "unix:100");
         assert_eq!(
             nightwing_eve_browser_reference_plan.status,
-            "partial-rudp-health-live"
+            "partial-rudp-health-and-provider-store-live"
         );
         assert!(
             nightwing_eve_browser_reference_plan
                 .current_mechanism
                 .contains("nightwing.cultnet-rudp-browser-reference-health")
+        );
+        assert!(
+            nightwing_eve_browser_reference_plan
+                .current_mechanism
+                .contains("/var/lib/gamecult/eve-browser-reference/cultcache/eve-browser-reference.service.cc")
         );
         assert!(
             nightwing_eve_browser_reference_plan
