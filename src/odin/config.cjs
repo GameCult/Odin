@@ -41,8 +41,9 @@ function buildConfig(argv) {
     path.join(repoRoot, "..", "Vili", ".vili", "vili.service.cc"),
     path.join(repoRoot, "..", "Stonks", "scratch", "stonks", "stonks-state.cc"),
     path.join(repoRoot, "..", "StreamPixels", ".streampixels-data", "cultcache", "streampixels.service.cc"),
-    "C:\\Meta\\Odin\\state\\muninn.telemetry.cc",
+    "sftp://raven/C:/Meta/Odin/state/muninn.telemetry.cc",
     "C:\\Meta\\Odin\\state\\starfire.muninn.telemetry.cc",
+    "sftp://nightwing/home/metacrat/.local/state/gamecult/muninn/muninn.telemetry.cc",
   ].join(",");
   const interfaceBindingStores = String(
     args.interfaceBindingStore ||

@@ -9,6 +9,9 @@ function defineOdinDocuments(defineDocumentType) {
       idunnDaemonHealthDefinition: null,
       muninnCaptureStreamDefinition: null,
       muninnCommandBoundaryDefinition: null,
+      muninnMoveControllerStateDefinition: null,
+      muninnMoveLightCommandDefinition: null,
+      muninnMoveMarkerCandidateDefinition: null,
       muninnObsStreamCatalogDefinition: null,
       muninnQuestAccessDefinition: null,
       muninnTelemetrySurfaceDefinition: null,
@@ -91,6 +94,33 @@ function defineOdinDocuments(defineDocumentType) {
     global: false,
     name: (value) => value?.boundary_id || value?.boundaryId || value?.daemon_id || value?.daemonId || "muninn",
     schema: parseObjectDocument("Muninn command boundary"),
+  });
+  const muninnMoveControllerStateDefinition = defineDocumentType({
+    type: "muninn.move_controller_state",
+    schemaName: "muninn.move_controller_state",
+    schemaId: "muninn.move_controller_state.v1",
+    schemaVersion: "muninn.move_controller_state.v1",
+    global: false,
+    name: (value) => value?.stream_id || value?.streamId || value?.move_id || value?.moveId || "move-controller-state",
+    schema: parseObjectDocument("Muninn Move controller state"),
+  });
+  const muninnMoveLightCommandDefinition = defineDocumentType({
+    type: "muninn.move_light_command",
+    schemaName: "muninn.move_light_command",
+    schemaId: "muninn.move_light_command.v1",
+    schemaVersion: "muninn.move_light_command.v1",
+    global: false,
+    name: (value) => value?.command_id || value?.commandId || value?.move_id || value?.moveId || "move-light-command",
+    schema: parseObjectDocument("Muninn Move light command"),
+  });
+  const muninnMoveMarkerCandidateDefinition = defineDocumentType({
+    type: "muninn.move_marker_candidate",
+    schemaName: "muninn.move_marker_candidate",
+    schemaId: "muninn.move_marker_candidate.v1",
+    schemaVersion: "muninn.move_marker_candidate.v1",
+    global: false,
+    name: (value) => value?.stream_id || value?.streamId || value?.camera_id || value?.cameraId || "move-marker-candidate",
+    schema: parseObjectDocument("Muninn Move marker candidate"),
   });
   const muninnObsStreamCatalogDefinition = defineDocumentType({
     type: "muninn.obs_stream_catalog",
@@ -249,6 +279,9 @@ function defineOdinDocuments(defineDocumentType) {
     idunnDaemonHealthDefinition,
     muninnCaptureStreamDefinition,
     muninnCommandBoundaryDefinition,
+    muninnMoveControllerStateDefinition,
+    muninnMoveLightCommandDefinition,
+    muninnMoveMarkerCandidateDefinition,
     muninnObsStreamCatalogDefinition,
     muninnQuestAccessDefinition,
     muninnTelemetrySurfaceDefinition,
