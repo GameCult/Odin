@@ -2,11 +2,17 @@
 
 const childProcess = require("child_process");
 const fs = require("fs");
+const { createRequire } = require("module");
 const os = require("os");
 const path = require("path");
 const { httpGet, stableId } = require("./utils.cjs");
 const { openWebSocket, readServerTextFrame, sendClientFrame } = require("./websocket.cjs");
 const { tcpCheck } = require("./probes.cjs");
+
+const requireCultCacheInspection = createRequire(
+  path.resolve(__dirname, "..", "..", "..", "CultLib", "packages", "cultcache-ts", "package.json"),
+);
+const { inspectCultCacheBytes } = requireCultCacheInspection("./dist/cult-cache-inspector.js");
 
 function createInterfaceDiscovery({
   CultMesh,
@@ -87,8 +93,9 @@ function createInterfaceDiscovery({
 
     const providers = [];
     for (const storeSpec of interfaceBindingStores) {
+      let resolvedStore = null;
       try {
-        const resolvedStore = resolveInterfaceBindingStore(storeSpec);
+        resolvedStore = resolveInterfaceBindingStore(storeSpec);
         if (!resolvedStore) {
           continue;
         }
@@ -179,6 +186,12 @@ function createInterfaceDiscovery({
       } catch {
         // Provider advertisements are optional discovery hints; broken stores
         // are still surfaced through interface discovery when possible.
+        if (resolvedStore?.localPath && fs.existsSync(resolvedStore.localPath)) {
+          providers.push(...inspectProviderAdvertisementsFromStore(
+            resolvedStore.localPath,
+            resolvedStore.sourceId,
+          ));
+        }
       }
     }
 
@@ -220,8 +233,9 @@ function createInterfaceDiscovery({
     }
     const interfaces = [];
     for (const storeSpec of interfaceBindingStores) {
+      let resolvedStore = null;
       try {
-        const resolvedStore = resolveInterfaceBindingStore(storeSpec);
+        resolvedStore = resolveInterfaceBindingStore(storeSpec);
         if (!resolvedStore) {
           continue;
         }
@@ -324,6 +338,16 @@ function createInterfaceDiscovery({
           });
         }
       } catch (error) {
+        if (resolvedStore?.localPath && fs.existsSync(resolvedStore.localPath)) {
+          const fallbackInterfaces = inspectCultMeshInterfacesFromStore(
+            resolvedStore.localPath,
+            resolvedStore.sourceId,
+          );
+          if (fallbackInterfaces.length > 0) {
+            interfaces.push(...fallbackInterfaces);
+            continue;
+          }
+        }
         interfaces.push(dashboardUnavailable(`cultmesh:${storeSpec}`, `cultmesh:${storeSpec}`, error.message));
       }
     }
@@ -424,6 +448,309 @@ function providerRecordKeys(advertisement) {
   if (advertisement?.providerId === "stonks.market") keys.push("stonks");
   if (advertisement?.provider?.id === "streampixels.service") keys.push("streampixels", "yggdrasil-streampixels");
   return [...new Set(keys.filter(Boolean).map(String))];
+}
+
+function inspectProviderAdvertisementsFromStore(storePath, sourceId) {
+  const inspection = inspectCultCacheBytes(storePath, fs.readFileSync(storePath));
+  const records = inspection.records || [];
+  return records
+    .filter((record) => record.schemaName === "gamecult.eve.provider_advertisement")
+    .map((record) => buildInspectedProviderAdvertisement(record, records, sourceId))
+    .filter(Boolean);
+}
+
+function buildInspectedProviderAdvertisement(record, records, sourceId) {
+  const advertisement = normalizeInspectedProviderAdvertisement(record?.payloadPreview);
+  const providerId = advertisement?.providerId;
+  if (!providerId) {
+    return null;
+  }
+  const commandBoundary = inspectProviderCommandBoundary(providerId, records);
+  const transportProfile = inspectProviderTransportProfile(providerId, records);
+  const endpoints = normalizeInspectedEndpoints(advertisement.endpoints);
+  return {
+    id: providerId,
+    title: advertisement.title || providerId,
+    description: advertisement.description || "Provider-owned CultMesh advertisement.",
+    version: String(advertisement.version || 0),
+    endpoint: advertisement.cultMeshAddress || endpoints[0]?.address || `cultmesh:${sourceId}`,
+    canonicalService: advertisement.canonicalService || null,
+    locatedService: advertisement.locatedService || null,
+    cultMeshAddress: advertisement.cultMeshAddress || null,
+    endpoints,
+    routes: normalizeInspectedRoutes(advertisement),
+    transportEndpoint: advertisement.cultMeshAddress || endpoints.find((entry) => String(entry.address || "").startsWith("ws://"))?.address || endpoints[0]?.address || `cultmesh:${sourceId}`,
+    capabilities: advertisement.capabilities || [],
+    operatorState: null,
+    commandBoundary,
+    transportProfile,
+    usesCultMesh: true,
+    transport: "CultMesh provider advertisement",
+    status: advertisement.status || "unknown",
+    updatedAt: advertisement.updatedAt || new Date().toISOString(),
+    source: `cultmesh:${sourceId}`,
+    commandSurface: advertisement.commandSurface || null,
+  };
+}
+
+function inspectCultMeshInterfacesFromStore(storePath, sourceId) {
+  const inspection = inspectCultCacheBytes(storePath, fs.readFileSync(storePath));
+  const records = inspection.records || [];
+  const providersById = new Map(
+    records
+      .filter((record) => record.schemaName === "gamecult.eve.provider_advertisement")
+      .map((record) => buildInspectedProviderAdvertisement(record, records, sourceId))
+      .filter(Boolean)
+      .map((provider) => [provider.id, provider]),
+  );
+  return records
+    .filter((record) => record.schemaName === "gamecult.eve.surface_state")
+    .map((record) => buildInspectedInterfaceFromSurfaceRecord(
+      record,
+      providersById,
+      sourceId,
+      records,
+    ))
+    .filter(Boolean);
+}
+
+function buildInspectedInterfaceFromSurfaceRecord(record, providersById, sourceId, records) {
+  const state = normalizeInspectedSurfaceState(record?.payloadPreview);
+  if (!state?.providerId || !state.surface?.root) {
+    return null;
+  }
+  const provider = providersById.get(state.providerId) || null;
+  return {
+    providerId: state.providerId,
+    title: state.title || provider?.title || state.providerId,
+    state: "active",
+    detail: `${state.surface.root.kind || "surface"} ${countSurfaceNodes(state.surface)} nodes via CultMesh witness inspection`,
+    version: state.version || 0,
+    updatedAt: state.updatedAt || provider?.updatedAt || new Date().toISOString(),
+    source: `cultmesh:${sourceId}`,
+    manifest: provider ? {
+      providerId: provider.id,
+      title: provider.title,
+      description: provider.description,
+      canonicalService: provider.canonicalService,
+      locatedService: provider.locatedService,
+      cultMeshAddress: provider.cultMeshAddress,
+      endpoints: provider.endpoints,
+      routes: provider.routes,
+    } : null,
+    canonicalService: provider?.canonicalService || null,
+    locatedService: provider?.locatedService || null,
+    cultMeshAddress: provider?.cultMeshAddress || null,
+    endpoints: provider?.endpoints || [],
+    routes: provider?.routes || [],
+    operatorState: null,
+    commandBoundary: provider?.commandBoundary || inspectProviderCommandBoundary(state.providerId, records),
+    transportProfile: provider?.transportProfile || inspectProviderTransportProfile(state.providerId, records),
+    surface: state.surface,
+  };
+}
+
+function normalizeInspectedProviderAdvertisement(preview) {
+  if (Array.isArray(preview) && preview.length === 1 && preview[0] && typeof preview[0] === "object" && !Array.isArray(preview[0])) {
+    const value = preview[0];
+    return {
+      providerId: value.providerId || value.ProviderId || null,
+      title: value.title || value.Title || null,
+      description: value.description || value.Description || null,
+      canonicalService: value.canonicalService || value.CanonicalService || null,
+      locatedService: value.locatedService || value.LocatedService || null,
+      cultMeshAddress: value.cultMeshAddress || value.CultMeshAddress || null,
+      status: value.status || value.Status || null,
+      updatedAt: value.updatedAt || value.UpdatedAt || null,
+      capabilities: value.capabilities || value.CapabilityIds || [],
+      endpoints: value.endpoints || value.Endpoints || [],
+      commandSurface: value.commandSurface || value.CommandSurface || null,
+    };
+  }
+  if (!Array.isArray(preview) || preview.length < 11) {
+    return null;
+  }
+  return {
+    providerId: preview[1] || null,
+    serviceId: preview[2] || null,
+    verseId: preview[3] || null,
+    title: preview[4] || null,
+    description: preview[5] || null,
+    canonicalService: preview[6] || null,
+    locatedService: preview[7] || null,
+    cultMeshAddress: preview[8] || null,
+    status: preview[9] || null,
+    updatedAt: preview[10] || null,
+    capabilities: Array.isArray(preview[11]) ? preview[11] : [],
+    endpoints: Array.isArray(preview[12]) ? preview[12] : [],
+    schemas: Array.isArray(preview[13]) ? preview[13] : [],
+    witnesses: Array.isArray(preview[14]) ? preview[14] : [],
+    surfaces: Array.isArray(preview[15]) ? preview[15] : [],
+  };
+}
+
+function normalizeInspectedSurfaceState(preview) {
+  if (Array.isArray(preview) && preview.length === 1 && preview[0] && typeof preview[0] === "object" && !Array.isArray(preview[0])) {
+    const value = preview[0];
+    return {
+      providerId: value.providerId || value.ProviderId || null,
+      title: value.title || value.Title || null,
+      version: Number(value.version || value.Version || 0),
+      updatedAt: value.updatedAt || value.UpdatedAt || null,
+      surface: normalizeInspectedSurface(value.surface || value.Surface || null),
+    };
+  }
+  if (!Array.isArray(preview) || preview.length < 5) {
+    return null;
+  }
+  if (preview.length >= 6) {
+    return {
+      providerId: preview[1] || null,
+      title: preview[2] || null,
+      version: Number(preview[3] || 0),
+      updatedAt: preview[4] || null,
+      surface: normalizeInspectedSurface(preview[5]),
+    };
+  }
+  return {
+    providerId: preview[0] || null,
+    title: preview[1] || null,
+    version: Number(preview[2] || 0),
+    updatedAt: preview[3] || null,
+    surface: normalizeInspectedSurface(preview[4]),
+  };
+}
+
+function normalizeInspectedSurface(preview) {
+  if (!preview) {
+    return null;
+  }
+  if (!Array.isArray(preview) && typeof preview === "object") {
+    return {
+      ...preview,
+      root: normalizeInspectedSurfaceNode(preview.root),
+      assets: Array.isArray(preview.assets) ? preview.assets : [],
+    };
+  }
+  if (!Array.isArray(preview) || preview.length < 4) {
+    return null;
+  }
+  return {
+    schema: preview[0] || "gamecult.eve.surface.v1",
+    id: preview[1] || "surface",
+    title: preview[2] || "",
+    root: normalizeInspectedSurfaceNode(preview[3]),
+    assets: Array.isArray(preview[4]) ? preview[4] : [],
+  };
+}
+
+function normalizeInspectedSurfaceNode(preview) {
+  if (!preview) {
+    return null;
+  }
+  if (!Array.isArray(preview) && typeof preview === "object") {
+    return {
+      ...preview,
+      props: normalizeInspectedSurfaceProps(preview.props),
+      children: Array.isArray(preview.children)
+        ? preview.children.map((child) => normalizeInspectedSurfaceNode(child)).filter(Boolean)
+        : [],
+    };
+  }
+  if (!Array.isArray(preview) || preview.length < 3) {
+    return null;
+  }
+  return {
+    id: preview[0] || "node",
+    kind: preview[1] || "group",
+    props: normalizeInspectedSurfaceProps(preview[2]),
+    children: Array.isArray(preview[3])
+      ? preview[3].map((child) => normalizeInspectedSurfaceNode(child)).filter(Boolean)
+      : [],
+  };
+}
+
+function normalizeInspectedSurfaceProps(preview) {
+  if (!preview) {
+    return {};
+  }
+  if (!Array.isArray(preview) && typeof preview === "object") {
+    return preview;
+  }
+  if (!Array.isArray(preview)) {
+    return {};
+  }
+  return {
+    title: preview[0] || "",
+    text: preview[1] || "",
+    label: preview[2] || "",
+    value: preview[3] || "",
+    status: preview[4] || "",
+    summary: preview[5] || "",
+    detail: preview[6] || "",
+  };
+}
+
+function inspectProviderCommandBoundary(providerId, records) {
+  if (providerId !== "nightwing-gjallar") {
+    return null;
+  }
+  const record = records.find((entry) => entry.schemaName === "gjallar.command_boundary");
+  if (!record || !Array.isArray(record.payloadPreview)) {
+    return null;
+  }
+  return {
+    boundary_id: record.payloadPreview[0] || null,
+    daemon_id: record.payloadPreview[1] || null,
+    owner: record.payloadPreview[2] || null,
+    lifecycle_authority: record.payloadPreview[5] || null,
+    updated_at: record.payloadPreview[8] || null,
+  };
+}
+
+function inspectProviderTransportProfile(providerId, records) {
+  if (providerId !== "nightwing-gjallar") {
+    return null;
+  }
+  const record = records.find((entry) => entry.schemaName === "gjallar.transport_profile");
+  if (!record || !Array.isArray(record.payloadPreview)) {
+    return null;
+  }
+  return {
+    profile_id: record.payloadPreview[0] || null,
+    daemon_id: record.payloadPreview[1] || null,
+    state: record.payloadPreview[2] || null,
+    compatibility_transport: record.payloadPreview[3] || null,
+    current_transport: record.payloadPreview[4] || null,
+    health_contract: record.payloadPreview[5] || null,
+    cut_line: record.payloadPreview[9] || null,
+    updated_at: record.payloadPreview[10] || null,
+  };
+}
+
+function normalizeInspectedEndpoints(endpoints) {
+  if (!Array.isArray(endpoints)) {
+    return [];
+  }
+  return endpoints.map((entry) => {
+    if (entry && typeof entry === "object" && !Array.isArray(entry)) {
+      return entry;
+    }
+    return {
+      transport: String(entry || "").startsWith("ws://") ? "compatibility-eve-deck" : "witness",
+      address: String(entry || ""),
+    };
+  });
+}
+
+function normalizeInspectedRoutes(advertisement) {
+  if (Array.isArray(advertisement?.routes)) {
+    return advertisement.routes;
+  }
+  if (Array.isArray(advertisement?.endpoints)) {
+    return normalizeInspectedEndpoints(advertisement.endpoints);
+  }
+  return [];
 }
 
 function resolveInterfaceBindingStore(storeSpec) {

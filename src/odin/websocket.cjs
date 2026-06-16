@@ -145,7 +145,18 @@ function stateForRequest(currentState, requestUrl) {
     return odinCatalogState(currentState);
   }
   const providerState = providerStateFromCurrentState(currentState, providerId);
-  return providerState || unavailableProviderState(providerId, "provider not present in Odin catalog");
+  if (providerState) {
+    return providerState;
+  }
+  const provider = providerCatalogFromState(currentState).find((entry) => entry.id === providerId);
+  if (provider) {
+    return unavailableProviderState(
+      providerId,
+      "provider advertisement is live, but no provider-owned Eve surface is published yet",
+      provider.title,
+    );
+  }
+  return unavailableProviderState(providerId, "provider not present in Odin catalog");
 }
 
 function providerIdFromDeckUrl(requestUrl) {
@@ -230,23 +241,23 @@ function providerInterfaceChild(currentState, providerId) {
   return children.find((child) => child?.kind === "interface" && String(child.props?.providerId || "") === providerId);
 }
 
-function unavailableProviderState(providerId, detail) {
+function unavailableProviderState(providerId, detail, title = null) {
   return {
     type: "dashboard-state",
     schema: "gamecult.eve.provider_surface_proxy.v1",
     providerId,
-    title: providerId,
+    title: title || providerId,
     version: 0,
     updatedAt: new Date().toISOString(),
     surface: {
       schema: "gamecult.eve.surface.v1",
       id: `unavailable-${stableSurfaceId(providerId)}`,
-      title: providerId,
+      title: title || providerId,
       root: {
         id: `unavailable-${stableSurfaceId(providerId)}-root`,
         kind: "pane",
         props: {
-          title: providerId,
+          title: title || providerId,
           status: "unavailable",
         },
         children: [{
