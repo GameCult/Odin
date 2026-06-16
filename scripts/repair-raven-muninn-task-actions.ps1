@@ -26,6 +26,25 @@ function Register-HiddenVbsTask {
   Register-ScheduledTask -TaskName `$TaskName -Action `$action -Trigger `$trigger -Principal `$principal -Settings `$settings -Force | Out-Null
 }
 
+function Assert-HiddenVbsTask {
+  param(
+    [Parameter(Mandatory = `$true)] [string] `$TaskName,
+    [Parameter(Mandatory = `$true)] [string] `$VbsPath
+  )
+
+  `$task = Get-ScheduledTask -TaskName `$TaskName -ErrorAction Stop
+  `$action = @(`$task.Actions)[0]
+  if (`$action.Execute -notmatch '(^|\\)wscript\.exe$') {
+    throw "`$TaskName action executes `$(`$action.Execute), expected wscript.exe"
+  }
+  if (`$action.Arguments -notlike "*`$VbsPath*") {
+    throw "`$TaskName action arguments `$(`$action.Arguments) do not reference `$VbsPath"
+  }
+  if (`$action.Arguments -notlike "*//B*" -or `$action.Arguments -notlike "*//Nologo*") {
+    throw "`$TaskName action arguments `$(`$action.Arguments) do not force background WScript execution"
+  }
+}
+
 `$serveVbs = Join-Path "$MuninnDir" "start-muninn-serve-hidden.vbs"
 `$activateCmd = Join-Path "$MuninnDir" "activate-raven-av-srt.cmd"
 `$activateVbs = Join-Path "$MuninnDir" "activate-raven-av-srt-hidden.vbs"
@@ -43,17 +62,19 @@ function Write-HiddenCmdLauncher {
   }
 
   `$lines = @(
+    'Set fso = CreateObject("Scripting.FileSystemObject")',
     'Set shell = CreateObject("WScript.Shell")',
     "cmdPath = ""`$CmdPath""",
+    'shell.CurrentDirectory = fso.GetParentFolderName(cmdPath)',
     'shell.Run """" & cmdPath & """", 0, False'
   )
   Set-Content -LiteralPath `$VbsPath -Value `$lines -Encoding ASCII
 }
 
-if ((Test-Path -LiteralPath `$activateCmd) -and -not (Test-Path -LiteralPath `$activateVbs)) {
+if (Test-Path -LiteralPath `$activateCmd) {
   Write-HiddenCmdLauncher -CmdPath `$activateCmd -VbsPath `$activateVbs
 }
-if ((Test-Path -LiteralPath `$videoProofCmd) -and -not (Test-Path -LiteralPath `$videoProofVbs)) {
+if (Test-Path -LiteralPath `$videoProofCmd) {
   Write-HiddenCmdLauncher -CmdPath `$videoProofCmd -VbsPath `$videoProofVbs
 }
 
@@ -63,6 +84,14 @@ if (Test-Path -LiteralPath `$activateVbs) {
 }
 if (Test-Path -LiteralPath `$videoProofVbs) {
   Register-HiddenVbsTask -TaskName "GameCult-Muninn-VideoProof" -VbsPath `$videoProofVbs
+}
+
+Assert-HiddenVbsTask -TaskName "GameCult-Muninn" -VbsPath `$serveVbs
+if (Test-Path -LiteralPath `$activateVbs) {
+  Assert-HiddenVbsTask -TaskName "GameCult-Muninn-Activate" -VbsPath `$activateVbs
+}
+if (Test-Path -LiteralPath `$videoProofVbs) {
+  Assert-HiddenVbsTask -TaskName "GameCult-Muninn-VideoProof" -VbsPath `$videoProofVbs
 }
 "@
 
