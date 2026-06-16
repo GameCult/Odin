@@ -302,6 +302,13 @@ bridge. Raven Muninn task action repair is queued separately and remains blocked
 while Raven is unreachable over SSH; the prepared actuator is
 `scripts\repair-raven-muninn-task-actions.ps1`.
 
+Vili's Node daemon now has an in-process Idunn RUDP publisher for
+`vili.cultnet-rudp-animation-health`, and local smoke proof shows Idunn accepts
+that record over `cultnet.transport.rudp.v0`. That is implementation proof, not
+live Raven deployment proof. Vili remains the active cut until Raven is
+reachable, the updated package is deployed there, and `GameCult\Vili` is
+restarted with `--idunn-rudp-health 10.77.0.2:17870`.
+
 No ad hoc JSON manifest, HTTP endpoint, TCP socket, or WebSocket bridge may
 become the live state owner. Debug projections are fine when they name the
 `.cc` record, CultNet document, or CultMesh publication behind them.
