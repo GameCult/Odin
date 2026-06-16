@@ -122,8 +122,33 @@ Assert-HiddenVbsTask -TaskName "GameCult-Muninn-VideoProof" -VbsPath `$videoProo
 Start-ScheduledTask -TaskName "GameCult-Muninn"
 "@
 
-$encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($remoteScript))
-& ssh.exe -o BatchMode=yes -o ConnectTimeout=10 $RavenHost "powershell.exe -NoProfile -NonInteractive -EncodedCommand $encoded"
+$uploadId = [guid]::NewGuid().ToString("N")
+$localRemoteScript = Join-Path $env:TEMP "odin-raven-muninn-restart-$uploadId.ps1"
+$localSftpBatch = Join-Path $env:TEMP "odin-raven-muninn-restart-$uploadId.sftp"
+$remoteSftpPath = "C:/Windows/Temp/odin-raven-muninn-restart-$uploadId.ps1"
+$remotePsPath = "C:\Windows\Temp\odin-raven-muninn-restart-$uploadId.ps1"
+try {
+  Set-Content -LiteralPath $localRemoteScript -Encoding ASCII -Value $remoteScript
+  Set-Content -LiteralPath $localSftpBatch -Encoding ASCII -Value "put ""$localRemoteScript"" ""$remoteSftpPath"""
+  & sftp.exe -b $localSftpBatch $RavenHost
+  if ($LASTEXITCODE -ne 0) {
+    exit $LASTEXITCODE
+  }
+  $remoteRunner = @"
+`$ErrorActionPreference = "Stop"
+try {
+  & "$remotePsPath"
+  `$code = `$LASTEXITCODE
+} finally {
+  Remove-Item -LiteralPath "$remotePsPath" -Force -ErrorAction SilentlyContinue
+}
+exit `$code
+"@
+  $encodedRunner = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($remoteRunner))
+  & ssh.exe -o BatchMode=yes -o ConnectTimeout=10 $RavenHost "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encodedRunner"
+} finally {
+  Remove-Item -LiteralPath $localRemoteScript, $localSftpBatch -Force -ErrorAction SilentlyContinue
+}
 $restartExit = $LASTEXITCODE
 if ($restartExit -eq 0) {
   Start-Sleep -Seconds 2

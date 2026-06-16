@@ -937,11 +937,11 @@ fn swarm_surgery_plan(
             "5. Delete or demote compatibility probes once every target has daemon-owned publication and advertised lifecycle authority.".to_string(),
         ],
         current_phase:
-            "Phase 12: move Vili and remaining runtime daemons from compatibility probes to daemon-published RUDP state, with Raven Muninn scheduled-task action repair queued as a background-only ops invariant."
+            "Phase 12: move Vili and remaining runtime daemons from compatibility probes to daemon-published RUDP state; Raven Muninn scheduled-task actions are now verified background-only, while Vili Raven refresh remains the next shared-host deployment cut."
                 .to_string(),
         next_target: next_target.to_string(),
         cut_line:
-            "Muninn, Idunn, Odin, Stonks, Weksa, VoidBot, Nightwing Gjallar, Mimir Eve dashboard, Nightwing Eve dashboard, and Nightwing Eve browser reference now exercise daemon-owned RUDP health. Vili has an in-process RUDP health publisher with local Idunn acceptance proof, but live Raven deployment and GameCult\\Vili restart remain blocked while Raven SSH is unreachable. Live Raven also still needs GameCult-Muninn, GameCult-Muninn-Activate, and GameCult-Muninn-VideoProof task actions repaired to execute wscript.exe hidden launchers directly."
+            "Muninn, Idunn, Odin, Stonks, Weksa, VoidBot, Nightwing Gjallar, Mimir Eve dashboard, Nightwing Eve dashboard, and Nightwing Eve browser reference now exercise daemon-owned RUDP health. Vili has an in-process RUDP health publisher with local Idunn acceptance proof, but live Raven deployment and GameCult\\Vili restart remain blocked until the Raven Vili task is refreshed and verified. Live Raven Muninn task actions have been repaired and verified to execute wscript.exe hidden launchers directly for GameCult-Muninn, GameCult-Muninn-Activate, and GameCult-Muninn-VideoProof."
                 .to_string(),
         verification_layer:
             "CultMesh keepalive store records plus live Idunn decision cycles, not process exit codes or chat summaries."
@@ -1222,7 +1222,7 @@ fn daemon_surgery_plan(target: &DaemonTarget, updated_at: &str) -> IdunnDaemonSu
             status = "partial-rudp-health-live";
             owner = "Muninn Rust runtime plus Raven background-only launcher surface";
             current_mechanism =
-                "Muninn can publish daemon health over CultNet/RUDP, and Odin has a repair actuator that registers Raven scheduled tasks with wscript.exe hidden launcher actions. Live Raven still has reported raw .cmd task actions for GameCult-Muninn, GameCult-Muninn-Activate, and GameCult-Muninn-VideoProof until the repair can be applied on the host."
+                "Muninn can publish daemon health over CultNet/RUDP. Live Raven scheduled tasks GameCult-Muninn, GameCult-Muninn-Activate, and GameCult-Muninn-VideoProof have been repaired and verified to execute wscript.exe //B //Nologo hidden launcher actions directly; .cmd wrappers are manual compatibility trampolines only."
                     .to_string();
             intended_authority =
                 "Muninn publishes telemetry and daemon health over CultNet/RUDP; Raven Task Scheduler owns only background launch of hidden WScript/PowerShell launchers and never visible .cmd trampoline execution."
@@ -1231,16 +1231,12 @@ fn daemon_surgery_plan(target: &DaemonTarget, updated_at: &str) -> IdunnDaemonSu
                 "Cut raw .cmd scheduled-task actions on Raven. .cmd files may remain manual compatibility trampolines only when Task Scheduler executes the hidden VBS launcher directly."
                     .to_string();
             steps = vec![
-                "Apply scripts/repair-raven-muninn-task-actions.ps1 when Raven SSH is reachable.".to_string(),
-                "Verify GameCult-Muninn action executes wscript.exe with start-muninn-serve-hidden.vbs arguments.".to_string(),
-                "Verify GameCult-Muninn-Activate action executes wscript.exe with activate-raven-av-srt-hidden.vbs arguments.".to_string(),
-                "Verify GameCult-Muninn-VideoProof action executes wscript.exe with muninn-raven-video-to-starfire-obs-hidden.vbs arguments.".to_string(),
+                "Keep scripts/repair-raven-muninn-task-actions.ps1 using sftp plus a tiny remote runner so Windows command-line length does not block future hidden-task repair.".to_string(),
+                "Keep GameCult-Muninn action executing wscript.exe with start-muninn-serve-hidden.vbs arguments.".to_string(),
+                "Keep GameCult-Muninn-Activate action executing wscript.exe with activate-raven-av-srt-hidden.vbs arguments.".to_string(),
+                "Keep GameCult-Muninn-VideoProof action executing wscript.exe with muninn-raven-video-to-starfire-obs-hidden.vbs arguments.".to_string(),
                 "Keep Raven health/restart actuators background-only; no visible terminals or interactive windows on the shared host.".to_string(),
             ];
-            blockers.push(
-                "Raven SSH currently times out, so the prepared task-action repair cannot be applied live."
-                    .to_string(),
-            );
         }
         "starfire-muninn" | "nightwing-muninn" => {
             owner = "Muninn Rust runtime";
@@ -2332,7 +2328,8 @@ mod tests {
         );
         assert!(plan.cut_line.contains("GameCult-Muninn-Activate"));
         assert!(plan.cut_line.contains("GameCult-Muninn-VideoProof"));
-        assert!(plan.cut_line.contains("Raven SSH is unreachable"));
+        assert!(plan.cut_line.contains("Muninn task actions"));
+        assert!(plan.cut_line.contains("verified"));
         assert!(plan.verification_layer.contains("CultMesh keepalive store"));
         assert!(
             plan.invariants
@@ -2359,8 +2356,9 @@ mod tests {
         assert!(
             raven_plan
                 .current_mechanism
-                .contains("raw .cmd task actions")
+                .contains("repaired and verified")
         );
+        assert!(raven_plan.current_mechanism.contains("wscript.exe"));
         assert!(
             raven_plan
                 .cut_line
@@ -2369,12 +2367,7 @@ mod tests {
         assert!(raven_plan.steps.iter().any(
             |step| step.contains("GameCult-Muninn-VideoProof") && step.contains("wscript.exe")
         ));
-        assert!(
-            raven_plan
-                .blockers
-                .iter()
-                .any(|blocker| blocker.contains("Raven SSH currently times out"))
-        );
+        assert!(raven_plan.blockers.is_empty());
 
         let weksa_plan = daemon_surgery_plan(&weksa, "unix:100");
         assert_eq!(

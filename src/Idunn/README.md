@@ -208,15 +208,18 @@ containing provider advertisement, market snapshot, Eve surface, command
 boundary, and transport profile records; Odin local discovery can ingest that
 store as provider truth. StreamPixels now publishes a service-owned CultCache
 boundary store with provider advertisement, command boundary, transport profile,
-and Idunn health summary; Odin local discovery can ingest that store, but
-StreamPixels still owes CultNet/RUDP health publication and Yggdrasil deployment
-before SSH/systemd/HTTP probes are only debug witnesses. Raven Muninn task
-actions are also an explicit ops
-invariant: Task Scheduler must execute `wscript.exe //B //Nologo` hidden
-launcher actions directly for `GameCult-Muninn`, `GameCult-Muninn-Activate`,
-and `GameCult-Muninn-VideoProof`, never raw `.cmd` wrappers. After those live
-cuts, continue daemon-by-daemon until compatibility HTTP, TCP, WebSocket, and
-command probes are fallback witnesses only.
+and Idunn health summary; Odin local discovery can ingest that store, and local
+Idunn has accepted StreamPixels daemon health over CultNet/RUDP. Yggdrasil
+deployment remains owed before SSH/systemd/HTTP probes are only debug
+witnesses. Raven Muninn task actions are also an explicit ops invariant: Task
+Scheduler must execute `wscript.exe //B //Nologo` hidden launcher actions
+directly for `GameCult-Muninn`, `GameCult-Muninn-Activate`, and
+`GameCult-Muninn-VideoProof`, never raw `.cmd` wrappers. Those three live Raven
+tasks have been repaired and verified. The repair actuator now uploads its
+Raven PowerShell body with `sftp` and runs a tiny cleanup wrapper, so the
+hidden-task repair does not hit Windows command-line limits before it can run.
+After those live cuts, continue daemon-by-daemon until compatibility HTTP, TCP,
+WebSocket, and command probes are fallback witnesses only.
 
 Rust no longer gets to claim the transport is imaginary:
 `vendor/cultnet-rs` includes the canonical CNR0 `cultnet.transport.rudp.v0`
