@@ -748,9 +748,11 @@ fn swarm_surgery_plan(
     targets: &[DaemonTarget],
     updated_at: &str,
 ) -> IdunnSwarmSurgeryPlanRecord {
-    let has_voidbot = targets.iter().any(|target| target.daemon_id == "voidbot");
-    let next_target = if has_voidbot {
-        "voidbot"
+    let has_nightwing_gjallar = targets
+        .iter()
+        .any(|target| target.daemon_id == "nightwing-gjallar");
+    let next_target = if has_nightwing_gjallar {
+        "nightwing-gjallar"
     } else if let Some(target) = targets.iter().find(|target| target.enabled) {
         target.daemon_id.as_str()
     } else {
@@ -784,11 +786,11 @@ fn swarm_surgery_plan(
             "5. Delete or demote compatibility probes once every target has daemon-owned publication and advertised lifecycle authority.".to_string(),
         ],
         current_phase:
-            "Phase 8: move VoidBot local stack health from compatibility command evidence to daemon-published RUDP state, with Raven Muninn scheduled-task action repair queued as a background-only ops invariant."
+            "Phase 9: move Nightwing Gjallar framebuffer health from service/status compatibility evidence to daemon-published RUDP state, with Raven Muninn scheduled-task action repair queued as a background-only ops invariant."
                 .to_string(),
         next_target: next_target.to_string(),
         cut_line:
-            "Muninn, Idunn, Odin, Stonks, and Weksa now exercise daemon-owned RUDP health locally. VoidBot is the next local stack cut. Live Raven still needs GameCult-Muninn, GameCult-Muninn-Activate, and GameCult-Muninn-VideoProof task actions repaired to execute wscript.exe hidden launchers directly; application is blocked while Raven SSH is unreachable."
+            "Muninn, Idunn, Odin, Stonks, Weksa, and VoidBot now exercise daemon-owned RUDP health locally. Nightwing Gjallar is the next compositor/runtime cut. Live Raven still needs GameCult-Muninn, GameCult-Muninn-Activate, and GameCult-Muninn-VideoProof task actions repaired to execute wscript.exe hidden launchers directly; application is blocked while Raven SSH is unreachable."
                 .to_string(),
         verification_layer:
             "CultMesh keepalive store records plus live Idunn decision cycles, not process exit codes or chat summaries."
@@ -819,6 +821,11 @@ fn daemon_transport_profile(
             "daemon-published-rudp-health + compatibility.local-command fallback",
             "partial-rudp-health-live",
             "Weksa daemon health is published over CultNet/RUDP; provider advertisement and command_boundary publication remain migration debt before the HTTP probe can be deleted.",
+        ),
+        "voidbot" => (
+            "daemon-published-rudp-health + compatibility.local-command fallback",
+            "partial-rudp-health-live",
+            "VoidBot stack health is published over CultNet/RUDP from the local orchestrator pulse; provider advertisement and command_boundary publication remain migration debt before the operations probe can be deleted.",
         ),
         _ => (
             "compatibility.local-command",
@@ -999,14 +1006,25 @@ fn daemon_surgery_plan(target: &DaemonTarget, updated_at: &str) -> IdunnDaemonSu
             ];
         }
         "voidbot" => {
+            status = "partial-rudp-health-live";
             severity = "medium-high";
             owner = "VoidBot internal provider stack";
             current_mechanism =
-                "VoidBot has CultMesh/CultCache swarm state, but Idunn still treats stack health through a compatibility command; Discord remains an external xenos boundary."
+                "VoidBot publishes voidbot.cultnet-rudp-stack-health over CultNet/RUDP after each local orchestrator pulse; swarm provider state already has a CultMesh witness, while operations watchdog and command boundary still retain compatibility projections."
                     .to_string();
             intended_authority =
                 "VoidBot publishes internal swarm, repo-face, and provider health over CultNet/RUDP; Discord delivery remains a boundary adapter, never daemon truth."
                     .to_string();
+            cut_line =
+                "Keep the operations probe as fallback only until VoidBot provider advertisement and command_boundary records are also daemon-owned RUDP/CultMesh publications."
+                    .to_string();
+            steps = vec![
+                "Keep live voidbot.cultnet-rudp-stack-health publication running from the GameCult Local Orchestrator pulse.".to_string(),
+                "Publish VoidBot swarm, Discord, archive, source, and repo-face provider records over cultnet.transport.rudp.v0.".to_string(),
+                "Publish VoidBot command_boundary and transport_profile records from the provider runtime.".to_string(),
+                "Teach Odin to prefer VoidBot RUDP/CultMesh provider records over compatibility status ingestion.".to_string(),
+                "Delete or demote health-voidbot.cmd to a manual compatibility probe with no lifecycle truth.".to_string(),
+            ];
         }
         "muninn" => {
             status = "partial-rudp-health-live";
@@ -1875,7 +1893,7 @@ mod tests {
     }
 
     #[test]
-    fn swarm_surgery_plan_names_voidbot_after_weksa_cut() {
+    fn swarm_surgery_plan_names_gjallar_after_voidbot_cut() {
         let starfire_muninn = DaemonTarget {
             daemon_id: "starfire-muninn".to_string(),
             verse_id: "starfire.local".to_string(),
@@ -1962,6 +1980,17 @@ mod tests {
             enabled: true,
             interval_seconds: 60,
         };
+        let nightwing_gjallar = DaemonTarget {
+            daemon_id: "nightwing-gjallar".to_string(),
+            verse_id: "nightwing.local".to_string(),
+            name: "Nightwing Gjallar framebuffer compositor".to_string(),
+            health_contract: health_contract("gjallar.cultnet-rudp-framebuffer-health", "failed"),
+            health_command: Some("health-nightwing-gjallar.cmd".to_string()),
+            deploy_command: Some("deploy-nightwing-gjallar.cmd".to_string()),
+            restart_command: Some("restart-nightwing-gjallar.cmd".to_string()),
+            enabled: true,
+            interval_seconds: 30,
+        };
 
         let plan = swarm_surgery_plan(
             "starfire-local",
@@ -1969,7 +1998,8 @@ mod tests {
                 odin,
                 stonks,
                 weksa.clone(),
-                voidbot,
+                voidbot.clone(),
+                nightwing_gjallar,
                 starfire_muninn,
                 nightwing_muninn,
                 raven_muninn.clone(),
@@ -1979,11 +2009,11 @@ mod tests {
 
         assert_eq!(plan.plan_id, "swarm-surgery:starfire-local");
         assert_eq!(plan.status, "active-transport-migration");
-        assert_eq!(plan.next_target, "voidbot");
-        assert!(plan.current_phase.contains("VoidBot"));
+        assert_eq!(plan.next_target, "nightwing-gjallar");
+        assert!(plan.current_phase.contains("Nightwing Gjallar"));
         assert!(
             plan.cut_line
-                .contains("Muninn, Idunn, Odin, Stonks, and Weksa")
+                .contains("Muninn, Idunn, Odin, Stonks, Weksa, and VoidBot")
         );
         assert!(plan.cut_line.contains("GameCult-Muninn-Activate"));
         assert!(plan.cut_line.contains("GameCult-Muninn-VideoProof"));
@@ -2039,6 +2069,19 @@ mod tests {
                 .contains("weksa.cultnet-rudp-provider-health")
         );
         assert!(weksa_plan.cut_line.contains("HTTP probe as fallback"));
+
+        let voidbot_plan = daemon_surgery_plan(&voidbot, "unix:100");
+        assert_eq!(voidbot_plan.status, "partial-rudp-health-live");
+        assert!(
+            voidbot_plan
+                .current_mechanism
+                .contains("voidbot.cultnet-rudp-stack-health")
+        );
+        assert!(
+            voidbot_plan
+                .cut_line
+                .contains("operations probe as fallback")
+        );
     }
 
     #[test]
@@ -2134,6 +2177,34 @@ mod tests {
             profile
                 .cut_line
                 .contains("Weksa daemon health is published over CultNet/RUDP")
+        );
+    }
+
+    #[test]
+    fn voidbot_transport_profile_marks_partial_rudp_health() {
+        let voidbot = DaemonTarget {
+            daemon_id: "voidbot".to_string(),
+            verse_id: "starfire.local".to_string(),
+            name: "VoidBot local stack".to_string(),
+            health_contract: health_contract("voidbot.cultnet-rudp-stack-health", "failed"),
+            health_command: Some("health-voidbot.cmd".to_string()),
+            deploy_command: None,
+            restart_command: Some("restart-voidbot.cmd".to_string()),
+            enabled: true,
+            interval_seconds: 60,
+        };
+
+        let profile = daemon_transport_profile(&voidbot, "unix:100");
+
+        assert_eq!(profile.state, "partial-rudp-health-live");
+        assert_eq!(
+            profile.current_transport,
+            "daemon-published-rudp-health + compatibility.local-command fallback"
+        );
+        assert!(
+            profile
+                .cut_line
+                .contains("VoidBot stack health is published over CultNet/RUDP")
         );
     }
 

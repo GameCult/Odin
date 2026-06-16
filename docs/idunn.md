@@ -266,26 +266,30 @@ The local swarm mode owns:
 
 Current plan surface: `idunn.swarm_surgery_plan.v1` for profile
 `starfire-local` treats the Muninn Rust lanes, Odin's local provider-health
-lane, Stonks daemon health, and Weksa daemon health as completed local substrate
-cuts. Muninn's `--health` mode publishes `idunn.daemon_health` over RUDP;
-Starfire publishes to local Idunn, while Nightwing and Raven publish over WireGuard to
+lane, Stonks daemon health, Weksa daemon health, and VoidBot stack health as
+completed local substrate cuts. Muninn's `--health` mode publishes
+`idunn.daemon_health` over RUDP; Starfire publishes to local Idunn, while
+Nightwing and Raven publish over WireGuard to
 `10.77.0.2:17870` using their target daemon ids and health contracts. Odin
 publishes `odin.cultnet-rudp-provider-health` after each provider refresh.
 Stonks publishes `stonks.cultnet-rudp-market-health` after each serialized
 market refresh. Weksa publishes `weksa.cultnet-rudp-provider-health` after each
-serialized provider witness refresh. Live Idunn cycles accept these records
-before command-probe fallback. Raven's Muninn scheduled-task repair is a separate ops invariant:
+serialized provider witness refresh. VoidBot publishes
+`voidbot.cultnet-rudp-stack-health` after each GameCult Local Orchestrator
+pulse. Live Idunn cycles accept these records before command-probe fallback.
+Raven's Muninn scheduled-task repair is a separate ops invariant:
 `GameCult-Muninn`, `GameCult-Muninn-Activate`, and
 `GameCult-Muninn-VideoProof` must execute `wscript.exe` hidden launcher actions,
 not raw `.cmd` task actions.
 
-Next: move VoidBot local stack health off compatibility command evidence and
-onto daemon-owned RUDP state, then continue runtime-by-runtime until
-compatibility probes can be deleted or demoted. Stonks and Weksa still owe
-provider advertisement and command-boundary RUDP publication before their HTTP
-surfaces can be purely display/debug lowerings. Raven Muninn task action repair
-is queued separately and remains blocked while Raven is unreachable over SSH;
-the prepared actuator is `scripts\repair-raven-muninn-task-actions.ps1`.
+Next: move Nightwing Gjallar framebuffer health off service/status compatibility
+evidence and onto daemon-owned RUDP state, then continue runtime-by-runtime
+until compatibility probes can be deleted or demoted. Stonks, Weksa, and VoidBot
+still owe provider advertisement and command-boundary RUDP publication before
+their compatibility surfaces can be purely display/debug lowerings. Raven Muninn
+task action repair is queued separately and remains blocked while Raven is
+unreachable over SSH; the prepared actuator is
+`scripts\repair-raven-muninn-task-actions.ps1`.
 
 No ad hoc JSON manifest, HTTP endpoint, TCP socket, or WebSocket bridge may
 become the live state owner. Debug projections are fine when they name the
