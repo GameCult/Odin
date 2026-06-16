@@ -193,12 +193,14 @@ probe. The record must match the daemon id, health contract, RUDP transport,
 and freshness window; otherwise the compatibility probe remains fallback
 evidence.
 
-The next cut is Stonks: market-provider health must publish through
+The next cut is Weksa: provider health must publish through
 `cultnet.transport.rudp.v0` instead of remaining HTTP compatibility evidence.
-After that, continue daemon-by-daemon, promote the built-in target catalog into
-Odin-ingested service/provider records, keep named adapters only for legacy
-service-manager crossings, and replace the local operator alarm bridge with a
-fully Bifrost-owned notification request record.
+Stonks already publishes daemon health through RUDP, but still owes provider
+advertisement and command-boundary publication before its HTTP surfaces can be
+pure display/debug lowerings. After Weksa, continue daemon-by-daemon, promote
+the built-in target catalog into Odin-ingested service/provider records, keep
+named adapters only for legacy service-manager crossings, and replace the local
+operator alarm bridge with a fully Bifrost-owned notification request record.
 
 Rust no longer gets to claim the transport is imaginary:
 `vendor/cultnet-rs` includes the canonical CNR0 `cultnet.transport.rudp.v0`

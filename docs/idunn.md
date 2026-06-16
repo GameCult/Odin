@@ -265,19 +265,22 @@ The local swarm mode owns:
    Yggdrasil checks.
 
 Current plan surface: `idunn.swarm_surgery_plan.v1` for profile
-`starfire-local` treats the Muninn Rust lanes and Odin's local provider-health
-lane as completed local substrate cuts. Muninn's `--health` mode publishes
-`idunn.daemon_health` over RUDP; Starfire publishes to local Idunn, while
-Nightwing and Raven publish over WireGuard to `10.77.0.2:17870` using their
-target daemon ids and health contracts. Odin now publishes
-`odin.cultnet-rudp-provider-health` over the same RUDP ingress after each
-provider refresh. Live Idunn cycles accept these records before command-probe
+`starfire-local` treats the Muninn Rust lanes, Odin's local provider-health
+lane, and Stonks daemon health as completed local substrate cuts. Muninn's
+`--health` mode publishes `idunn.daemon_health` over RUDP; Starfire publishes to
+local Idunn, while Nightwing and Raven publish over WireGuard to
+`10.77.0.2:17870` using their target daemon ids and health contracts. Odin
+publishes `odin.cultnet-rudp-provider-health` after each provider refresh.
+Stonks publishes `stonks.cultnet-rudp-market-health` after each serialized
+market refresh. Live Idunn cycles accept these records before command-probe
 fallback.
 
-Next: move Stonks market-provider health off HTTP compatibility evidence and
-onto daemon-owned RUDP state, then continue runtime-by-runtime until
-compatibility probes can be deleted or demoted. Raven Muninn task action repair
-is queued separately and remains blocked while Raven is unreachable.
+Next: move Weksa provider health off HTTP compatibility evidence and onto
+daemon-owned RUDP state, then continue runtime-by-runtime until compatibility
+probes can be deleted or demoted. Stonks still owes provider advertisement and
+command-boundary RUDP publication before its HTTP surfaces can be purely
+display/debug lowerings. Raven Muninn task action repair is queued separately
+and remains blocked while Raven is unreachable.
 
 No ad hoc JSON manifest, HTTP endpoint, TCP socket, or WebSocket bridge may
 become the live state owner. Debug projections are fine when they name the

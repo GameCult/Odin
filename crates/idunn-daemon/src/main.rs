@@ -747,9 +747,9 @@ fn swarm_surgery_plan(
     targets: &[DaemonTarget],
     updated_at: &str,
 ) -> IdunnSwarmSurgeryPlanRecord {
-    let has_stonks = targets.iter().any(|target| target.daemon_id == "stonks");
-    let next_target = if has_stonks {
-        "stonks"
+    let has_weksa = targets.iter().any(|target| target.daemon_id == "weksa");
+    let next_target = if has_weksa {
+        "weksa"
     } else if let Some(target) = targets.iter().find(|target| target.enabled) {
         target.daemon_id.as_str()
     } else {
@@ -783,11 +783,11 @@ fn swarm_surgery_plan(
             "5. Delete or demote compatibility probes once every target has daemon-owned publication and advertised lifecycle authority.".to_string(),
         ],
         current_phase:
-            "Phase 6: move Stonks market-provider health from HTTP compatibility evidence to daemon-published RUDP state."
+            "Phase 7: move Weksa provider health from HTTP compatibility evidence to daemon-published RUDP state."
                 .to_string(),
         next_target: next_target.to_string(),
         cut_line:
-            "Muninn, Idunn, and Odin now exercise daemon-owned RUDP health locally. Stonks is the next TypeScript provider cut; Raven task repairs remain queued until the host is reachable."
+            "Muninn, Idunn, Odin, and Stonks now exercise daemon-owned RUDP health locally. Weksa is the next JavaScript provider cut; Raven task repairs remain queued until the host is reachable."
                 .to_string(),
         verification_layer:
             "CultMesh keepalive store records plus live Idunn decision cycles, not process exit codes or chat summaries."
@@ -808,20 +808,31 @@ fn daemon_transport_profile(
     target: &DaemonTarget,
     observed_at: &str,
 ) -> IdunnDaemonTransportProfileRecord {
+    let (current_transport, state, cut_line) = match target.daemon_id.as_str() {
+        "stonks" => (
+            "daemon-published-rudp-health + compatibility.local-command fallback",
+            "partial-rudp-health-live",
+            "Stonks daemon health is published over CultNet/RUDP; provider advertisement and command_boundary publication remain migration debt before the HTTP probe can be deleted.",
+        ),
+        _ => (
+            "compatibility.local-command",
+            "migration-required",
+            "Compatibility command probes are evidence only; daemon truth moves to CultNet/RUDP health publication and advertised command boundaries.",
+        ),
+    };
     IdunnDaemonTransportProfileRecord {
         profile_id: transport_profile_id(target),
         daemon_id: target.daemon_id.clone(),
         target_transport: "cultnet.transport.rudp.v0".to_string(),
-        current_transport: "compatibility.local-command".to_string(),
-        state: "migration-required".to_string(),
+        current_transport: current_transport.to_string(),
+        state: state.to_string(),
         health_contract: target.health_contract.id.clone(),
         publication_schema: "idunn.daemon_health.v1".to_string(),
         compatibility_mechanism: target
             .health_command
             .clone()
             .unwrap_or_else(|| "none".to_string()),
-        cut_line: "Compatibility command probes are evidence only; daemon truth moves to CultNet/RUDP health publication and advertised command boundaries."
-            .to_string(),
+        cut_line: cut_line.to_string(),
         observed_at: observed_at.to_string(),
     }
 }
@@ -931,11 +942,24 @@ fn daemon_surgery_plan(target: &DaemonTarget, updated_at: &str) -> IdunnDaemonSu
                 .push("Requires native C# CultNet/RUDP subscription path for Gjallar.".to_string());
         }
         "stonks" => {
+            status = "partial-rudp-health-live";
             owner = "Stonks TypeScript runtime";
             current_mechanism =
-                "Stonks has a repaired CultCache startup path, but health and market projection are still checked through local HTTP/WebSocket compatibility surfaces."
+                "Stonks publishes daemon health over CultNet/RUDP after each serialized market refresh; provider manifest, market state, and command boundary still retain HTTP/WebSocket compatibility surfaces."
                     .to_string();
-            blockers.push("Requires TypeScript CultLib RUDP publication support.".to_string());
+            intended_authority =
+                "Stonks publishes daemon health, provider advertisement, market snapshot, and command boundary as typed CultMesh/CultNet records over cultnet.transport.rudp.v0; HTTP/WebSocket remain renderer/debug lowerings."
+                    .to_string();
+            cut_line =
+                "Keep the HTTP probe as fallback only until Stonks provider advertisement and command_boundary records are also daemon-owned RUDP publications."
+                    .to_string();
+            steps = vec![
+                "Keep live stonks.cultnet-rudp-market-health publication running from the Stonks daemon.".to_string(),
+                "Publish Stonks provider advertisement and market snapshot records over cultnet.transport.rudp.v0.".to_string(),
+                "Publish Stonks command_boundary and transport_profile records from the daemon runtime.".to_string(),
+                "Teach Odin to prefer the Stonks RUDP provider records over HTTP manifest ingestion.".to_string(),
+                "Delete or demote health-stonks.cmd to a manual compatibility probe with no lifecycle truth.".to_string(),
+            ];
         }
         "mimir-eve-dashboard" => {
             severity = "high";
@@ -1807,7 +1831,7 @@ mod tests {
     }
 
     #[test]
-    fn swarm_surgery_plan_names_stonks_after_odin_cut() {
+    fn swarm_surgery_plan_names_weksa_after_stonks_cut() {
         let starfire_muninn = DaemonTarget {
             daemon_id: "starfire-muninn".to_string(),
             verse_id: "starfire.local".to_string(),
@@ -1872,18 +1896,29 @@ mod tests {
             enabled: true,
             interval_seconds: 30,
         };
+        let weksa = DaemonTarget {
+            daemon_id: "weksa".to_string(),
+            verse_id: "starfire.local".to_string(),
+            name: "Weksa".to_string(),
+            health_contract: health_contract("weksa.cultnet-rudp-provider-health", "failed"),
+            health_command: Some("health-weksa.cmd".to_string()),
+            deploy_command: None,
+            restart_command: Some("restart-weksa.cmd".to_string()),
+            enabled: true,
+            interval_seconds: 60,
+        };
 
         let plan = swarm_surgery_plan(
             "starfire-local",
-            &[odin, stonks, starfire_muninn, nightwing_muninn, raven_muninn],
+            &[odin, stonks, weksa, starfire_muninn, nightwing_muninn, raven_muninn],
             "unix:100",
         );
 
         assert_eq!(plan.plan_id, "swarm-surgery:starfire-local");
         assert_eq!(plan.status, "active-transport-migration");
-        assert_eq!(plan.next_target, "stonks");
-        assert!(plan.current_phase.contains("Stonks"));
-        assert!(plan.cut_line.contains("Muninn, Idunn, and Odin"));
+        assert_eq!(plan.next_target, "weksa");
+        assert!(plan.current_phase.contains("Weksa"));
+        assert!(plan.cut_line.contains("Muninn, Idunn, Odin, and Stonks"));
         assert!(plan.verification_layer.contains("CultMesh keepalive store"));
         assert!(
             plan.invariants
@@ -1945,6 +1980,27 @@ mod tests {
         assert!(!is_fresh_daemon_published_health(
             &health, &desired, "unix:100"
         ));
+    }
+
+    #[test]
+    fn stonks_transport_profile_marks_partial_rudp_health() {
+        let stonks = DaemonTarget {
+            daemon_id: "stonks".to_string(),
+            verse_id: "starfire.local".to_string(),
+            name: "Stonks".to_string(),
+            health_contract: health_contract("stonks.cultnet-rudp-market-health", "failed"),
+            health_command: Some("health-stonks.cmd".to_string()),
+            deploy_command: None,
+            restart_command: Some("restart-stonks.cmd".to_string()),
+            enabled: true,
+            interval_seconds: 30,
+        };
+
+        let profile = daemon_transport_profile(&stonks, "unix:100");
+
+        assert_eq!(profile.state, "partial-rudp-health-live");
+        assert!(profile.current_transport.contains("daemon-published-rudp-health"));
+        assert!(profile.cut_line.contains("provider advertisement"));
     }
 
     #[test]
