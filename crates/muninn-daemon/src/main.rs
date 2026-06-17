@@ -141,6 +141,7 @@ struct ActiveMoveStateSource {
 struct BluetoothPickupAttempt {
     address: String,
     attempted_at: Instant,
+    detail: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -222,9 +223,16 @@ fn serve(options: Options) -> Result<()> {
     loop {
         let live_move_sources = live_move_state_sources(&options);
         sync_active_move_state_sources(&mut active_move_states, live_move_sources.clone());
+        pickup_bluetooth_moves_if_due(&active_move_states, &mut bluetooth_pickup_attempts);
         {
             let mut node = open_node(&options, "muninn-daemon")?;
-            reconcile_move_identity_records(&mut node, &options, &live_move_sources, &active_move_states)?;
+            reconcile_move_identity_records(
+                &mut node,
+                &options,
+                &live_move_sources,
+                &active_move_states,
+                &bluetooth_pickup_attempts,
+            )?;
             register_move_light_commands(&mut node, &options, &mut active_move_lights)?;
             tick_move_light_commands(&mut node, &mut active_move_lights, &mut HidMoveLightWriter)?;
             tick_default_move_light_pulse(
@@ -245,7 +253,6 @@ fn serve(options: Options) -> Result<()> {
             publish_runtime_boundary_records(&mut node, &options, "idle", &[])?;
         }
         claim_move_host_if_due(&options, &mut last_move_host_claim_attempt_at);
-        pickup_bluetooth_moves_if_due(&active_move_states, &mut bluetooth_pickup_attempts);
         publish_daemon_health_if_configured(
             &options,
             &mut last_idunn_health_publish_attempt_at,
@@ -384,9 +391,10 @@ fn reconcile_move_identity_records(
     options: &Options,
     sources: &[MoveStateSource],
     active: &[ActiveMoveStateSource],
+    bluetooth_pickup_attempts: &[BluetoothPickupAttempt],
 ) -> Result<()> {
     publish_move_identity_records(node, options, sources)?;
-    publish_bluetooth_move_identity_records(node, options, active)?;
+    publish_bluetooth_move_identity_records(node, options, active, bluetooth_pickup_attempts)?;
 
     let current_ids = current_move_identity_records_from_sources(options, sources)?
         .into_iter()
@@ -410,6 +418,7 @@ fn publish_bluetooth_move_identity_records(
     node: &mut cultmesh_rs::CultMeshNode,
     options: &Options,
     active: &[ActiveMoveStateSource],
+    bluetooth_pickup_attempts: &[BluetoothPickupAttempt],
 ) -> Result<()> {
     let observed_at = timestamp()?;
     let bluetooth_host_address = platform_default_bluetooth_host_address().unwrap_or_default();
@@ -429,6 +438,7 @@ fn publish_bluetooth_move_identity_records(
             &device,
             bluetooth_host_address.clone(),
             observed_at.clone(),
+            bluetooth_pickup_detail(bluetooth_pickup_attempts, &device.address),
         ) else {
             continue;
         };
@@ -442,6 +452,7 @@ fn build_bluetooth_move_identity_record(
     device: &BluetoothMoveDevice,
     bluetooth_host_address: String,
     observed_at: String,
+    pickup_detail: Option<String>,
 ) -> Option<MuninnMoveIdentityRecord> {
     let move_id = bluetooth_address_move_id(&device.address)?;
     let state = if device.connected {
@@ -451,13 +462,18 @@ fn build_bluetooth_move_identity_record(
     } else {
         "bluetooth-known"
     };
-    let detail = if device.connected {
+    let mut detail = if device.connected {
         "Muninn sees this PS Move connected through BlueZ."
     } else if device.trusted {
         "Muninn sees this trusted PS Move in BlueZ and will attempt bounded pickup while disconnected."
     } else {
         "Muninn sees this PS Move in BlueZ, but it is not trusted for automatic pickup."
-    };
+    }
+    .to_string();
+    if let Some(pickup_detail) = pickup_detail.filter(|detail| !detail.trim().is_empty()) {
+        detail.push_str(" Last pickup attempt: ");
+        detail.push_str(pickup_detail.trim());
+    }
     Some(MuninnMoveIdentityRecord {
         identity_id: format!("{}:{}:move-identity", options.host_id, move_id),
         host_id: options.host_id.clone(),
@@ -465,7 +481,7 @@ fn build_bluetooth_move_identity_record(
         source_path: format!("bluetooth:{}", device.address),
         bluetooth_host_address,
         state: state.to_string(),
-        detail: detail.to_string(),
+        detail,
         observed_at,
     })
 }
@@ -475,6 +491,7 @@ fn publish_bluetooth_move_identity_records(
     _node: &mut cultmesh_rs::CultMeshNode,
     _options: &Options,
     _active: &[ActiveMoveStateSource],
+    _bluetooth_pickup_attempts: &[BluetoothPickupAttempt],
 ) -> Result<()> {
     Ok(())
 }
@@ -577,14 +594,20 @@ fn pickup_bluetooth_moves(
         }
         record_bluetooth_pickup_attempt(attempts, &device.address);
         match bluetoothctl_connect_device(&device.address) {
-            Ok(outcome) if outcome.connected => println!(
-                "bluetooth_move_pickup address={} state=connected detail={}",
-                device.address, outcome.detail
-            ),
-            Ok(outcome) => println!(
-                "bluetooth_move_pickup address={} state=waiting detail={}",
-                device.address, outcome.detail
-            ),
+            Ok(outcome) if outcome.connected => {
+                record_bluetooth_pickup_detail(attempts, &device.address, &outcome.detail);
+                println!(
+                    "bluetooth_move_pickup address={} state=connected detail={}",
+                    device.address, outcome.detail
+                );
+            }
+            Ok(outcome) => {
+                record_bluetooth_pickup_detail(attempts, &device.address, &outcome.detail);
+                println!(
+                    "bluetooth_move_pickup address={} state=waiting detail={}",
+                    device.address, outcome.detail
+                );
+            }
             Err(error) => eprintln!(
                 "bluetooth_move_pickup address={} state=failed error={error:#}",
                 device.address
@@ -617,7 +640,31 @@ fn record_bluetooth_pickup_attempt(attempts: &mut Vec<BluetoothPickupAttempt>, a
     attempts.push(BluetoothPickupAttempt {
         address: address.to_string(),
         attempted_at: Instant::now(),
+        detail: "attempt in progress".to_string(),
     });
+}
+
+fn record_bluetooth_pickup_detail(
+    attempts: &mut [BluetoothPickupAttempt],
+    address: &str,
+    detail: &str,
+) {
+    if let Some(attempt) = attempts
+        .iter_mut()
+        .find(|attempt| attempt.address.eq_ignore_ascii_case(address))
+    {
+        attempt.detail = detail.trim().to_string();
+    }
+}
+
+fn bluetooth_pickup_detail(
+    attempts: &[BluetoothPickupAttempt],
+    address: &str,
+) -> Option<String> {
+    attempts
+        .iter()
+        .find(|attempt| attempt.address.eq_ignore_ascii_case(address))
+        .map(|attempt| attempt.detail.clone())
 }
 
 #[cfg(unix)]
@@ -3809,6 +3856,7 @@ fn current_bluetooth_move_identity_records(
                 &device,
                 bluetooth_host_address.clone(),
                 observed_at.to_string(),
+                None,
             )
         })
         .collect()
@@ -4772,6 +4820,7 @@ Device 00:07:04:A8:00:D0 (public)
             &device,
             "5C:93:A2:9C:A8:A8".to_string(),
             "unix-1781667000".to_string(),
+            None,
         )
         .unwrap();
 
@@ -4782,6 +4831,37 @@ Device 00:07:04:A8:00:D0 (public)
         assert_eq!(record.source_path, "bluetooth:00:07:04:A8:00:D0");
         assert_eq!(record.bluetooth_host_address, "5C:93:A2:9C:A8:A8");
         assert_eq!(record.state, "bluetooth-waiting");
+    }
+
+    #[test]
+    fn bluetooth_move_identity_record_includes_last_pickup_detail() {
+        let options = Options::parse(
+            ["serve", "--host", "nightwing"]
+                .into_iter()
+                .map(String::from),
+        )
+        .unwrap();
+        let device = BluetoothMoveDevice {
+            address: "00:07:04:A6:BE:5F".to_string(),
+            trusted: true,
+            connected: false,
+        };
+
+        let record = build_bluetooth_move_identity_record(
+            &options,
+            &device,
+            "5C:93:A2:9C:A8:A8".to_string(),
+            "unix-1781667000".to_string(),
+            Some(
+                "Failed to connect: org.bluez.Error.Failed br-connection-create-socket"
+                    .to_string(),
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(record.state, "bluetooth-waiting");
+        assert!(record.detail.contains("Last pickup attempt: Failed to connect"));
+        assert!(record.detail.contains("br-connection-create-socket"));
     }
 
     #[test]
@@ -5091,7 +5171,7 @@ MODALIAS=input:b0005v054Cp03D5e0220
             hidraw_path: "windows-psmove://current".to_string(),
         }];
 
-        reconcile_move_identity_records(&mut node, &options, &current, &[]).unwrap();
+        reconcile_move_identity_records(&mut node, &options, &current, &[], &[]).unwrap();
 
         assert!(node
             .get::<MuninnMoveIdentityRecord>("starfire:move-0006f523e2d1:move-identity")
