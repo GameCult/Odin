@@ -1,12 +1,12 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use cultmesh_rs::{
     CultMesh, CultMeshNodeOptions, CultMeshSharedMemoryFrameRing, CultMeshStreamBodyTransport,
     CultMeshStreamCatalog, CultMeshStreamClock, CultMeshStreamDescriptor, CultMeshStreamKind,
 };
 use cultnet_rs::{
-    encode_cultnet_message_to_vec, CultNetMessage, CultNetRawDocumentRecord,
-    CultNetRawPayloadEncoding, CultNetRudpSocketTransportConnection,
-    CultNetRudpSocketTransportOptions, CultNetWireContract,
+    CultNetMessage, CultNetRawDocumentRecord, CultNetRawPayloadEncoding,
+    CultNetRudpSocketTransportConnection, CultNetRudpSocketTransportOptions, CultNetWireContract,
+    encode_cultnet_message_to_vec,
 };
 use odin_core::{
     EveProviderAdvertisementCompatRecord, IdunnDaemonHealthRecord, MuninnCaptureStreamRecord,
@@ -222,7 +222,12 @@ fn serve(options: Options) -> Result<()> {
 
     loop {
         let live_move_sources = live_move_state_sources(&options);
-        sync_active_move_state_sources(&mut active_move_states, live_move_sources.clone());
+        let released_usb_moves =
+            sync_active_move_state_sources(&mut active_move_states, live_move_sources.clone());
+        clear_bluetooth_pickup_attempts_for_released_usb_moves(
+            &mut bluetooth_pickup_attempts,
+            &released_usb_moves,
+        );
         pickup_bluetooth_moves_if_due(&active_move_states, &mut bluetooth_pickup_attempts);
         {
             let mut node = open_node(&options, "muninn-daemon")?;
@@ -253,10 +258,7 @@ fn serve(options: Options) -> Result<()> {
             publish_runtime_boundary_records(&mut node, &options, "idle", &[])?;
         }
         claim_move_host_if_due(&options, &mut last_move_host_claim_attempt_at);
-        publish_daemon_health_if_configured(
-            &options,
-            &mut last_idunn_health_publish_attempt_at,
-        )?;
+        publish_daemon_health_if_configured(&options, &mut last_idunn_health_publish_attempt_at)?;
         let has_platform_default_move_lights = platform_default_move_lights_enabled();
         if options.interval_seconds.is_none()
             && active_move_lights.is_empty()
@@ -294,7 +296,16 @@ fn active_move_state_source(source: MoveStateSource) -> ActiveMoveStateSource {
 fn sync_active_move_state_sources(
     active: &mut Vec<ActiveMoveStateSource>,
     desired: Vec<MoveStateSource>,
-) {
+) -> Vec<String> {
+    let released_usb_moves = active
+        .iter()
+        .filter(|state| {
+            !desired.iter().any(|source| source == &state.source)
+                && move_identity_source_state_and_detail(&state.source.hidraw_path).0
+                    == "usb-visible"
+        })
+        .map(|state| state.source.move_id.clone())
+        .collect();
     active.retain(|state| desired.iter().any(|source| source == &state.source));
     for source in desired {
         if active.iter().any(|state| state.source == source) {
@@ -302,6 +313,7 @@ fn sync_active_move_state_sources(
         }
         active.push(active_move_state_source(source));
     }
+    released_usb_moves
 }
 
 fn publish_move_identity_records(
@@ -344,11 +356,13 @@ fn move_identity_source_state_and_detail(source_path: &str) -> (String, String) 
 #[cfg(unix)]
 fn is_bluetooth_move_source_path(source_path: &str) -> bool {
     if is_joystick_path(source_path) {
-        let Some(name) = Path::new(source_path).file_name().and_then(|name| name.to_str()) else {
+        let Some(name) = Path::new(source_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+        else {
             return false;
         };
-        let Some(sysfs_device) =
-            fs::canonicalize(format!("/sys/class/input/{name}/device")).ok()
+        let Some(sysfs_device) = fs::canonicalize(format!("/sys/class/input/{name}/device")).ok()
         else {
             return false;
         };
@@ -356,11 +370,13 @@ fn is_bluetooth_move_source_path(source_path: &str) -> bool {
     }
 
     if source_path.contains("/dev/hidraw") {
-        let Some(name) = Path::new(source_path).file_name().and_then(|name| name.to_str()) else {
+        let Some(name) = Path::new(source_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+        else {
             return false;
         };
-        let Ok(uevent) =
-            fs::read_to_string(format!("/sys/class/hidraw/{name}/device/uevent"))
+        let Ok(uevent) = fs::read_to_string(format!("/sys/class/hidraw/{name}/device/uevent"))
         else {
             return false;
         };
@@ -642,6 +658,21 @@ fn bluetooth_pickup_recently_attempted(
     })
 }
 
+fn clear_bluetooth_pickup_attempts_for_released_usb_moves(
+    attempts: &mut Vec<BluetoothPickupAttempt>,
+    move_ids: &[String],
+) {
+    for move_id in move_ids {
+        if let Some(address) = move_id_bluetooth_address(move_id) {
+            clear_bluetooth_pickup_attempt(attempts, &address);
+        }
+    }
+}
+
+fn clear_bluetooth_pickup_attempt(attempts: &mut Vec<BluetoothPickupAttempt>, address: &str) {
+    attempts.retain(|attempt| !attempt.address.eq_ignore_ascii_case(address));
+}
+
 fn record_bluetooth_pickup_attempt(attempts: &mut Vec<BluetoothPickupAttempt>, address: &str) {
     attempts.retain(|attempt| !attempt.address.eq_ignore_ascii_case(address));
     attempts.push(BluetoothPickupAttempt {
@@ -664,10 +695,7 @@ fn record_bluetooth_pickup_detail(
     }
 }
 
-fn bluetooth_pickup_detail(
-    attempts: &[BluetoothPickupAttempt],
-    address: &str,
-) -> Option<String> {
+fn bluetooth_pickup_detail(attempts: &[BluetoothPickupAttempt], address: &str) -> Option<String> {
     attempts
         .iter()
         .find(|attempt| attempt.address.eq_ignore_ascii_case(address))
@@ -676,8 +704,7 @@ fn bluetooth_pickup_detail(
 
 fn bluetooth_pickup_detail_is_unreachable(detail: &str) -> bool {
     let normalized = detail.to_ascii_lowercase();
-    normalized.contains("br-connection-create-socket")
-        || normalized.contains("host is down")
+    normalized.contains("br-connection-create-socket") || normalized.contains("host is down")
 }
 
 #[cfg(unix)]
@@ -712,6 +739,18 @@ fn bluetooth_address_move_id(address: &str) -> Option<String> {
                     .collect::<String>()
             )
         })
+}
+
+fn move_id_bluetooth_address(move_id: &str) -> Option<String> {
+    let hex = move_id.strip_prefix("move-")?;
+    if hex.len() != 12 || !hex.as_bytes().iter().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut parts = Vec::new();
+    for index in (0..hex.len()).step_by(2) {
+        parts.push(hex[index..index + 2].to_ascii_uppercase());
+    }
+    Some(parts.join(":"))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2213,9 +2252,9 @@ fn bluetoothctl_connect_device(address: &str) -> Result<BluetoothConnectOutcome>
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
-            let output = child
-                .wait_with_output()
-                .with_context(|| format!("collecting timed-out bluetoothctl connect {address} output"))?;
+            let output = child.wait_with_output().with_context(|| {
+                format!("collecting timed-out bluetoothctl connect {address} output")
+            })?;
             let detail = bluetoothctl_output_detail(&output.stdout, &output.stderr);
             return Ok(BluetoothConnectOutcome {
                 connected: false,
@@ -2383,12 +2422,12 @@ fn platform_default_move_lights_enabled() -> bool {
 #[cfg(windows)]
 fn windows_ps_move_light_paths() -> Result<Vec<DefaultMoveLightTarget>> {
     use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
-        SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW,
         DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, SP_DEVICE_INTERFACE_DATA,
+        SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW,
     };
     use windows_sys::Win32::Devices::HumanInterfaceDevice::{
-        HidD_FreePreparsedData, HidD_GetAttributes, HidD_GetHidGuid, HidD_GetPreparsedData,
-        HidP_GetCaps, HIDD_ATTRIBUTES, HIDP_CAPS, HIDP_STATUS_SUCCESS,
+        HIDD_ATTRIBUTES, HIDP_CAPS, HIDP_STATUS_SUCCESS, HidD_FreePreparsedData,
+        HidD_GetAttributes, HidD_GetHidGuid, HidD_GetPreparsedData, HidP_GetCaps,
     };
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{
@@ -2493,12 +2532,12 @@ fn windows_ps_move_light_paths() -> Result<Vec<DefaultMoveLightTarget>> {
 #[cfg(windows)]
 fn windows_ps_move_state_paths() -> Result<Vec<DefaultMoveLightTarget>> {
     use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
-        SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW,
         DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, SP_DEVICE_INTERFACE_DATA,
+        SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW,
     };
     use windows_sys::Win32::Devices::HumanInterfaceDevice::{
-        HidD_FreePreparsedData, HidD_GetAttributes, HidD_GetHidGuid, HidD_GetPreparsedData,
-        HidP_GetCaps, HIDD_ATTRIBUTES, HIDP_CAPS, HIDP_STATUS_SUCCESS,
+        HIDD_ATTRIBUTES, HIDP_CAPS, HIDP_STATUS_SUCCESS, HidD_FreePreparsedData,
+        HidD_GetAttributes, HidD_GetHidGuid, HidD_GetPreparsedData, HidP_GetCaps,
     };
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{
@@ -2604,11 +2643,11 @@ fn windows_ps_move_state_paths() -> Result<Vec<DefaultMoveLightTarget>> {
 #[cfg(windows)]
 fn windows_ps_move_identity_by_physical_key() -> Result<std::collections::HashMap<String, String>> {
     use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
-        SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW,
         DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, SP_DEVICE_INTERFACE_DATA,
+        SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW,
     };
     use windows_sys::Win32::Devices::HumanInterfaceDevice::{
-        HidD_GetAttributes, HidD_GetHidGuid, HIDD_ATTRIBUTES,
+        HIDD_ATTRIBUTES, HidD_GetAttributes, HidD_GetHidGuid,
     };
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{
@@ -2784,12 +2823,12 @@ fn windows_ps_move_bluetooth_addresses(handle: *mut std::ffi::c_void) -> Option<
 #[cfg(windows)]
 fn windows_claim_ps_move_host(host: &[u8; 6]) -> Result<usize> {
     use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
-        SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW,
         DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, SP_DEVICE_INTERFACE_DATA,
+        SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW,
     };
     use windows_sys::Win32::Devices::HumanInterfaceDevice::{
-        HidD_FreePreparsedData, HidD_GetAttributes, HidD_GetHidGuid, HidD_GetPreparsedData,
-        HidD_SetFeature, HidP_GetCaps, HIDD_ATTRIBUTES, HIDP_CAPS, HIDP_STATUS_SUCCESS,
+        HIDD_ATTRIBUTES, HIDP_CAPS, HIDP_STATUS_SUCCESS, HidD_FreePreparsedData,
+        HidD_GetAttributes, HidD_GetHidGuid, HidD_GetPreparsedData, HidD_SetFeature, HidP_GetCaps,
     };
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{
@@ -2930,8 +2969,8 @@ fn windows_claim_ps_move_host(host: &[u8; 6]) -> Result<usize> {
 #[cfg(windows)]
 fn windows_ps_move_input_report(source: &str) -> Result<Option<Vec<u8>>> {
     use windows_sys::Win32::Devices::HumanInterfaceDevice::{
-        HidD_FreePreparsedData, HidD_GetInputReport, HidD_GetPreparsedData, HidP_GetCaps,
-        HIDP_CAPS, HIDP_STATUS_SUCCESS,
+        HIDP_CAPS, HIDP_STATUS_SUCCESS, HidD_FreePreparsedData, HidD_GetInputReport,
+        HidD_GetPreparsedData, HidP_GetCaps,
     };
     use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_READ, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{
@@ -3022,8 +3061,8 @@ fn windows_read_hid_interrupt_report(
         WAIT_OBJECT_0, WAIT_TIMEOUT,
     };
     use windows_sys::Win32::Storage::FileSystem::ReadFile;
-    use windows_sys::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
     use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
+    use windows_sys::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 
     let event = unsafe { CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) };
     if event.is_null() {
@@ -3109,7 +3148,7 @@ unsafe fn windows_hid_interface_path(
     interface_data: &mut windows_sys::Win32::Devices::DeviceAndDriverInstallation::SP_DEVICE_INTERFACE_DATA,
 ) -> Option<String> {
     use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
-        SetupDiGetDeviceInterfaceDetailW, SP_DEVICE_INTERFACE_DETAIL_DATA_W,
+        SP_DEVICE_INTERFACE_DETAIL_DATA_W, SetupDiGetDeviceInterfaceDetailW,
     };
 
     let mut required_size = 0;
@@ -3166,8 +3205,8 @@ unsafe fn windows_hid_interface_path(
 fn write_windows_hid_report(path: &str, report: &[u8]) -> Result<()> {
     use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_WRITE, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, WriteFile, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE,
-        OPEN_EXISTING,
+        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+        WriteFile,
     };
 
     let wide = wide_null(path);
@@ -3720,7 +3759,10 @@ fn move_state_status(options: Options) -> Result<()> {
         {
             continue;
         }
-        let key = format!("{}:{}:move-controller-state", options.host_id, source.move_id);
+        let key = format!(
+            "{}:{}:move-controller-state",
+            options.host_id, source.move_id
+        );
         if let Some(state) = node.get::<MuninnMoveControllerStateRecord>(&key)? {
             states.push(state);
         }
@@ -3734,7 +3776,9 @@ fn move_state_status(options: Options) -> Result<()> {
             )
             .then(a.sequence.cmp(&b.sequence))
     });
-    states.dedup_by(|left, right| left.stream_id == right.stream_id && left.sequence == right.sequence);
+    states.dedup_by(|left, right| {
+        left.stream_id == right.stream_id && left.sequence == right.sequence
+    });
     if states.is_empty() {
         println!(
             "No Muninn Move controller state records found for host {}.",
@@ -3862,7 +3906,10 @@ fn current_move_identity_records_from_sources(
             }
         })
         .collect::<Vec<_>>();
-    identities.extend(current_bluetooth_move_identity_records(options, &observed_at));
+    identities.extend(current_bluetooth_move_identity_records(
+        options,
+        &observed_at,
+    ));
     identities.sort_by(|a, b| {
         a.identity_id.cmp(&b.identity_id).then(
             unix_timestamp_sort_key(&b.observed_at).cmp(&unix_timestamp_sort_key(&a.observed_at)),
@@ -4599,9 +4646,11 @@ mod tests {
         let sources = available_sources(&options);
 
         assert!(sources.iter().any(|source| source.starts_with("screen:")));
-        assert!(sources
-            .iter()
-            .any(|source| source.starts_with("audio-loopback:")));
+        assert!(
+            sources
+                .iter()
+                .any(|source| source.starts_with("audio-loopback:"))
+        );
     }
 
     #[test]
@@ -4804,10 +4853,10 @@ mod tests {
             .as_deref(),
             Some("00:07:04:A8:00:D0")
         );
-        assert!(parse_bluetoothctl_motion_controller_device_line(
-            "Device 00:11:22:33:44:55 Keyboard"
-        )
-        .is_none());
+        assert!(
+            parse_bluetoothctl_motion_controller_device_line("Device 00:11:22:33:44:55 Keyboard")
+                .is_none()
+        );
     }
 
     #[test]
@@ -4830,6 +4879,19 @@ Device 00:07:04:A8:00:D0 (public)
             bluetooth_address_move_id("00:07:04:A8:00:D0").as_deref(),
             Some("move-000704a800d0")
         );
+    }
+
+    #[test]
+    fn move_id_maps_to_bluetooth_address() {
+        assert_eq!(
+            move_id_bluetooth_address("move-000704a39772").as_deref(),
+            Some("00:07:04:A3:97:72")
+        );
+        assert_eq!(
+            move_id_bluetooth_address("move-000704a800d0").as_deref(),
+            Some("00:07:04:A8:00:D0")
+        );
+        assert!(move_id_bluetooth_address("move-not-a-controller").is_none());
     }
 
     #[test]
@@ -4884,16 +4946,23 @@ Device 00:07:04:A8:00:D0 (public)
             "5C:93:A2:9C:A8:A8".to_string(),
             "unix-1781667000".to_string(),
             Some(
-                "Failed to connect: org.bluez.Error.Failed br-connection-create-socket"
-                    .to_string(),
+                "Failed to connect: org.bluez.Error.Failed br-connection-create-socket".to_string(),
             ),
         )
         .unwrap();
 
         assert_eq!(record.state, "bluetooth-unreachable");
-        assert!(record.detail.contains("Last pickup attempt: Failed to connect"));
+        assert!(
+            record
+                .detail
+                .contains("Last pickup attempt: Failed to connect")
+        );
         assert!(record.detail.contains("br-connection-create-socket"));
-        assert!(record.detail.contains("Wake the controller with the PS button"));
+        assert!(
+            record
+                .detail
+                .contains("Wake the controller with the PS button")
+        );
         assert!(record.detail.contains("reattach USB"));
     }
 
@@ -5229,10 +5298,11 @@ MODALIAS=input:b0005v054Cp03D5e0220
 
         reconcile_move_identity_records(&mut node, &options, &current, &[], &[]).unwrap();
 
-        assert!(node
-            .get::<MuninnMoveIdentityRecord>("starfire:move-0006f523e2d1:move-identity")
-            .unwrap()
-            .is_none());
+        assert!(
+            node.get::<MuninnMoveIdentityRecord>("starfire:move-0006f523e2d1:move-identity")
+                .unwrap()
+                .is_none()
+        );
         let current_record = node
             .get_required::<MuninnMoveIdentityRecord>("starfire:move-000704a800d0:move-identity")
             .unwrap();
@@ -5321,11 +5391,12 @@ MODALIAS=input:b0005v054Cp03D5e0220
         publish_move_controller_states(&mut node, &options, &mut active, &mut reader, None)
             .unwrap();
 
-        assert!(node
-            .get_required::<MuninnMoveControllerStateRecord>(
+        assert!(
+            node.get_required::<MuninnMoveControllerStateRecord>(
                 "nightwing:missing:move-controller-state"
             )
-            .is_err());
+            .is_err()
+        );
         let record = node
             .get_required::<MuninnMoveControllerStateRecord>(
                 "nightwing:present:move-controller-state",
@@ -5357,13 +5428,65 @@ MODALIAS=input:b0005v054Cp03D5e0220
         );
 
         assert_eq!(active.len(), 2);
-        assert!(active
-            .iter()
-            .any(|state| state.source.move_id == "move-new"));
+        assert!(
+            active
+                .iter()
+                .any(|state| state.source.move_id == "move-new")
+        );
         assert!(active.iter().any(|state| state.source.move_id == "move-bt"));
-        assert!(!active
-            .iter()
-            .any(|state| state.source.move_id == "move-old"));
+        assert!(
+            !active
+                .iter()
+                .any(|state| state.source.move_id == "move-old")
+        );
+    }
+
+    #[test]
+    fn active_move_state_sync_reports_released_usb_moves() {
+        let mut active = active_move_state_sources(vec![
+            MoveStateSource {
+                move_id: "move-000704a39772".to_string(),
+                hidraw_path: "/dev/input/js0".to_string(),
+            },
+            MoveStateSource {
+                move_id: "move-0006f523e2d1".to_string(),
+                hidraw_path: "bluetooth:00:06:F5:23:E2:D1".to_string(),
+            },
+        ]);
+
+        let released = sync_active_move_state_sources(
+            &mut active,
+            vec![MoveStateSource {
+                move_id: "move-0006f523e2d1".to_string(),
+                hidraw_path: "bluetooth:00:06:F5:23:E2:D1".to_string(),
+            }],
+        );
+
+        assert_eq!(released, vec!["move-000704a39772"]);
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].source.move_id, "move-0006f523e2d1");
+    }
+
+    #[test]
+    fn released_usb_move_clears_pickup_backoff() {
+        let mut attempts = Vec::new();
+        record_bluetooth_pickup_attempt(&mut attempts, "00:07:04:A3:97:72");
+        assert!(bluetooth_pickup_recently_attempted(
+            &attempts,
+            "00:07:04:A3:97:72",
+            Duration::from_secs(30)
+        ));
+
+        clear_bluetooth_pickup_attempts_for_released_usb_moves(
+            &mut attempts,
+            &["move-000704a39772".to_string()],
+        );
+
+        assert!(!bluetooth_pickup_recently_attempted(
+            &attempts,
+            "00:07:04:A3:97:72",
+            Duration::from_secs(30)
+        ));
     }
 
     #[test]
