@@ -137,6 +137,12 @@ struct ActiveMoveStateSource {
     light_hidraw_path: Option<String>,
 }
 
+#[derive(Clone, Debug)]
+struct BluetoothPickupAttempt {
+    address: String,
+    attempted_at: Instant,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct DefaultMoveLightTarget {
     path: String,
@@ -210,7 +216,7 @@ fn serve(options: Options) -> Result<()> {
     let mut last_default_move_light_write_at = None;
     let mut last_idunn_health_publish_attempt_at = None;
     let mut last_move_host_claim_attempt_at = None;
-    let mut last_move_bluetooth_pickup_attempt_at = None;
+    let mut bluetooth_pickup_attempts = Vec::new();
     let mut active_move_states = active_move_state_sources(live_move_state_sources(&options));
 
     loop {
@@ -239,10 +245,7 @@ fn serve(options: Options) -> Result<()> {
             publish_runtime_boundary_records(&mut node, &options, "idle", &[])?;
         }
         claim_move_host_if_due(&options, &mut last_move_host_claim_attempt_at);
-        pickup_bluetooth_moves_if_due(
-            &active_move_states,
-            &mut last_move_bluetooth_pickup_attempt_at,
-        );
+        pickup_bluetooth_moves_if_due(&active_move_states, &mut bluetooth_pickup_attempts);
         publish_daemon_health_if_configured(
             &options,
             &mut last_idunn_health_publish_attempt_at,
@@ -463,18 +466,9 @@ fn claim_move_host_if_due(options: &Options, last_attempt_at: &mut Option<Instan
 
 fn pickup_bluetooth_moves_if_due(
     active: &[ActiveMoveStateSource],
-    last_attempt_at: &mut Option<Instant>,
+    attempts: &mut Vec<BluetoothPickupAttempt>,
 ) {
-    let cadence = Duration::from_secs(5);
-    if last_attempt_at
-        .as_ref()
-        .is_some_and(|instant| instant.elapsed() < cadence)
-    {
-        return;
-    }
-    *last_attempt_at = Some(Instant::now());
-
-    if let Err(error) = pickup_bluetooth_moves(active) {
+    if let Err(error) = pickup_bluetooth_moves(active, attempts) {
         eprintln!("Muninn could not attempt PS Move Bluetooth pickup: {error:#}");
     }
 }
@@ -506,7 +500,11 @@ fn prepare_move_bluetooth_host_for_claim() -> Result<()> {
 }
 
 #[cfg(unix)]
-fn pickup_bluetooth_moves(active: &[ActiveMoveStateSource]) -> Result<()> {
+fn pickup_bluetooth_moves(
+    active: &[ActiveMoveStateSource],
+    attempts: &mut Vec<BluetoothPickupAttempt>,
+) -> Result<()> {
+    let cadence = Duration::from_secs(30);
     let devices = bluetoothctl_motion_controller_devices()?;
     for device in devices {
         if device.connected
@@ -515,12 +513,19 @@ fn pickup_bluetooth_moves(active: &[ActiveMoveStateSource]) -> Result<()> {
         {
             continue;
         }
+        if bluetooth_pickup_recently_attempted(attempts, &device.address, cadence) {
+            continue;
+        }
+        record_bluetooth_pickup_attempt(attempts, &device.address);
         match bluetoothctl_connect_device(&device.address) {
-            Ok(true) => println!(
-                "bluetooth_move_pickup address={} state=connected",
-                device.address
+            Ok(outcome) if outcome.connected => println!(
+                "bluetooth_move_pickup address={} state=connected detail={}",
+                device.address, outcome.detail
             ),
-            Ok(false) => {}
+            Ok(outcome) => println!(
+                "bluetooth_move_pickup address={} state=waiting detail={}",
+                device.address, outcome.detail
+            ),
             Err(error) => eprintln!(
                 "bluetooth_move_pickup address={} state=failed error={error:#}",
                 device.address
@@ -531,8 +536,29 @@ fn pickup_bluetooth_moves(active: &[ActiveMoveStateSource]) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-fn pickup_bluetooth_moves(_active: &[ActiveMoveStateSource]) -> Result<()> {
+fn pickup_bluetooth_moves(
+    _active: &[ActiveMoveStateSource],
+    _attempts: &mut Vec<BluetoothPickupAttempt>,
+) -> Result<()> {
     Ok(())
+}
+
+fn bluetooth_pickup_recently_attempted(
+    attempts: &[BluetoothPickupAttempt],
+    address: &str,
+    cadence: Duration,
+) -> bool {
+    attempts.iter().any(|attempt| {
+        attempt.address.eq_ignore_ascii_case(address) && attempt.attempted_at.elapsed() < cadence
+    })
+}
+
+fn record_bluetooth_pickup_attempt(attempts: &mut Vec<BluetoothPickupAttempt>, address: &str) {
+    attempts.retain(|attempt| !attempt.address.eq_ignore_ascii_case(address));
+    attempts.push(BluetoothPickupAttempt {
+        address: address.to_string(),
+        attempted_at: Instant::now(),
+    });
 }
 
 #[cfg(unix)]
@@ -560,6 +586,12 @@ fn bluetooth_address_move_id(address: &str) -> Option<String> {
                     .collect::<String>()
             )
         })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BluetoothConnectOutcome {
+    connected: bool,
+    detail: String,
 }
 
 fn move_host_address_for_claim(options: &Options) -> Option<String> {
@@ -2031,10 +2063,10 @@ fn bluetoothctl_info_flag(text: &str, name: &str) -> bool {
 }
 
 #[cfg(unix)]
-fn bluetoothctl_connect_device(address: &str) -> Result<bool> {
+fn bluetoothctl_connect_device(address: &str) -> Result<BluetoothConnectOutcome> {
     let mut child = Command::new("bluetoothctl")
         .args(["connect", address])
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .with_context(|| format!("bluetoothctl connect {address} could not start"))?;
@@ -2044,14 +2076,54 @@ fn bluetoothctl_connect_device(address: &str) -> Result<bool> {
             .try_wait()
             .with_context(|| format!("waiting for bluetoothctl connect {address}"))?
         {
-            return Ok(status.success());
+            let output = child
+                .wait_with_output()
+                .with_context(|| format!("collecting bluetoothctl connect {address} output"))?;
+            let detail = bluetoothctl_output_detail(&output.stdout, &output.stderr);
+            return Ok(BluetoothConnectOutcome {
+                connected: status.success(),
+                detail,
+            });
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
-            let _ = child.wait();
-            return Ok(false);
+            let output = child
+                .wait_with_output()
+                .with_context(|| format!("collecting timed-out bluetoothctl connect {address} output"))?;
+            let detail = bluetoothctl_output_detail(&output.stdout, &output.stderr);
+            return Ok(BluetoothConnectOutcome {
+                connected: false,
+                detail: if detail.is_empty() {
+                    "timeout".to_string()
+                } else {
+                    format!("timeout; {detail}")
+                },
+            });
         }
         thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[cfg(unix)]
+fn bluetoothctl_output_detail(stdout: &[u8], stderr: &[u8]) -> String {
+    let mut detail = String::new();
+    for text in [stdout, stderr] {
+        let text = String::from_utf8_lossy(text);
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with("Attempting to connect") {
+                continue;
+            }
+            if !detail.is_empty() {
+                detail.push_str("; ");
+            }
+            detail.push_str(line);
+        }
+    }
+    if detail.is_empty() {
+        "no bluetoothctl detail".to_string()
+    } else {
+        detail
     }
 }
 
