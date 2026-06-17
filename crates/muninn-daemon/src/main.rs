@@ -452,8 +452,13 @@ fn build_bluetooth_move_identity_record(
     pickup_detail: Option<String>,
 ) -> Option<MuninnMoveIdentityRecord> {
     let move_id = bluetooth_address_move_id(&device.address)?;
+    let pickup_unreachable = pickup_detail
+        .as_deref()
+        .is_some_and(bluetooth_pickup_detail_is_unreachable);
     let state = if device.connected {
         "bluetooth-connected"
+    } else if device.trusted && pickup_unreachable {
+        "bluetooth-unreachable"
     } else if device.trusted {
         "bluetooth-waiting"
     } else {
@@ -662,6 +667,12 @@ fn bluetooth_pickup_detail(
         .iter()
         .find(|attempt| attempt.address.eq_ignore_ascii_case(address))
         .map(|attempt| attempt.detail.clone())
+}
+
+fn bluetooth_pickup_detail_is_unreachable(detail: &str) -> bool {
+    let normalized = detail.to_ascii_lowercase();
+    normalized.contains("br-connection-create-socket")
+        || normalized.contains("host is down")
 }
 
 #[cfg(unix)]
@@ -4874,7 +4885,7 @@ Device 00:07:04:A8:00:D0 (public)
         )
         .unwrap();
 
-        assert_eq!(record.state, "bluetooth-waiting");
+        assert_eq!(record.state, "bluetooth-unreachable");
         assert!(record.detail.contains("Last pickup attempt: Failed to connect"));
         assert!(record.detail.contains("br-connection-create-socket"));
     }
