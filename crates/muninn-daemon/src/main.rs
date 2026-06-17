@@ -3772,7 +3772,18 @@ fn move_source_status(options: Options) -> Result<()> {
 }
 
 fn move_identity_status(options: Options) -> Result<()> {
-    let mut identities = current_move_identity_records(&options)?;
+    let node = open_node(&options, "muninn-move-identity-status")?;
+    let mut identities = node.cache().get_all::<MuninnMoveIdentityRecord>()?;
+    identities.retain(|identity| identity.host_id == options.host_id);
+    let current = current_move_identity_records(&options)?;
+    for identity in current {
+        if !identities
+            .iter()
+            .any(|existing| existing.identity_id == identity.identity_id)
+        {
+            identities.push(identity);
+        }
+    }
     if let Some(move_filter) = options.move_filter.as_deref() {
         identities.retain(|identity| identity.move_id == move_filter);
     }
