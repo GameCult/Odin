@@ -218,8 +218,7 @@ fn serve(options: Options) -> Result<()> {
         sync_active_move_state_sources(&mut active_move_states, live_move_sources.clone());
         {
             let mut node = open_node(&options, "muninn-daemon")?;
-            publish_move_identity_records(&mut node, &options, &live_move_sources)?;
-            publish_bluetooth_move_identity_records(&mut node, &options, &active_move_states)?;
+            reconcile_move_identity_records(&mut node, &options, &live_move_sources, &active_move_states)?;
             register_move_light_commands(&mut node, &options, &mut active_move_lights)?;
             tick_move_light_commands(&mut node, &mut active_move_lights, &mut HidMoveLightWriter)?;
             tick_default_move_light_pulse(
@@ -314,6 +313,32 @@ fn publish_move_identity_records(
             observed_at: observed_at.clone(),
         };
         node.put(&record.identity_id, &record)?;
+    }
+    Ok(())
+}
+
+fn reconcile_move_identity_records(
+    node: &mut cultmesh_rs::CultMeshNode,
+    options: &Options,
+    sources: &[MoveStateSource],
+    active: &[ActiveMoveStateSource],
+) -> Result<()> {
+    publish_move_identity_records(node, options, sources)?;
+    publish_bluetooth_move_identity_records(node, options, active)?;
+
+    let current_ids = current_move_identity_records_from_sources(options, sources)?
+        .into_iter()
+        .map(|identity| identity.identity_id)
+        .collect::<Vec<_>>();
+    let existing = node.cache().get_all::<MuninnMoveIdentityRecord>()?;
+    for identity in existing {
+        if identity.host_id == options.host_id
+            && !current_ids
+                .iter()
+                .any(|current| current == &identity.identity_id)
+        {
+            node.delete::<MuninnMoveIdentityRecord>(&identity.identity_id)?;
+        }
     }
     Ok(())
 }
@@ -3569,25 +3594,9 @@ fn move_source_status(options: Options) -> Result<()> {
 }
 
 fn move_identity_status(options: Options) -> Result<()> {
-    let node = open_node(&options, "muninn-move-identity-status")?;
-    let mut identities = node.cache().get_all::<MuninnMoveIdentityRecord>()?;
-    identities.extend(current_move_identity_records(&options)?);
-    identities.retain(|identity| identity.host_id == options.host_id);
+    let mut identities = current_move_identity_records(&options)?;
     if let Some(move_filter) = options.move_filter.as_deref() {
         identities.retain(|identity| identity.move_id == move_filter);
-    }
-    for move_id in live_move_identity_ids(&options) {
-        if options
-            .move_filter
-            .as_deref()
-            .is_some_and(|move_filter| move_id != move_filter)
-        {
-            continue;
-        }
-        let key = format!("{}:{}:move-identity", options.host_id, move_id);
-        if let Some(identity) = node.get::<MuninnMoveIdentityRecord>(&key)? {
-            identities.push(identity);
-        }
     }
     identities.sort_by(|a, b| {
         a.identity_id.cmp(&b.identity_id).then(
@@ -3618,15 +3627,23 @@ fn move_identity_status(options: Options) -> Result<()> {
 }
 
 fn current_move_identity_records(options: &Options) -> Result<Vec<MuninnMoveIdentityRecord>> {
+    let sources = live_move_state_sources(options);
+    current_move_identity_records_from_sources(options, &sources)
+}
+
+fn current_move_identity_records_from_sources(
+    options: &Options,
+    sources: &[MoveStateSource],
+) -> Result<Vec<MuninnMoveIdentityRecord>> {
     let observed_at = timestamp()?;
     let bluetooth_host_address = move_host_address_for_claim(options).unwrap_or_default();
-    let mut identities = live_move_state_sources(options)
-        .into_iter()
+    let mut identities = sources
+        .iter()
         .map(|source| MuninnMoveIdentityRecord {
             identity_id: format!("{}:{}:move-identity", options.host_id, source.move_id),
             host_id: options.host_id.clone(),
-            move_id: source.move_id,
-            source_path: source.hidraw_path,
+            move_id: source.move_id.clone(),
+            source_path: source.hidraw_path.clone(),
             bluetooth_host_address: bluetooth_host_address.clone(),
             state: "usb-visible".to_string(),
             detail: "Muninn currently sees this PS Move on a local USB/HID input path.".to_string(),
@@ -3668,33 +3685,6 @@ fn current_bluetooth_move_identity_records(
     _options: &Options,
     _observed_at: &str,
 ) -> Vec<MuninnMoveIdentityRecord> {
-    Vec::new()
-}
-
-fn live_move_identity_ids(options: &Options) -> Vec<String> {
-    let mut move_ids = live_move_state_sources(options)
-        .into_iter()
-        .map(|source| source.move_id)
-        .collect::<Vec<_>>();
-    for move_id in platform_bluetooth_move_identity_ids() {
-        if !move_ids.iter().any(|known| known.eq_ignore_ascii_case(&move_id)) {
-            move_ids.push(move_id);
-        }
-    }
-    move_ids
-}
-
-#[cfg(unix)]
-fn platform_bluetooth_move_identity_ids() -> Vec<String> {
-    bluetoothctl_motion_controller_devices()
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|device| bluetooth_address_move_id(&device.address))
-        .collect()
-}
-
-#[cfg(not(unix))]
-fn platform_bluetooth_move_identity_ids() -> Vec<String> {
     Vec::new()
 }
 
@@ -4903,6 +4893,56 @@ Device 00:07:04:A8:00:D0 (public)
         assert_eq!(identities.len(), 1);
         assert_eq!(identities[0].move_id, "move-000704a39772");
         assert_eq!(identities[0].source_path, "/dev/input/js0");
+        let _ = fs::remove_file(store_path);
+    }
+
+    #[test]
+    fn move_identity_reconcile_deletes_stale_host_records() {
+        let store_path = std::env::temp_dir().join(format!(
+            "muninn-move-identity-reconcile-{}.cc",
+            timestamp_ns().unwrap()
+        ));
+        let options = Options::parse(
+            [
+                "serve",
+                "--host",
+                "starfire",
+                "--store",
+                store_path.to_str().unwrap(),
+                "--move-host",
+                "5C:93:A2:9C:A8:A8",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap();
+        let mut node = open_node(&options, "muninn-move-identity-reconcile-test").unwrap();
+        let stale = MuninnMoveIdentityRecord {
+            identity_id: "starfire:move-0006f523e2d1:move-identity".to_string(),
+            host_id: "starfire".to_string(),
+            move_id: "move-0006f523e2d1".to_string(),
+            source_path: "windows-psmove://stale".to_string(),
+            bluetooth_host_address: "5C:93:A2:9C:A8:A8".to_string(),
+            state: "usb-visible".to_string(),
+            detail: "stale test record".to_string(),
+            observed_at: "unix-1".to_string(),
+        };
+        node.put(&stale.identity_id, &stale).unwrap();
+        let current = vec![MoveStateSource {
+            move_id: "move-000704a800d0".to_string(),
+            hidraw_path: "windows-psmove://current".to_string(),
+        }];
+
+        reconcile_move_identity_records(&mut node, &options, &current, &[]).unwrap();
+
+        assert!(node
+            .get::<MuninnMoveIdentityRecord>("starfire:move-0006f523e2d1:move-identity")
+            .unwrap()
+            .is_none());
+        let current_record = node
+            .get_required::<MuninnMoveIdentityRecord>("starfire:move-000704a800d0:move-identity")
+            .unwrap();
+        assert_eq!(current_record.source_path, "windows-psmove://current");
         let _ = fs::remove_file(store_path);
     }
 
