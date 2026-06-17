@@ -475,6 +475,11 @@ fn build_bluetooth_move_identity_record(
     if let Some(pickup_detail) = pickup_detail.filter(|detail| !detail.trim().is_empty()) {
         detail.push_str(" Last pickup attempt: ");
         detail.push_str(pickup_detail.trim());
+        if pickup_unreachable {
+            detail.push_str(
+                "; BlueZ reports the controller host is down, so the Move is likely asleep/off-air. Wake the controller with the PS button or reattach USB for Muninn to refresh the host claim.",
+            );
+        }
     }
     Some(MuninnMoveIdentityRecord {
         identity_id: format!("{}:{}:move-identity", options.host_id, move_id),
@@ -4888,6 +4893,8 @@ Device 00:07:04:A8:00:D0 (public)
         assert_eq!(record.state, "bluetooth-unreachable");
         assert!(record.detail.contains("Last pickup attempt: Failed to connect"));
         assert!(record.detail.contains("br-connection-create-socket"));
+        assert!(record.detail.contains("Wake the controller with the PS button"));
+        assert!(record.detail.contains("reattach USB"));
     }
 
     #[test]
