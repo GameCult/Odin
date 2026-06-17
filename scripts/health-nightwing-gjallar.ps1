@@ -72,6 +72,22 @@ if ($null -eq $status.cultCacheWitness -or $status.cultCacheWitness.status -ne "
   Fail-IdunnHealth -State "degraded" -Message "Nightwing Gjallar has not published the daemon-owned CultCache witness. $detail"
 }
 
+if ([string]::IsNullOrWhiteSpace([string]$status.receive.lastAttemptStatus)) {
+  Fail-IdunnHealth -State "failed" -Message "Nightwing Gjallar status witness is missing receive.lastAttemptStatus."
+}
+
+if ([string]::IsNullOrWhiteSpace([string]$status.receive.lastSuccessfulAtUtc)) {
+  Fail-IdunnHealth -State "failed" -Message "Nightwing Gjallar status witness is missing receive.lastSuccessfulAtUtc."
+}
+
+if ([int]$status.receive.staleAfterSeconds -le 0) {
+  Fail-IdunnHealth -State "failed" -Message "Nightwing Gjallar status witness has invalid receive.staleAfterSeconds=$($status.receive.staleAfterSeconds)."
+}
+
+if ($null -eq $status.receive.consecutiveFailures) {
+  Fail-IdunnHealth -State "failed" -Message "Nightwing Gjallar status witness is missing receive.consecutiveFailures."
+}
+
 if ($status.receive.status -ne "catalog-composed") {
   $detail = $status.receive.error
   if ([string]::IsNullOrWhiteSpace($detail)) {

@@ -1,5 +1,7 @@
 param(
   [string] $GjallarRoot = "E:\Projects\Gjallar",
+  [string] $CultLibRoot = "E:\Projects\CultLib",
+  [string] $CultMathRoot = "E:\Projects\CultMath",
   [string] $SshTarget = "nwroot",
   [string] $RemoteDir = "/opt/gamecult/gjallar",
   [string] $CultCachePath = "/var/lib/gamecult/gjallar/cultcache/gjallar.service.cc",
@@ -13,6 +15,45 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+function Remove-ScratchPath {
+  param(
+    [string] $ScratchRoot,
+    [string] $TargetPath
+  )
+
+  if (-not (Test-Path -LiteralPath $TargetPath)) {
+    return
+  }
+
+  $resolvedScratch = (Resolve-Path -LiteralPath $ScratchRoot).Path
+  $resolvedTarget = (Resolve-Path -LiteralPath $TargetPath).Path
+  if (-not $resolvedTarget.StartsWith($resolvedScratch, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Refusing to remove scratch path outside scratch root: $resolvedTarget"
+  }
+
+  Remove-Item -LiteralPath $TargetPath -Recurse -Force
+}
+
+function Export-GitArchive {
+  param(
+    [string] $RepoRoot,
+    [string] $Ref,
+    [string] $Destination,
+    [string] $TarPath
+  )
+
+  Remove-ScratchPath -ScratchRoot (Split-Path -Parent $Destination) -TargetPath $Destination
+  New-Item -ItemType Directory -Force -Path $Destination | Out-Null
+  git -C $RepoRoot archive --format=tar --output=$TarPath $Ref
+  if ($LASTEXITCODE -ne 0) {
+    throw "git archive failed for $RepoRoot $Ref"
+  }
+  tar -xf $TarPath -C $Destination
+  if ($LASTEXITCODE -ne 0) {
+    throw "source extraction failed for $TarPath"
+  }
+}
+
 if ($env:IDUNN_ACTUATOR -ne "1") {
   throw "This deployment script is an Idunn actuator. Agents must configure Idunn release targets and let Idunn run deployment; do not invoke deploy scripts manually."
 }
@@ -20,7 +61,11 @@ if ($env:IDUNN_ACTUATOR -ne "1") {
 $sourceRef = "$UpstreamRemote/$UpstreamBranch"
 $scratchRoot = Join-Path $GjallarRoot "scratch"
 $releaseSource = Join-Path $scratchRoot "idunn-release-source"
+$cultLibRelease = Join-Path $scratchRoot "CultLib"
+$cultMathRelease = Join-Path $scratchRoot "CultMath"
 $releaseTarPath = Join-Path $scratchRoot "gjallar-source-release.tar"
+$cultLibTarPath = Join-Path $scratchRoot "cultlib-source-release.tar"
+$cultMathTarPath = Join-Path $scratchRoot "cultmath-source-release.tar"
 $publishDir = Join-Path $scratchRoot "publish\gjallar"
 $tarPath = Join-Path $GjallarRoot "scratch\gjallar-publish.tar"
 $projectPath = Join-Path $releaseSource "src\Gjallar\Gjallar.csproj"
@@ -36,24 +81,21 @@ if ([string]::IsNullOrWhiteSpace($commit)) {
   throw "Could not determine Gjallar git revision."
 }
 
+$cultLibCommit = (git -C $CultLibRoot rev-parse HEAD).Trim()
+if ([string]::IsNullOrWhiteSpace($cultLibCommit)) {
+  throw "Could not determine CultLib git revision."
+}
+
+$cultMathCommit = (git -C $CultMathRoot rev-parse HEAD).Trim()
+if ([string]::IsNullOrWhiteSpace($cultMathCommit)) {
+  throw "Could not determine CultMath git revision."
+}
+
 New-Item -ItemType Directory -Force -Path $scratchRoot | Out-Null
-if (Test-Path -LiteralPath $releaseSource) {
-  $resolvedScratch = (Resolve-Path -LiteralPath $scratchRoot).Path
-  $resolvedRelease = (Resolve-Path -LiteralPath $releaseSource).Path
-  if (-not $resolvedRelease.StartsWith($resolvedScratch, [StringComparison]::OrdinalIgnoreCase)) {
-    throw "Refusing to remove release source outside scratch: $resolvedRelease"
-  }
-  Remove-Item -LiteralPath $releaseSource -Recurse -Force
-}
-New-Item -ItemType Directory -Force -Path $releaseSource | Out-Null
-git -C $GjallarRoot archive --format=tar --output=$releaseTarPath $sourceRef
-if ($LASTEXITCODE -ne 0) {
-  throw "git archive failed for $GjallarRoot $sourceRef"
-}
-tar -xf $releaseTarPath -C $releaseSource
-if ($LASTEXITCODE -ne 0) {
-  throw "source extraction failed for $releaseTarPath"
-}
+Remove-ScratchPath -ScratchRoot $scratchRoot -TargetPath $publishDir
+Export-GitArchive -RepoRoot $GjallarRoot -Ref $sourceRef -Destination $releaseSource -TarPath $releaseTarPath
+Export-GitArchive -RepoRoot $CultLibRoot -Ref $cultLibCommit -Destination $cultLibRelease -TarPath $cultLibTarPath
+Export-GitArchive -RepoRoot $CultMathRoot -Ref $cultMathCommit -Destination $cultMathRelease -TarPath $cultMathTarPath
 
 dotnet publish $projectPath -c Release -r linux-x64 --self-contained true -o $publishDir
 if ($LASTEXITCODE -ne 0) {
@@ -69,6 +111,8 @@ $deployedAt = [DateTimeOffset]::UtcNow.ToString("O")
   "upstreamBranch=$UpstreamBranch"
   "sourceRef=$sourceRef"
   "gitCommit=$commit"
+  "cultLibCommit=$cultLibCommit"
+  "cultMathCommit=$cultMathCommit"
   "artifact=Gjallar.dll"
   "sha256=$hash"
   "deployedAtUtc=$deployedAt"

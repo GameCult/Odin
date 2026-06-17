@@ -222,9 +222,21 @@ fn run_target_cycle(
         observed_at: now.clone(),
     };
 
-    let health = read_fresh_daemon_published_health(options, store_lock, &desired, &now)?
-        .unwrap_or_else(|| probe_health(target, options.command_timeout_seconds, &now));
-    let plan = plan_keepalive(&desired, &health, now.clone());
+    let (mut health_key, mut health) =
+        evaluate_target_health(target, options, store_lock, &desired, &now)?;
+    let mut plan = plan_keepalive(&desired, &health, now.clone());
+    if plan.restart_request.is_some() {
+        let veto_now = timestamp()?;
+        if let Some(fresh_health) =
+            read_fresh_daemon_published_health(options, store_lock, &desired, &veto_now)?
+        {
+            if health_state_is_healthy(&fresh_health.state) {
+                health_key = desired.daemon_id.clone();
+                health = fresh_health;
+                plan = plan_keepalive(&desired, &health, veto_now);
+            }
+        }
+    }
 
     with_store_node(options, store_lock, |node| {
         let transport_profile = daemon_transport_profile(target, &now);
@@ -232,7 +244,7 @@ fn run_target_cycle(
         node.put(&transport_profile.profile_id, &transport_profile)?;
         node.put(&command_boundary.boundary_id, &command_boundary)?;
         node.put(&desired.daemon_id, &desired)?;
-        node.put(&health.daemon_id, &health)?;
+        node.put(&health_key, &health)?;
         node.put(&plan.decision.decision_id, &plan.decision)?;
         if let Some(request) = &plan.deployment_request {
             node.put(&request.request_id, request)?;
@@ -396,6 +408,44 @@ fn read_fresh_daemon_published_health(
             Ok(None)
         }
     })
+}
+
+fn evaluate_target_health(
+    target: &DaemonTarget,
+    options: &CommonOptions,
+    store_lock: &Arc<Mutex<()>>,
+    desired: &IdunnDesiredDaemonRecord,
+    now: &str,
+) -> Result<(String, IdunnDaemonHealthRecord)> {
+    if let Some(health) = read_fresh_daemon_published_health(
+        options,
+        store_lock,
+        desired,
+        &timestamp()?,
+    )? {
+        return Ok((desired.daemon_id.clone(), health));
+    }
+
+    let probe = probe_health(target, options.command_timeout_seconds, now);
+
+    if let Some(health) = read_fresh_daemon_published_health(
+        options,
+        store_lock,
+        desired,
+        &timestamp()?,
+    )? {
+        return Ok((desired.daemon_id.clone(), health));
+    }
+
+    Ok((compatibility_health_key(&desired.daemon_id), probe))
+}
+
+fn compatibility_health_key(daemon_id: &str) -> String {
+    format!("compat-health:{daemon_id}")
+}
+
+fn health_state_is_healthy(state: &str) -> bool {
+    matches!(state, "active" | "healthy" | "ok" | "running")
 }
 
 fn is_fresh_daemon_published_health(
@@ -984,7 +1034,7 @@ fn swarm_surgery_plan(
                 .to_string(),
         next_target: next_target.to_string(),
         cut_line:
-            "Muninn, Vili, Idunn, Odin, Stonks, Weksa, VoidBot, Nightwing Gjallar, Mimir Eve dashboard, Nightwing Eve dashboard, Nightwing Eve browser reference, yggdrasil-streampixels, yggdrasil-heimdall, and yggdrasil-repixelizer now exercise daemon-owned RUDP health. Raven GameCult\\Vili has been refreshed from Odin, the hidden scheduled task now launches start-vili-daemon.ps1 with Idunn RUDP arguments, and live Idunn accepts vili.cultnet-rudp-animation-health from 10.77.0.4. VoidBot now publishes a daemon-owned provider catalog, provider advertisements, command_boundary, and transport_profile records from E:\\Projects\\VoidBot\\.voidbot\\status\\cultmesh\\voidbot-swarm-state.cc while health-voidbot.cmd is demoted to a fast compatibility witness. Raven Muninn now publishes provider advertisement, command_boundary, and transport_profile records from C:\\Meta\\Odin\\state\\muninn.telemetry.cc, Starfire Muninn now publishes the same daemon-owned witness records from C:\\Meta\\Odin\\state\\starfire.muninn.telemetry.cc, Nightwing Muninn now publishes the same daemon-owned witness records from /home/metacrat/.local/state/gamecult/muninn/muninn.telemetry.cc, and live Idunn accepts muninn from 10.77.0.4, starfire-muninn from 127.0.0.1, and nightwing-muninn from 10.77.0.3. Raven's GameCult-Muninn, GameCult-Muninn-Activate, and GameCult-Muninn-VideoProof tasks now execute wscript.exe actions whose hidden VBS launchers call noninteractive hidden PowerShell entrypoints directly; .cmd wrappers, where present, are manual compatibility entrypoints only. Live yggdrasil-streampixels publishes streampixels.cultnet-rudp-service-health from 10.77.0.1, live yggdrasil-heimdall publishes heimdall.cultnet-rudp-provider-health from 10.77.0.1 with a boundary store at /srv/heimdall/cultcache/heimdall.service.cc, live yggdrasil-repixelizer publishes repixelizer.cultnet-rudp-service-health from 10.77.0.1 with a boundary store at /srv/repixelizer/cultcache/repixelizer.service.cc, live Nightwing Gjallar publishes a boundary store at /var/lib/gamecult/gjallar/cultcache/gjallar.service.cc plus a daemon-owned gamecult.eve.surface_state witness, live Gjallar now consumes Odin's accepted surface:gamecult.network.status snapshot over CultNet/RUDP from 192.168.1.66:17871, live Odin now ingests remote Raven Vili and Nightwing Gjallar witness stores into the accepted provider catalog, and /eve/deck/nightwing-gjallar now proxies a renderer-only lowering of the live remote store. Live Mimir Eve dashboard now publishes CultMesh state at /var/lib/gamecult/eve-dashboard/cultmesh/eve-dashboard.ccmp plus a boundary store at /var/lib/gamecult/eve-dashboard/cultcache/eve-dashboard.service.cc, and live Nightwing Eve browser reference now publishes a boundary store at /var/lib/gamecult/eve-browser-reference/cultcache/eve-browser-reference.service.cc. The remaining debt is demoting compatibility probes and bridge-only lowerings without letting them retake daemon truth."
+            "Muninn, Vili, Idunn, Odin, Stonks, Weksa, VoidBot, Nightwing Gjallar, Mimir Eve dashboard, Nightwing Eve dashboard, Nightwing Eve browser reference, yggdrasil-streampixels, yggdrasil-heimdall, and yggdrasil-repixelizer now exercise daemon-owned RUDP health. Raven GameCult\\Vili has been refreshed from Odin, the hidden scheduled task now launches start-vili-daemon.ps1 with Idunn RUDP arguments, and live Idunn accepts vili.cultnet-rudp-animation-health from 10.77.0.4. VoidBot now publishes a daemon-owned provider catalog, provider advertisements, command_boundary, and transport_profile records from E:\\Projects\\VoidBot\\.voidbot\\status\\cultmesh\\voidbot-swarm-state.cc while health-voidbot.cmd is demoted to a fast compatibility witness. Raven Muninn now publishes provider advertisement, command_boundary, and transport_profile records from C:\\Meta\\Odin\\state\\muninn.telemetry.cc, keeps activation commands in C:\\Meta\\Odin\\state\\muninn.activate.cc, and no longer lets plain serve infer ambient Move runtime authority from platform defaults. Starfire Muninn now publishes the same daemon-owned witness records from C:\\Meta\\Odin\\state\\starfire.muninn.telemetry.cc, Nightwing Muninn now publishes the same daemon-owned witness records from /home/metacrat/.local/state/gamecult/muninn/muninn.telemetry.cc, and live Idunn accepts muninn from 10.77.0.4, starfire-muninn from 127.0.0.1, and nightwing-muninn from 10.77.0.3. Nightwing's restart wrapper now makes Move runtime authority explicit with -DiscoverMoveState -ClaimUsbMoves instead of silently adding Move evidence on plain serve. Raven's GameCult-Muninn, GameCult-Muninn-Activate, and GameCult-Muninn-VideoProof tasks now execute wscript.exe actions whose hidden VBS launchers call noninteractive hidden PowerShell entrypoints directly; .cmd wrappers, where present, are manual compatibility entrypoints only. Live yggdrasil-streampixels publishes streampixels.cultnet-rudp-service-health from 10.77.0.1, live yggdrasil-heimdall publishes heimdall.cultnet-rudp-provider-health from 10.77.0.1 with a boundary store at /srv/heimdall/cultcache/heimdall.service.cc, live yggdrasil-repixelizer publishes repixelizer.cultnet-rudp-service-health from 10.77.0.1 with a boundary store at /srv/repixelizer/cultcache/repixelizer.service.cc, live Nightwing Gjallar publishes a boundary store at /var/lib/gamecult/gjallar/cultcache/gjallar.service.cc plus a daemon-owned gamecult.eve.surface_state witness, live Gjallar now consumes Odin's accepted surface:gamecult.network.status snapshot over CultNet/RUDP from 192.168.1.66:17871, live Odin now ingests remote Raven Vili and Nightwing Gjallar witness stores into the accepted provider catalog, and /eve/deck/nightwing-gjallar now proxies a renderer-only lowering of the live remote store. Live Mimir Eve dashboard now publishes CultMesh state at /var/lib/gamecult/eve-dashboard/cultmesh/eve-dashboard.ccmp plus a boundary store at /var/lib/gamecult/eve-dashboard/cultcache/eve-dashboard.service.cc while health-nightwing-eve-dashboard.ps1 inspects those witnesses directly instead of trusting /health for daemon truth, and live Nightwing Eve browser reference now publishes a boundary store at /var/lib/gamecult/eve-browser-reference/cultcache/eve-browser-reference.service.cc while health-nightwing-eve-browser-reference.ps1 inspects that store directly instead of trusting /health for daemon truth. The remaining debt is demoting compatibility probes and bridge-only lowerings without letting them retake daemon truth."
                 .to_string(),
         verification_layer:
             "CultMesh keepalive store records plus live Idunn decision cycles, not process exit codes or chat summaries."
@@ -1216,14 +1266,14 @@ fn daemon_transport_profile(
 ) -> IdunnDaemonTransportProfileRecord {
     let (current_transport, state, cut_line) = match target.daemon_id.as_str() {
         "stonks" => (
-            "daemon-published-rudp-health + daemon-owned-cultcache-provider-store + compatibility.local-command fallback",
+            "daemon-published-rudp-health + daemon-owned-cultcache-provider-store + daemon-owned-rudp-command-ingress",
             "partial-rudp-health-and-provider-store-live",
             "Stonks daemon health is published over CultNet/RUDP, and provider advertisement, market snapshot, Eve surface, command_boundary, and transport_profile records are in the daemon-owned CultCache store; HTTP/WebSocket are renderer/debug lowerings.",
         ),
         "weksa" => (
-            "daemon-published-rudp-health + daemon-owned-cultcache-provider-store + compatibility.local-command fallback",
+            "daemon-published-rudp-health + daemon-owned-cultcache-provider-store + daemon-owned-rudp-command-ingress",
             "partial-rudp-health-and-provider-store-live",
-            "Weksa daemon health is published over CultNet/RUDP, and provider advertisement, operator state, Eve surface, command_boundary, and transport_profile records are in the daemon-owned CultCache store; MiMo VoiceDesign command ingress remains compatibility HTTP debt.",
+            "Weksa daemon health is published over CultNet/RUDP, provider advertisement, operator state, Eve surface, command_boundary, and transport_profile records are in the daemon-owned CultCache store, and speech_provider.mimo.voicedesign now arrives over CultNet/RUDP as weksa.mimo_voicedesign_command.v0 instead of an HTTP route.",
         ),
         "voidbot" => (
             "daemon-published-rudp-health + daemon-owned-cultmesh-provider-store + compatibility.local-command fallback",
@@ -1238,12 +1288,12 @@ fn daemon_transport_profile(
         "nightwing-eve-dashboard" => (
             "daemon-published-rudp-health + daemon-owned-cultmesh-state + daemon-owned-cultcache-boundary-store + compatibility.local-command fallback",
             "partial-rudp-health-and-provider-store-live",
-            "Nightwing Eve dashboard service health is published over CultNet/RUDP from the Mimir.EveDashboard systemd process, and the live broker now publishes CultMesh state at /var/lib/gamecult/eve-dashboard/cultmesh/eve-dashboard.ccmp plus a daemon-owned boundary store at /var/lib/gamecult/eve-dashboard/cultcache/eve-dashboard.service.cc carrying provider manifest, command_boundary, transport_profile, and daemon-health summary state. HTTP/WebSocket remain client lowerings and the local service probe is fallback evidence only.",
+            "Nightwing Eve dashboard service health is published over CultNet/RUDP from the Mimir.EveDashboard systemd process, and the live broker now publishes CultMesh state at /var/lib/gamecult/eve-dashboard/cultmesh/eve-dashboard.ccmp plus a daemon-owned boundary store at /var/lib/gamecult/eve-dashboard/cultcache/eve-dashboard.service.cc carrying provider manifest, command_boundary, transport_profile, and daemon-health summary state. HTTP/WebSocket remain client lowerings, and health-nightwing-eve-dashboard.ps1 now inspects the typed witnesses directly while the .cmd wrapper stays a compatibility entrypoint only.",
         ),
         "nightwing-eve-browser-reference" => (
             "daemon-published-rudp-health + daemon-owned-cultcache-boundary-store + compatibility.local-command fallback",
             "partial-rudp-health-and-provider-store-live",
-            "Nightwing Eve browser reference health is published over CultNet/RUDP from the Mimir.EveBrowserReference service process, and the runtime now publishes a daemon-owned boundary store at /var/lib/gamecult/eve-browser-reference/cultcache/eve-browser-reference.service.cc carrying manifest, static-surface, command_boundary, transport_profile, and daemon-health summary state. HTTP remains a browser lowering and the local service probe is fallback evidence only.",
+            "Nightwing Eve browser reference health is published over CultNet/RUDP from the Mimir.EveBrowserReference service process, and the runtime now publishes a daemon-owned boundary store at /var/lib/gamecult/eve-browser-reference/cultcache/eve-browser-reference.service.cc carrying manifest, static-surface, command_boundary, transport_profile, and daemon-health summary state. HTTP remains a browser lowering, and health-nightwing-eve-browser-reference.ps1 now inspects the daemon-owned witness directly while the .cmd wrapper stays a compatibility entrypoint only.",
         ),
         "muninn" => (
             "daemon-published-rudp-health + daemon-owned-cultcache-telemetry-store + background-only hidden task launch + compatibility.local-command fallback",
@@ -1404,14 +1454,15 @@ fn daemon_surgery_plan(target: &DaemonTarget, updated_at: &str) -> IdunnDaemonSu
                 "Gjallar consumes Odin's accepted provider surface snapshot over CultNet/RUDP and publishes framebuffer composition health, provider advertisement, provider-owned Eve surface, runtime config, command boundary, and transport profile as typed CultMesh/CultNet state."
                     .to_string();
             cut_line =
-                "Keep the service/status probe as fallback only; the daemon-owned witness now owns provider advertisement, gamecult.eve.surface_state, command_boundary, and transport_profile truth, live input now comes from Odin's accepted CultNet/RUDP snapshot surface, and the remaining debt is deleting or demoting compatibility probes and renderer-only deck lowerings without letting them reclaim daemon truth."
+                "Keep the service/status probe as fallback only; the daemon-owned witness now owns provider advertisement, gamecult.eve.surface_state, command_boundary, and transport_profile truth, live input now comes from Odin's accepted CultNet/RUDP snapshot surface, and live Gjallar daemon health now keys off snapshot freshness through receive.status, lastAttemptStatus, lastSuccessfulAtUtc, staleAfterSeconds, and consecutiveFailures so retained panels cannot masquerade as healthy after input goes stale."
                     .to_string();
             steps = vec![
                 "Keep live gjallar.cultnet-rudp-framebuffer-composition-health publication running from Nightwing's Gjallar service.".to_string(),
                 "Keep Gjallar's daemon-owned boundary store at /var/lib/gamecult/gjallar/cultcache/gjallar.service.cc publishing provider advertisement, gamecult.eve.surface_state, runtime_config, frame_status, command_boundary, transport_profile, and daemon-health summary records.".to_string(),
                 "Keep the native C# CultNet/RUDP snapshot polling path pointed at Odin's accepted surface:gamecult.network.status surface on 192.168.1.66:17871.".to_string(),
+                "Keep Gjallar's receive-freshness daemon health live on Nightwing so daemon-published health degrades when Odin snapshot success goes stale instead of keying only off rendered frames.".to_string(),
                 "Keep /eve/deck/nightwing-gjallar as a renderer-only lowering; it must not become Gjallar's live input path again.".to_string(),
-                "Delete or demote health-nightwing-gjallar.cmd to a manual deployment witness with no lifecycle truth.".to_string(),
+                "Keep the .ps1 lifecycle bodies authoritative and leave the .cmd wrappers as manual compatibility entrypoints only.".to_string(),
             ];
         }
         "stonks" => {
@@ -1459,20 +1510,20 @@ fn daemon_surgery_plan(target: &DaemonTarget, updated_at: &str) -> IdunnDaemonSu
             severity = "medium-high";
             owner = "Weksa provider runtime";
             current_mechanism =
-                "Weksa publishes weksa.cultnet-rudp-provider-health over CultNet/RUDP after each serialized witness refresh, and its daemon-owned provider store contains provider advertisement, operator state, Eve surface, command_boundary, and transport_profile records that Odin can ingest. The remaining command ingress debt is the MiMo VoiceDesign compatibility HTTP route."
+                "Weksa publishes weksa.cultnet-rudp-provider-health over CultNet/RUDP after each serialized witness refresh, its daemon-owned provider store contains provider advertisement, operator state, Eve surface, command_boundary, and transport_profile records that Odin can ingest, and speech_provider.mimo.voicedesign now arrives on rudp://127.0.0.1:8813 as weksa.mimo_voicedesign_command.v0."
                     .to_string();
             intended_authority =
-                "Weksa publishes daemon health, provider advertisement, operator state, Eve surfaces, command boundary, and transport profile as typed CultMesh/CultNet records over cultnet.transport.rudp.v0; HTTP remains operator/debug and temporary command lowering only."
+                "Weksa publishes daemon health, provider advertisement, operator state, Eve surfaces, command boundary, transport profile, and MiMo VoiceDesign command ingress as typed CultMesh/CultNet records over cultnet.transport.rudp.v0; no HTTP endpoint owns daemon truth."
                     .to_string();
             cut_line =
-                "Replace the MiMo VoiceDesign compatibility HTTP command route with CultNet/RUDP command document ingress, then demote health-weksa.cmd and HTTP endpoints to manual/debug lowerings with no lifecycle truth."
+                "Keep health-weksa.cmd as fallback evidence only; Odin should consume Weksa's typed provider store, command boundary, and transport profile directly, and no HTTP endpoint may retake command authority."
                     .to_string();
             steps = vec![
                 "Keep live weksa.cultnet-rudp-provider-health publication running from the Weksa daemon.".to_string(),
                 "Keep Weksa provider advertisement, operator-state, Eve surface, command_boundary, and transport_profile records in the daemon-owned provider store.".to_string(),
                 "Keep Odin provider discovery accepting Weksa's typed provider store instead of relying on compatibility HTTP ingestion.".to_string(),
-                "Add CultNet/RUDP command document ingress for speech_provider.mimo.voicedesign.".to_string(),
-                "Delete or demote health-weksa.cmd and HTTP endpoints to manual/debug compatibility paths with no lifecycle truth.".to_string(),
+                "Keep speech_provider.mimo.voicedesign on CultNet/RUDP as weksa.mimo_voicedesign_command.v0 instead of an HTTP route.".to_string(),
+                "Keep health-weksa.cmd as a compatibility witness over daemon-owned .cc state and process shape, not daemon truth.".to_string(),
             ];
         }
         "voidbot" => {
@@ -1500,19 +1551,21 @@ fn daemon_surgery_plan(target: &DaemonTarget, updated_at: &str) -> IdunnDaemonSu
             status = "partial-rudp-health-and-provider-store-live";
             owner = "Muninn Rust runtime plus Raven background-only launcher surface";
             current_mechanism =
-                "Raven Muninn now runs from the hidden GameCult-Muninn scheduled task with --idunn-rudp-health 10.77.0.2:17870, daemon id muninn, and contract muninn.cultnet-rudp-remote-telemetry-health on the long-running serve process. Live Idunn accepts that daemon-published health from 10.77.0.4, the daemon-owned telemetry store at C:\\Meta\\Odin\\state\\muninn.telemetry.cc now carries provider advertisement, command_boundary, transport_profile, and telemetry surface records, and GameCult-Muninn, GameCult-Muninn-Activate, and GameCult-Muninn-VideoProof now execute hidden VBS launchers whose bodies call noninteractive hidden PowerShell entrypoints directly; .cmd wrappers, where present, are manual compatibility entrypoints only."
+                "Raven Muninn now runs from the hidden GameCult-Muninn scheduled task with --idunn-rudp-health 10.77.0.2:17870, daemon id muninn, and contract muninn.cultnet-rudp-remote-telemetry-health on the long-running serve process. Live Idunn accepts that daemon-published health from 10.77.0.4, the daemon-owned telemetry store at C:\\Meta\\Odin\\state\\muninn.telemetry.cc now carries provider advertisement, command_boundary, transport_profile, and telemetry surface records, activation commands now route through the explicit C:\\Meta\\Odin\\state\\muninn.activate.cc store, the serve body no longer auto-claims ambient Move runtime state from platform defaults, and GameCult-Muninn, GameCult-Muninn-Activate, and GameCult-Muninn-VideoProof now execute hidden VBS launchers whose bodies call noninteractive hidden PowerShell entrypoints directly; .cmd wrappers, where present, are manual compatibility entrypoints only."
                     .to_string();
             intended_authority =
-                "Muninn publishes telemetry, provider advertisement, command_boundary, transport_profile, and daemon health over CultNet/RUDP/CultCache; Raven Task Scheduler owns only background launch of hidden WScript/PowerShell launchers and never visible .cmd trampoline execution."
+                "Muninn publishes telemetry, provider advertisement, command_boundary, transport_profile, explicit activation routing, and daemon health over CultNet/RUDP/CultCache; Raven Task Scheduler owns only background launch of hidden WScript/PowerShell launchers and never visible .cmd trampoline execution or ambient Move runtime inference."
                     .to_string();
             cut_line =
-                "Keep Raven's hidden task launch invariant structural by verifying that scheduled-task actions and hidden VBS launchers never route through cmdPath trampolines; Odin and Idunn should consume C:\\Meta\\Odin\\state\\muninn.telemetry.cc as the daemon-owned witness while health-muninn.cmd remains fallback evidence only."
+                "Keep Raven's hidden task launch invariant structural by verifying that scheduled-task actions and hidden VBS launchers never route through cmdPath trampolines, that activation commands stay pointed at C:\\Meta\\Odin\\state\\muninn.activate.cc, and that plain serve cannot infer Move runtime authority from platform defaults; Odin and Idunn should consume C:\\Meta\\Odin\\state\\muninn.telemetry.cc as the daemon-owned witness while health-muninn.cmd remains fallback evidence only."
                     .to_string();
             steps = vec![
                 "Keep scripts/repair-raven-muninn-task-actions.ps1 using sftp plus a tiny remote runner so Windows command-line length does not block future hidden-task repair.".to_string(),
                 "Keep GameCult-Muninn action executing wscript.exe with start-muninn-serve-hidden.vbs arguments.".to_string(),
                 "Keep the Raven Muninn serve process command line carrying --idunn-rudp-health 10.77.0.2:17870, --idunn-daemon muninn, and --idunn-health-contract muninn.cultnet-rudp-remote-telemetry-health.".to_string(),
                 "Keep the daemon-owned telemetry store at C:\\Meta\\Odin\\state\\muninn.telemetry.cc publishing provider advertisement, command_boundary, transport_profile, and telemetry surface records.".to_string(),
+                "Keep the activation path publishing through C:\\Meta\\Odin\\state\\muninn.activate.cc instead of reusing the telemetry store for activate routing.".to_string(),
+                "Keep plain Muninn serve from auto-claiming PS Move hosts, Move state, or platform-default Move lights unless explicit Move flags request that runtime authority.".to_string(),
                 "Keep GameCult-Muninn-Activate action executing wscript.exe with activate-raven-av-srt-hidden.vbs arguments.".to_string(),
                 "Keep GameCult-Muninn-VideoProof action executing wscript.exe with muninn-raven-video-to-starfire-obs-hidden.vbs arguments.".to_string(),
                 "Keep the Activate and VideoProof hidden VBS launchers calling PowerShell entrypoints directly instead of cmdPath trampolines.".to_string(),
@@ -1541,7 +1594,7 @@ fn daemon_surgery_plan(target: &DaemonTarget, updated_at: &str) -> IdunnDaemonSu
             } else {
                 status = "partial-rudp-health-and-provider-store-live";
                 current_mechanism =
-                    "Nightwing Muninn now runs as a long-lived serve process with Move HID input, --idunn-rudp-health 10.77.0.2:17870, daemon id nightwing-muninn, and contract muninn.cultnet-rudp-remote-telemetry-and-move-hid. Live Idunn accepts that daemon-published health from 10.77.0.3, and the daemon-owned telemetry store at /home/metacrat/.local/state/gamecult/muninn/muninn.telemetry.cc now carries provider advertisement, command_boundary, transport_profile, Move HID evidence, and telemetry surface records."
+                    "Nightwing Muninn now runs as a long-lived serve process with explicit Move HID input, --idunn-rudp-health 10.77.0.2:17870, daemon id nightwing-muninn, and contract muninn.cultnet-rudp-remote-telemetry-and-move-hid. Live Idunn accepts that daemon-published health from 10.77.0.3, the daemon-owned telemetry store at /home/metacrat/.local/state/gamecult/muninn/muninn.telemetry.cc now carries provider advertisement, command_boundary, transport_profile, Move HID evidence, and telemetry surface records, and restart-nightwing-muninn.ps1 now only claims or discovers Move runtime authority when -DiscoverMoveState, -ClaimUsbMoves, or explicit -MoveState values are present."
                         .to_string();
                 cut_line =
                     "Keep health-nightwing-muninn.cmd as fallback evidence only; Odin and Idunn should consume /home/metacrat/.local/state/gamecult/muninn/muninn.telemetry.cc as the daemon-owned witness while the serve process owns muninn.cultnet-rudp-remote-telemetry-and-move-hid publication."
@@ -1550,6 +1603,7 @@ fn daemon_surgery_plan(target: &DaemonTarget, updated_at: &str) -> IdunnDaemonSu
                     "Keep the Nightwing Muninn serve process command line carrying --idunn-rudp-health 10.77.0.2:17870, --idunn-daemon nightwing-muninn, and --idunn-health-contract muninn.cultnet-rudp-remote-telemetry-and-move-hid.".to_string(),
                     "Keep the daemon-owned telemetry store at /home/metacrat/.local/state/gamecult/muninn/muninn.telemetry.cc publishing provider advertisement, command_boundary, transport_profile, Move HID evidence, and telemetry surface records.".to_string(),
                     "Keep restart-nightwing-muninn.ps1 launching the long-running serve body instead of one-shot health publication.".to_string(),
+                    "Keep restart-nightwing-muninn.ps1 requiring explicit -DiscoverMoveState/-ClaimUsbMoves or explicit -MoveState values before it adds Move evidence/runtime arguments.".to_string(),
                     "Keep health-nightwing-muninn.cmd as a compatibility witness for Move HID freshness, not daemon truth.".to_string(),
                 ];
             }
@@ -1587,14 +1641,14 @@ fn daemon_surgery_plan(target: &DaemonTarget, updated_at: &str) -> IdunnDaemonSu
                     "Nightwing Eve dashboard publishes nightwing.cultnet-rudp-eve-dashboard-health over CultNet/RUDP from the Mimir.EveDashboard systemd process, with retained dashboard state in /var/lib/gamecult/eve-dashboard/cultmesh/eve-dashboard.ccmp and a daemon-owned boundary store at /var/lib/gamecult/eve-dashboard/cultcache/eve-dashboard.service.cc."
                         .to_string();
                 cut_line =
-                    "Keep the service probe as fallback only until Nightwing projections and Odin consume the dashboard CultMesh/CultCache witnesses directly instead of treating the service probe as primary truth."
+                    "HTTP/WebSocket stay client lowerings only. health-nightwing-eve-dashboard.ps1 now inspects the dashboard CultMesh/CultCache witnesses directly, the .cmd wrapper is a compatibility entrypoint only, and the remaining debt is teaching Nightwing projections and Odin to consume the typed witnesses without any service probe reclaiming daemon truth."
                         .to_string();
                 steps = vec![
                     "Keep live nightwing.cultnet-rudp-eve-dashboard-health publication running from the Mimir.EveDashboard systemd process.".to_string(),
                     "Keep the live CultMesh state witness at /var/lib/gamecult/eve-dashboard/cultmesh/eve-dashboard.ccmp publishing retained dashboard state.".to_string(),
                     "Keep the daemon-owned boundary store at /var/lib/gamecult/eve-dashboard/cultcache/eve-dashboard.service.cc publishing provider manifest, command_boundary, transport_profile, and daemon-health summary records.".to_string(),
                     "Teach Odin and Nightwing projections to prefer the dashboard CultMesh/CultCache witnesses over service compatibility probes.".to_string(),
-                    "Delete or demote health-nightwing-eve-dashboard.cmd to a manual compatibility probe with no lifecycle truth.".to_string(),
+                    "Keep health-nightwing-eve-dashboard.cmd as a compatibility wrapper over witness-first PowerShell checks with no daemon-truth of its own.".to_string(),
                 ];
             } else {
                 status = "partial-rudp-health-and-provider-store-live";
@@ -1602,13 +1656,13 @@ fn daemon_surgery_plan(target: &DaemonTarget, updated_at: &str) -> IdunnDaemonSu
                     "Nightwing Eve browser reference publishes nightwing.cultnet-rudp-browser-reference-health over CultNet/RUDP from the Mimir.EveBrowserReference service process, and the runtime now writes a daemon-owned boundary store at /var/lib/gamecult/eve-browser-reference/cultcache/eve-browser-reference.service.cc."
                         .to_string();
                 cut_line =
-                    "Keep the service probe as fallback only until Nightwing projections and Odin consume the browser reference CultCache witness directly instead of treating the service probe as primary truth."
+                    "HTTP stays a browser lowering only. health-nightwing-eve-browser-reference.ps1 now inspects the browser reference CultCache witness directly, the .cmd wrapper is a compatibility entrypoint only, and the remaining debt is teaching Nightwing projections and Odin to consume the typed witness without any service probe reclaiming daemon truth."
                         .to_string();
                 steps = vec![
                     "Keep live nightwing.cultnet-rudp-browser-reference-health publication running from the Mimir.EveBrowserReference service process.".to_string(),
                     "Keep the daemon-owned boundary store at /var/lib/gamecult/eve-browser-reference/cultcache/eve-browser-reference.service.cc publishing manifest, static-surface, command_boundary, transport_profile, and daemon-health summary records.".to_string(),
                     "Teach Odin and Nightwing projections to prefer the browser reference CultCache witness over service compatibility probes.".to_string(),
-                    "Delete or demote health-nightwing-eve-browser-reference.cmd to a manual compatibility probe with no lifecycle truth.".to_string(),
+                    "Keep health-nightwing-eve-browser-reference.cmd as a compatibility wrapper over witness-first PowerShell checks with no daemon-truth of its own.".to_string(),
                 ];
             }
         }
@@ -1904,9 +1958,9 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                     "gjallar.cultnet-rudp-framebuffer-composition-health",
                     "dependency-unavailable",
                 ),
-                health_command: Some(script("health-nightwing-gjallar.cmd")),
-                deploy_command: Some(script("deploy-nightwing-gjallar.cmd")),
-                restart_command: Some(script("restart-nightwing-gjallar.cmd")),
+                health_command: Some(script("health-nightwing-gjallar.ps1")),
+                deploy_command: Some(script("deploy-nightwing-gjallar.ps1")),
+                restart_command: Some(script("restart-nightwing-gjallar.ps1")),
                 release: Some(release_target(
                     "Gjallar",
                     project("Gjallar"),
@@ -2702,9 +2756,9 @@ mod tests {
                 "gjallar.cultnet-rudp-framebuffer-composition-health",
                 "failed",
             ),
-            health_command: Some("health-nightwing-gjallar.cmd".to_string()),
-            deploy_command: Some("deploy-nightwing-gjallar.cmd".to_string()),
-            restart_command: Some("restart-nightwing-gjallar.cmd".to_string()),
+            health_command: Some("health-nightwing-gjallar.ps1".to_string()),
+            deploy_command: Some("deploy-nightwing-gjallar.ps1".to_string()),
+            restart_command: Some("restart-nightwing-gjallar.ps1".to_string()),
             release: None,
             enabled: true,
             interval_seconds: 30,
@@ -2933,6 +2987,16 @@ mod tests {
                 .current_mechanism
                 .contains("C:\\Meta\\Odin\\state\\muninn.telemetry.cc")
         );
+        assert!(
+            raven_plan
+                .current_mechanism
+                .contains("C:\\Meta\\Odin\\state\\muninn.activate.cc")
+        );
+        assert!(
+            raven_plan
+                .current_mechanism
+                .contains("platform defaults")
+        );
         assert!(raven_plan.cut_line.contains("fallback evidence only"));
         assert!(raven_plan.steps.iter().any(
             |step| step.contains("GameCult-Muninn-VideoProof") && step.contains("wscript.exe")
@@ -2940,6 +3004,12 @@ mod tests {
         assert!(raven_plan.steps.iter().any(
             |step| step.contains("PowerShell entrypoints directly") && step.contains("cmdPath")
         ));
+        assert!(raven_plan.steps.iter().any(|step| {
+            step.contains("muninn.activate.cc") && step.contains("activation path")
+        }));
+        assert!(raven_plan.steps.iter().any(|step| {
+            step.contains("auto-claiming PS Move hosts") && step.contains("explicit Move flags")
+        }));
         assert!(
             raven_plan
                 .steps
@@ -2982,6 +3052,11 @@ mod tests {
                 .current_mechanism
                 .contains("/home/metacrat/.local/state/gamecult/muninn/muninn.telemetry.cc")
         );
+        assert!(
+            nightwing_plan
+                .current_mechanism
+                .contains("-DiscoverMoveState, -ClaimUsbMoves, or explicit -MoveState values")
+        );
         assert!(nightwing_plan.cut_line.contains("fallback evidence only"));
         assert!(nightwing_plan.steps.iter().any(|step| {
             step.contains("/home/metacrat/.local/state/gamecult/muninn/muninn.telemetry.cc")
@@ -2994,6 +3069,10 @@ mod tests {
                 .any(|step| step.contains("restart-nightwing-muninn.ps1")
                     && step.contains("long-running serve body"))
         );
+        assert!(nightwing_plan.steps.iter().any(|step| {
+            step.contains("explicit -DiscoverMoveState/-ClaimUsbMoves")
+                && step.contains("Move evidence/runtime arguments")
+        }));
 
         let weksa_plan = daemon_surgery_plan(&weksa, "unix:100");
         assert_eq!(
@@ -3001,7 +3080,12 @@ mod tests {
             "partial-rudp-health-and-provider-store-live"
         );
         assert!(weksa_plan.current_mechanism.contains("command_boundary"));
-        assert!(weksa_plan.cut_line.contains("MiMo VoiceDesign"));
+        assert!(weksa_plan.current_mechanism.contains("weksa.mimo_voicedesign_command.v0"));
+        assert!(weksa_plan.cut_line.contains("no HTTP endpoint may retake command authority"));
+        assert!(weksa_plan.steps.iter().any(|step| {
+            step.contains("speech_provider.mimo.voicedesign")
+                && step.contains("CultNet/RUDP")
+        }));
 
         let voidbot_plan = daemon_surgery_plan(&voidbot, "unix:100");
         assert_eq!(
@@ -3237,6 +3321,134 @@ mod tests {
     }
 
     #[test]
+    fn evaluate_target_health_keeps_fresh_daemon_published_record_on_owner_key() {
+        let now_seconds = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let now = format!("unix:{now_seconds}");
+        let store_path = std::env::temp_dir().join(format!(
+            "idunn-test-store-{}.cc",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let options = CommonOptions {
+            store_path: store_path.clone(),
+            operator_alarm_command: None,
+            rudp_health_bind: None,
+            execute: false,
+            command_timeout_seconds: 1,
+        };
+        let store_lock = Arc::new(Mutex::new(()));
+        let target = DaemonTarget {
+            daemon_id: "test-daemon".to_string(),
+            verse_id: "test.local".to_string(),
+            name: "Test daemon".to_string(),
+            health_contract: health_contract("test.cultnet-rudp-health", "failed"),
+            health_command: Some("__idunn_probe_should_not_run__".to_string()),
+            deploy_command: None,
+            restart_command: Some("restart test".to_string()),
+            release: None,
+            enabled: true,
+            interval_seconds: 30,
+        };
+        let desired = IdunnDesiredDaemonRecord {
+            daemon_id: target.daemon_id.clone(),
+            verse_id: target.verse_id.clone(),
+            name: target.name.clone(),
+            enabled: target.enabled,
+            health_command: target.health_command.clone(),
+            restart_command: target.restart_command.clone(),
+            deploy_command: target.deploy_command.clone(),
+            health_contract: target.health_contract.id.clone(),
+            transport_profile_id: transport_profile_id(&target),
+            command_boundary_id: command_boundary_id(&target),
+            authority: "idunn.local-command".to_string(),
+            max_silence_seconds: 60,
+            observed_at: now.clone(),
+        };
+        let health = IdunnDaemonHealthRecord {
+            daemon_id: target.daemon_id.clone(),
+            state: "active".to_string(),
+            detail: "daemon published".to_string(),
+            observed_at: now.clone(),
+            health_contract: target.health_contract.id.clone(),
+            publication_source: "daemon-published".to_string(),
+            transport: CULTNET_RUDP_PROTOCOL_ID.to_string(),
+        };
+
+        with_store_node(&options, &store_lock, |node| {
+            node.put(&health.daemon_id, &health)?;
+            Ok(())
+        })
+        .unwrap();
+
+        let (health_key, selected) =
+            evaluate_target_health(&target, &options, &store_lock, &desired, &now).unwrap();
+
+        assert_eq!(health_key, "test-daemon");
+        assert_eq!(selected.publication_source, "daemon-published");
+
+        let _ = std::fs::remove_file(store_path);
+    }
+
+    #[test]
+    fn evaluate_target_health_uses_compatibility_lane_when_no_fresh_daemon_health_exists() {
+        let store_path = std::env::temp_dir().join(format!(
+            "idunn-test-store-{}.cc",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let options = CommonOptions {
+            store_path: store_path.clone(),
+            operator_alarm_command: None,
+            rudp_health_bind: None,
+            execute: false,
+            command_timeout_seconds: 1,
+        };
+        let store_lock = Arc::new(Mutex::new(()));
+        let target = DaemonTarget {
+            daemon_id: "test-daemon".to_string(),
+            verse_id: "test.local".to_string(),
+            name: "Test daemon".to_string(),
+            health_contract: health_contract("test.cultnet-rudp-health", "failed"),
+            health_command: Some("__idunn_probe_should_fail__".to_string()),
+            deploy_command: None,
+            restart_command: Some("restart test".to_string()),
+            release: None,
+            enabled: true,
+            interval_seconds: 30,
+        };
+        let desired = IdunnDesiredDaemonRecord {
+            daemon_id: target.daemon_id.clone(),
+            verse_id: target.verse_id.clone(),
+            name: target.name.clone(),
+            enabled: target.enabled,
+            health_command: target.health_command.clone(),
+            restart_command: target.restart_command.clone(),
+            deploy_command: target.deploy_command.clone(),
+            health_contract: target.health_contract.id.clone(),
+            transport_profile_id: transport_profile_id(&target),
+            command_boundary_id: command_boundary_id(&target),
+            authority: "idunn.local-command".to_string(),
+            max_silence_seconds: 60,
+            observed_at: "unix:100".to_string(),
+        };
+
+        let (health_key, selected) =
+            evaluate_target_health(&target, &options, &store_lock, &desired, "unix:100").unwrap();
+
+        assert_eq!(health_key, "compat-health:test-daemon");
+        assert_eq!(selected.publication_source, "compatibility-command");
+
+        let _ = std::fs::remove_file(store_path);
+    }
+
+    #[test]
     fn stonks_transport_profile_marks_provider_store_live() {
         let stonks = DaemonTarget {
             daemon_id: "stonks".to_string(),
@@ -3282,9 +3494,9 @@ mod tests {
         assert_eq!(profile.state, "partial-rudp-health-and-provider-store-live");
         assert_eq!(
             profile.current_transport,
-            "daemon-published-rudp-health + daemon-owned-cultcache-provider-store + compatibility.local-command fallback"
+            "daemon-published-rudp-health + daemon-owned-cultcache-provider-store + daemon-owned-rudp-command-ingress"
         );
-        assert!(profile.cut_line.contains("MiMo VoiceDesign"));
+        assert!(profile.cut_line.contains("weksa.mimo_voicedesign_command.v0"));
     }
 
     #[test]
@@ -3410,9 +3622,9 @@ mod tests {
                 "gjallar.cultnet-rudp-framebuffer-composition-health",
                 "failed",
             ),
-            health_command: Some("health-nightwing-gjallar.cmd".to_string()),
-            deploy_command: Some("deploy-nightwing-gjallar.cmd".to_string()),
-            restart_command: Some("restart-nightwing-gjallar.cmd".to_string()),
+            health_command: Some("health-nightwing-gjallar.ps1".to_string()),
+            deploy_command: Some("deploy-nightwing-gjallar.ps1".to_string()),
+            restart_command: Some("restart-nightwing-gjallar.ps1".to_string()),
             release: None,
             enabled: true,
             interval_seconds: 30,

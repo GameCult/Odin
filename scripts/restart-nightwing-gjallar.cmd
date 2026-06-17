@@ -1,2 +1,2 @@
 @echo off
-ssh.exe -o BatchMode=yes -o ConnectTimeout=5 nwroot systemctl restart gjallar.service
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File E:\Projects\Odin\scripts\restart-nightwing-gjallar.ps1
