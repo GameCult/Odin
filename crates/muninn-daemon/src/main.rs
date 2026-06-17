@@ -51,6 +51,7 @@ enum Mode {
     DryRun,
     RequestMoveLight,
     MoveLightStatus,
+    MoveSourceStatus,
     MoveStateStatus,
     ClaimMoveHost,
     QuestAccessStatus,
@@ -187,6 +188,7 @@ fn main() -> Result<()> {
         Mode::Health => health_check(&options),
         Mode::RequestMoveLight => request_move_light(options),
         Mode::MoveLightStatus => move_light_status(options),
+        Mode::MoveSourceStatus => move_source_status(options),
         Mode::MoveStateStatus => move_state_status(options),
         Mode::ClaimMoveHost => claim_move_host(options),
         Mode::QuestAccessStatus => quest_access_status(options),
@@ -327,18 +329,23 @@ fn claim_move_host_if_due(options: &Options, last_attempt_at: &mut Option<Instan
 
 #[cfg(unix)]
 fn prepare_move_bluetooth_host_for_claim() -> Result<()> {
-    let output = Command::new("bluetoothctl")
-        .args(["pairable", "on"])
-        .output()
-        .context("bluetoothctl pairable on could not run")?;
-    if output.status.success() {
-        return Ok(());
+    for args in [["pairable", "on"], ["discoverable", "on"]] {
+        let output = Command::new("bluetoothctl")
+            .args(args)
+            .output()
+            .with_context(|| format!("bluetoothctl {} {} could not run", args[0], args[1]))?;
+        if output.status.success() {
+            continue;
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow!(
+            "bluetoothctl {} {} failed: {}",
+            args[0],
+            args[1],
+            stderr.trim()
+        ));
     }
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    Err(anyhow!(
-        "bluetoothctl pairable on failed: {}",
-        stderr.trim()
-    ))
+    Ok(())
 }
 
 #[cfg(not(unix))]
@@ -949,7 +956,7 @@ impl MoveControllerStateReader for HidMoveControllerStateReader {
             return Ok(None);
         }
         if is_windows_ps_move_source(hidraw_path) {
-            return windows_ps_move_input_report();
+            return windows_ps_move_input_report(hidraw_path);
         }
         Err(anyhow!(
             "Windows PS Move controller state reads require the windows-psmove source path"
@@ -1084,7 +1091,11 @@ fn is_joystick_path(path: &str) -> bool {
 
 #[cfg(windows)]
 fn is_windows_ps_move_source(path: &str) -> bool {
-    path.eq_ignore_ascii_case("windows-psmove") || path.eq_ignore_ascii_case("windows-psmove-col01")
+    path.eq_ignore_ascii_case("windows-psmove")
+        || path.eq_ignore_ascii_case("windows-psmove-col01")
+        || path
+            .to_ascii_lowercase()
+            .starts_with(WINDOWS_PS_MOVE_SOURCE_PREFIX)
 }
 
 fn build_move_controller_state_record(
@@ -1558,7 +1569,38 @@ fn platform_move_state_sources() -> Vec<MoveStateSource> {
     selected.into_iter().map(|(source, _)| source).collect()
 }
 
+#[cfg(windows)]
+const WINDOWS_PS_MOVE_SOURCE_PREFIX: &str = "windows-psmove:";
+
+#[cfg(windows)]
+fn platform_move_state_sources() -> Vec<MoveStateSource> {
+    let Ok(targets) = windows_ps_move_state_paths() else {
+        return Vec::new();
+    };
+    targets
+        .into_iter()
+        .enumerate()
+        .map(|(index, target)| {
+            let move_id = if target.identity.starts_with("move-") {
+                target.identity
+            } else {
+                format!("move-windows-psmove-{index}")
+            };
+            MoveStateSource {
+                move_id,
+                hidraw_path: windows_ps_move_source_token(&target.path),
+            }
+        })
+        .collect()
+}
+
+#[cfg(windows)]
+fn windows_ps_move_source_token(path: &str) -> String {
+    format!("{WINDOWS_PS_MOVE_SOURCE_PREFIX}{path}")
+}
+
 #[cfg(not(unix))]
+#[cfg(not(windows))]
 fn platform_move_state_sources() -> Vec<MoveStateSource> {
     Vec::new()
 }
@@ -1938,6 +1980,239 @@ fn windows_ps_move_light_paths() -> Result<Vec<DefaultMoveLightTarget>> {
 }
 
 #[cfg(windows)]
+fn windows_ps_move_state_paths() -> Result<Vec<DefaultMoveLightTarget>> {
+    use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
+        SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW,
+        DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, SP_DEVICE_INTERFACE_DATA,
+    };
+    use windows_sys::Win32::Devices::HumanInterfaceDevice::{
+        HidD_FreePreparsedData, HidD_GetAttributes, HidD_GetHidGuid, HidD_GetPreparsedData,
+        HidP_GetCaps, HIDD_ATTRIBUTES, HIDP_CAPS, HIDP_STATUS_SUCCESS,
+    };
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+
+    let sibling_identities = windows_ps_move_identity_by_physical_key()?;
+    let mut hid_guid = unsafe { std::mem::zeroed() };
+    unsafe { HidD_GetHidGuid(&mut hid_guid) };
+    let info_set = unsafe {
+        SetupDiGetClassDevsW(
+            &hid_guid,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            DIGCF_PRESENT | DIGCF_DEVICEINTERFACE,
+        )
+    };
+    if info_set == INVALID_HANDLE_VALUE as isize {
+        return Ok(Vec::new());
+    }
+
+    let mut paths = Vec::new();
+    let mut index = 0;
+    loop {
+        let mut interface_data = SP_DEVICE_INTERFACE_DATA {
+            cbSize: std::mem::size_of::<SP_DEVICE_INTERFACE_DATA>() as u32,
+            InterfaceClassGuid: unsafe { std::mem::zeroed() },
+            Flags: 0,
+            Reserved: 0,
+        };
+        let ok = unsafe {
+            SetupDiEnumDeviceInterfaces(
+                info_set,
+                std::ptr::null_mut(),
+                &hid_guid,
+                index,
+                &mut interface_data,
+            )
+        };
+        if ok == 0 {
+            break;
+        }
+        index += 1;
+
+        let Some(path) = (unsafe { windows_hid_interface_path(info_set, &mut interface_data) })
+        else {
+            continue;
+        };
+        let wide = wide_null(&path);
+        let handle = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                std::ptr::null_mut(),
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                std::ptr::null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            continue;
+        }
+
+        let mut attributes = HIDD_ATTRIBUTES {
+            Size: std::mem::size_of::<HIDD_ATTRIBUTES>() as u32,
+            VendorID: 0,
+            ProductID: 0,
+            VersionNumber: 0,
+        };
+        let mut preparsed = 0;
+        let is_move = unsafe {
+            HidD_GetAttributes(handle, &mut attributes) != 0
+                && attributes.VendorID == 0x054c
+                && attributes.ProductID == 0x03d5
+                && HidD_GetPreparsedData(handle, &mut preparsed) != 0
+        };
+        if is_move {
+            let mut caps: HIDP_CAPS = unsafe { std::mem::zeroed() };
+            let caps_ok = unsafe { HidP_GetCaps(preparsed, &mut caps) == HIDP_STATUS_SUCCESS };
+            if caps_ok && caps.InputReportByteLength > 0 {
+                let identity = windows_ps_move_controller_identity(handle)
+                    .or_else(|| {
+                        windows_ps_move_physical_key(&path)
+                            .and_then(|key| sibling_identities.get(&key).cloned())
+                    })
+                    .map(|id| format!("move-{id}"))
+                    .unwrap_or_else(|| path.clone());
+                paths.push(DefaultMoveLightTarget { path, identity });
+            }
+        }
+        if preparsed != 0 {
+            unsafe { HidD_FreePreparsedData(preparsed) };
+        }
+        unsafe { CloseHandle(handle) };
+    }
+
+    unsafe { SetupDiDestroyDeviceInfoList(info_set) };
+    paths.sort_by(|a, b| a.identity.cmp(&b.identity).then(a.path.cmp(&b.path)));
+    Ok(paths)
+}
+
+#[cfg(windows)]
+fn windows_ps_move_identity_by_physical_key() -> Result<std::collections::HashMap<String, String>> {
+    use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
+        SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW,
+        DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, SP_DEVICE_INTERFACE_DATA,
+    };
+    use windows_sys::Win32::Devices::HumanInterfaceDevice::{
+        HidD_GetAttributes, HidD_GetHidGuid, HIDD_ATTRIBUTES,
+    };
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+
+    let mut hid_guid = unsafe { std::mem::zeroed() };
+    unsafe { HidD_GetHidGuid(&mut hid_guid) };
+    let info_set = unsafe {
+        SetupDiGetClassDevsW(
+            &hid_guid,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            DIGCF_PRESENT | DIGCF_DEVICEINTERFACE,
+        )
+    };
+    if info_set == INVALID_HANDLE_VALUE as isize {
+        return Ok(std::collections::HashMap::new());
+    }
+
+    let mut identities = std::collections::HashMap::new();
+    let mut index = 0;
+    loop {
+        let mut interface_data = SP_DEVICE_INTERFACE_DATA {
+            cbSize: std::mem::size_of::<SP_DEVICE_INTERFACE_DATA>() as u32,
+            InterfaceClassGuid: unsafe { std::mem::zeroed() },
+            Flags: 0,
+            Reserved: 0,
+        };
+        let ok = unsafe {
+            SetupDiEnumDeviceInterfaces(
+                info_set,
+                std::ptr::null_mut(),
+                &hid_guid,
+                index,
+                &mut interface_data,
+            )
+        };
+        if ok == 0 {
+            break;
+        }
+        index += 1;
+
+        let Some(path) = (unsafe { windows_hid_interface_path(info_set, &mut interface_data) })
+        else {
+            continue;
+        };
+        let Some(key) = windows_ps_move_physical_key(&path) else {
+            continue;
+        };
+        let wide = wide_null(&path);
+        let handle = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                std::ptr::null_mut(),
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                std::ptr::null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            continue;
+        }
+
+        let mut attributes = HIDD_ATTRIBUTES {
+            Size: std::mem::size_of::<HIDD_ATTRIBUTES>() as u32,
+            VendorID: 0,
+            ProductID: 0,
+            VersionNumber: 0,
+        };
+        let is_move = unsafe {
+            HidD_GetAttributes(handle, &mut attributes) != 0
+                && attributes.VendorID == 0x054c
+                && attributes.ProductID == 0x03d5
+        };
+        if is_move {
+            if let Some(identity) = windows_ps_move_controller_identity(handle) {
+                identities.insert(key, identity);
+            }
+        }
+        unsafe { CloseHandle(handle) };
+    }
+
+    unsafe { SetupDiDestroyDeviceInfoList(info_set) };
+    Ok(identities)
+}
+
+#[cfg(windows)]
+fn windows_ps_move_physical_key(path: &str) -> Option<String> {
+    let lower = path.to_ascii_lowercase();
+    if !lower.contains("vid_054c&pid_03d5") {
+        return None;
+    }
+    let (before_guid, _) = lower.split_once("#{").unwrap_or((lower.as_str(), ""));
+    let without_collection = before_guid
+        .replace("&col01", "")
+        .replace("&col02", "")
+        .replace("&col03", "")
+        .replace("&col04", "");
+    let Some((prefix, suffix)) = without_collection.rsplit_once('&') else {
+        return Some(without_collection);
+    };
+    if suffix.len() == 4
+        && suffix
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+    {
+        return Some(prefix.to_string());
+    }
+    Some(without_collection)
+}
+
+#[cfg(windows)]
 fn windows_ps_move_controller_identity(handle: *mut std::ffi::c_void) -> Option<String> {
     use windows_sys::Win32::Devices::HumanInterfaceDevice::HidD_GetFeature;
 
@@ -2142,7 +2417,7 @@ fn windows_claim_ps_move_host(host: &[u8; 6]) -> Result<usize> {
 }
 
 #[cfg(windows)]
-fn windows_ps_move_input_report() -> Result<Option<Vec<u8>>> {
+fn windows_ps_move_input_report(source: &str) -> Result<Option<Vec<u8>>> {
     use windows_sys::Win32::Devices::HumanInterfaceDevice::{
         HidD_FreePreparsedData, HidD_GetInputReport, HidD_GetPreparsedData, HidP_GetCaps,
         HIDP_CAPS, HIDP_STATUS_SUCCESS,
@@ -2153,10 +2428,9 @@ fn windows_ps_move_input_report() -> Result<Option<Vec<u8>>> {
         FILE_SHARE_WRITE, OPEN_EXISTING,
     };
 
-    let Some(target) = windows_ps_move_light_paths()?.into_iter().next() else {
+    let Some(path) = windows_ps_move_input_path(source)? else {
         return Ok(None);
     };
-    let path = target.path;
     let wide = wide_null(&path);
     let handle = unsafe {
         CreateFileW(
@@ -2201,6 +2475,29 @@ fn windows_ps_move_input_report() -> Result<Option<Vec<u8>>> {
     let interrupt_report = windows_read_hid_interrupt_report(handle, report.len(), &path)?;
     unsafe { CloseHandle(handle) };
     Ok(interrupt_report)
+}
+
+#[cfg(windows)]
+fn windows_ps_move_input_path(source: &str) -> Result<Option<String>> {
+    if source.eq_ignore_ascii_case("windows-psmove")
+        || source.eq_ignore_ascii_case("windows-psmove-col01")
+    {
+        return Ok(windows_ps_move_light_paths()?
+            .into_iter()
+            .next()
+            .map(|target| target.path));
+    }
+    let Some(path) = source
+        .to_ascii_lowercase()
+        .strip_prefix(WINDOWS_PS_MOVE_SOURCE_PREFIX)
+        .map(|_| &source[WINDOWS_PS_MOVE_SOURCE_PREFIX.len()..])
+    else {
+        return Ok(None);
+    };
+    if path.trim().is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(path.to_string()))
 }
 
 #[cfg(windows)]
@@ -2939,6 +3236,37 @@ fn move_state_status(options: Options) -> Result<()> {
     Ok(())
 }
 
+fn move_source_status(options: Options) -> Result<()> {
+    let sources = live_move_state_sources(&options);
+    if sources.is_empty() {
+        println!(
+            "No live Muninn Move state sources found for host {}.",
+            options.host_id
+        );
+        return Ok(());
+    }
+    let mut reader = HidMoveControllerStateReader;
+    for source in sources {
+        let report_status = if is_joystick_path(&source.hidraw_path) {
+            match reader.read_joystick_events(&source.hidraw_path) {
+                Ok(events) => format!("joystick_events={}", events.len()),
+                Err(error) => format!("read_error={error:#}"),
+            }
+        } else {
+            match reader.read_report(&source.hidraw_path) {
+                Ok(Some(report)) => format!("report_bytes={}", report.len()),
+                Ok(None) => "report_bytes=none".to_string(),
+                Err(error) => format!("read_error={error:#}"),
+            }
+        };
+        println!(
+            "{} move={} source={} {}",
+            options.host_id, source.move_id, source.hidraw_path, report_status
+        );
+    }
+    Ok(())
+}
+
 fn claim_move_host(options: Options) -> Result<()> {
     let host = options
         .move_host_address
@@ -3201,6 +3529,7 @@ impl Options {
                 "activate" => options.mode = Mode::Activate,
                 "request-move-light" => options.mode = Mode::RequestMoveLight,
                 "move-light-status" => options.mode = Mode::MoveLightStatus,
+                "move-source-status" => options.mode = Mode::MoveSourceStatus,
                 "move-state-status" => options.mode = Mode::MoveStateStatus,
                 "claim-move-host" => options.mode = Mode::ClaimMoveHost,
                 "quest-access-status" => options.mode = Mode::QuestAccessStatus,
@@ -3423,7 +3752,7 @@ fn timestamp_ns() -> Result<i64> {
 }
 
 fn help_text() -> &'static str {
-    "Usage: muninn [serve|activate|request-move-light|move-light-status|move-state-status|claim-move-host|quest-access-status] [--store <path>] [--target-host <host>] [--port <port>] [--obs-target-host <host>] [--obs-port <port>] [--loopback-script <path>] [--ffmpeg <path>] [--move-state <move-id>=<hidraw-path>] [--move-host <bt-addr>] [--move-evidence-stream <stream-id>] [--move-evidence-verse <verse-id>] [--quest-adb] [--quest-serial <serial>] [--quest-input-stream <stream-id>] [--quest-pose-stream <stream-id>] [--quest-video-input-stream <stream-id>] [--idunn-rudp-health <addr>] [--idunn-daemon <id>] [--idunn-health-contract <contract>] [--dry-run] [--health]\n\nMuninn is Odin's portable telemetry Verse assembler. serve publishes cheap typed telemetry affordances, optional source-local Move controller state, optional Quest USB access surfaces, and a CultMesh Move evidence stream when Move state sources are attached; activate starts an explicitly requested local stream; request-move-light publishes a typed Move light command for Muninn serve to execute; move-light-status reads typed command receipts; move-state-status reads typed controller-state records; claim-move-host assigns USB-attached PS Moves to a Bluetooth host; quest-access-status reads typed Quest access state. In --health mode, the Idunn RUDP flags publish typed daemon health to Idunn while preserving command-probe exit semantics."
+    "Usage: muninn [serve|activate|request-move-light|move-light-status|move-source-status|move-state-status|claim-move-host|quest-access-status] [--store <path>] [--target-host <host>] [--port <port>] [--obs-target-host <host>] [--obs-port <port>] [--loopback-script <path>] [--ffmpeg <path>] [--move-state <move-id>=<hidraw-path>] [--move-host <bt-addr>] [--move-evidence-stream <stream-id>] [--move-evidence-verse <verse-id>] [--quest-adb] [--quest-serial <serial>] [--quest-input-stream <stream-id>] [--quest-pose-stream <stream-id>] [--quest-video-input-stream <stream-id>] [--idunn-rudp-health <addr>] [--idunn-daemon <id>] [--idunn-health-contract <contract>] [--dry-run] [--health]\n\nMuninn is Odin's portable telemetry Verse assembler. serve publishes cheap typed telemetry affordances, optional source-local Move controller state, optional Quest USB access surfaces, and a CultMesh Move evidence stream when Move state sources are attached; activate starts an explicitly requested local stream; request-move-light publishes a typed Move light command for Muninn serve to execute; move-light-status reads typed command receipts; move-source-status prints live Move source discovery; move-state-status reads typed controller-state records; claim-move-host assigns USB-attached PS Moves to a Bluetooth host; quest-access-status reads typed Quest access state. In --health mode, the Idunn RUDP flags publish typed daemon health to Idunn while preserving command-probe exit semantics."
 }
 
 fn parse_move_state_source(value: &str) -> Result<MoveStateSource> {
@@ -3778,6 +4107,19 @@ mod tests {
     }
 
     #[test]
+    fn move_source_status_is_a_read_only_diagnostic_mode() {
+        let options = Options::parse(
+            ["move-source-status", "--host", "starfire"]
+                .into_iter()
+                .map(String::from),
+        )
+        .unwrap();
+
+        assert_eq!(options.mode, Mode::MoveSourceStatus);
+        assert_eq!(options.host_id, "starfire");
+    }
+
+    #[test]
     fn claim_move_host_accepts_target_bluetooth_address() {
         let options = Options::parse(
             ["claim-move-host", "--move-host", "5C:93:A2:9C:A8:A8"]
@@ -3790,6 +4132,31 @@ mod tests {
         assert_eq!(
             options.move_host_address.as_deref(),
             Some("5C:93:A2:9C:A8:A8")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_ps_move_source_token_preserves_concrete_hid_path() {
+        let path = r"\\?\hid#vid_054c&pid_03d5&col01#example#{guid}";
+        let token = windows_ps_move_source_token(path);
+
+        assert!(is_windows_ps_move_source(&token));
+        assert_eq!(
+            windows_ps_move_input_path(&token).unwrap().as_deref(),
+            Some(path)
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_ps_move_physical_key_groups_sibling_collections() {
+        let col01 = r"\\?\hid#vid_054c&pid_03d5&col01#a&976df89&0&0000#{guid}";
+        let col02 = r"\\?\hid#vid_054c&pid_03d5&col02#a&976df89&0&0001#{guid}";
+
+        assert_eq!(
+            windows_ps_move_physical_key(col01),
+            windows_ps_move_physical_key(col02)
         );
     }
 
