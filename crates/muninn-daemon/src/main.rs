@@ -2129,7 +2129,7 @@ fn bluetoothctl_connect_device(address: &str) -> Result<BluetoothConnectOutcome>
         .stderr(Stdio::piped())
         .spawn()
         .with_context(|| format!("bluetoothctl connect {address} could not start"))?;
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         if let Some(status) = child
             .try_wait()
