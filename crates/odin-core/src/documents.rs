@@ -36,6 +36,7 @@ pub const MUNINN_CAPTURE_STREAM_SCHEMA: &str = "muninn.capture_stream.v1";
 pub const MUNINN_OBS_STREAM_CATALOG_SCHEMA: &str = "muninn.obs_stream_catalog.v1";
 pub const MUNINN_MOVE_MARKER_CANDIDATE_SCHEMA: &str = "muninn.move_marker_candidate.v1";
 pub const MUNINN_MOVE_CONTROLLER_STATE_SCHEMA: &str = "muninn.move_controller_state.v1";
+pub const MUNINN_MOVE_IDENTITY_SCHEMA: &str = "muninn.move_identity.v1";
 pub const MUNINN_MOVE_LIGHT_COMMAND_SCHEMA: &str = "muninn.move_light_command.v1";
 pub const MUNINN_QUEST_ACCESS_SCHEMA: &str = "muninn.quest_access.v1";
 pub const MUNINN_COMMAND_BOUNDARY_SCHEMA: &str = "muninn.command_boundary.v1";
@@ -827,6 +828,27 @@ pub struct MuninnMoveControllerStateRecord {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(type = "muninn.move_identity", schema = "muninn.move_identity.v1")]
+pub struct MuninnMoveIdentityRecord {
+    #[cultcache(key = 0)]
+    pub identity_id: String,
+    #[cultcache(key = 1)]
+    pub host_id: String,
+    #[cultcache(key = 2)]
+    pub move_id: String,
+    #[cultcache(key = 3)]
+    pub source_path: String,
+    #[cultcache(key = 4)]
+    pub bluetooth_host_address: String,
+    #[cultcache(key = 5)]
+    pub state: String,
+    #[cultcache(key = 6)]
+    pub detail: String,
+    #[cultcache(key = 7)]
+    pub observed_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
 #[cultcache(
     type = "muninn.move_light_command",
     schema = "muninn.move_light_command.v1"
@@ -947,6 +969,7 @@ cultmesh_rs::cultmesh_documents!(OdinDocuments {
     MuninnObsStreamCatalogRecord => MUNINN_OBS_STREAM_CATALOG_SCHEMA,
     MuninnMoveMarkerCandidateRecord => MUNINN_MOVE_MARKER_CANDIDATE_SCHEMA,
     MuninnMoveControllerStateRecord => MUNINN_MOVE_CONTROLLER_STATE_SCHEMA,
+    MuninnMoveIdentityRecord => MUNINN_MOVE_IDENTITY_SCHEMA,
     MuninnMoveLightCommandRecord => MUNINN_MOVE_LIGHT_COMMAND_SCHEMA,
     MuninnQuestAccessRecord => MUNINN_QUEST_ACCESS_SCHEMA,
     MuninnCommandBoundaryCompatRecord => MUNINN_COMMAND_BOUNDARY_SCHEMA,

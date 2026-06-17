@@ -49,6 +49,9 @@ $arguments = @(
   "--idunn-daemon", $IdunnDaemon,
   "--idunn-health-contract", $IdunnHealthContract
 )
+if (-not [string]::IsNullOrWhiteSpace($MoveBluetoothHost)) {
+  $arguments += @("--move-host", $MoveBluetoothHost)
+}
 foreach ($source in $MoveState) {
   if (-not [string]::IsNullOrWhiteSpace($source)) {
     $arguments += @("--move-state", $source)

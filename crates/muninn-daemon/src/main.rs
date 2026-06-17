@@ -10,7 +10,7 @@ use cultnet_rs::{
 };
 use odin_core::{
     EveProviderAdvertisementCompatRecord, IdunnDaemonHealthRecord, MuninnCaptureStreamRecord,
-    MuninnCommandBoundaryCompatRecord, MuninnMoveControllerStateRecord,
+    MuninnCommandBoundaryCompatRecord, MuninnMoveControllerStateRecord, MuninnMoveIdentityRecord,
     MuninnMoveLightCommandRecord, MuninnObsStreamCatalogRecord, MuninnQuestAccessRecord,
     MuninnTelemetrySurfaceRecord, MuninnTransportProfileCompatRecord, OdinDocuments,
 };
@@ -51,6 +51,7 @@ enum Mode {
     DryRun,
     RequestMoveLight,
     MoveLightStatus,
+    MoveIdentityStatus,
     MoveSourceStatus,
     MoveStateStatus,
     ClaimMoveHost,
@@ -188,6 +189,7 @@ fn main() -> Result<()> {
         Mode::Health => health_check(&options),
         Mode::RequestMoveLight => request_move_light(options),
         Mode::MoveLightStatus => move_light_status(options),
+        Mode::MoveIdentityStatus => move_identity_status(options),
         Mode::MoveSourceStatus => move_source_status(options),
         Mode::MoveStateStatus => move_state_status(options),
         Mode::ClaimMoveHost => claim_move_host(options),
@@ -213,6 +215,7 @@ fn serve(options: Options) -> Result<()> {
         sync_active_move_state_sources(&mut active_move_states, live_move_state_sources(&options));
         claim_move_host_if_due(&options, &mut last_move_host_claim_attempt_at);
         let mut node = open_node(&options, "muninn-daemon")?;
+        publish_move_identity_records(&mut node, &options, &active_move_states)?;
         register_move_light_commands(&mut node, &options, &mut active_move_lights)?;
         tick_move_light_commands(&mut node, &mut active_move_lights, &mut HidMoveLightWriter)?;
         tick_default_move_light_pulse(
@@ -281,6 +284,29 @@ fn sync_active_move_state_sources(
         }
         active.push(active_move_state_source(source));
     }
+}
+
+fn publish_move_identity_records(
+    node: &mut cultmesh_rs::CultMeshNode,
+    options: &Options,
+    active: &[ActiveMoveStateSource],
+) -> Result<()> {
+    let observed_at = timestamp()?;
+    let bluetooth_host_address = options.move_host_address.clone().unwrap_or_default();
+    for state in active {
+        let record = MuninnMoveIdentityRecord {
+            identity_id: format!("{}:{}:move-identity", options.host_id, state.source.move_id),
+            host_id: options.host_id.clone(),
+            move_id: state.source.move_id.clone(),
+            source_path: state.source.hidraw_path.clone(),
+            bluetooth_host_address: bluetooth_host_address.clone(),
+            state: "usb-visible".to_string(),
+            detail: "Muninn discovered this PS Move on a local USB/HID input path; controller-state records may be absent when the platform HID input collection is silent.".to_string(),
+            observed_at: observed_at.clone(),
+        };
+        node.put(&record.identity_id, &record)?;
+    }
+    Ok(())
 }
 
 fn live_move_state_sources(options: &Options) -> Vec<MoveStateSource> {
@@ -3267,6 +3293,41 @@ fn move_source_status(options: Options) -> Result<()> {
     Ok(())
 }
 
+fn move_identity_status(options: Options) -> Result<()> {
+    let node = open_node(&options, "muninn-move-identity-status")?;
+    let mut identities = node.cache().get_all::<MuninnMoveIdentityRecord>()?;
+    identities.retain(|identity| identity.host_id == options.host_id);
+    if !options.move_id.trim().is_empty() {
+        identities.retain(|identity| identity.move_id == options.move_id);
+    }
+    identities.sort_by(|a, b| {
+        a.identity_id.cmp(&b.identity_id).then(
+            unix_timestamp_sort_key(&b.observed_at).cmp(&unix_timestamp_sort_key(&a.observed_at)),
+        )
+    });
+    identities.dedup_by(|left, right| left.identity_id == right.identity_id);
+    if identities.is_empty() {
+        println!(
+            "No Muninn Move identity records found for host {}.",
+            options.host_id
+        );
+        return Ok(());
+    }
+    for identity in identities {
+        println!(
+            "{} move={} source={} bluetooth_host={} state={} observed={} detail={}",
+            identity.identity_id,
+            identity.move_id,
+            identity.source_path,
+            identity.bluetooth_host_address,
+            identity.state,
+            identity.observed_at,
+            identity.detail
+        );
+    }
+    Ok(())
+}
+
 fn claim_move_host(options: Options) -> Result<()> {
     let host = options
         .move_host_address
@@ -3529,6 +3590,7 @@ impl Options {
                 "activate" => options.mode = Mode::Activate,
                 "request-move-light" => options.mode = Mode::RequestMoveLight,
                 "move-light-status" => options.mode = Mode::MoveLightStatus,
+                "move-identity-status" => options.mode = Mode::MoveIdentityStatus,
                 "move-source-status" => options.mode = Mode::MoveSourceStatus,
                 "move-state-status" => options.mode = Mode::MoveStateStatus,
                 "claim-move-host" => options.mode = Mode::ClaimMoveHost,
@@ -3752,7 +3814,7 @@ fn timestamp_ns() -> Result<i64> {
 }
 
 fn help_text() -> &'static str {
-    "Usage: muninn [serve|activate|request-move-light|move-light-status|move-source-status|move-state-status|claim-move-host|quest-access-status] [--store <path>] [--target-host <host>] [--port <port>] [--obs-target-host <host>] [--obs-port <port>] [--loopback-script <path>] [--ffmpeg <path>] [--move-state <move-id>=<hidraw-path>] [--move-host <bt-addr>] [--move-evidence-stream <stream-id>] [--move-evidence-verse <verse-id>] [--quest-adb] [--quest-serial <serial>] [--quest-input-stream <stream-id>] [--quest-pose-stream <stream-id>] [--quest-video-input-stream <stream-id>] [--idunn-rudp-health <addr>] [--idunn-daemon <id>] [--idunn-health-contract <contract>] [--dry-run] [--health]\n\nMuninn is Odin's portable telemetry Verse assembler. serve publishes cheap typed telemetry affordances, optional source-local Move controller state, optional Quest USB access surfaces, and a CultMesh Move evidence stream when Move state sources are attached; activate starts an explicitly requested local stream; request-move-light publishes a typed Move light command for Muninn serve to execute; move-light-status reads typed command receipts; move-source-status prints live Move source discovery; move-state-status reads typed controller-state records; claim-move-host assigns USB-attached PS Moves to a Bluetooth host; quest-access-status reads typed Quest access state. In --health mode, the Idunn RUDP flags publish typed daemon health to Idunn while preserving command-probe exit semantics."
+    "Usage: muninn [serve|activate|request-move-light|move-light-status|move-identity-status|move-source-status|move-state-status|claim-move-host|quest-access-status] [--store <path>] [--target-host <host>] [--port <port>] [--obs-target-host <host>] [--obs-port <port>] [--loopback-script <path>] [--ffmpeg <path>] [--move-state <move-id>=<hidraw-path>] [--move-host <bt-addr>] [--move-evidence-stream <stream-id>] [--move-evidence-verse <verse-id>] [--quest-adb] [--quest-serial <serial>] [--quest-input-stream <stream-id>] [--quest-pose-stream <stream-id>] [--quest-video-input-stream <stream-id>] [--idunn-rudp-health <addr>] [--idunn-daemon <id>] [--idunn-health-contract <contract>] [--dry-run] [--health]\n\nMuninn is Odin's portable telemetry Verse assembler. serve publishes cheap typed telemetry affordances, optional source-local Move controller state, optional typed Move identity records, optional Quest USB access surfaces, and a CultMesh Move evidence stream when Move state sources are attached; activate starts an explicitly requested local stream; request-move-light publishes a typed Move light command for Muninn serve to execute; move-light-status reads typed command receipts; move-identity-status reads typed Move identity records; move-source-status prints live Move source discovery; move-state-status reads typed controller-state records; claim-move-host assigns USB-attached PS Moves to a Bluetooth host; quest-access-status reads typed Quest access state. In --health mode, the Idunn RUDP flags publish typed daemon health to Idunn while preserving command-probe exit semantics."
 }
 
 fn parse_move_state_source(value: &str) -> Result<MoveStateSource> {
@@ -4120,6 +4182,26 @@ mod tests {
     }
 
     #[test]
+    fn move_identity_status_accepts_move_filter() {
+        let options = Options::parse(
+            [
+                "move-identity-status",
+                "--host",
+                "starfire",
+                "--move",
+                "move-0006f523e2d1",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap();
+
+        assert_eq!(options.mode, Mode::MoveIdentityStatus);
+        assert_eq!(options.host_id, "starfire");
+        assert_eq!(options.move_id, "move-0006f523e2d1");
+    }
+
+    #[test]
     fn claim_move_host_accepts_target_bluetooth_address() {
         let options = Options::parse(
             ["claim-move-host", "--move-host", "5C:93:A2:9C:A8:A8"]
@@ -4304,6 +4386,50 @@ mod tests {
             }
             Ok(std::mem::take(&mut self.joystick_events))
         }
+    }
+
+    #[test]
+    fn move_identity_publishes_without_controller_state_report() {
+        let store_path = std::env::temp_dir().join(format!(
+            "muninn-move-identity-{}.cc",
+            timestamp_ns().unwrap()
+        ));
+        let options = Options::parse(
+            [
+                "serve",
+                "--host",
+                "starfire",
+                "--store",
+                store_path.to_str().unwrap(),
+                "--move-host",
+                "5C:93:A2:9C:A8:A8",
+                "--move-state",
+                "move-0006f523e2d1=windows-psmove://silent",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap();
+        let source = options.move_state_sources[0].clone();
+        let active = vec![ActiveMoveStateSource {
+            source,
+            sequence: 0,
+            joystick_axes: [0; 16],
+            joystick_buttons: [false; 32],
+            light_hidraw_path: None,
+        }];
+        let mut node = open_node(&options, "muninn-move-identity-test").unwrap();
+
+        publish_move_identity_records(&mut node, &options, &active).unwrap();
+
+        let record = node
+            .get_required::<MuninnMoveIdentityRecord>("starfire:move-0006f523e2d1:move-identity")
+            .unwrap();
+        assert_eq!(record.host_id, "starfire");
+        assert_eq!(record.move_id, "move-0006f523e2d1");
+        assert_eq!(record.bluetooth_host_address, "5C:93:A2:9C:A8:A8");
+        assert_eq!(record.state, "usb-visible");
+        let _ = fs::remove_file(store_path);
     }
 
     #[test]
