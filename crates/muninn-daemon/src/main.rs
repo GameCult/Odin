@@ -209,11 +209,13 @@ fn serve(options: Options) -> Result<()> {
     let mut last_default_move_light_write_at = None;
     let mut last_idunn_health_publish_attempt_at = None;
     let mut last_move_host_claim_attempt_at = None;
+    let mut last_move_bluetooth_pickup_attempt_at = None;
     let mut active_move_states = active_move_state_sources(live_move_state_sources(&options));
 
     loop {
         sync_active_move_state_sources(&mut active_move_states, live_move_state_sources(&options));
         claim_move_host_if_due(&options, &mut last_move_host_claim_attempt_at);
+        pickup_bluetooth_moves_if_due(&mut last_move_bluetooth_pickup_attempt_at);
         let mut node = open_node(&options, "muninn-daemon")?;
         publish_move_identity_records(&mut node, &options, &active_move_states)?;
         register_move_light_commands(&mut node, &options, &mut active_move_lights)?;
@@ -353,6 +355,21 @@ fn claim_move_host_if_due(options: &Options, last_attempt_at: &mut Option<Instan
     }
 }
 
+fn pickup_bluetooth_moves_if_due(last_attempt_at: &mut Option<Instant>) {
+    let cadence = Duration::from_secs(5);
+    if last_attempt_at
+        .as_ref()
+        .is_some_and(|instant| instant.elapsed() < cadence)
+    {
+        return;
+    }
+    *last_attempt_at = Some(Instant::now());
+
+    if let Err(error) = pickup_bluetooth_moves() {
+        eprintln!("Muninn could not attempt PS Move Bluetooth pickup: {error:#}");
+    }
+}
+
 #[cfg(unix)]
 fn prepare_move_bluetooth_host_for_claim() -> Result<()> {
     for args in [["pairable", "on"], ["discoverable", "on"]] {
@@ -376,6 +393,33 @@ fn prepare_move_bluetooth_host_for_claim() -> Result<()> {
 
 #[cfg(not(unix))]
 fn prepare_move_bluetooth_host_for_claim() -> Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn pickup_bluetooth_moves() -> Result<()> {
+    let devices = bluetoothctl_motion_controller_devices()?;
+    for device in devices {
+        if device.connected || !device.trusted {
+            continue;
+        }
+        match bluetoothctl_connect_device(&device.address) {
+            Ok(true) => println!(
+                "bluetooth_move_pickup address={} state=connected",
+                device.address
+            ),
+            Ok(false) => {}
+            Err(error) => eprintln!(
+                "bluetooth_move_pickup address={} state=failed error={error:#}",
+                device.address
+            ),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn pickup_bluetooth_moves() -> Result<()> {
     Ok(())
 }
 
@@ -1766,6 +1810,108 @@ fn bluetoothctl_host_address() -> Option<String> {
             .ok()
             .map(|_| address.to_string())
     })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BluetoothMoveDevice {
+    address: String,
+    trusted: bool,
+    connected: bool,
+}
+
+#[cfg(unix)]
+fn bluetoothctl_motion_controller_devices() -> Result<Vec<BluetoothMoveDevice>> {
+    let output = Command::new("bluetoothctl")
+        .arg("devices")
+        .output()
+        .context("bluetoothctl devices could not run")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow!("bluetoothctl devices failed: {}", stderr.trim()));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut devices = Vec::new();
+    for line in stdout.lines() {
+        let Some(address) = parse_bluetoothctl_motion_controller_device_line(line) else {
+            continue;
+        };
+        if let Some(device) = bluetoothctl_device_info(&address) {
+            devices.push(device);
+        }
+    }
+    Ok(devices)
+}
+
+fn parse_bluetoothctl_motion_controller_device_line(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    let rest = trimmed.strip_prefix("Device ")?;
+    let mut parts = rest.split_whitespace();
+    let address = parts.next()?;
+    let name = parts.collect::<Vec<_>>().join(" ");
+    if !name.eq_ignore_ascii_case("Motion Controller") {
+        return None;
+    }
+    parse_bluetooth_address_little_endian(address)
+        .ok()
+        .map(|_| address.to_string())
+}
+
+#[cfg(unix)]
+fn bluetoothctl_device_info(address: &str) -> Option<BluetoothMoveDevice> {
+    let output = Command::new("bluetoothctl")
+        .args(["info", address])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(parse_bluetoothctl_device_info(
+        address,
+        &String::from_utf8_lossy(&output.stdout),
+    ))
+}
+
+fn parse_bluetoothctl_device_info(address: &str, text: &str) -> BluetoothMoveDevice {
+    BluetoothMoveDevice {
+        address: address.to_string(),
+        trusted: bluetoothctl_info_flag(text, "Trusted"),
+        connected: bluetoothctl_info_flag(text, "Connected"),
+    }
+}
+
+fn bluetoothctl_info_flag(text: &str, name: &str) -> bool {
+    let prefix = format!("{name}:");
+    text.lines().any(|line| {
+        let trimmed = line.trim();
+        trimmed
+            .strip_prefix(&prefix)
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("yes"))
+    })
+}
+
+#[cfg(unix)]
+fn bluetoothctl_connect_device(address: &str) -> Result<bool> {
+    let mut child = Command::new("bluetoothctl")
+        .args(["connect", address])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("bluetoothctl connect {address} could not start"))?;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .with_context(|| format!("waiting for bluetoothctl connect {address}"))?
+        {
+            return Ok(status.success());
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(false);
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
 }
 
 #[cfg(not(unix))]
@@ -4215,6 +4361,35 @@ mod tests {
             options.move_host_address.as_deref(),
             Some("5C:93:A2:9C:A8:A8")
         );
+    }
+
+    #[test]
+    fn parses_bluetoothctl_motion_controller_device_line() {
+        assert_eq!(
+            parse_bluetoothctl_motion_controller_device_line(
+                "Device 00:07:04:A8:00:D0 Motion Controller"
+            )
+            .as_deref(),
+            Some("00:07:04:A8:00:D0")
+        );
+        assert!(parse_bluetoothctl_motion_controller_device_line(
+            "Device 00:11:22:33:44:55 Keyboard"
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn parses_bluetoothctl_motion_controller_flags() {
+        let info = "\
+Device 00:07:04:A8:00:D0 (public)
+\tTrusted: yes
+\tConnected: no
+";
+        let device = parse_bluetoothctl_device_info("00:07:04:A8:00:D0", info);
+
+        assert_eq!(device.address, "00:07:04:A8:00:D0");
+        assert!(device.trusted);
+        assert!(!device.connected);
     }
 
     #[cfg(windows)]
