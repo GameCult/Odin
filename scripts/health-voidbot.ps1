@@ -32,6 +32,25 @@ function Read-JsonFile {
   return $raw | ConvertFrom-Json
 }
 
+function Get-JsonPropertyValue {
+  param(
+    [Parameter(Mandatory = $false)] $Object,
+    [Parameter(Mandatory = $true)][string] $Name,
+    [Parameter(Mandatory = $false)] $Default = $null
+  )
+
+  if ($null -eq $Object) {
+    return $Default
+  }
+
+  $property = $Object.PSObject.Properties[$Name]
+  if ($null -eq $property) {
+    return $Default
+  }
+
+  return $property.Value
+}
+
 function Get-ProcessOrFail {
   param(
     [Parameter(Mandatory = $true)][string] $Role,
@@ -74,16 +93,19 @@ if ($null -eq $runtime) {
   Fail-IdunnHealth -State "failed" -Message "VoidBot runtime state is missing at $runtimePath."
 }
 
-if (-not $runtime.ready) {
+if (-not [bool](Get-JsonPropertyValue -Object $runtime -Name "ready" -Default $false)) {
   Fail-IdunnHealth -State "failed" -Message "VoidBot runtime stack reports ready=false."
 }
 
-if ($runtime.stage -ne "ready") {
-  Fail-IdunnHealth -State "failed" -Message "VoidBot runtime stack stage is '$($runtime.stage)', expected 'ready'."
+$runtimeStage = [string](Get-JsonPropertyValue -Object $runtime -Name "stage" -Default "unknown")
+if ($runtimeStage -ne "ready") {
+  Fail-IdunnHealth -State "failed" -Message "VoidBot runtime stack stage is '$runtimeStage', expected 'ready'."
 }
 
-$botPid = if ($null -ne $runtime.bot) { [int]$runtime.bot.pid } else { 0 }
-$workerPid = if ($null -ne $runtime.worker) { [int]$runtime.worker.pid } else { 0 }
+$bot = Get-JsonPropertyValue -Object $runtime -Name "bot"
+$worker = Get-JsonPropertyValue -Object $runtime -Name "worker"
+$botPid = if ($null -ne $bot) { [int](Get-JsonPropertyValue -Object $bot -Name "pid" -Default 0) } else { 0 }
+$workerPid = if ($null -ne $worker) { [int](Get-JsonPropertyValue -Object $worker -Name "pid" -Default 0) } else { 0 }
 if ($botPid -le 0) {
   Fail-IdunnHealth -State "failed" -Message "VoidBot runtime state does not contain a live bot PID."
 }
