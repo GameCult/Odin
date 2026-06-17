@@ -5,27 +5,56 @@ param(
   [string] $PidPath = "/home/metacrat/.local/state/gamecult/muninn/muninn.pid",
   [string[]] $MoveState = @(),
   [int] $IntervalSeconds = 15,
+  [int] $MaxStoreAgeSeconds = 180,
   [string] $IdunnRudpHealth = "10.77.0.2:17870"
 )
 
 $ErrorActionPreference = "Stop"
 
-function Quote-ShSingle([string] $Value) {
-  return "'" + ($Value -replace "'", "'\''") + "'"
+function Set-AsciiFile {
+  param(
+    [Parameter(Mandatory = $true)] [string] $Path,
+    [Parameter(Mandatory = $true)] [string] $Content
+  )
+
+  [System.IO.File]::WriteAllText($Path, ($Content -replace "`r?`n", "`n"), [System.Text.Encoding]::ASCII)
 }
 
-$moveStateSpecs = @($MoveState | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-if ($moveStateSpecs.Count -eq 0) {
-  $sourceScript = Join-Path $PSScriptRoot "get-nightwing-move-state-sources.ps1"
-  $moveStateSpecs = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $sourceScript -SshTarget $SshTarget)
-}
+function Invoke-NightwingUploadedShell {
+  param(
+    [Parameter(Mandatory = $true)] [string] $SshTarget,
+    [Parameter(Mandatory = $true)] [string] $RemoteScriptContent,
+    [Parameter(Mandatory = $true)] [string] $TempPrefix
+  )
 
-$moveStateSetLines = ($moveStateSpecs | ForEach-Object {
-  "set -- ""`$@"" --move-state $(Quote-ShSingle $_)"
-}) -join "`n"
+  $uploadId = [guid]::NewGuid().ToString("N")
+  $localTempRoot = Join-Path $env:TEMP "$TempPrefix-$uploadId"
+  $localRemoteScript = Join-Path $localTempRoot "$TempPrefix-$uploadId.sh"
+  $localSftpBatch = Join-Path $localTempRoot "$TempPrefix-$uploadId.sftp"
+  $remoteScriptPath = "/tmp/$TempPrefix-$uploadId.sh"
+
+  try {
+    New-Item -ItemType Directory -Force -Path $localTempRoot | Out-Null
+    Set-AsciiFile -Path $localRemoteScript -Content $RemoteScriptContent
+    Set-AsciiFile -Path $localSftpBatch -Content ('put "{0}" "{1}"' -f $localRemoteScript, $remoteScriptPath)
+
+    & sftp.exe -b $localSftpBatch $SshTarget
+    if ($LASTEXITCODE -ne 0) {
+      exit $LASTEXITCODE
+    }
+
+    & ssh.exe -o BatchMode=yes -o ConnectTimeout=10 $SshTarget "chmod +x '$remoteScriptPath' && bash '$remoteScriptPath'"
+    $remoteExit = $LASTEXITCODE
+    & ssh.exe -o BatchMode=yes -o ConnectTimeout=10 $SshTarget "rm -f '$remoteScriptPath'"
+    exit $remoteExit
+  } finally {
+    Remove-Item -LiteralPath $localTempRoot -Recurse -Force -ErrorAction SilentlyContinue
+  }
+}
 
 $remoteScript = @"
-set -eu
+#!/usr/bin/env bash
+set -euo pipefail
 if [ ! -x '$MuninnExe' ]; then
   echo 'Muninn executable not found at $MuninnExe' >&2
   exit 1
@@ -38,14 +67,24 @@ else
   echo 'Muninn serve process is not running on Nightwing' >&2
   exit 1
 fi
-set -- --health \
-  --store '$StorePath' \
-  --host nightwing
-$moveStateSetLines
-set -- "`$@" \
-  --interval-seconds '$IntervalSeconds'
-'$MuninnExe' "`$@"
+if [ ! -f '$StorePath' ]; then
+  echo 'Muninn telemetry store is missing on Nightwing' >&2
+  exit 1
+fi
+store_mtime="`$(stat -c %Y '$StorePath')"
+now="`$(date +%s)"
+store_age="`$((now - store_mtime))"
+if [ "`$store_age" -gt '$MaxStoreAgeSeconds' ]; then
+  echo "Muninn telemetry store is stale on Nightwing (`$store_age s old)" >&2
+  exit 1
+fi
+identity_output="`$('$MuninnExe' move-identity-status --store '$StorePath' --host nightwing)"
+if printf '%s\n' "`$identity_output" | grep -Fq 'No Muninn Move identity records found'; then
+  echo 'Muninn Move identity roster is empty on Nightwing' >&2
+  exit 1
+fi
+identity_count="`$(printf '%s\n' "`$identity_output" | grep -c 'move-identity move=')"
+echo "Muninn healthy: nightwing store_age=`${store_age}s move_identities=`${identity_count}"
 "@
 
-ssh.exe -o BatchMode=yes -o ConnectTimeout=5 $SshTarget $remoteScript
-exit $LASTEXITCODE
+Invoke-NightwingUploadedShell -SshTarget $SshTarget -RemoteScriptContent $remoteScript -TempPrefix "odin-nightwing-muninn-health"
