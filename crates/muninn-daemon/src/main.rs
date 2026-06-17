@@ -427,10 +427,7 @@ fn publish_bluetooth_move_identity_records(
         let Some(move_id) = bluetooth_address_move_id(&device.address) else {
             continue;
         };
-        if active.iter().any(|state| {
-            state.source.move_id.eq_ignore_ascii_case(&move_id)
-                && !is_joystick_path(&state.source.hidraw_path)
-        }) {
+        if active_usb_move_source_has_move_id(active, &move_id) {
             continue;
         }
         let Some(record) = build_bluetooth_move_identity_record(
@@ -676,6 +673,13 @@ fn active_move_source_has_bluetooth_address(
         active
             .iter()
             .any(|state| state.source.move_id.eq_ignore_ascii_case(&move_id))
+    })
+}
+
+fn active_usb_move_source_has_move_id(active: &[ActiveMoveStateSource], move_id: &str) -> bool {
+    active.iter().any(|state| {
+        state.source.move_id.eq_ignore_ascii_case(move_id)
+            && move_identity_source_state_and_detail(&state.source.hidraw_path).0 == "usb-visible"
     })
 }
 
@@ -4897,6 +4901,29 @@ MODALIAS=input:b0005v054Cp03D5e0220
             move_identity_source_state_and_detail("bluetooth:00:06:F5:23:E2:D1").0,
             "bluetooth-connected"
         );
+    }
+
+    #[test]
+    fn usb_visible_active_move_blocks_bluetooth_identity_overwrite() {
+        let active = vec![ActiveMoveStateSource {
+            source: MoveStateSource {
+                move_id: "move-000704a39772".to_string(),
+                hidraw_path: "/dev/input/js0".to_string(),
+            },
+            sequence: 0,
+            joystick_axes: [0; 16],
+            joystick_buttons: [false; 32],
+            light_hidraw_path: None,
+        }];
+
+        assert!(active_usb_move_source_has_move_id(
+            &active,
+            "move-000704a39772"
+        ));
+        assert!(!active_usb_move_source_has_move_id(
+            &active,
+            "move-000704a800d0"
+        ));
     }
 
     #[cfg(windows)]
