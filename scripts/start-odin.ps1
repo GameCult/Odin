@@ -1,6 +1,7 @@
 param(
   [int] $Port = 8797,
   [string] $StateDir = "E:\Projects\Odin\scratch\odin",
+  [string] $CultNetRudpBind = "0.0.0.0:17871",
   [string] $IdunnRudpHealth = "127.0.0.1:17870",
   [string] $IdunnDaemon = "odin",
   [string] $IdunnHealthContract = "odin.cultnet-rudp-provider-health",
@@ -33,6 +34,7 @@ $args = @(
   $scriptPath,
   "--port", "$Port",
   "--stateDir", $StateDir,
+  "--cultnet-rudp-bind", $CultNetRudpBind,
   "--idunn-rudp-health", $IdunnRudpHealth,
   "--idunn-daemon", $IdunnDaemon,
   "--idunn-health-contract", $IdunnHealthContract
@@ -56,3 +58,4 @@ if ($proc.HasExited) {
 Write-Host "Odin started as PID $($proc.Id)."
 Write-Host "Health: http://127.0.0.1:$Port/health"
 Write-Host "Eve deck: ws://127.0.0.1:$Port/eve/deck"
+Write-Host "CultNet/RUDP snapshot: $CultNetRudpBind"

@@ -56,9 +56,11 @@ Idunn is a Rust daemon inside Odin's Cargo workspace. The live local runtime is
 one long-lived `idunn.exe` process that owns the whole Starfire-local swarm:
 Odin, local adjunct daemons, the Yggdrasil deploy lanes, and the Nightwing
 display services. Each target declares a daemon-owned health contract and keeps
-its own interval and deploy/restart authority. The current shell health
-commands are compatibility probes until each daemon updates its CultLib
-dependency and publishes health through CultNet over the shared RUDP transport.
+its own interval and deploy/restart authority. The shell health commands now
+exist as compatibility probes and actuators; daemon truth is expected to come
+first from typed CultNet/RUDP publication and daemon-owned boundary stores, and
+the local commands only matter when that witness is absent or when an explicit
+restart/deploy boundary is advertised.
 The scheduler and continuity witness now belong to one Rust process instead of
 a PowerShell-herded pile of one-daemon workers.
 
@@ -220,61 +222,33 @@ probe. The record must match the daemon id, health contract, RUDP transport,
 and freshness window; otherwise the compatibility probe remains fallback
 evidence.
 
-The current active cut has moved past Raven daemon launcher surgery and into the
-remaining Yggdrasil deployments, with repixelizer now the explicit next target.
-Heimdall has crossed the first live transport cut: the Yggdrasil runtime now
-publishes `heimdall.cultnet-rudp-provider-health`, writes a daemon-owned
-boundary witness at `/srv/heimdall/cultcache/heimdall.service.cc`, and ships
-the required `CultLib` snapshot through the source-artifact lane. Heimdall
-still owes Odin ingestion of that typed store plus the later redacted
-auth-document witness export, but it is no longer blocked on basic daemon
-health publication. Vili now publishes RUDP health from Raven
-through the hidden `GameCult\Vili` scheduled task, and live Idunn accepts
-`vili.cultnet-rudp-animation-health` from `10.77.0.4`. The Raven repair
-actuator in [restart-vili.ps1](/E:/Projects/Odin/scripts/restart-vili.ps1)
-syncs the authoritative Vili runtime plus flattened CultLib node modules before
-reinstalling the hidden task. Vili also writes a daemon-owned
-`.vili\vili.service.cc` store with provider advertisement, operator state, Eve
-surface, command boundary, and transport profile records; Odin local discovery
-can ingest that typed store. Weksa publishes RUDP health and a daemon-owned
-provider store containing provider advertisement, operator state, Eve surface,
-command boundary, and transport profile records; Odin local discovery can ingest
-that typed store too. Weksa still owes CultNet/RUDP command document ingress
-for MiMo VoiceDesign before its HTTP command route can become debug-only.
-Stonks publishes RUDP health and a daemon-owned CultCache store containing
-provider advertisement, market snapshot, Eve surface, command boundary, and
-transport profile records; Odin local discovery can ingest that store as
-provider truth. StreamPixels now publishes a service-owned CultCache boundary
-store with provider advertisement, command boundary, transport profile, and
-Idunn health summary; Odin local discovery can ingest that store, and the live
-Yggdrasil service now publishes daemon health over CultNet/RUDP with
-`STREAMPIXELS_IDUNN_RUDP_HEALTH=10.77.0.2:17870` and contract
-`streampixels.cultnet-rudp-service-health` in
-`/srv/streampixels/env/service.env`. Live Idunn accepts
-`yggdrasil-streampixels` from `10.77.0.1`, and the service-owned boundary store
-now lives at
-`/srv/streampixels/app/.streampixels-data/cultcache/streampixels.service.cc`.
-The remaining debt is only to demote SSH/systemd/HTTP probes from compatibility
-proof to deployment/debug witness once Odin consumes the typed store without
-fallback. Repixelizer is still plain GUI/systemd compatibility debt for now,
-which makes it the next Yggdrasil surgery target:
-`repixelizer-gui.service`, `/api/health`, `/api/config`, and nginx routing are
-still the live witnesses until the runtime publishes internal RUDP health and
-typed queue/provider state. Raven Muninn task actions are also an explicit ops invariant: Task
-Scheduler must execute `wscript.exe //B //Nologo` hidden launcher actions
-directly for `GameCult-Muninn`, `GameCult-Muninn-Activate`, and
+The active transport cut is no longer "make the daemons speak RUDP at all."
+Nightwing Gjallar now consumes Odin's accepted
+`surface:gamecult.network.status` snapshot over CultNet/RUDP, so every active
+Starfire-local daemon target now publishes daemon-owned RUDP health plus typed
+boundary state. The remaining debt is deleting or demoting compatibility
+probes, HTTP/WebSocket/TCP lowerings, and xenos-boundary ingestion shims
+without letting them reclaim ownership. Weksa still owes CultNet/RUDP command
+document ingress for MiMo VoiceDesign before its HTTP command route can become
+debug-only, and Odin still owes removal of hashed-store/C# witness shims once
+direct interoperable witness publication is ready.
+
+Raven Muninn task actions are also an explicit ops invariant: Task Scheduler
+must execute `wscript.exe //B //Nologo` hidden launcher actions directly for
+`GameCult-Muninn`, `GameCult-Muninn-Activate`, and
 `GameCult-Muninn-VideoProof`, never raw `.cmd` wrappers, and the hidden VBS
 layer must call `.ps1` launchers directly instead of `cmdPath` trampolines.
-Those three live Raven tasks have been repaired and verified. The repair actuator now uploads its
-Raven PowerShell body with `sftp` and runs a tiny cleanup wrapper, so the
-hidden-task repair does not hit Windows command-line limits before it can run.
-The long-running Muninn serve bodies on Raven, Nightwing, and Starfire now also
-carry their own `--idunn-rudp-health`, `--idunn-daemon`, and
-`--idunn-health-contract` arguments, and live Idunn accepts those daemon-owned
-health records directly instead of relying on one-shot health commands for the
-truth.
-After those live cuts, continue daemon-by-daemon until compatibility HTTP, TCP,
-WebSocket, and command probes are fallback witnesses only.
+Those three live Raven tasks have been repaired and verified. The repair
+actuator now uploads its Raven PowerShell body with `sftp` and runs a tiny
+cleanup wrapper, so the hidden-task repair does not hit Windows command-line
+limits before it can run. The long-running Muninn serve bodies on Raven,
+Nightwing, and Starfire now also carry their own `--idunn-rudp-health`,
+`--idunn-daemon`, and `--idunn-health-contract` arguments, and live Idunn
+accepts those daemon-owned health records directly instead of relying on
+one-shot health commands for the truth.
+
+From here on out, the work is not "teach another daemon to speak." It is
+"delete the witness masks and keep ownership where it belongs."
 
 Rust no longer gets to claim the transport is imaginary:
 `vendor/cultnet-rs` includes the canonical CNR0 `cultnet.transport.rudp.v0`

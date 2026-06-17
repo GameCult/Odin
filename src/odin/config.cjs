@@ -16,6 +16,7 @@ function buildConfig(argv) {
   const args = parseArgs(argv);
   const port = Number(args.port || 8797);
   const host = args.host || "0.0.0.0";
+  const cultnetRudpBind = args["cultnet-rudp-bind"] ? String(args["cultnet-rudp-bind"]) : "";
   const intervalMs = Number(args.intervalMs || 5000);
   const stateDir = args.stateDir || path.join(repoRoot, "scratch", "odin");
   const cachePath = args.cachePath || path.join(stateDir, "odin.ccmp");
@@ -57,6 +58,7 @@ function buildConfig(argv) {
   return {
     args,
     cachePath,
+    cultnetRudpBind,
     gamecultTextDocumentStorePath,
     host,
     interfaceBindingStores,

@@ -5,6 +5,7 @@ const fs = require("fs");
 const path = require("path");
 
 const { buildConfig, loadCultRuntime } = require("./odin/config.cjs");
+const { createCultNetRudpSurfaceServer } = require("./odin/cultnet-rudp.cjs");
 const { defineOdinDocuments } = require("./odin/documents.cjs");
 const { createInterfaceDiscovery } = require("./odin/interfaces.cjs");
 const { createIdunnRudpHealthPublisher, publishIdunnRudpHealth } = require("./odin/idunn-rudp.cjs");
@@ -41,6 +42,7 @@ const stateBuilder = createStateBuilder({
 });
 
 let meshNodePromise = null;
+let cultNetRudpSurfaceServer = null;
 let currentState = stateBuilder.buildPendingState("Coordinator starting");
 let lastRefresh = {
   completedAt: null,
@@ -58,6 +60,20 @@ main().catch((error) => {
 async function main() {
   if (cultRuntime.CultMesh && documents.surfaceDefinition) {
     meshNodePromise = createDurableSurfaceNode();
+  }
+  if (config.cultnetRudpBind) {
+    cultNetRudpSurfaceServer = createCultNetRudpSurfaceServer({
+      bind: config.cultnetRudpBind,
+      documents,
+      getCache: async () => {
+        if (!meshNodePromise) {
+          throw new Error("CultMesh runtime is unavailable; Odin cannot serve a CultNet/RUDP snapshot.");
+        }
+        return (await meshNodePromise).cache;
+      },
+    });
+    await cultNetRudpSurfaceServer.start();
+    console.log(`CultNet/RUDP snapshot: ${config.cultnetRudpBind}`);
   }
 
   const dashboardServer = createDashboardServer({
@@ -177,6 +193,7 @@ function health(clients) {
       error: cultRuntime.error?.message || null,
     },
     discovery: {
+      cultNetRudpBind: config.cultnetRudpBind || null,
       seedDeckUrls: config.seedDeckUrls,
       discoveredDeckUrls: interfaceDiscovery.getDiscoveredDeckUrls(),
       interfaceBindingStores: config.interfaceBindingStores,

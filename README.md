@@ -21,16 +21,17 @@ documents, ingest ports, normalization, and repository persistence so unit tests
 can use mocked inputs and pipeline smokes can prove typed handoff without
 booting the whole daemon. Gjallar is not part of that Rust record spine: it is
 the Nightwing-resident terminal compositor in `E:\Projects\Gjallar` that
-consumes Odin's published Eve/CultUI deck and renders the live display.
+consumes Odin's accepted `gamecult.eve.surface_state` snapshot over CultNet/RUDP
+and renders the live display.
 
 ## Gjallar
 
 Gjallar is the herald display daemon that runs on Nightwing. Odin sees the
 Verses, accepts provider surfaces, and publishes the `odin.providers` catalog.
-Gjallar talks to Odin, enumerates active providers, composes the multi-scale
-tiled dashboard, lowers Odin's canonical marquee tape into continuous gutter
-text, owns dense character-level update behavior, and writes the visible
-framebuffer.
+Gjallar consumes Odin's accepted surface snapshot over CultNet/RUDP, composes
+the multi-scale tiled dashboard from that typed state, lowers Odin's canonical
+marquee tape into continuous gutter text, owns dense character-level update
+behavior, and writes the visible framebuffer.
 
 Local package surfaces:
 
@@ -95,7 +96,13 @@ The Eve/CultUI deck endpoint is a compatibility bridge:
 ws://127.0.0.1:8797/eve/deck
 ```
 
-Nightwing can consume the LAN bridge endpoint:
+The native CultNet/RUDP snapshot endpoint is:
+
+```text
+127.0.0.1:17871
+```
+
+Legacy browser/deck lowerers can consume the LAN bridge endpoint:
 
 ```text
 ws://192.168.1.66:8797/eve/deck
