@@ -221,6 +221,7 @@ fn serve(options: Options) -> Result<()> {
         );
         let mut node = open_node(&options, "muninn-daemon")?;
         publish_move_identity_records(&mut node, &options, &active_move_states)?;
+        publish_bluetooth_move_identity_records(&mut node, &options, &active_move_states)?;
         register_move_light_commands(&mut node, &options, &mut active_move_lights)?;
         tick_move_light_commands(&mut node, &mut active_move_lights, &mut HidMoveLightWriter)?;
         tick_default_move_light_pulse(
@@ -311,6 +312,80 @@ fn publish_move_identity_records(
         };
         node.put(&record.identity_id, &record)?;
     }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn publish_bluetooth_move_identity_records(
+    node: &mut cultmesh_rs::CultMeshNode,
+    options: &Options,
+    active: &[ActiveMoveStateSource],
+) -> Result<()> {
+    let observed_at = timestamp()?;
+    let bluetooth_host_address = platform_default_bluetooth_host_address().unwrap_or_default();
+    let devices = bluetoothctl_motion_controller_devices()?;
+    for device in devices {
+        let Some(move_id) = bluetooth_address_move_id(&device.address) else {
+            continue;
+        };
+        if active.iter().any(|state| {
+            state.source.move_id.eq_ignore_ascii_case(&move_id)
+                && !is_joystick_path(&state.source.hidraw_path)
+        }) {
+            continue;
+        }
+        let Some(record) = build_bluetooth_move_identity_record(
+            options,
+            &device,
+            bluetooth_host_address.clone(),
+            observed_at.clone(),
+        ) else {
+            continue;
+        };
+        node.put(&record.identity_id, &record)?;
+    }
+    Ok(())
+}
+
+fn build_bluetooth_move_identity_record(
+    options: &Options,
+    device: &BluetoothMoveDevice,
+    bluetooth_host_address: String,
+    observed_at: String,
+) -> Option<MuninnMoveIdentityRecord> {
+    let move_id = bluetooth_address_move_id(&device.address)?;
+    let state = if device.connected {
+        "bluetooth-connected"
+    } else if device.trusted {
+        "bluetooth-waiting"
+    } else {
+        "bluetooth-known"
+    };
+    let detail = if device.connected {
+        "Muninn sees this PS Move connected through BlueZ."
+    } else if device.trusted {
+        "Muninn sees this trusted PS Move in BlueZ and will attempt bounded pickup while disconnected."
+    } else {
+        "Muninn sees this PS Move in BlueZ, but it is not trusted for automatic pickup."
+    };
+    Some(MuninnMoveIdentityRecord {
+        identity_id: format!("{}:{}:move-identity", options.host_id, move_id),
+        host_id: options.host_id.clone(),
+        move_id,
+        source_path: format!("bluetooth:{}", device.address),
+        bluetooth_host_address,
+        state: state.to_string(),
+        detail: detail.to_string(),
+        observed_at,
+    })
+}
+
+#[cfg(not(unix))]
+fn publish_bluetooth_move_identity_records(
+    _node: &mut cultmesh_rs::CultMeshNode,
+    _options: &Options,
+    _active: &[ActiveMoveStateSource],
+) -> Result<()> {
     Ok(())
 }
 
@@ -1820,7 +1895,9 @@ fn platform_default_bluetooth_host_address() -> Option<String> {
         if !name.starts_with("hci") {
             continue;
         }
-        let address = fs::read_to_string(entry.path().join("address")).ok()?;
+        let Ok(address) = fs::read_to_string(entry.path().join("address")) else {
+            continue;
+        };
         let address = address.trim();
         if !address.is_empty() {
             return Some(address.to_string());
@@ -4434,6 +4511,37 @@ Device 00:07:04:A8:00:D0 (public)
             bluetooth_address_move_id("00:07:04:A8:00:D0").as_deref(),
             Some("move-000704a800d0")
         );
+    }
+
+    #[test]
+    fn bluetooth_move_identity_record_describes_waiting_pickup() {
+        let options = Options::parse(
+            ["serve", "--host", "nightwing"]
+                .into_iter()
+                .map(String::from),
+        )
+        .unwrap();
+        let device = BluetoothMoveDevice {
+            address: "00:07:04:A8:00:D0".to_string(),
+            trusted: true,
+            connected: false,
+        };
+
+        let record = build_bluetooth_move_identity_record(
+            &options,
+            &device,
+            "5C:93:A2:9C:A8:A8".to_string(),
+            "unix-1781667000".to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            record.identity_id,
+            "nightwing:move-000704a800d0:move-identity"
+        );
+        assert_eq!(record.source_path, "bluetooth:00:07:04:A8:00:D0");
+        assert_eq!(record.bluetooth_host_address, "5C:93:A2:9C:A8:A8");
+        assert_eq!(record.state, "bluetooth-waiting");
     }
 
     #[cfg(windows)]
