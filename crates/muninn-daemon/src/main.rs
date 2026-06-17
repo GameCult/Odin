@@ -521,17 +521,20 @@ fn publish_bluetooth_move_identity_records(
 
 fn live_move_state_sources(options: &Options) -> Vec<MoveStateSource> {
     let discovered = platform_move_state_sources();
+    merge_live_move_state_sources(discovered, &options.move_state_sources)
+}
+
+fn merge_live_move_state_sources(
+    discovered: Vec<MoveStateSource>,
+    configured: &[MoveStateSource],
+) -> Vec<MoveStateSource> {
     if discovered.is_empty() {
-        return options.move_state_sources.clone();
+        return configured.to_vec();
     }
 
     let mut sources = discovered;
-    for source in &options.move_state_sources {
-        if is_joystick_path(&source.hidraw_path)
-            && sources
-                .iter()
-                .any(|discovered| discovered.hidraw_path == source.hidraw_path)
-        {
+    for source in configured {
+        if is_platform_move_source_path(&source.hidraw_path) {
             continue;
         }
         if !sources.iter().any(|discovered| discovered == source) {
@@ -1493,6 +1496,20 @@ fn publish_move_controller_states(
 
 fn is_joystick_path(path: &str) -> bool {
     path.contains("/dev/input/js") || path.contains("-joystick")
+}
+
+fn is_platform_move_source_path(path: &str) -> bool {
+    is_joystick_path(path) || is_platform_runtime_move_source_path(path)
+}
+
+#[cfg(windows)]
+fn is_platform_runtime_move_source_path(path: &str) -> bool {
+    is_windows_ps_move_source(path)
+}
+
+#[cfg(not(windows))]
+fn is_platform_runtime_move_source_path(_path: &str) -> bool {
+    false
 }
 
 #[cfg(windows)]
@@ -5614,6 +5631,40 @@ MODALIAS=input:b0005v054Cp03D5e0220
         assert_eq!(released, vec!["move-000704a39772"]);
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].source.move_id, "move-0006f523e2d1");
+    }
+
+    #[test]
+    fn live_move_state_merge_drops_stale_configured_joystick_sources() {
+        let sources = merge_live_move_state_sources(
+            vec![MoveStateSource {
+                move_id: "move-0006f523e2d1".to_string(),
+                hidraw_path: "/dev/input/js1".to_string(),
+            }],
+            &[
+                MoveStateSource {
+                    move_id: "move-000704a39772".to_string(),
+                    hidraw_path: "/dev/input/js0".to_string(),
+                },
+                MoveStateSource {
+                    move_id: "manual-source".to_string(),
+                    hidraw_path: "file:///tmp/manual-source".to_string(),
+                },
+            ],
+        );
+
+        assert_eq!(
+            sources,
+            vec![
+                MoveStateSource {
+                    move_id: "move-0006f523e2d1".to_string(),
+                    hidraw_path: "/dev/input/js1".to_string(),
+                },
+                MoveStateSource {
+                    move_id: "manual-source".to_string(),
+                    hidraw_path: "file:///tmp/manual-source".to_string(),
+                },
+            ]
+        );
     }
 
     #[test]
