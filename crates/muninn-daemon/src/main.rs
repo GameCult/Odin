@@ -305,19 +305,78 @@ fn publish_move_identity_records(
     let observed_at = timestamp()?;
     let bluetooth_host_address = options.move_host_address.clone().unwrap_or_default();
     for source in sources {
+        let (state, detail) = move_identity_source_state_and_detail(&source.hidraw_path);
         let record = MuninnMoveIdentityRecord {
             identity_id: format!("{}:{}:move-identity", options.host_id, source.move_id),
             host_id: options.host_id.clone(),
             move_id: source.move_id.clone(),
             source_path: source.hidraw_path.clone(),
             bluetooth_host_address: bluetooth_host_address.clone(),
-            state: "usb-visible".to_string(),
-            detail: "Muninn discovered this PS Move on a local USB/HID input path; controller-state records may be absent when the platform HID input collection is silent.".to_string(),
+            state,
+            detail,
             observed_at: observed_at.clone(),
         };
         node.put(&record.identity_id, &record)?;
     }
     Ok(())
+}
+
+fn move_identity_source_state_and_detail(source_path: &str) -> (String, String) {
+    if is_bluetooth_move_source_path(source_path) {
+        return (
+            "bluetooth-connected".to_string(),
+            "Muninn currently sees this PS Move through a local Bluetooth input path.".to_string(),
+        );
+    }
+    (
+        "usb-visible".to_string(),
+        "Muninn discovered this PS Move on a local USB/HID input path; controller-state records may be absent when the platform HID input collection is silent.".to_string(),
+    )
+}
+
+#[cfg(unix)]
+fn is_bluetooth_move_source_path(source_path: &str) -> bool {
+    if is_joystick_path(source_path) {
+        let Some(name) = Path::new(source_path).file_name().and_then(|name| name.to_str()) else {
+            return false;
+        };
+        let Some(sysfs_device) =
+            fs::canonicalize(format!("/sys/class/input/{name}/device")).ok()
+        else {
+            return false;
+        };
+        return is_bluetooth_move_uevent(&read_move_uevent_chain(&sysfs_device));
+    }
+
+    if source_path.contains("/dev/hidraw") {
+        let Some(name) = Path::new(source_path).file_name().and_then(|name| name.to_str()) else {
+            return false;
+        };
+        let Ok(uevent) =
+            fs::read_to_string(format!("/sys/class/hidraw/{name}/device/uevent"))
+        else {
+            return false;
+        };
+        return is_bluetooth_move_uevent(&uevent);
+    }
+
+    source_path
+        .strip_prefix("bluetooth:")
+        .is_some_and(|address| bluetooth_address_move_id(address).is_some())
+}
+
+#[cfg(not(unix))]
+fn is_bluetooth_move_source_path(source_path: &str) -> bool {
+    source_path
+        .strip_prefix("bluetooth:")
+        .is_some_and(|address| bluetooth_address_move_id(address).is_some())
+}
+
+fn is_bluetooth_move_uevent(uevent: &str) -> bool {
+    uevent.contains("PRODUCT=5/54c/3d5")
+        || uevent.contains("HID_ID=0005:0000054C:000003D5")
+        || uevent.contains("MODALIAS=input:b0005v054Cp03D5")
+        || uevent.contains("MODALIAS=hid:b0005")
 }
 
 fn reconcile_move_identity_records(
@@ -3711,15 +3770,18 @@ fn current_move_identity_records_from_sources(
     let bluetooth_host_address = move_host_address_for_claim(options).unwrap_or_default();
     let mut identities = sources
         .iter()
-        .map(|source| MuninnMoveIdentityRecord {
-            identity_id: format!("{}:{}:move-identity", options.host_id, source.move_id),
-            host_id: options.host_id.clone(),
-            move_id: source.move_id.clone(),
-            source_path: source.hidraw_path.clone(),
-            bluetooth_host_address: bluetooth_host_address.clone(),
-            state: "usb-visible".to_string(),
-            detail: "Muninn currently sees this PS Move on a local USB/HID input path.".to_string(),
-            observed_at: observed_at.clone(),
+        .map(|source| {
+            let (state, detail) = move_identity_source_state_and_detail(&source.hidraw_path);
+            MuninnMoveIdentityRecord {
+                identity_id: format!("{}:{}:move-identity", options.host_id, source.move_id),
+                host_id: options.host_id.clone(),
+                move_id: source.move_id.clone(),
+                source_path: source.hidraw_path.clone(),
+                bluetooth_host_address: bluetooth_host_address.clone(),
+                state,
+                detail,
+                observed_at: observed_at.clone(),
+            }
         })
         .collect::<Vec<_>>();
     identities.extend(current_bluetooth_move_identity_records(options, &observed_at));
@@ -4720,6 +4782,30 @@ Device 00:07:04:A8:00:D0 (public)
         assert_eq!(record.source_path, "bluetooth:00:07:04:A8:00:D0");
         assert_eq!(record.bluetooth_host_address, "5C:93:A2:9C:A8:A8");
         assert_eq!(record.state, "bluetooth-waiting");
+    }
+
+    #[test]
+    fn move_identity_source_transport_distinguishes_usb_and_bluetooth() {
+        let usb = r#"
+PRODUCT=3/54c/3d5/110
+NAME="Sony Computer Entertainment Motion Controller"
+PHYS="usb-0000:00:14.0-3/input0"
+MODALIAS=input:b0003v054Cp03D5e0110
+"#;
+        let bluetooth = r#"
+PRODUCT=5/54c/3d5/220
+NAME="Motion Controller"
+PHYS="5c:93:a2:9c:a8:a8"
+UNIQ="00:06:f5:23:e2:d1"
+MODALIAS=input:b0005v054Cp03D5e0220
+"#;
+
+        assert!(!is_bluetooth_move_uevent(usb));
+        assert!(is_bluetooth_move_uevent(bluetooth));
+        assert_eq!(
+            move_identity_source_state_and_detail("bluetooth:00:06:F5:23:E2:D1").0,
+            "bluetooth-connected"
+        );
     }
 
     #[cfg(windows)]
