@@ -81,6 +81,7 @@ struct Options {
     log_root: PathBuf,
     interval_seconds: Option<u64>,
     move_id: String,
+    move_filter: Option<String>,
     hidraw_path: String,
     move_colors: Vec<String>,
     move_durations_ms: Vec<u32>,
@@ -3485,11 +3486,15 @@ fn move_state_status(options: Options) -> Result<()> {
     let node = open_node(&options, "muninn-move-state-status")?;
     let mut states = node.cache().get_all::<MuninnMoveControllerStateRecord>()?;
     states.retain(|state| state.host_id == options.host_id);
-    if !options.move_id.trim().is_empty() {
-        states.retain(|state| state.move_id == options.move_id);
+    if let Some(move_filter) = options.move_filter.as_deref() {
+        states.retain(|state| state.move_id == move_filter);
     }
     for source in live_move_state_sources(&options) {
-        if !options.move_id.trim().is_empty() && source.move_id != options.move_id {
+        if options
+            .move_filter
+            .as_deref()
+            .is_some_and(|move_filter| source.move_id != move_filter)
+        {
             continue;
         }
         let key = format!("{}:{}:move-controller-state", options.host_id, source.move_id);
@@ -3568,11 +3573,15 @@ fn move_identity_status(options: Options) -> Result<()> {
     let mut identities = node.cache().get_all::<MuninnMoveIdentityRecord>()?;
     identities.extend(current_move_identity_records(&options)?);
     identities.retain(|identity| identity.host_id == options.host_id);
-    if !options.move_id.trim().is_empty() {
-        identities.retain(|identity| identity.move_id == options.move_id);
+    if let Some(move_filter) = options.move_filter.as_deref() {
+        identities.retain(|identity| identity.move_id == move_filter);
     }
     for move_id in live_move_identity_ids(&options) {
-        if !options.move_id.trim().is_empty() && move_id != options.move_id {
+        if options
+            .move_filter
+            .as_deref()
+            .is_some_and(|move_filter| move_id != move_filter)
+        {
             continue;
         }
         let key = format!("{}:{}:move-identity", options.host_id, move_id);
@@ -3620,7 +3629,7 @@ fn current_move_identity_records(options: &Options) -> Result<Vec<MuninnMoveIden
             source_path: source.hidraw_path,
             bluetooth_host_address: bluetooth_host_address.clone(),
             state: "usb-visible".to_string(),
-            detail: "Muninn currently sees this PS Move on a local USB/HID input path; persisted identity records were not readable through the status index.".to_string(),
+            detail: "Muninn currently sees this PS Move on a local USB/HID input path.".to_string(),
             observed_at: observed_at.clone(),
         })
         .collect::<Vec<_>>();
@@ -3922,6 +3931,7 @@ impl Options {
             log_root: PathBuf::from("C:/Meta/Odin/logs/muninn"),
             interval_seconds: None,
             move_id: "move-usb".to_string(),
+            move_filter: None,
             hidraw_path: String::new(),
             move_colors: Vec::new(),
             move_durations_ms: Vec::new(),
@@ -4001,7 +4011,11 @@ impl Options {
                             .context("--interval-seconds must be a positive integer")?,
                     )
                 }
-                "--move" => options.move_id = take_value(&mut args, "--move")?,
+                "--move" => {
+                    let value = take_value(&mut args, "--move")?;
+                    options.move_id = value.clone();
+                    options.move_filter = Some(value);
+                }
                 "--hidraw" => options.hidraw_path = take_value(&mut args, "--hidraw")?,
                 "--move-state" => {
                     let value = take_value(&mut args, "--move-state")?;
