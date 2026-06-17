@@ -313,12 +313,37 @@ fn claim_move_host_if_due(options: &Options, last_attempt_at: &mut Option<Instan
     }
     *last_attempt_at = Some(Instant::now());
 
+    if let Err(error) = prepare_move_bluetooth_host_for_claim() {
+        eprintln!("Muninn could not prepare Bluetooth host for USB PS Move claim: {error:#}");
+    }
+
     let Some(host) = move_host_address_for_claim(options) else {
         return;
     };
     if let Err(error) = claim_ps_move_host(&host) {
         eprintln!("Muninn could not claim USB PS Move host {host}: {error:#}");
     }
+}
+
+#[cfg(unix)]
+fn prepare_move_bluetooth_host_for_claim() -> Result<()> {
+    let output = Command::new("bluetoothctl")
+        .args(["pairable", "on"])
+        .output()
+        .context("bluetoothctl pairable on could not run")?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Err(anyhow!(
+        "bluetoothctl pairable on failed: {}",
+        stderr.trim()
+    ))
+}
+
+#[cfg(not(unix))]
+fn prepare_move_bluetooth_host_for_claim() -> Result<()> {
+    Ok(())
 }
 
 fn move_host_address_for_claim(options: &Options) -> Option<String> {
