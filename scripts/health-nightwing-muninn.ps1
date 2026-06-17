@@ -43,10 +43,7 @@ set -- --health \
   --host nightwing
 $moveStateSetLines
 set -- "`$@" \
-  --interval-seconds '$IntervalSeconds' \
-  --idunn-rudp-health '$IdunnRudpHealth' \
-  --idunn-daemon 'nightwing-muninn' \
-  --idunn-health-contract 'muninn.cultnet-rudp-remote-telemetry-and-move-hid'
+  --interval-seconds '$IntervalSeconds'
 '$MuninnExe' "`$@"
 "@
 

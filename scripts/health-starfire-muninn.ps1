@@ -28,10 +28,7 @@ $healthArgs = @(
   "--health",
   "--store", $StorePath,
   "--host", "starfire",
-  "--interval-seconds", "$IntervalSeconds",
-  "--idunn-rudp-health", $IdunnRudpHealth,
-  "--idunn-daemon", "starfire-muninn",
-  "--idunn-health-contract", "muninn.cultnet-rudp-local-telemetry-and-quest-access"
+  "--interval-seconds", "$IntervalSeconds"
 )
 foreach ($source in $MoveState) {
   if (-not [string]::IsNullOrWhiteSpace($source)) {

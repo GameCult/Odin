@@ -2,6 +2,7 @@ param(
   [string] $RavenHost = "raven",
   [string] $MuninnExe = "C:\Meta\Odin\Muninn\muninn.exe",
   [string] $StorePath = "C:\Meta\Odin\state\muninn.telemetry.cc",
+  [string] $ActivateStorePath = "C:\Meta\Odin\state\muninn.activate.cc",
   [string] $LogRoot = "C:\Meta\Odin\logs\muninn",
   [string] $LoopbackScript = "C:\Meta\Odin\Muninn\scripts\wasapi-loopback-capture.ps1",
   [string] $Ffmpeg = "C:\Users\Madman's Lullaby\AppData\Local\Microsoft\WinGet\Links\ffmpeg.exe",
@@ -41,6 +42,57 @@ function ConvertTo-PowerShellArrayLiteral {
 
   $lines = $Values | ForEach-Object { "  {0}" -f (ConvertTo-PowerShellStringLiteral $_) }
   return "@(`r`n{0}`r`n)" -f ($lines -join ",`r`n")
+}
+
+function New-HiddenNativeLauncherPowerShellContent {
+  param(
+    [Parameter(Mandatory = $false)] [string] $StorePath,
+    [Parameter(Mandatory = $true)] [string] $LogRoot,
+    [Parameter(Mandatory = $true)] [string[]] $Arguments,
+    [Parameter(Mandatory = $true)] [string] $FilePath,
+    [Parameter(Mandatory = $true)] [string] $StdoutPath,
+    [Parameter(Mandatory = $true)] [string] $StderrPath,
+    [Parameter(Mandatory = $true)] [string] $PidPath,
+    [Parameter(Mandatory = $false)] [string] $WorkingDirectory
+  )
+
+  $template = @'
+$ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
+__STORE_DIR_LINE__
+New-Item -ItemType Directory -Force -Path __LOG_ROOT__ | Out-Null
+$arguments = __ARGUMENTS__
+function Quote-NativeArgument([string] $Value) {
+  if ($Value -match '[\s"]') {
+    return '"' + $Value.Replace('"', '\"') + '"'
+  }
+  return $Value
+}
+$argumentLine = ($arguments | ForEach-Object { Quote-NativeArgument $_ }) -join ' '
+$process = Start-Process -FilePath __FILE_PATH__ -ArgumentList $argumentLine __WORKING_DIRECTORY_CLAUSE__-WindowStyle Hidden -PassThru -RedirectStandardOutput __STDOUT_PATH__ -RedirectStandardError __STDERR_PATH__
+$process.Id | Set-Content -Encoding ASCII -LiteralPath __PID_PATH__
+'@
+
+  $storeDirLine = if ([string]::IsNullOrWhiteSpace($StorePath)) {
+    ""
+  } else {
+    "New-Item -ItemType Directory -Force -Path (Split-Path -Parent {0}) | Out-Null" -f (ConvertTo-PowerShellStringLiteral $StorePath)
+  }
+  $workingDirectoryClause = if ([string]::IsNullOrWhiteSpace($WorkingDirectory)) {
+    ""
+  } else {
+    "-WorkingDirectory {0} " -f (ConvertTo-PowerShellStringLiteral $WorkingDirectory)
+  }
+
+  return $template.
+    Replace("__STORE_DIR_LINE__", $storeDirLine).
+    Replace("__LOG_ROOT__", (ConvertTo-PowerShellStringLiteral $LogRoot)).
+    Replace("__ARGUMENTS__", (ConvertTo-PowerShellArrayLiteral $Arguments)).
+    Replace("__FILE_PATH__", (ConvertTo-PowerShellStringLiteral $FilePath)).
+    Replace("__WORKING_DIRECTORY_CLAUSE__", $workingDirectoryClause).
+    Replace("__STDOUT_PATH__", (ConvertTo-PowerShellStringLiteral $StdoutPath)).
+    Replace("__STDERR_PATH__", (ConvertTo-PowerShellStringLiteral $StderrPath)).
+    Replace("__PID_PATH__", (ConvertTo-PowerShellStringLiteral $PidPath))
 }
 
 function New-HiddenPowerShellVbsLauncherContent {
@@ -143,7 +195,7 @@ $serveArguments = @(
 
 $activateArguments = @(
   "activate",
-  "--store", $StorePath,
+  "--store", $ActivateStorePath,
   "--host", "raven",
   "--stream", "muninn.raven.av.srt",
   "--target-host", $TargetHost,
@@ -187,55 +239,32 @@ $videoProofArguments = @(
   ("srt://{0}:{1}?mode=caller&latency=120000&timeout=30000000" -f $ObsTargetHost, $ObsPort)
 )
 
-$servePsContent = (@'
-$ErrorActionPreference = "Stop"
-$ProgressPreference = "SilentlyContinue"
-New-Item -ItemType Directory -Force -Path (Split-Path -Parent {0}) | Out-Null
-New-Item -ItemType Directory -Force -Path {1} | Out-Null
-$arguments = {2}
-$process = Start-Process -FilePath {3} -ArgumentList $arguments -WindowStyle Hidden -PassThru -RedirectStandardOutput {4} -RedirectStandardError {5}
-$process.Id | Set-Content -Encoding ASCII -LiteralPath {6}
-'@) -f
-  (ConvertTo-PowerShellStringLiteral $StorePath),
-  (ConvertTo-PowerShellStringLiteral $LogRoot),
-  (ConvertTo-PowerShellArrayLiteral $serveArguments),
-  (ConvertTo-PowerShellStringLiteral $MuninnExe),
-  (ConvertTo-PowerShellStringLiteral (Join-Path $LogRoot "muninn-serve.out.log")),
-  (ConvertTo-PowerShellStringLiteral (Join-Path $LogRoot "muninn-serve.err.log")),
-  (ConvertTo-PowerShellStringLiteral (Join-Path $LogRoot "muninn-serve.pid"))
+$servePsContent = New-HiddenNativeLauncherPowerShellContent `
+  -StorePath $StorePath `
+  -LogRoot $LogRoot `
+  -Arguments $serveArguments `
+  -FilePath $MuninnExe `
+  -StdoutPath (Join-Path $LogRoot "muninn-serve.out.log") `
+  -StderrPath (Join-Path $LogRoot "muninn-serve.err.log") `
+  -PidPath (Join-Path $LogRoot "muninn-serve.pid")
 
-$activatePsContent = (@'
-$ErrorActionPreference = "Stop"
-$ProgressPreference = "SilentlyContinue"
-New-Item -ItemType Directory -Force -Path (Split-Path -Parent {0}) | Out-Null
-New-Item -ItemType Directory -Force -Path {1} | Out-Null
-$arguments = {2}
-$process = Start-Process -FilePath {3} -ArgumentList $arguments -WindowStyle Hidden -PassThru -RedirectStandardOutput {4} -RedirectStandardError {5}
-$process.Id | Set-Content -Encoding ASCII -LiteralPath {6}
-'@) -f
-  (ConvertTo-PowerShellStringLiteral $StorePath),
-  (ConvertTo-PowerShellStringLiteral $LogRoot),
-  (ConvertTo-PowerShellArrayLiteral $activateArguments),
-  (ConvertTo-PowerShellStringLiteral $MuninnExe),
-  (ConvertTo-PowerShellStringLiteral (Join-Path $LogRoot "muninn-activate.out.log")),
-  (ConvertTo-PowerShellStringLiteral (Join-Path $LogRoot "muninn-activate.err.log")),
-  (ConvertTo-PowerShellStringLiteral (Join-Path $LogRoot "muninn-activate.pid"))
+$activatePsContent = New-HiddenNativeLauncherPowerShellContent `
+  -StorePath $ActivateStorePath `
+  -LogRoot $LogRoot `
+  -Arguments $activateArguments `
+  -FilePath $MuninnExe `
+  -StdoutPath (Join-Path $LogRoot "muninn-activate.out.log") `
+  -StderrPath (Join-Path $LogRoot "muninn-activate.err.log") `
+  -PidPath (Join-Path $LogRoot "muninn-activate.pid")
 
-$videoProofPsContent = (@'
-$ErrorActionPreference = "Stop"
-$ProgressPreference = "SilentlyContinue"
-New-Item -ItemType Directory -Force -Path {0} | Out-Null
-$arguments = {1}
-$process = Start-Process -FilePath {2} -ArgumentList $arguments -WorkingDirectory {3} -WindowStyle Hidden -PassThru -RedirectStandardOutput {4} -RedirectStandardError {5}
-$process.Id | Set-Content -Encoding ASCII -LiteralPath {6}
-'@) -f
-  (ConvertTo-PowerShellStringLiteral $LogRoot),
-  (ConvertTo-PowerShellArrayLiteral $videoProofArguments),
-  (ConvertTo-PowerShellStringLiteral $Ffmpeg),
-  (ConvertTo-PowerShellStringLiteral $muninnDir),
-  (ConvertTo-PowerShellStringLiteral (Join-Path $LogRoot "muninn-video-proof.out.log")),
-  (ConvertTo-PowerShellStringLiteral (Join-Path $LogRoot "muninn-video-proof.err.log")),
-  (ConvertTo-PowerShellStringLiteral (Join-Path $LogRoot "muninn-video-proof.pid"))
+$videoProofPsContent = New-HiddenNativeLauncherPowerShellContent `
+  -LogRoot $LogRoot `
+  -Arguments $videoProofArguments `
+  -FilePath $Ffmpeg `
+  -StdoutPath (Join-Path $LogRoot "muninn-video-proof.out.log") `
+  -StderrPath (Join-Path $LogRoot "muninn-video-proof.err.log") `
+  -PidPath (Join-Path $LogRoot "muninn-video-proof.pid") `
+  -WorkingDirectory $muninnDir
 
 $uploadRoot = Join-Path $env:TEMP ("odin-raven-muninn-launchers-" + [guid]::NewGuid().ToString("N"))
 
@@ -289,7 +318,7 @@ foreach (`$path in @(
 }
 
 Get-CimInstance Win32_Process |
-  Where-Object { `$_.Name -ieq "muninn.exe" -and `$_.CommandLine -like "*serve*" } |
+  Where-Object { `$_.Name -ieq "muninn.exe" } |
   ForEach-Object {
     & taskkill.exe /PID `$_.ProcessId /T /F | Out-Null
   }

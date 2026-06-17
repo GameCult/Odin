@@ -1,7 +1,7 @@
 param(
   [string] $RavenHost = "raven",
   [string] $MuninnExe = "C:\Meta\Odin\Muninn\muninn.exe",
-  [string] $StorePath = "C:\Meta\Odin\state\muninn.telemetry.cc",
+  [string] $StorePath = "C:\Meta\Odin\state\muninn.activate.cc",
   [string] $LoopbackScript = "C:\Meta\Odin\Muninn\scripts\wasapi-loopback-capture.ps1",
   [string] $LogRoot = "C:\Meta\Odin\logs\muninn",
   [string] $Ffmpeg = "C:\Users\Madman's Lullaby\AppData\Local\Microsoft\WinGet\Links\ffmpeg.exe",
@@ -148,7 +148,14 @@ $ProgressPreference = "SilentlyContinue"
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent {0}) | Out-Null
 New-Item -ItemType Directory -Force -Path {1} | Out-Null
 $arguments = {2}
-$process = Start-Process -FilePath {3} -ArgumentList $arguments -WindowStyle Hidden -PassThru -RedirectStandardOutput {4} -RedirectStandardError {5}
+function Quote-NativeArgument([string] $Value) {{
+  if ($Value -match '[\s"]') {{
+    return '"' + $Value.Replace('"', '\"') + '"'
+  }}
+  return $Value
+}}
+$argumentLine = ($arguments | ForEach-Object {{ Quote-NativeArgument $_ }}) -join ' '
+$process = Start-Process -FilePath {3} -ArgumentList $argumentLine -WindowStyle Hidden -PassThru -RedirectStandardOutput {4} -RedirectStandardError {5}
 $process.Id | Set-Content -Encoding ASCII -LiteralPath {6}
 '@) -f
   (ConvertTo-PowerShellStringLiteral $StorePath),

@@ -129,10 +129,7 @@ foreach (`$pattern in @(
 }
 `$healthArgs = @(
   "--health",
-  "--store", "$StorePath",
-  "--idunn-rudp-health", "$IdunnRudpHealth",
-  "--idunn-daemon", "muninn",
-  "--idunn-health-contract", "muninn.cultnet-rudp-remote-telemetry-health"
+  "--store", "$StorePath"
 )
 & "$MuninnExe" @healthArgs
 "@
