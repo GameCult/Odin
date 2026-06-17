@@ -215,7 +215,10 @@ fn serve(options: Options) -> Result<()> {
     loop {
         sync_active_move_state_sources(&mut active_move_states, live_move_state_sources(&options));
         claim_move_host_if_due(&options, &mut last_move_host_claim_attempt_at);
-        pickup_bluetooth_moves_if_due(&mut last_move_bluetooth_pickup_attempt_at);
+        pickup_bluetooth_moves_if_due(
+            &active_move_states,
+            &mut last_move_bluetooth_pickup_attempt_at,
+        );
         let mut node = open_node(&options, "muninn-daemon")?;
         publish_move_identity_records(&mut node, &options, &active_move_states)?;
         register_move_light_commands(&mut node, &options, &mut active_move_lights)?;
@@ -355,7 +358,10 @@ fn claim_move_host_if_due(options: &Options, last_attempt_at: &mut Option<Instan
     }
 }
 
-fn pickup_bluetooth_moves_if_due(last_attempt_at: &mut Option<Instant>) {
+fn pickup_bluetooth_moves_if_due(
+    active: &[ActiveMoveStateSource],
+    last_attempt_at: &mut Option<Instant>,
+) {
     let cadence = Duration::from_secs(5);
     if last_attempt_at
         .as_ref()
@@ -365,7 +371,7 @@ fn pickup_bluetooth_moves_if_due(last_attempt_at: &mut Option<Instant>) {
     }
     *last_attempt_at = Some(Instant::now());
 
-    if let Err(error) = pickup_bluetooth_moves() {
+    if let Err(error) = pickup_bluetooth_moves(active) {
         eprintln!("Muninn could not attempt PS Move Bluetooth pickup: {error:#}");
     }
 }
@@ -397,10 +403,13 @@ fn prepare_move_bluetooth_host_for_claim() -> Result<()> {
 }
 
 #[cfg(unix)]
-fn pickup_bluetooth_moves() -> Result<()> {
+fn pickup_bluetooth_moves(active: &[ActiveMoveStateSource]) -> Result<()> {
     let devices = bluetoothctl_motion_controller_devices()?;
     for device in devices {
-        if device.connected || !device.trusted {
+        if device.connected
+            || !device.trusted
+            || active_move_source_has_bluetooth_address(active, &device.address)
+        {
             continue;
         }
         match bluetoothctl_connect_device(&device.address) {
@@ -419,8 +428,35 @@ fn pickup_bluetooth_moves() -> Result<()> {
 }
 
 #[cfg(not(unix))]
-fn pickup_bluetooth_moves() -> Result<()> {
+fn pickup_bluetooth_moves(_active: &[ActiveMoveStateSource]) -> Result<()> {
     Ok(())
+}
+
+#[cfg(unix)]
+fn active_move_source_has_bluetooth_address(
+    active: &[ActiveMoveStateSource],
+    address: &str,
+) -> bool {
+    bluetooth_address_move_id(address).is_some_and(|move_id| {
+        active
+            .iter()
+            .any(|state| state.source.move_id.eq_ignore_ascii_case(&move_id))
+    })
+}
+
+fn bluetooth_address_move_id(address: &str) -> Option<String> {
+    parse_bluetooth_address_little_endian(address)
+        .ok()
+        .map(|bytes| {
+            format!(
+                "move-{}",
+                bytes
+                    .iter()
+                    .rev()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            )
+        })
 }
 
 fn move_host_address_for_claim(options: &Options) -> Option<String> {
@@ -4390,6 +4426,14 @@ Device 00:07:04:A8:00:D0 (public)
         assert_eq!(device.address, "00:07:04:A8:00:D0");
         assert!(device.trusted);
         assert!(!device.connected);
+    }
+
+    #[test]
+    fn bluetooth_address_maps_to_move_id() {
+        assert_eq!(
+            bluetooth_address_move_id("00:07:04:A8:00:D0").as_deref(),
+            Some("move-000704a800d0")
+        );
     }
 
     #[cfg(windows)]
