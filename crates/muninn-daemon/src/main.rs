@@ -2821,6 +2821,108 @@ fn windows_ps_move_bluetooth_addresses(handle: *mut std::ffi::c_void) -> Option<
 }
 
 #[cfg(windows)]
+fn windows_ps_move_paired_host_address(path: &str) -> Option<String> {
+    if let Some(address) = windows_ps_move_paired_host_address_from_path(path) {
+        return Some(address);
+    }
+    let key = windows_ps_move_physical_key(path)?;
+    windows_ps_move_pairing_collection_paired_host_address(&key)
+}
+
+#[cfg(windows)]
+fn windows_ps_move_paired_host_address_from_path(path: &str) -> Option<String> {
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+
+    let wide = wide_null(path);
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            std::ptr::null_mut(),
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return None;
+    }
+    let paired_host = windows_ps_move_bluetooth_addresses(handle).map(|addresses| addresses.1);
+    unsafe { windows_sys::Win32::Foundation::CloseHandle(handle) };
+    paired_host
+}
+
+#[cfg(windows)]
+fn windows_ps_move_pairing_collection_paired_host_address(physical_key: &str) -> Option<String> {
+    use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
+        DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, SP_DEVICE_INTERFACE_DATA,
+        SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW,
+    };
+    use windows_sys::Win32::Devices::HumanInterfaceDevice::HidD_GetHidGuid;
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+
+    let mut hid_guid = unsafe { std::mem::zeroed() };
+    unsafe { HidD_GetHidGuid(&mut hid_guid) };
+    let info_set = unsafe {
+        SetupDiGetClassDevsW(
+            &hid_guid,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            DIGCF_PRESENT | DIGCF_DEVICEINTERFACE,
+        )
+    };
+    if info_set == INVALID_HANDLE_VALUE as isize {
+        return None;
+    }
+
+    let mut index = 0;
+    let mut paired_host = None;
+    loop {
+        let mut interface_data = SP_DEVICE_INTERFACE_DATA {
+            cbSize: std::mem::size_of::<SP_DEVICE_INTERFACE_DATA>() as u32,
+            InterfaceClassGuid: unsafe { std::mem::zeroed() },
+            Flags: 0,
+            Reserved: 0,
+        };
+        let ok = unsafe {
+            SetupDiEnumDeviceInterfaces(
+                info_set,
+                std::ptr::null_mut(),
+                &hid_guid,
+                index,
+                &mut interface_data,
+            )
+        };
+        if ok == 0 {
+            break;
+        }
+        index += 1;
+
+        let Some(path) = (unsafe { windows_hid_interface_path(info_set, &mut interface_data) })
+        else {
+            continue;
+        };
+        if !path.to_ascii_lowercase().contains("&col02#") {
+            continue;
+        }
+        if windows_ps_move_physical_key(&path).as_deref() != Some(physical_key) {
+            continue;
+        }
+        paired_host = windows_ps_move_paired_host_address_from_path(&path);
+        if paired_host.is_some() {
+            break;
+        }
+    }
+
+    unsafe { SetupDiDestroyDeviceInfoList(info_set) };
+    paired_host
+}
+
+#[cfg(windows)]
 fn windows_claim_ps_move_host(host: &[u8; 6]) -> Result<usize> {
     use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
         DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, SP_DEVICE_INTERFACE_DATA,
@@ -3889,17 +3991,18 @@ fn current_move_identity_records_from_sources(
     sources: &[MoveStateSource],
 ) -> Result<Vec<MuninnMoveIdentityRecord>> {
     let observed_at = timestamp()?;
-    let bluetooth_host_address = move_host_address_for_claim(options).unwrap_or_default();
     let mut identities = sources
         .iter()
         .map(|source| {
             let (state, detail) = move_identity_source_state_and_detail(&source.hidraw_path);
+            let bluetooth_host_address =
+                move_identity_bluetooth_host_address(options, &source.hidraw_path);
             MuninnMoveIdentityRecord {
                 identity_id: format!("{}:{}:move-identity", options.host_id, source.move_id),
                 host_id: options.host_id.clone(),
                 move_id: source.move_id.clone(),
                 source_path: source.hidraw_path.clone(),
-                bluetooth_host_address: bluetooth_host_address.clone(),
+                bluetooth_host_address,
                 state,
                 detail,
                 observed_at: observed_at.clone(),
@@ -3917,6 +4020,25 @@ fn current_move_identity_records_from_sources(
     });
     identities.dedup_by(|left, right| left.identity_id == right.identity_id);
     Ok(identities)
+}
+
+fn move_identity_bluetooth_host_address(options: &Options, source_path: &str) -> String {
+    move_host_address_for_claim(options)
+        .or_else(|| paired_bluetooth_host_address_for_source(source_path))
+        .unwrap_or_default()
+}
+
+#[cfg(windows)]
+fn paired_bluetooth_host_address_for_source(source_path: &str) -> Option<String> {
+    let path = source_path
+        .strip_prefix(WINDOWS_PS_MOVE_SOURCE_PREFIX)
+        .unwrap_or(source_path);
+    windows_ps_move_paired_host_address(path)
+}
+
+#[cfg(not(windows))]
+fn paired_bluetooth_host_address_for_source(_source_path: &str) -> Option<String> {
+    None
 }
 
 #[cfg(unix)]
@@ -5218,6 +5340,33 @@ MODALIAS=input:b0005v054Cp03D5e0220
         assert_eq!(record.bluetooth_host_address, "5C:93:A2:9C:A8:A8");
         assert_eq!(record.state, "usb-visible");
         let _ = fs::remove_file(store_path);
+    }
+
+    #[test]
+    fn current_move_identity_uses_configured_bluetooth_host() {
+        let options = Options::parse(
+            [
+                "move-identity-status",
+                "--host",
+                "starfire",
+                "--move-host",
+                "5C:93:A2:9C:A8:A8",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap();
+        let identities = current_move_identity_records_from_sources(
+            &options,
+            &[MoveStateSource {
+                move_id: "move-000704a800d0".to_string(),
+                hidraw_path: "windows-psmove://silent".to_string(),
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(identities.len(), 1);
+        assert_eq!(identities[0].bluetooth_host_address, "5C:93:A2:9C:A8:A8");
     }
 
     #[test]
