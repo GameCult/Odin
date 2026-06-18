@@ -26,7 +26,7 @@ struct NalUnit<'a> {
 }
 
 pub fn h264_annex_b_access_units(input: &[u8]) -> Result<Vec<VideoAccessUnit>> {
-    let nal_units = h264_annex_b_nal_units(input)?;
+    let nal_units = annex_b_nal_units(input, "H.264", h264_nal_type)?;
     let mut access_units = Vec::new();
     let mut current_start = None;
     let mut current_end = 0_usize;
@@ -62,6 +62,57 @@ pub fn h264_annex_b_access_units(input: &[u8]) -> Result<Vec<VideoAccessUnit>> {
             current_has_vcl = true;
         }
         if nal.nal_type == 5 {
+            current_keyframe = true;
+        }
+    }
+
+    if let Some(start) = current_start {
+        access_units.push(VideoAccessUnit {
+            bytes: input[start..current_end].to_vec(),
+            keyframe: current_keyframe,
+        });
+    }
+
+    Ok(access_units)
+}
+
+pub fn h265_annex_b_access_units(input: &[u8]) -> Result<Vec<VideoAccessUnit>> {
+    let nal_units = annex_b_nal_units(input, "H.265", h265_nal_type)?;
+    let mut access_units = Vec::new();
+    let mut current_start = None;
+    let mut current_end = 0_usize;
+    let mut current_has_vcl = false;
+    let mut current_keyframe = false;
+
+    for nal in nal_units {
+        let starts_new = if nal.nal_type == 35 {
+            current_start.is_some()
+        } else if is_h265_vcl_nal(nal.nal_type) {
+            current_has_vcl && h265_first_slice_segment_in_pic(nal.payload).unwrap_or(false)
+        } else {
+            current_has_vcl && is_h265_pre_vcl_boundary_nal(nal.nal_type)
+        };
+
+        if starts_new {
+            if let Some(start) = current_start {
+                access_units.push(VideoAccessUnit {
+                    bytes: input[start..current_end].to_vec(),
+                    keyframe: current_keyframe,
+                });
+            }
+            current_start = None;
+            current_has_vcl = false;
+            current_keyframe = false;
+        }
+
+        if current_start.is_none() {
+            current_start = Some(nal.start);
+        }
+        current_end = nal.end;
+        if is_h265_vcl_nal(nal.nal_type) {
+            current_has_vcl = true;
+        }
+        if is_h265_irap_nal(nal.nal_type) {
             current_keyframe = true;
         }
     }
@@ -944,7 +995,11 @@ fn normalize_video_chunk_feedback_keys(keys: Vec<String>) -> Result<Vec<String>>
         .collect())
 }
 
-fn h264_annex_b_nal_units(input: &[u8]) -> Result<Vec<NalUnit<'_>>> {
+fn annex_b_nal_units<'a>(
+    input: &'a [u8],
+    codec_name: &str,
+    nal_type: fn(&[u8]) -> Option<u8>,
+) -> Result<Vec<NalUnit<'a>>> {
     let mut starts = Vec::new();
     let mut offset = 0_usize;
     while let Some((start, prefix_len)) = find_annex_b_start_code(input, offset) {
@@ -953,7 +1008,7 @@ fn h264_annex_b_nal_units(input: &[u8]) -> Result<Vec<NalUnit<'_>>> {
     }
 
     if starts.is_empty() {
-        return Err(anyhow!("H.264 Annex B stream has no start codes"));
+        return Err(anyhow!("{codec_name} Annex B stream has no start codes"));
     }
 
     let mut nal_units = Vec::new();
@@ -968,17 +1023,18 @@ fn h264_annex_b_nal_units(input: &[u8]) -> Result<Vec<NalUnit<'_>>> {
             continue;
         }
         let payload = &input[payload_start..end];
-        let nal_type = payload[0] & 0x1f;
-        nal_units.push(NalUnit {
-            start,
-            end,
-            payload,
-            nal_type,
-        });
+        if let Some(nal_type) = nal_type(payload) {
+            nal_units.push(NalUnit {
+                start,
+                end,
+                payload,
+                nal_type,
+            });
+        }
     }
 
     if nal_units.is_empty() {
-        return Err(anyhow!("H.264 Annex B stream has no NAL payloads"));
+        return Err(anyhow!("{codec_name} Annex B stream has no NAL payloads"));
     }
 
     Ok(nal_units)
@@ -1002,12 +1058,43 @@ fn is_h264_vcl_nal(nal_type: u8) -> bool {
     matches!(nal_type, 1..=5)
 }
 
+fn h264_nal_type(payload: &[u8]) -> Option<u8> {
+    payload.first().map(|byte| byte & 0x1f)
+}
+
 fn h264_first_mb_in_slice(nal_payload: &[u8]) -> Option<u64> {
     if nal_payload.len() < 2 {
         return None;
     }
     let rbsp = h264_ebsp_to_rbsp(&nal_payload[1..]);
     read_unsigned_exp_golomb(&rbsp)
+}
+
+fn is_h265_vcl_nal(nal_type: u8) -> bool {
+    nal_type <= 31
+}
+
+fn is_h265_irap_nal(nal_type: u8) -> bool {
+    matches!(nal_type, 16..=21)
+}
+
+fn is_h265_pre_vcl_boundary_nal(nal_type: u8) -> bool {
+    matches!(nal_type, 32..=34 | 39 | 40)
+}
+
+fn h265_nal_type(payload: &[u8]) -> Option<u8> {
+    if payload.len() < 2 {
+        return None;
+    }
+    Some((payload[0] >> 1) & 0x3f)
+}
+
+fn h265_first_slice_segment_in_pic(nal_payload: &[u8]) -> Option<bool> {
+    if nal_payload.len() < 3 {
+        return None;
+    }
+    let rbsp = h264_ebsp_to_rbsp(&nal_payload[2..]);
+    rbsp.first().map(|byte| (byte & 0x80) != 0)
 }
 
 fn h264_ebsp_to_rbsp(payload: &[u8]) -> Vec<u8> {
@@ -1106,6 +1193,60 @@ mod tests {
         stream.extend_from_slice(&[0x41, 0x80]);
 
         let access_units = h264_annex_b_access_units(&stream)?;
+
+        assert_eq!(access_units.len(), 2);
+        assert!(access_units[0].keyframe);
+        assert!(!access_units[1].keyframe);
+        Ok(())
+    }
+
+    fn h265_nal(nal_type: u8, slice_first: Option<bool>) -> Vec<u8> {
+        let mut nal = vec![nal_type << 1, 0x01];
+        if let Some(first) = slice_first {
+            nal.push(if first { 0x80 } else { 0x00 });
+        } else {
+            nal.push(0x00);
+        }
+        nal
+    }
+
+    #[test]
+    fn splits_h265_annex_b_access_units_on_aud_boundaries() -> Result<()> {
+        let mut stream = Vec::new();
+        stream.extend_from_slice(&start_code());
+        stream.extend_from_slice(&h265_nal(35, None));
+        stream.extend_from_slice(&start_code());
+        stream.extend_from_slice(&h265_nal(32, None));
+        stream.extend_from_slice(&start_code());
+        stream.extend_from_slice(&h265_nal(33, None));
+        stream.extend_from_slice(&start_code());
+        stream.extend_from_slice(&h265_nal(34, None));
+        stream.extend_from_slice(&start_code());
+        stream.extend_from_slice(&h265_nal(19, Some(true)));
+        stream.extend_from_slice(&start_code());
+        stream.extend_from_slice(&h265_nal(35, None));
+        stream.extend_from_slice(&start_code());
+        stream.extend_from_slice(&h265_nal(1, Some(true)));
+
+        let access_units = h265_annex_b_access_units(&stream)?;
+
+        assert_eq!(access_units.len(), 2);
+        assert!(access_units[0].keyframe);
+        assert!(!access_units[1].keyframe);
+        assert!(access_units[0].bytes.starts_with(&start_code()));
+        assert!(access_units[1].bytes.starts_with(&start_code()));
+        Ok(())
+    }
+
+    #[test]
+    fn splits_h265_annex_b_access_units_on_first_slice_flag() -> Result<()> {
+        let mut stream = Vec::new();
+        stream.extend_from_slice(&start_code());
+        stream.extend_from_slice(&h265_nal(19, Some(true)));
+        stream.extend_from_slice(&start_code());
+        stream.extend_from_slice(&h265_nal(1, Some(true)));
+
+        let access_units = h265_annex_b_access_units(&stream)?;
 
         assert_eq!(access_units.len(), 2);
         assert!(access_units[0].keyframe);
