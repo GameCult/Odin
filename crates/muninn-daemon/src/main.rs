@@ -57,6 +57,7 @@ const MUNINN_MEDIA_RUDP_CONNECTION_ID: u32 = 0x6d75_0001;
 const MUNINN_MEDIA_SEND_QUEUE_DEADLINE_MS: u64 = 75;
 const MUNINN_RUDP_MEDIA_PROFILE_ID: &str = "muninn.rudp.low_latency_h264_lan.v1";
 const MUNINN_RUDP_MEDIA_VIDEO_BITRATE_KBPS: u32 = 12_000;
+const MUNINN_RUDP_MEDIA_PACKET_BYTES: usize = 480;
 const MUNINN_RUDP_MEDIA_RELIABLE_EXPIRE_AFTER_MS: u64 = 75;
 const MUNINN_RUDP_MEDIA_RECEIVER_ASSEMBLY_DEADLINE_MS: u64 = 75;
 const MUNINN_RUDP_MEDIA_RECEIVER_GAP_WAIT_MS: u64 = 8;
@@ -142,6 +143,7 @@ struct MuninnRudpMediaProfile {
     video_preset: &'static str,
     video_tune: &'static str,
     video_bitrate_kbps: u32,
+    media_packet_bytes: usize,
     video_b_frames: u8,
     video_rc_lookahead: u8,
     sender_queue_deadline_ms: u64,
@@ -1810,6 +1812,7 @@ fn publish_runtime_boundary_records(
                 "video_bitrate": muninn_rudp_video_bitrate_arg(&media_profile),
                 "video_maxrate": muninn_rudp_video_bitrate_arg(&media_profile),
                 "video_bufsize": muninn_rudp_video_vbv_buffer_arg(options, &media_profile),
+                "media_packet_bytes": media_profile.media_packet_bytes,
                 "video_b_frames": media_profile.video_b_frames,
                 "video_rate_control": "cbr",
                 "video_rc_lookahead": media_profile.video_rc_lookahead,
@@ -5045,6 +5048,7 @@ fn muninn_rudp_media_profile() -> MuninnRudpMediaProfile {
         video_preset: "p1",
         video_tune: "ull",
         video_bitrate_kbps: MUNINN_RUDP_MEDIA_VIDEO_BITRATE_KBPS,
+        media_packet_bytes: MUNINN_RUDP_MEDIA_PACKET_BYTES,
         video_b_frames: 0,
         video_rc_lookahead: 0,
         sender_queue_deadline_ms: MUNINN_MEDIA_SEND_QUEUE_DEADLINE_MS,
@@ -5328,7 +5332,7 @@ impl Options {
             obs_target_host: Some("10.77.0.2".to_string()),
             obs_port: 5204,
             media_transport: MediaTransport::Srt,
-            media_packet_bytes: 1316,
+            media_packet_bytes: MUNINN_RUDP_MEDIA_PACKET_BYTES,
             width: 1920,
             height: 1080,
             framerate: 30,
@@ -5983,6 +5987,7 @@ mod tests {
         )
         .unwrap();
 
+        assert_eq!(options.media_packet_bytes, MUNINN_RUDP_MEDIA_PACKET_BYTES);
         let plan = build_mux_plan(&options, "test".to_string());
 
         assert_eq!(
@@ -6073,6 +6078,42 @@ mod tests {
         assert_eq!(
             muninn_rudp_video_vbv_buffer_arg(&sixty_fps, &profile),
             "200k"
+        );
+    }
+
+    #[test]
+    fn default_rudp_media_packet_size_keeps_typed_video_wire_under_udp_mtu() {
+        let mut access_unit = Vec::new();
+        access_unit.extend_from_slice(&[0, 0, 0, 1, 0x65]);
+        access_unit.resize(MUNINN_RUDP_MEDIA_PACKET_BYTES, 0x80);
+
+        let payloads = crate::media_packetizer::video_annex_b_stream_send_payloads(
+            crate::media_packetizer::VideoAnnexBStreamWireOptions {
+                packetize: crate::media_packetizer::VideoAnnexBStreamPacketizeOptions {
+                    stream_id: "muninn.raven.av.rudp",
+                    session_id: "session-1",
+                    codec: "h264",
+                    first_frame_id: 1,
+                    first_pts_ticks: 0,
+                    frame_duration_ticks: 3_000,
+                    timebase_num: 1,
+                    timebase_den: 90_000,
+                    deadline_delay_ticks: 1_800,
+                    max_payload_bytes: MUNINN_RUDP_MEDIA_PACKET_BYTES,
+                },
+                stored_at: "2026-06-18T00:00:00Z",
+                source_runtime_id: "muninn-test",
+                source_role: "media-test",
+            },
+            &access_unit,
+        )
+        .unwrap();
+
+        assert_eq!(payloads.len(), 1);
+        assert!(
+            payloads[0].payload.len() <= 1_472,
+            "typed media payload was {} bytes",
+            payloads[0].payload.len()
         );
     }
 
@@ -6863,6 +6904,12 @@ Device 00:07:04:A8:00:D0 (public)
                 .get("video_bufsize")
                 .and_then(|value| value.as_str()),
             Some("400k")
+        );
+        assert_eq!(
+            media_profile
+                .get("media_packet_bytes")
+                .and_then(|value| value.as_u64()),
+            Some(MUNINN_RUDP_MEDIA_PACKET_BYTES as u64)
         );
         assert_eq!(
             media_profile

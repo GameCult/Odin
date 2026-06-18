@@ -161,6 +161,10 @@ Recommended first LAN profile:
   temporary PCM/AAC bridge with separate packet identity and clock.
 - Transport: payload elementary access units as typed media records, never a
   muxed container as the unit of truth.
+- Packet size: default typed media chunks are `480` bytes. That leaves headroom
+  for CultNet/MessagePack/RUDP headers inside a normal Ethernet MTU so the OBS
+  bridge does not depend on IP fragmentation or private RUDP fragment
+  reassembly.
 - Control: sender may adapt bitrate, keyframe cadence, chunk size, and playout
   budget from receiver feedback; the receiver must not silently stretch latency
   to preserve visual perfection.
