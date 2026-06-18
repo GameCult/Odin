@@ -232,6 +232,10 @@ register `GameCult-Muninn`, `GameCult-Muninn-Activate`, and
 corresponding `*-hidden.vbs` launcher as arguments while also verifying that the
 hidden VBS bodies reference `.ps1` launchers instead of `.cmd` payloads. If
 Raven is unreachable, the repo is prepared but the live scheduler is not clean.
+Run `scripts\verify-muninn-media-profile.ps1` after changing Raven media
+startup scripts; it verifies that the video proof path still uses the same
+low-latency NVENC profile as Muninn's RUDP media lane instead of drifting back
+to legacy buffered encoder settings.
 
 Nightwing Muninn is kept alive by the single Idunn supervisor through the
 `nightwing-muninn` daemon target. Idunn learns that target through Odin's typed
