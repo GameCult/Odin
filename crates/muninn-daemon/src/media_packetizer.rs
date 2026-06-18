@@ -1848,6 +1848,43 @@ mod tests {
     }
 
     #[test]
+    fn feedback_payload_decodes_legacy_record_without_chunk_keys() -> Result<()> {
+        #[derive(serde::Serialize)]
+        struct LegacyFeedbackRecord {
+            stream_id: String,
+            session_id: String,
+            receiver_id: String,
+            highest_decodable_frame_id: Option<u64>,
+            missing_frame_ids: Vec<u64>,
+            late_frame_ids: Vec<u64>,
+            requested_keyframe: bool,
+            jitter_us: i64,
+            decode_queue_us: i64,
+            observed_at: String,
+        }
+
+        let payload = encode_record_payload(&LegacyFeedbackRecord {
+            stream_id: "muninn.raven.av.rudp".to_string(),
+            session_id: "session-1".to_string(),
+            receiver_id: "starfire.obs".to_string(),
+            highest_decodable_frame_id: Some(41),
+            missing_frame_ids: vec![42],
+            late_frame_ids: vec![40],
+            requested_keyframe: true,
+            jitter_us: 750,
+            decode_queue_us: 2_000,
+            observed_at: "2026-06-18T00:00:00Z".to_string(),
+        })?;
+
+        let decoded: MuninnMediaReceiverFeedbackRecord = decode_record_payload(&payload)?;
+
+        assert_eq!(decoded.missing_video_chunk_keys, Vec::<String>::new());
+        assert_eq!(decoded.missing_frame_ids, vec![42]);
+        assert!(decoded.requested_keyframe);
+        Ok(())
+    }
+
+    #[test]
     fn media_wire_rejects_mismatched_record_key() -> Result<()> {
         let record = packetize_audio_packet(
             AudioPacketizeOptions {
@@ -1935,6 +1972,35 @@ mod tests {
             error
                 .to_string()
                 .contains("unsupported Muninn media schema")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn media_wire_rejects_non_raw_document_messages() -> Result<()> {
+        let wire = encode_cultnet_message_to_vec(
+            &CultNetMessage::DocumentPut {
+                message_id: "not-raw-media".to_string(),
+                document: cultnet_rs::CultNetDocumentRecord {
+                    schema_id: MUNINN_MEDIA_AUDIO_PACKET_SCHEMA.to_string(),
+                    record_key: "muninn.raven.av.rudp:session-1:audio:12".to_string(),
+                    stored_at: "2026-06-18T00:00:00Z".to_string(),
+                    payload: serde_json::json!({ "packet_id": 12 }),
+                    source_runtime_id: Some("muninn-test".to_string()),
+                    source_agent_id: None,
+                    source_role: Some("media-test".to_string()),
+                    tags: Some(vec!["muninn.media".to_string()]),
+                },
+            },
+            CultNetWireContract::CultNetSchemaV0,
+        )?;
+
+        let error = decode_media_wire_record(&wire).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("expected cultnet.document_put_raw.v0")
         );
         Ok(())
     }
