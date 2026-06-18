@@ -25,6 +25,17 @@ struct NalUnit<'a> {
     nal_type: u8,
 }
 
+pub fn video_annex_b_access_units(codec: &str, input: &[u8]) -> Result<Vec<VideoAccessUnit>> {
+    match normalized_video_codec(codec).as_deref() {
+        Some("h264") => h264_annex_b_access_units(input),
+        Some("h265") => h265_annex_b_access_units(input),
+        Some("av1") => Err(anyhow!(
+            "AV1 access unit splitting is not Annex B; provide an AV1 OBU packetizer"
+        )),
+        _ => Err(anyhow!("unsupported Annex B video codec {codec}")),
+    }
+}
+
 pub fn h264_annex_b_access_units(input: &[u8]) -> Result<Vec<VideoAccessUnit>> {
     let nal_units = annex_b_nal_units(input, "H.264", h264_nal_type)?;
     let mut access_units = Vec::new();
@@ -995,6 +1006,15 @@ fn normalize_video_chunk_feedback_keys(keys: Vec<String>) -> Result<Vec<String>>
         .collect())
 }
 
+fn normalized_video_codec(codec: &str) -> Option<&'static str> {
+    match codec.trim().to_ascii_lowercase().as_str() {
+        "h264" | "h.264" | "avc" | "avc1" | "video/avc" => Some("h264"),
+        "h265" | "h.265" | "hevc" | "hev1" | "hvc1" | "video/hevc" => Some("h265"),
+        "av1" | "av01" | "video/av1" => Some("av1"),
+        _ => None,
+    }
+}
+
 fn annex_b_nal_units<'a>(
     input: &'a [u8],
     codec_name: &str,
@@ -1200,6 +1220,19 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn video_annex_b_dispatches_h264_aliases() -> Result<()> {
+        let mut stream = Vec::new();
+        stream.extend_from_slice(&start_code());
+        stream.extend_from_slice(&[0x65, 0x80]);
+
+        let access_units = video_annex_b_access_units("AVC", &stream)?;
+
+        assert_eq!(access_units.len(), 1);
+        assert!(access_units[0].keyframe);
+        Ok(())
+    }
+
     fn h265_nal(nal_type: u8, slice_first: Option<bool>) -> Vec<u8> {
         let mut nal = vec![nal_type << 1, 0x01];
         if let Some(first) = slice_first {
@@ -1252,6 +1285,41 @@ mod tests {
         assert!(access_units[0].keyframe);
         assert!(!access_units[1].keyframe);
         Ok(())
+    }
+
+    #[test]
+    fn video_annex_b_dispatches_hevc_aliases() -> Result<()> {
+        let mut stream = Vec::new();
+        stream.extend_from_slice(&start_code());
+        stream.extend_from_slice(&h265_nal(19, Some(true)));
+
+        let access_units = video_annex_b_access_units("HEVC", &stream)?;
+
+        assert_eq!(access_units.len(), 1);
+        assert!(access_units[0].keyframe);
+        Ok(())
+    }
+
+    #[test]
+    fn video_annex_b_rejects_av1_without_obu_packetizer() {
+        let error = video_annex_b_access_units("av1", &[1, 2, 3]).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("AV1 access unit splitting is not Annex B")
+        );
+    }
+
+    #[test]
+    fn video_annex_b_rejects_unknown_codec() {
+        let error = video_annex_b_access_units("vp9", &[1, 2, 3]).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported Annex B video codec vp9")
+        );
     }
 
     #[test]
