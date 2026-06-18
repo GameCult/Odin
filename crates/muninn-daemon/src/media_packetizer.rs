@@ -1,8 +1,14 @@
 use anyhow::{Result, anyhow};
-use odin_core::{
-    MuninnMediaAudioPacketRecord, MuninnMediaReceiverFeedbackRecord,
-    MuninnMediaVideoAccessUnitRecord,
+use cultnet_rs::{
+    CultNetMessage, CultNetRawDocumentRecord, CultNetRawPayloadEncoding, CultNetWireContract,
+    decode_cultnet_message_from_slice, encode_cultnet_message_to_vec,
 };
+use odin_core::{
+    MUNINN_MEDIA_AUDIO_PACKET_SCHEMA, MUNINN_MEDIA_RECEIVER_FEEDBACK_SCHEMA,
+    MUNINN_MEDIA_VIDEO_ACCESS_UNIT_SCHEMA, MuninnMediaAudioPacketRecord,
+    MuninnMediaReceiverFeedbackRecord, MuninnMediaVideoAccessUnitRecord,
+};
+use serde::{Serialize, de::DeserializeOwned};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -106,6 +112,13 @@ pub struct ReceiverFeedbackOptions<'a> {
     pub jitter_us: i64,
     pub decode_queue_us: i64,
     pub observed_at: &'a str,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MuninnMediaWireRecord {
+    Video(MuninnMediaVideoAccessUnitRecord),
+    Audio(MuninnMediaAudioPacketRecord),
+    Feedback(MuninnMediaReceiverFeedbackRecord),
 }
 
 pub fn packetize_video_access_unit(
@@ -338,6 +351,144 @@ pub fn build_receiver_feedback(
         decode_queue_us: options.decode_queue_us,
         observed_at: options.observed_at.to_string(),
     })
+}
+
+pub fn encode_media_wire_record(
+    record: &MuninnMediaWireRecord,
+    stored_at: &str,
+    source_runtime_id: &str,
+    source_role: &str,
+) -> Result<Vec<u8>> {
+    if stored_at.is_empty() {
+        return Err(anyhow!("stored_at must be non-empty"));
+    }
+    if source_runtime_id.is_empty() {
+        return Err(anyhow!("source_runtime_id must be non-empty"));
+    }
+    if source_role.is_empty() {
+        return Err(anyhow!("source_role must be non-empty"));
+    }
+
+    let (schema_id, record_key, payload) = match record {
+        MuninnMediaWireRecord::Video(record) => (
+            MUNINN_MEDIA_VIDEO_ACCESS_UNIT_SCHEMA,
+            video_record_key(record),
+            encode_record_payload(record)?,
+        ),
+        MuninnMediaWireRecord::Audio(record) => (
+            MUNINN_MEDIA_AUDIO_PACKET_SCHEMA,
+            audio_record_key(record),
+            encode_record_payload(record)?,
+        ),
+        MuninnMediaWireRecord::Feedback(record) => (
+            MUNINN_MEDIA_RECEIVER_FEEDBACK_SCHEMA,
+            feedback_record_key(record),
+            encode_record_payload(record)?,
+        ),
+    };
+
+    let message = CultNetMessage::DocumentPutRaw {
+        message_id: format!(
+            "muninn-media:{}:{}",
+            schema_id,
+            record_key.replace(':', "-")
+        ),
+        document: CultNetRawDocumentRecord {
+            schema_id: schema_id.to_string(),
+            record_key,
+            stored_at: stored_at.to_string(),
+            payload_encoding: CultNetRawPayloadEncoding::Messagepack,
+            payload,
+            source_runtime_id: Some(source_runtime_id.to_string()),
+            source_agent_id: None,
+            source_role: Some(source_role.to_string()),
+            tags: Some(vec!["muninn.media".to_string()]),
+        },
+    };
+
+    encode_cultnet_message_to_vec(&message, CultNetWireContract::CultNetSchemaV0)
+        .map_err(Into::into)
+}
+
+pub fn decode_media_wire_record(payload: &[u8]) -> Result<MuninnMediaWireRecord> {
+    let message = decode_cultnet_message_from_slice(payload, CultNetWireContract::CultNetSchemaV0)?;
+    let CultNetMessage::DocumentPutRaw { document, .. } = message else {
+        return Err(anyhow!("expected cultnet.document_put_raw.v0"));
+    };
+    if document.payload_encoding != CultNetRawPayloadEncoding::Messagepack {
+        return Err(anyhow!("Muninn media document payload must be MessagePack"));
+    }
+
+    match document.schema_id.as_str() {
+        MUNINN_MEDIA_VIDEO_ACCESS_UNIT_SCHEMA => {
+            let record: MuninnMediaVideoAccessUnitRecord =
+                decode_record_payload(&document.payload)?;
+            let expected_key = video_record_key(&record);
+            if document.record_key != expected_key {
+                return Err(anyhow!(
+                    "Muninn video media record key mismatch: expected {}, received {}",
+                    expected_key,
+                    document.record_key
+                ));
+            }
+            Ok(MuninnMediaWireRecord::Video(record))
+        }
+        MUNINN_MEDIA_AUDIO_PACKET_SCHEMA => {
+            let record: MuninnMediaAudioPacketRecord = decode_record_payload(&document.payload)?;
+            let expected_key = audio_record_key(&record);
+            if document.record_key != expected_key {
+                return Err(anyhow!(
+                    "Muninn audio media record key mismatch: expected {}, received {}",
+                    expected_key,
+                    document.record_key
+                ));
+            }
+            Ok(MuninnMediaWireRecord::Audio(record))
+        }
+        MUNINN_MEDIA_RECEIVER_FEEDBACK_SCHEMA => {
+            let record: MuninnMediaReceiverFeedbackRecord =
+                decode_record_payload(&document.payload)?;
+            let expected_key = feedback_record_key(&record);
+            if document.record_key != expected_key {
+                return Err(anyhow!(
+                    "Muninn receiver feedback record key mismatch: expected {}, received {}",
+                    expected_key,
+                    document.record_key
+                ));
+            }
+            Ok(MuninnMediaWireRecord::Feedback(record))
+        }
+        schema_id => Err(anyhow!("unsupported Muninn media schema {schema_id}")),
+    }
+}
+
+fn encode_record_payload<T: Serialize>(record: &T) -> Result<Vec<u8>> {
+    rmp_serde::to_vec(record).map_err(Into::into)
+}
+
+fn decode_record_payload<T: DeserializeOwned>(payload: &[u8]) -> Result<T> {
+    rmp_serde::from_slice(payload).map_err(Into::into)
+}
+
+fn video_record_key(record: &MuninnMediaVideoAccessUnitRecord) -> String {
+    format!(
+        "{}:{}:video:{}:{}",
+        record.stream_id, record.session_id, record.frame_id, record.chunk_index
+    )
+}
+
+fn audio_record_key(record: &MuninnMediaAudioPacketRecord) -> String {
+    format!(
+        "{}:{}:audio:{}",
+        record.stream_id, record.session_id, record.packet_id
+    )
+}
+
+fn feedback_record_key(record: &MuninnMediaReceiverFeedbackRecord) -> String {
+    format!(
+        "{}:{}:feedback:{}",
+        record.stream_id, record.session_id, record.receiver_id
+    )
 }
 
 fn h264_annex_b_nal_units(input: &[u8]) -> Result<Vec<NalUnit<'_>>> {
@@ -710,5 +861,102 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("jitter_us"));
+    }
+
+    #[test]
+    fn media_wire_round_trips_video_document() -> Result<()> {
+        let access_unit = VideoAccessUnit {
+            bytes: vec![1, 2, 3],
+            keyframe: true,
+        };
+        let record = packetize_video_access_unit(
+            VideoFramePacketizeOptions {
+                stream_id: "muninn.raven.av.rudp",
+                session_id: "session-1",
+                codec: "h264",
+                frame_id: 9,
+                pts_ticks: 27_000,
+                duration_ticks: 3_000,
+                timebase_num: 1,
+                timebase_den: 90_000,
+                deadline_ticks: 28_800,
+                max_payload_bytes: 4,
+            },
+            &access_unit,
+        )?
+        .remove(0);
+
+        let wire = encode_media_wire_record(
+            &MuninnMediaWireRecord::Video(record.clone()),
+            "2026-06-18T00:00:00Z",
+            "muninn-test",
+            "media-test",
+        )?;
+
+        assert_eq!(
+            decode_media_wire_record(&wire)?,
+            MuninnMediaWireRecord::Video(record)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn media_wire_round_trips_audio_document() -> Result<()> {
+        let record = packetize_audio_packet(
+            AudioPacketizeOptions {
+                stream_id: "muninn.raven.av.rudp",
+                session_id: "session-1",
+                codec: "opus",
+                packet_id: 12,
+                pts_ticks: 48_000,
+                duration_ticks: 960,
+                timebase_num: 1,
+                timebase_den: 48_000,
+                deadline_ticks: 48_960,
+            },
+            &[0xf8, 0xff, 0xfe],
+        )?;
+
+        let wire = encode_media_wire_record(
+            &MuninnMediaWireRecord::Audio(record.clone()),
+            "2026-06-18T00:00:00Z",
+            "muninn-test",
+            "media-test",
+        )?;
+
+        assert_eq!(
+            decode_media_wire_record(&wire)?,
+            MuninnMediaWireRecord::Audio(record)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn media_wire_round_trips_feedback_document() -> Result<()> {
+        let record = build_receiver_feedback(ReceiverFeedbackOptions {
+            stream_id: "muninn.raven.av.rudp",
+            session_id: "session-1",
+            receiver_id: "starfire.obs",
+            highest_decodable_frame_id: Some(40),
+            missing_frame_ids: vec![42],
+            late_frame_ids: vec![39],
+            requested_keyframe: true,
+            jitter_us: 700,
+            decode_queue_us: 2_000,
+            observed_at: "2026-06-18T00:00:00Z",
+        })?;
+
+        let wire = encode_media_wire_record(
+            &MuninnMediaWireRecord::Feedback(record.clone()),
+            "2026-06-18T00:00:00Z",
+            "muninn-test",
+            "media-test",
+        )?;
+
+        assert_eq!(
+            decode_media_wire_record(&wire)?,
+            MuninnMediaWireRecord::Feedback(record)
+        );
+        Ok(())
     }
 }
