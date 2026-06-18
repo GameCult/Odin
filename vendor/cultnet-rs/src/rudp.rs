@@ -1068,6 +1068,7 @@ pub fn create_rudp_transport_profile(
                     max_payload_bytes: options.max_payload_bytes,
                     max_fragment_bytes: options.max_fragment_bytes,
                     max_pending_reliable_packets: options.max_pending_reliable_packets,
+                    reliable_expire_after_ms: None,
                 },
                 CultNetTransportChannel {
                     channel_id: "latest".to_string(),
@@ -1076,6 +1077,7 @@ pub fn create_rudp_transport_profile(
                     max_payload_bytes: options.max_payload_bytes,
                     max_fragment_bytes: options.max_fragment_bytes,
                     max_pending_reliable_packets: options.max_pending_reliable_packets,
+                    reliable_expire_after_ms: None,
                 },
                 CultNetTransportChannel {
                     channel_id: "realtime".to_string(),
@@ -1084,6 +1086,7 @@ pub fn create_rudp_transport_profile(
                     max_payload_bytes: options.max_payload_bytes,
                     max_fragment_bytes: options.max_fragment_bytes,
                     max_pending_reliable_packets: options.max_pending_reliable_packets,
+                    reliable_expire_after_ms: None,
                 },
                 CultNetTransportChannel {
                     channel_id: "media".to_string(),
@@ -1092,6 +1095,7 @@ pub fn create_rudp_transport_profile(
                     max_payload_bytes: options.max_payload_bytes,
                     max_fragment_bytes: options.max_fragment_bytes,
                     max_pending_reliable_packets: options.max_pending_reliable_packets,
+                    reliable_expire_after_ms: Some(MEDIA_RELIABLE_EXPIRE_AFTER_MS),
                 },
             ],
         }],

@@ -857,6 +857,7 @@ fn tcp_framed_transport_profiles(
                     max_payload_bytes: None,
                     max_fragment_bytes: None,
                     max_pending_reliable_packets: None,
+                    reliable_expire_after_ms: None,
                 },
                 CultNetTransportChannel {
                     channel_id: "state".to_string(),
@@ -865,6 +866,7 @@ fn tcp_framed_transport_profiles(
                     max_payload_bytes: None,
                     max_fragment_bytes: None,
                     max_pending_reliable_packets: None,
+                    reliable_expire_after_ms: None,
                 },
             ],
         }],

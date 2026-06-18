@@ -165,6 +165,7 @@ fn cultnet_schema_messages_round_trip_through_messagepack_frames() -> Result<()>
                     max_payload_bytes: None,
                     max_fragment_bytes: None,
                     max_pending_reliable_packets: None,
+                    reliable_expire_after_ms: None,
                 }],
             }],
         }]),
@@ -287,6 +288,7 @@ fn rudp_transport_profile_advertises_state_and_realtime_channels() {
                 channel.delivery,
                 channel.ordering,
                 channel.max_pending_reliable_packets,
+                channel.reliable_expire_after_ms,
             )
         })
         .collect::<Vec<_>>();
@@ -297,25 +299,29 @@ fn rudp_transport_profile_advertises_state_and_realtime_channels() {
                 "schema",
                 CultNetTransportDelivery::Reliable,
                 CultNetTransportOrdering::Ordered,
-                Some(64)
+                Some(64),
+                None
             ),
             (
                 "latest",
                 CultNetTransportDelivery::Unreliable,
                 CultNetTransportOrdering::Sequenced,
-                Some(64)
+                Some(64),
+                None
             ),
             (
                 "realtime",
                 CultNetTransportDelivery::Unreliable,
                 CultNetTransportOrdering::Unordered,
-                Some(64)
+                Some(64),
+                None
             ),
             (
                 "media",
                 CultNetTransportDelivery::Reliable,
                 CultNetTransportOrdering::Unordered,
-                Some(64)
+                Some(64),
+                Some(75)
             ),
         ]
     );

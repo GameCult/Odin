@@ -124,6 +124,7 @@ pub fn create_tcp_framed_transport_profile(
                 max_payload_bytes: options.max_payload_bytes,
                 max_fragment_bytes: options.max_fragment_bytes,
                 max_pending_reliable_packets: None,
+                reliable_expire_after_ms: None,
             }],
         }],
     }
