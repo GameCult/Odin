@@ -229,24 +229,36 @@ $activateArguments += @(
   "--log-root", $LogRoot
 )
 
+$videoProofFramerate = 30
+$videoProofBitrateKbps = 12000
+$videoProofVbvKbits = [Math]::Ceiling($videoProofBitrateKbps / $videoProofFramerate)
+
 $videoProofArguments = @(
   "-hide_banner",
   "-loglevel", "info",
+  "-fflags", "nobuffer",
+  "-flags", "low_delay",
   "-thread_queue_size", "1024",
   "-f", "lavfi",
-  "-i", "ddagrab=framerate=30:output_idx=0:draw_mouse=1",
+  "-i", ("ddagrab=framerate={0}:output_idx=0:draw_mouse=1" -f $videoProofFramerate),
   "-thread_queue_size", "1024",
   "-f", "lavfi",
   "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
   "-map", "0:v:0",
   "-map", "1:a:0",
   "-c:v", "h264_nvenc",
-  "-preset", "p4",
-  "-tune", "ll",
-  "-b:v", "12000k",
-  "-maxrate", "12000k",
-  "-bufsize", "24000k",
-  "-g", "60",
+  "-preset", "p1",
+  "-tune", "ull",
+  "-zerolatency", "1",
+  "-bf", "0",
+  "-delay", "0",
+  "-rc", "cbr",
+  "-rc-lookahead", "0",
+  "-b:v", ("{0}k" -f $videoProofBitrateKbps),
+  "-maxrate", ("{0}k" -f $videoProofBitrateKbps),
+  "-bufsize", ("{0}k" -f $videoProofVbvKbits),
+  "-g", $videoProofFramerate.ToString(),
+  "-forced-idr", "1",
   "-c:a", "aac",
   "-b:a", "192k",
   "-ar", "48000",
