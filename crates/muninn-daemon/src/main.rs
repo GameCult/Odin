@@ -55,6 +55,11 @@ const IDUNN_HEALTH_RUDP_CONNECTION_ID: u32 = 0x1d0d_0001;
 const MUNINN_COMMAND_RUDP_CONNECTION_ID: u32 = 0x6d75_0002;
 const MUNINN_MEDIA_RUDP_CONNECTION_ID: u32 = 0x6d75_0001;
 const MUNINN_MEDIA_SEND_QUEUE_DEADLINE_MS: u64 = 75;
+const MUNINN_RUDP_MEDIA_PROFILE_ID: &str = "muninn.rudp.low_latency_h264_lan.v1";
+const MUNINN_RUDP_MEDIA_VIDEO_BITRATE: &str = "12000k";
+const MUNINN_RUDP_MEDIA_VIDEO_BUFFER: &str = "6000k";
+const MUNINN_RUDP_MEDIA_RECEIVER_ASSEMBLY_DEADLINE_MS: u64 = 75;
+const MUNINN_RUDP_MEDIA_RECEIVER_GAP_WAIT_MS: u64 = 8;
 const MUNINN_MEDIA_RECEIVER_KEYFRAME_RESTART_DELAY_MS: u64 = 100;
 const PS_MOVE_LED_REPORT_LEN: usize = 49;
 
@@ -127,6 +132,22 @@ struct Options {
 enum MediaTransport {
     Srt,
     Rudp,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MuninnRudpMediaProfile {
+    profile_id: &'static str,
+    video_codec: &'static str,
+    video_encoder: &'static str,
+    video_preset: &'static str,
+    video_tune: &'static str,
+    video_bitrate: &'static str,
+    video_maxrate: &'static str,
+    video_bufsize: &'static str,
+    video_b_frames: u8,
+    sender_queue_deadline_ms: u64,
+    receiver_assembly_deadline_ms: u64,
+    receiver_gap_wait_ms: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1209,6 +1230,7 @@ fn run_rudp_mux_once(
         "typed video/audio access units are publishing over CultNet RUDP media",
     )?;
 
+    let media_profile = muninn_rudp_media_profile();
     let (payload_tx, payload_rx) = mpsc::channel::<Result<QueuedMuninnMediaSendPayload>>();
     let video_sender = video_rudp_payload_reader(
         payload_tx.clone(),
@@ -1216,7 +1238,7 @@ fn run_rudp_mux_once(
         VideoAnnexBStreamSendConfig {
             stream_id: options.stream_id.clone(),
             session_id: format!("{}:{timestamp}:video", options.host_id),
-            codec: "h264".to_string(),
+            codec: media_profile.video_codec.to_string(),
             first_frame_id: 0,
             first_pts_ticks: 0,
             frame_duration_ticks: video_frame_duration_ticks(options)?,
@@ -1259,7 +1281,7 @@ fn run_rudp_mux_once(
                 if media_payload_queue_age_exceeded(
                     queued.queued_at,
                     Instant::now(),
-                    Duration::from_millis(MUNINN_MEDIA_SEND_QUEUE_DEADLINE_MS),
+                    Duration::from_millis(media_profile.sender_queue_deadline_ms),
                 ) {
                     payloads_dropped += 1;
                     poll_rudp_media_receiver_feedback(&mut transport, &mut receiver_feedback)?;
@@ -1710,6 +1732,7 @@ fn publish_runtime_boundary_records(
     } else {
         vec![activation_command.clone()]
     };
+    let media_profile = muninn_rudp_media_profile();
     let command_boundary = MuninnCommandBoundaryCompatRecord {
         value: json!({
             "schema": "muninn.command_boundary.v1",
@@ -1773,6 +1796,22 @@ fn publish_runtime_boundary_records(
             "provider_advertisement_schema": "gamecult.eve.provider_advertisement.v1",
             "command_boundary_schema": "muninn.command_boundary.v1",
             "telemetry_surface_schema": "muninn.telemetry_surface.v1",
+            "media_profile": {
+                "profile_id": media_profile.profile_id,
+                "owner": "Muninn capture runtime",
+                "codec": media_profile.video_codec,
+                "encoder": media_profile.video_encoder,
+                "encoder_preset": media_profile.video_preset,
+                "encoder_tune": media_profile.video_tune,
+                "video_bitrate": media_profile.video_bitrate,
+                "video_maxrate": media_profile.video_maxrate,
+                "video_bufsize": media_profile.video_bufsize,
+                "video_b_frames": media_profile.video_b_frames,
+                "sender_queue_deadline_ms": media_profile.sender_queue_deadline_ms,
+                "receiver_assembly_deadline_ms": media_profile.receiver_assembly_deadline_ms,
+                "receiver_gap_wait_ms": media_profile.receiver_gap_wait_ms,
+                "recovery": "receiver feedback may request keyframe; sender restarts low-latency encoder on new keyframe edges"
+            },
             "compatibility_mechanisms": compatibility_mechanisms,
             "cut_line": "Muninn's telemetry store owns provider advertisement, command boundary, transport profile, telemetry surface, and daemon health state. Local CLI activation and health commands are compatibility/ops witnesses only.",
             "updated_at": updated_at,
@@ -4981,9 +5020,28 @@ fn srt_endpoint(host: &str, port: u16) -> String {
 }
 
 fn rudp_endpoint(host: &str, port: u16, stream_id: &str) -> String {
+    let profile = muninn_rudp_media_profile();
     format!(
-        "rudp://{host}:{port}/{stream_id}?channel=media&format=muninn-typed-media&connection=0x{MUNINN_MEDIA_RUDP_CONNECTION_ID:08x}"
+        "rudp://{host}:{port}/{stream_id}?channel=media&format=muninn-typed-media&connection=0x{MUNINN_MEDIA_RUDP_CONNECTION_ID:08x}&profile={}&assembly_deadline_ms={}&gap_wait_ms={}",
+        profile.profile_id, profile.receiver_assembly_deadline_ms, profile.receiver_gap_wait_ms
     )
+}
+
+fn muninn_rudp_media_profile() -> MuninnRudpMediaProfile {
+    MuninnRudpMediaProfile {
+        profile_id: MUNINN_RUDP_MEDIA_PROFILE_ID,
+        video_codec: "h264",
+        video_encoder: "h264_nvenc",
+        video_preset: "p1",
+        video_tune: "ull",
+        video_bitrate: MUNINN_RUDP_MEDIA_VIDEO_BITRATE,
+        video_maxrate: MUNINN_RUDP_MEDIA_VIDEO_BITRATE,
+        video_bufsize: MUNINN_RUDP_MEDIA_VIDEO_BUFFER,
+        video_b_frames: 0,
+        sender_queue_deadline_ms: MUNINN_MEDIA_SEND_QUEUE_DEADLINE_MS,
+        receiver_assembly_deadline_ms: MUNINN_RUDP_MEDIA_RECEIVER_ASSEMBLY_DEADLINE_MS,
+        receiver_gap_wait_ms: MUNINN_RUDP_MEDIA_RECEIVER_GAP_WAIT_MS,
+    }
 }
 
 fn loopback_args(options: &Options) -> Vec<String> {
@@ -5005,6 +5063,7 @@ fn loopback_args(options: &Options) -> Vec<String> {
 }
 
 fn rudp_video_ffmpeg_args(options: &Options) -> Vec<String> {
+    let profile = muninn_rudp_media_profile();
     vec![
         "-hide_banner".to_string(),
         "-loglevel".to_string(),
@@ -5026,29 +5085,29 @@ fn rudp_video_ffmpeg_args(options: &Options) -> Vec<String> {
         "0:v:0".to_string(),
         "-an".to_string(),
         "-c:v".to_string(),
-        "h264_nvenc".to_string(),
+        profile.video_encoder.to_string(),
         "-preset".to_string(),
-        "p1".to_string(),
+        profile.video_preset.to_string(),
         "-tune".to_string(),
-        "ull".to_string(),
+        profile.video_tune.to_string(),
         "-zerolatency".to_string(),
         "1".to_string(),
         "-bf".to_string(),
-        "0".to_string(),
+        profile.video_b_frames.to_string(),
         "-delay".to_string(),
         "0".to_string(),
         "-b:v".to_string(),
-        "12000k".to_string(),
+        profile.video_bitrate.to_string(),
         "-maxrate".to_string(),
-        "12000k".to_string(),
+        profile.video_maxrate.to_string(),
         "-bufsize".to_string(),
-        "6000k".to_string(),
+        profile.video_bufsize.to_string(),
         "-g".to_string(),
         options.framerate.max(1).to_string(),
         "-forced-idr".to_string(),
         "1".to_string(),
         "-f".to_string(),
-        "h264".to_string(),
+        profile.video_codec.to_string(),
         "pipe:1".to_string(),
     ]
 }
@@ -5905,7 +5964,7 @@ mod tests {
         assert_eq!(
             plan.targets,
             vec![
-                "rudp://10.77.0.2:5204/muninn.raven.av.rudp?channel=media&format=muninn-typed-media&connection=0x6d750001"
+                "rudp://10.77.0.2:5204/muninn.raven.av.rudp?channel=media&format=muninn-typed-media&connection=0x6d750001&profile=muninn.rudp.low_latency_h264_lan.v1&assembly_deadline_ms=75&gap_wait_ms=8"
             ]
         );
         assert!(!plan.command_line.contains("tee"));
@@ -5921,11 +5980,13 @@ mod tests {
         .unwrap();
 
         let args = rudp_video_ffmpeg_args(&options);
+        let profile = muninn_rudp_media_profile();
 
         assert!(
             args.windows(2)
                 .any(|pair| pair[0] == "-f" && pair[1] == "h264")
         );
+        assert_eq!(profile.profile_id, MUNINN_RUDP_MEDIA_PROFILE_ID);
         assert!(
             args.windows(2)
                 .any(|pair| pair[0] == "-tune" && pair[1] == "ull")
@@ -5982,7 +6043,7 @@ mod tests {
     #[test]
     fn media_payload_queue_deadline_is_strictly_bounded() {
         let queued_at = Instant::now();
-        let deadline = Duration::from_millis(MUNINN_MEDIA_SEND_QUEUE_DEADLINE_MS);
+        let deadline = Duration::from_millis(muninn_rudp_media_profile().sender_queue_deadline_ms);
 
         assert!(!media_payload_queue_age_exceeded(
             queued_at,

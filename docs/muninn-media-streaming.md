@@ -135,10 +135,10 @@ transport that understands frame deadlines.
 
 Shipping order:
 
-1. HEVC NVENC low-latency when Raven encode and OBS decode both prove the
+1. H.264 NVENC low-latency as the compatibility baseline for broad decoder
+   support, simple failure analysis, and OBS bridge stability.
+2. HEVC NVENC low-latency when Raven encode and OBS decode both prove the
    target latency budget.
-2. H.264 NVENC low-latency as the compatibility baseline for broad decoder
-   support and simple failure analysis.
 3. AV1 NVENC only after the exact Raven-to-OBS path proves encode, decode, and
    queue latency inside budget. AV1 can be the quality/bandwidth winner, but it
    must earn the low-latency lane on our hardware instead of getting promoted by
@@ -150,9 +150,10 @@ a temporary PCM/AAC compatibility bridge.
 
 Recommended first LAN profile:
 
-- Video: HEVC or H.264 NVENC, low-latency tune, fast preset, CBR/VBR high enough
-  that LAN bandwidth is not the constraint, no B-frames, no lookahead, short GOP
-  or intra-refresh, periodic IDR/keyframe on feedback pressure.
+- Profile id: `muninn.rudp.low_latency_h264_lan.v1`.
+- Video: H.264 NVENC, `p1`, ultra-low-latency tune, CBR/VBR high enough that
+  LAN bandwidth is not the constraint, no B-frames, no lookahead, short GOP or
+  intra-refresh, periodic IDR/keyframe on feedback pressure.
 - Audio: Opus low-delay when OBS lowering can consume it directly; otherwise a
   temporary PCM/AAC bridge with separate packet identity and clock.
 - Transport: payload elementary access units as typed media records, never a
@@ -160,6 +161,9 @@ Recommended first LAN profile:
 - Control: sender may adapt bitrate, keyframe cadence, chunk size, and playout
   budget from receiver feedback; the receiver must not silently stretch latency
   to preserve visual perfection.
+- Receiver URL policy: RUDP stream URLs carry `profile`, `assembly_deadline_ms`,
+  and `gap_wait_ms` so the OBS bridge receives playout budget from Muninn's
+  stream profile instead of hard-coding receiver policy privately.
 
 ### Motion Vectors And Reconstruction
 
