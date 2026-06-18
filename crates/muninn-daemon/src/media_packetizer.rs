@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use cultnet_rs::{
     CultNetMessage, CultNetRawDocumentRecord, CultNetRawPayloadEncoding, CultNetWireContract,
     decode_cultnet_message_from_slice, encode_cultnet_message_to_vec,
@@ -148,6 +148,19 @@ pub struct VideoFramePacketizeOptions<'a> {
     pub timebase_num: u32,
     pub timebase_den: u32,
     pub deadline_ticks: i64,
+    pub max_payload_bytes: usize,
+}
+
+pub struct VideoAnnexBStreamPacketizeOptions<'a> {
+    pub stream_id: &'a str,
+    pub session_id: &'a str,
+    pub codec: &'a str,
+    pub first_frame_id: u64,
+    pub first_pts_ticks: i64,
+    pub frame_duration_ticks: u32,
+    pub timebase_num: u32,
+    pub timebase_den: u32,
+    pub deadline_delay_ticks: i64,
     pub max_payload_bytes: usize,
 }
 
@@ -501,6 +514,57 @@ pub fn packetize_video_access_unit(
             chunk_count: chunk_count as u16,
             payload: payload.to_vec(),
         });
+    }
+
+    Ok(records)
+}
+
+pub fn packetize_video_annex_b_stream(
+    options: VideoAnnexBStreamPacketizeOptions<'_>,
+    input: &[u8],
+) -> Result<Vec<MuninnMediaVideoAccessUnitRecord>> {
+    if options.frame_duration_ticks == 0 {
+        return Err(anyhow!("frame_duration_ticks must be greater than zero"));
+    }
+    if options.deadline_delay_ticks < 0 {
+        return Err(anyhow!("deadline_delay_ticks must be non-negative"));
+    }
+
+    let access_units = video_annex_b_access_units(options.codec, input)?;
+    let mut records = Vec::new();
+    for (index, access_unit) in access_units.iter().enumerate() {
+        let frame_offset = u64::try_from(index).context("video frame index overflow")?;
+        let frame_id = options
+            .first_frame_id
+            .checked_add(frame_offset)
+            .ok_or_else(|| anyhow!("video frame_id overflow"))?;
+        let pts_offset = i64::try_from(index)
+            .ok()
+            .and_then(|index| index.checked_mul(i64::from(options.frame_duration_ticks)))
+            .ok_or_else(|| anyhow!("video pts_ticks overflow"))?;
+        let pts_ticks = options
+            .first_pts_ticks
+            .checked_add(pts_offset)
+            .ok_or_else(|| anyhow!("video pts_ticks overflow"))?;
+        let deadline_ticks = pts_ticks
+            .checked_add(options.deadline_delay_ticks)
+            .ok_or_else(|| anyhow!("video deadline_ticks overflow"))?;
+
+        records.extend(packetize_video_access_unit(
+            VideoFramePacketizeOptions {
+                stream_id: options.stream_id,
+                session_id: options.session_id,
+                codec: options.codec,
+                frame_id,
+                pts_ticks,
+                duration_ticks: options.frame_duration_ticks,
+                timebase_num: options.timebase_num,
+                timebase_den: options.timebase_den,
+                deadline_ticks,
+                max_payload_bytes: options.max_payload_bytes,
+            },
+            access_unit,
+        )?);
     }
 
     Ok(records)
@@ -1469,6 +1533,69 @@ mod tests {
         assert_eq!(records[0].dependency_frame_id, Some(8));
         assert_eq!(records[2].payload, vec![5]);
         Ok(())
+    }
+
+    #[test]
+    fn packetizes_annex_b_stream_into_timed_video_records() -> Result<()> {
+        let mut stream = Vec::new();
+        stream.extend_from_slice(&start_code());
+        stream.extend_from_slice(&[0x65, 0x80]);
+        stream.extend_from_slice(&start_code());
+        stream.extend_from_slice(&[0x41, 0x80]);
+
+        let records = packetize_video_annex_b_stream(
+            VideoAnnexBStreamPacketizeOptions {
+                stream_id: "muninn.raven.av.rudp",
+                session_id: "session-1",
+                codec: "avc",
+                first_frame_id: 9,
+                first_pts_ticks: 27_000,
+                frame_duration_ticks: 3_000,
+                timebase_num: 1,
+                timebase_den: 90_000,
+                deadline_delay_ticks: 1_800,
+                max_payload_bytes: 16,
+            },
+            &stream,
+        )?;
+
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].frame_id, 9);
+        assert_eq!(records[0].pts_ticks, 27_000);
+        assert_eq!(records[0].deadline_ticks, 28_800);
+        assert!(records[0].keyframe);
+        assert_eq!(records[1].frame_id, 10);
+        assert_eq!(records[1].pts_ticks, 30_000);
+        assert_eq!(records[1].deadline_ticks, 31_800);
+        assert_eq!(records[1].dependency_frame_id, Some(9));
+        assert_eq!(records[1].codec, "avc");
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_negative_annex_b_stream_deadline_delay() {
+        let error = packetize_video_annex_b_stream(
+            VideoAnnexBStreamPacketizeOptions {
+                stream_id: "muninn.raven.av.rudp",
+                session_id: "session-1",
+                codec: "h264",
+                first_frame_id: 9,
+                first_pts_ticks: 27_000,
+                frame_duration_ticks: 3_000,
+                timebase_num: 1,
+                timebase_den: 90_000,
+                deadline_delay_ticks: -1,
+                max_payload_bytes: 4,
+            },
+            &[0, 0, 0, 1, 0x65, 0x80],
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("deadline_delay_ticks must be non-negative")
+        );
     }
 
     #[test]
