@@ -274,6 +274,64 @@ impl VideoFrameAssembly {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct VideoFrameKey {
+    pub stream_id: String,
+    pub session_id: String,
+    pub frame_id: u64,
+}
+
+impl VideoFrameKey {
+    pub fn from_chunk(chunk: &MuninnMediaVideoAccessUnitRecord) -> Self {
+        Self {
+            stream_id: chunk.stream_id.clone(),
+            session_id: chunk.session_id.clone(),
+            frame_id: chunk.frame_id,
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct VideoFrameAssemblySet {
+    frames: BTreeMap<VideoFrameKey, VideoFrameAssembly>,
+}
+
+impl VideoFrameAssemblySet {
+    pub fn insert_chunk(
+        &mut self,
+        chunk: MuninnMediaVideoAccessUnitRecord,
+    ) -> Result<Option<VideoAccessUnit>> {
+        let key = VideoFrameKey::from_chunk(&chunk);
+        if let Some(assembly) = self.frames.get_mut(&key) {
+            assembly.insert(chunk)?;
+            if assembly.is_complete() {
+                let access_unit = assembly.reassemble()?;
+                self.frames.remove(&key);
+                return Ok(Some(access_unit));
+            }
+            return Ok(None);
+        }
+
+        let assembly = VideoFrameAssembly::new(chunk)?;
+        if assembly.is_complete() {
+            return Ok(Some(assembly.reassemble()?));
+        }
+        self.frames.insert(key, assembly);
+        Ok(None)
+    }
+
+    pub fn missing_video_chunk_keys(&self, key: &VideoFrameKey) -> Vec<String> {
+        self.frames
+            .get(key)
+            .map(VideoFrameAssembly::missing_video_chunk_keys)
+            .unwrap_or_default()
+    }
+
+    pub fn pending_frame_count(&self) -> usize {
+        self.frames.len()
+    }
+}
+
 pub fn packetize_video_access_unit(
     options: VideoFramePacketizeOptions<'_>,
     access_unit: &VideoAccessUnit,
@@ -1150,6 +1208,83 @@ mod tests {
         let error = assembly.insert(records[1].clone()).unwrap_err();
 
         assert!(error.to_string().contains("metadata"));
+        Ok(())
+    }
+
+    #[test]
+    fn video_frame_assembly_set_handles_interleaved_frames() -> Result<()> {
+        let frame_one = VideoAccessUnit {
+            bytes: vec![1, 2, 3, 4, 5],
+            keyframe: true,
+        };
+        let frame_two = VideoAccessUnit {
+            bytes: vec![6, 7, 8, 9],
+            keyframe: false,
+        };
+        let frame_one_chunks = packetize_video_access_unit(
+            VideoFramePacketizeOptions {
+                stream_id: "muninn.raven.av.rudp",
+                session_id: "session-1",
+                codec: "h264",
+                frame_id: 9,
+                pts_ticks: 27_000,
+                duration_ticks: 3_000,
+                timebase_num: 1,
+                timebase_den: 90_000,
+                deadline_ticks: 28_800,
+                max_payload_bytes: 2,
+            },
+            &frame_one,
+        )?;
+        let frame_two_chunks = packetize_video_access_unit(
+            VideoFramePacketizeOptions {
+                stream_id: "muninn.raven.av.rudp",
+                session_id: "session-1",
+                codec: "h264",
+                frame_id: 10,
+                pts_ticks: 30_000,
+                duration_ticks: 3_000,
+                timebase_num: 1,
+                timebase_den: 90_000,
+                deadline_ticks: 31_800,
+                max_payload_bytes: 2,
+            },
+            &frame_two,
+        )?;
+        let key_one = VideoFrameKey::from_chunk(&frame_one_chunks[0]);
+        let mut assemblies = VideoFrameAssemblySet::default();
+
+        assert!(
+            assemblies
+                .insert_chunk(frame_one_chunks[0].clone())?
+                .is_none()
+        );
+        assert!(
+            assemblies
+                .insert_chunk(frame_two_chunks[1].clone())?
+                .is_none()
+        );
+        assert_eq!(assemblies.pending_frame_count(), 2);
+        assert_eq!(
+            assemblies.missing_video_chunk_keys(&key_one),
+            vec![
+                video_chunk_feedback_key(9, 1),
+                video_chunk_feedback_key(9, 2)
+            ]
+        );
+
+        assert!(
+            assemblies
+                .insert_chunk(frame_one_chunks[2].clone())?
+                .is_none()
+        );
+        let completed = assemblies
+            .insert_chunk(frame_one_chunks[1].clone())?
+            .expect("frame one should complete");
+
+        assert_eq!(completed, frame_one);
+        assert_eq!(assemblies.pending_frame_count(), 1);
+        assert!(assemblies.missing_video_chunk_keys(&key_one).is_empty());
         Ok(())
     }
 
