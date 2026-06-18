@@ -55,6 +55,7 @@ const IDUNN_HEALTH_RUDP_CONNECTION_ID: u32 = 0x1d0d_0001;
 const MUNINN_COMMAND_RUDP_CONNECTION_ID: u32 = 0x6d75_0002;
 const MUNINN_MEDIA_RUDP_CONNECTION_ID: u32 = 0x6d75_0001;
 const MUNINN_MEDIA_SEND_QUEUE_DEADLINE_MS: u64 = 75;
+const MUNINN_MEDIA_RECEIVER_KEYFRAME_RESTART_DELAY_MS: u64 = 100;
 const PS_MOVE_LED_REPORT_LEN: usize = 49;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1090,7 +1091,7 @@ fn activate_rudp(options: Options) -> Result<()> {
         )?;
 
         match run_rudp_mux_once(&options, &plan, &mut node, supervisor_pid, restart_count) {
-            Ok(detail) => {
+            Ok(restart) => {
                 restart_count += 1;
                 publish_stream(
                     &mut node,
@@ -1100,8 +1101,9 @@ fn activate_rudp(options: Options) -> Result<()> {
                     supervisor_pid,
                     None,
                     restart_count,
-                    &detail,
+                    &restart.detail,
                 )?;
+                thread::sleep(restart.delay);
             }
             Err(error) => {
                 restart_count += 1;
@@ -1118,9 +1120,12 @@ fn activate_rudp(options: Options) -> Result<()> {
                 return Err(error);
             }
         }
-
-        thread::sleep(Duration::from_secs((2 + restart_count).min(30) as u64));
     }
+}
+
+struct RudpMuxRestart {
+    detail: String,
+    delay: Duration,
 }
 
 fn run_rudp_mux_once(
@@ -1129,7 +1134,7 @@ fn run_rudp_mux_once(
     node: &mut cultmesh_rs::CultMeshNode,
     supervisor_pid: u32,
     restart_count: u32,
-) -> Result<String> {
+) -> Result<RudpMuxRestart> {
     let timestamp = timestamp()?;
     let loopback_stderr = options
         .log_root
@@ -1247,6 +1252,7 @@ fn run_rudp_mux_once(
     let mut payloads_sent = 0_u64;
     let mut payloads_dropped = 0_u64;
     let mut receiver_feedback = MuninnRudpReceiverFeedbackStats::default();
+    let mut handled_keyframe_requests = 0_u64;
     let result = loop {
         match payload_rx.recv_timeout(Duration::from_millis(5)) {
             Ok(Ok(queued)) => {
@@ -1257,6 +1263,18 @@ fn run_rudp_mux_once(
                 ) {
                     payloads_dropped += 1;
                     poll_rudp_media_receiver_feedback(&mut transport, &mut receiver_feedback)?;
+                    if receiver_feedback_requests_encoder_restart(
+                        &receiver_feedback,
+                        &mut handled_keyframe_requests,
+                    ) {
+                        let expired = transport.stats().reliable_packets_expired;
+                        break Ok(rudp_media_keyframe_restart(
+                            payloads_sent,
+                            payloads_dropped,
+                            expired,
+                            &receiver_feedback,
+                        ));
+                    }
                     transport.poll_resends()?;
                     if payloads_dropped == 1 || payloads_dropped % 300 == 0 {
                         let expired = transport.stats().reliable_packets_expired;
@@ -1278,6 +1296,18 @@ fn run_rudp_mux_once(
                     .send(queued.payload.channel_id, queued.payload.payload)
                     .context("sending typed Muninn media payload over RUDP media")?;
                 poll_rudp_media_receiver_feedback(&mut transport, &mut receiver_feedback)?;
+                if receiver_feedback_requests_encoder_restart(
+                    &receiver_feedback,
+                    &mut handled_keyframe_requests,
+                ) {
+                    let expired = transport.stats().reliable_packets_expired;
+                    break Ok(rudp_media_keyframe_restart(
+                        payloads_sent,
+                        payloads_dropped,
+                        expired,
+                        &receiver_feedback,
+                    ));
+                }
                 transport.poll_resends()?;
                 payloads_sent += 1;
                 if payloads_sent == 1 || payloads_sent % 900 == 0 {
@@ -1296,19 +1326,34 @@ fn run_rudp_mux_once(
             Ok(Err(error)) => break Err(error),
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 poll_rudp_media_receiver_feedback(&mut transport, &mut receiver_feedback)?;
+                if receiver_feedback_requests_encoder_restart(
+                    &receiver_feedback,
+                    &mut handled_keyframe_requests,
+                ) {
+                    let expired = transport.stats().reliable_packets_expired;
+                    break Ok(rudp_media_keyframe_restart(
+                        payloads_sent,
+                        payloads_dropped,
+                        expired,
+                        &receiver_feedback,
+                    ));
+                }
                 transport.poll_resends()?;
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 let expired = transport.stats().reliable_packets_expired;
-                break Ok(format!(
-                    "encoder stdout ended; {}",
-                    rudp_media_progress_detail(
-                        payloads_sent,
-                        payloads_dropped,
-                        expired,
-                        &receiver_feedback
-                    )
-                ));
+                break Ok(RudpMuxRestart {
+                    detail: format!(
+                        "encoder stdout ended; {}",
+                        rudp_media_progress_detail(
+                            payloads_sent,
+                            payloads_dropped,
+                            expired,
+                            &receiver_feedback
+                        )
+                    ),
+                    delay: default_rudp_mux_restart_delay(restart_count),
+                });
             }
         }
     };
@@ -1352,6 +1397,40 @@ fn queue_muninn_media_payload(
 
 fn media_payload_queue_age_exceeded(queued_at: Instant, now: Instant, max_age: Duration) -> bool {
     now.saturating_duration_since(queued_at) > max_age
+}
+
+fn default_rudp_mux_restart_delay(restart_count: u32) -> Duration {
+    Duration::from_secs((2 + restart_count).min(30) as u64)
+}
+
+fn receiver_keyframe_restart_delay() -> Duration {
+    Duration::from_millis(MUNINN_MEDIA_RECEIVER_KEYFRAME_RESTART_DELAY_MS)
+}
+
+fn receiver_feedback_requests_encoder_restart(
+    receiver_feedback: &MuninnRudpReceiverFeedbackStats,
+    handled_keyframe_requests: &mut u64,
+) -> bool {
+    if receiver_feedback.requested_keyframes <= *handled_keyframe_requests {
+        return false;
+    }
+    *handled_keyframe_requests = receiver_feedback.requested_keyframes;
+    true
+}
+
+fn rudp_media_keyframe_restart(
+    sent: u64,
+    queue_dropped: u64,
+    reliable_expired: u64,
+    receiver_feedback: &MuninnRudpReceiverFeedbackStats,
+) -> RudpMuxRestart {
+    RudpMuxRestart {
+        detail: format!(
+            "receiver requested a fresh keyframe; {}",
+            rudp_media_progress_detail(sent, queue_dropped, reliable_expired, receiver_feedback)
+        ),
+        delay: receiver_keyframe_restart_delay(),
+    }
 }
 
 fn rudp_media_progress_detail(
@@ -5931,6 +6010,60 @@ mod tests {
             rudp_media_progress_detail(120, 3, 9, &receiver_feedback),
             "Muninn RUDP media progress: sent=120 queue_dropped=3 reliable_expired=9 receiver_feedback=2 receiver_keyframes=1 receiver_late_frames=3 receiver_missing_chunks=4 receiver_highest_decodable=88"
         );
+    }
+
+    #[test]
+    fn receiver_feedback_keyframe_requests_are_single_restart_edges() {
+        let mut handled = 0;
+        let mut receiver_feedback = MuninnRudpReceiverFeedbackStats::default();
+
+        assert!(!receiver_feedback_requests_encoder_restart(
+            &receiver_feedback,
+            &mut handled
+        ));
+
+        receiver_feedback.requested_keyframes = 1;
+        assert!(receiver_feedback_requests_encoder_restart(
+            &receiver_feedback,
+            &mut handled
+        ));
+        assert_eq!(handled, 1);
+        assert!(!receiver_feedback_requests_encoder_restart(
+            &receiver_feedback,
+            &mut handled
+        ));
+
+        receiver_feedback.requested_keyframes = 2;
+        assert!(receiver_feedback_requests_encoder_restart(
+            &receiver_feedback,
+            &mut handled
+        ));
+        assert_eq!(handled, 2);
+    }
+
+    #[test]
+    fn receiver_keyframe_restart_uses_short_delay_and_live_pressure_detail() {
+        let receiver_feedback = MuninnRudpReceiverFeedbackStats {
+            feedback_records: 1,
+            requested_keyframes: 1,
+            late_frames: 2,
+            missing_video_chunks: 3,
+            highest_decodable_frame_id: Some(40),
+        };
+
+        let restart = rudp_media_keyframe_restart(120, 4, 7, &receiver_feedback);
+
+        assert_eq!(restart.delay, receiver_keyframe_restart_delay());
+        assert!(
+            restart
+                .detail
+                .contains("receiver requested a fresh keyframe")
+        );
+        assert!(restart.detail.contains("sent=120"));
+        assert!(restart.detail.contains("queue_dropped=4"));
+        assert!(restart.detail.contains("reliable_expired=7"));
+        assert!(restart.detail.contains("receiver_keyframes=1"));
+        assert_eq!(default_rudp_mux_restart_delay(0), Duration::from_secs(2));
     }
 
     #[test]
