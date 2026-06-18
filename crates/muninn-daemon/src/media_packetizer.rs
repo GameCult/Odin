@@ -173,6 +173,21 @@ pub struct VideoAnnexBStreamWireOptions<'a> {
     pub source_role: &'a str,
 }
 
+pub struct VideoAnnexBStreamSendConfig {
+    pub stream_id: String,
+    pub session_id: String,
+    pub codec: String,
+    pub first_frame_id: u64,
+    pub first_pts_ticks: i64,
+    pub frame_duration_ticks: u32,
+    pub timebase_num: u32,
+    pub timebase_den: u32,
+    pub deadline_delay_ticks: i64,
+    pub max_payload_bytes: usize,
+    pub source_runtime_id: String,
+    pub source_role: String,
+}
+
 pub struct AudioPacketizeOptions<'a> {
     pub stream_id: &'a str,
     pub session_id: &'a str,
@@ -224,6 +239,158 @@ pub enum MuninnMediaWireRecord {
 pub struct MuninnMediaSendPayload {
     pub channel_id: &'static str,
     pub payload: Vec<u8>,
+}
+
+pub struct VideoAnnexBStreamSendState {
+    config: VideoAnnexBStreamSendConfig,
+    pending: Vec<u8>,
+    next_frame_id: u64,
+    next_pts_ticks: i64,
+}
+
+impl VideoAnnexBStreamSendState {
+    pub fn new(config: VideoAnnexBStreamSendConfig) -> Result<Self> {
+        if matches!(normalized_video_codec(&config.codec), None | Some("av1")) {
+            return Err(anyhow!(
+                "Annex B stream sender requires H.264/AVC or H.265/HEVC codec"
+            ));
+        }
+        if config.stream_id.is_empty() {
+            return Err(anyhow!("stream_id must be non-empty"));
+        }
+        if config.session_id.is_empty() {
+            return Err(anyhow!("session_id must be non-empty"));
+        }
+        if config.frame_duration_ticks == 0 {
+            return Err(anyhow!("frame_duration_ticks must be greater than zero"));
+        }
+        if config.timebase_num == 0 || config.timebase_den == 0 {
+            return Err(anyhow!("video timebase must be non-zero"));
+        }
+        if config.deadline_delay_ticks < 0 {
+            return Err(anyhow!("deadline_delay_ticks must be non-negative"));
+        }
+        if config.max_payload_bytes == 0 {
+            return Err(anyhow!("max_payload_bytes must be greater than zero"));
+        }
+        if config.source_runtime_id.is_empty() {
+            return Err(anyhow!("source_runtime_id must be non-empty"));
+        }
+        if config.source_role.is_empty() {
+            return Err(anyhow!("source_role must be non-empty"));
+        }
+
+        Ok(Self {
+            next_frame_id: config.first_frame_id,
+            next_pts_ticks: config.first_pts_ticks,
+            config,
+            pending: Vec::new(),
+        })
+    }
+
+    pub fn push(&mut self, stored_at: &str, bytes: &[u8]) -> Result<Vec<MuninnMediaSendPayload>> {
+        if !bytes.is_empty() {
+            self.pending.extend_from_slice(bytes);
+        }
+        self.emit_available(stored_at, false)
+    }
+
+    pub fn finish(&mut self, stored_at: &str) -> Result<Vec<MuninnMediaSendPayload>> {
+        self.emit_available(stored_at, true)
+    }
+
+    pub fn pending_bytes(&self) -> usize {
+        self.pending.len()
+    }
+
+    pub fn next_frame_id(&self) -> u64 {
+        self.next_frame_id
+    }
+
+    fn emit_available(
+        &mut self,
+        stored_at: &str,
+        flush_last: bool,
+    ) -> Result<Vec<MuninnMediaSendPayload>> {
+        if stored_at.is_empty() {
+            return Err(anyhow!("stored_at must be non-empty"));
+        }
+        if self.pending.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let access_units = match video_annex_b_access_units(&self.config.codec, &self.pending) {
+            Ok(access_units) => access_units,
+            Err(error)
+                if error.to_string().contains("has no start codes")
+                    || error.to_string().contains("has no NAL payloads") =>
+            {
+                return Ok(Vec::new());
+            }
+            Err(error) => return Err(error),
+        };
+        let emit_count = if flush_last {
+            access_units.len()
+        } else {
+            access_units.len().saturating_sub(1)
+        };
+        if emit_count == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut send_payloads = Vec::new();
+        let mut emitted_bytes = 0_usize;
+        for access_unit in access_units.iter().take(emit_count) {
+            emitted_bytes = emitted_bytes
+                .checked_add(access_unit.bytes.len())
+                .ok_or_else(|| anyhow!("emitted Annex B byte count overflow"))?;
+            let deadline_ticks = self
+                .next_pts_ticks
+                .checked_add(self.config.deadline_delay_ticks)
+                .ok_or_else(|| anyhow!("video deadline_ticks overflow"))?;
+            let records = packetize_video_access_unit(
+                VideoFramePacketizeOptions {
+                    stream_id: &self.config.stream_id,
+                    session_id: &self.config.session_id,
+                    codec: &self.config.codec,
+                    frame_id: self.next_frame_id,
+                    pts_ticks: self.next_pts_ticks,
+                    duration_ticks: self.config.frame_duration_ticks,
+                    timebase_num: self.config.timebase_num,
+                    timebase_den: self.config.timebase_den,
+                    deadline_ticks,
+                    max_payload_bytes: self.config.max_payload_bytes,
+                },
+                access_unit,
+            )?;
+            let wire_records = records
+                .into_iter()
+                .map(MuninnMediaWireRecord::Video)
+                .collect::<Vec<_>>();
+            send_payloads.extend(wire_payloads_to_media_send(encode_media_wire_records(
+                &wire_records,
+                stored_at,
+                &self.config.source_runtime_id,
+                &self.config.source_role,
+            )?));
+            self.advance_frame_clock()?;
+        }
+
+        self.pending.drain(..emitted_bytes);
+        Ok(send_payloads)
+    }
+
+    fn advance_frame_clock(&mut self) -> Result<()> {
+        self.next_frame_id = self
+            .next_frame_id
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("video frame_id overflow"))?;
+        self.next_pts_ticks = self
+            .next_pts_ticks
+            .checked_add(i64::from(self.config.frame_duration_ticks))
+            .ok_or_else(|| anyhow!("video pts_ticks overflow"))?;
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -2565,6 +2732,86 @@ mod tests {
         };
         assert_eq!(record.frame_id, 9);
         Ok(())
+    }
+
+    fn stream_send_config() -> VideoAnnexBStreamSendConfig {
+        VideoAnnexBStreamSendConfig {
+            stream_id: "muninn.raven.av.rudp".to_string(),
+            session_id: "session-1".to_string(),
+            codec: "h264".to_string(),
+            first_frame_id: 9,
+            first_pts_ticks: 27_000,
+            frame_duration_ticks: 3_000,
+            timebase_num: 1,
+            timebase_den: 90_000,
+            deadline_delay_ticks: 1_800,
+            max_payload_bytes: 16,
+            source_runtime_id: "muninn-test".to_string(),
+            source_role: "media-test".to_string(),
+        }
+    }
+
+    #[test]
+    fn annex_b_stream_send_state_emits_only_completed_frames() -> Result<()> {
+        let mut first_frame = Vec::new();
+        first_frame.extend_from_slice(&start_code());
+        first_frame.extend_from_slice(&[0x65, 0x80]);
+        let mut second_frame = Vec::new();
+        second_frame.extend_from_slice(&start_code());
+        second_frame.extend_from_slice(&[0x41, 0x80]);
+        let mut sender = VideoAnnexBStreamSendState::new(stream_send_config())?;
+
+        let first_push = sender.push("2026-06-18T00:00:00Z", &first_frame)?;
+
+        assert!(first_push.is_empty());
+        assert_eq!(sender.next_frame_id(), 9);
+        assert_eq!(sender.pending_bytes(), first_frame.len());
+
+        let second_push = sender.push("2026-06-18T00:00:00Z", &second_frame)?;
+
+        assert_eq!(second_push.len(), 1);
+        assert_eq!(second_push[0].channel_id, MUNINN_MEDIA_RUDP_CHANNEL);
+        let MuninnMediaWireRecord::Video(first) =
+            decode_media_wire_record(&second_push[0].payload)?
+        else {
+            panic!("expected video media record");
+        };
+        assert_eq!(first.frame_id, 9);
+        assert_eq!(first.pts_ticks, 27_000);
+        assert!(first.keyframe);
+        assert_eq!(sender.next_frame_id(), 10);
+        assert_eq!(sender.pending_bytes(), second_frame.len());
+
+        let tail = sender.finish("2026-06-18T00:00:00Z")?;
+
+        assert_eq!(tail.len(), 1);
+        let MuninnMediaWireRecord::Video(second) = decode_media_wire_record(&tail[0].payload)?
+        else {
+            panic!("expected video media record");
+        };
+        assert_eq!(second.frame_id, 10);
+        assert_eq!(second.pts_ticks, 30_000);
+        assert_eq!(second.dependency_frame_id, Some(9));
+        assert_eq!(sender.pending_bytes(), 0);
+        assert_eq!(sender.next_frame_id(), 11);
+        Ok(())
+    }
+
+    #[test]
+    fn annex_b_stream_send_state_rejects_non_annex_b_codecs() {
+        let mut config = stream_send_config();
+        config.codec = "av1".to_string();
+
+        let error = match VideoAnnexBStreamSendState::new(config) {
+            Ok(_) => panic!("AV1 must not create an Annex B stream sender"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("Annex B stream sender requires H.264/AVC or H.265/HEVC codec")
+        );
     }
 
     #[test]
