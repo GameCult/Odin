@@ -183,6 +183,13 @@ pub struct AudioPacketizeOptions<'a> {
     pub deadline_ticks: i64,
 }
 
+pub struct AudioPacketWireOptions<'a> {
+    pub packetize: AudioPacketizeOptions<'a>,
+    pub stored_at: &'a str,
+    pub source_runtime_id: &'a str,
+    pub source_role: &'a str,
+}
+
 pub struct ReceiverFeedbackOptions<'a> {
     pub stream_id: &'a str,
     pub session_id: &'a str,
@@ -1018,6 +1025,19 @@ pub fn encode_video_annex_b_stream_wire_records(
         .collect::<Vec<_>>();
     encode_media_wire_records(
         &wire_records,
+        options.stored_at,
+        options.source_runtime_id,
+        options.source_role,
+    )
+}
+
+pub fn encode_audio_packet_wire_record(
+    options: AudioPacketWireOptions<'_>,
+    payload: &[u8],
+) -> Result<Vec<u8>> {
+    let record = packetize_audio_packet(options.packetize, payload)?;
+    encode_media_wire_record(
+        &MuninnMediaWireRecord::Audio(record),
         options.stored_at,
         options.source_runtime_id,
         options.source_role,
@@ -2471,6 +2491,38 @@ mod tests {
         assert_eq!(first.deadline_ticks, 28_800);
         assert_eq!(second.frame_id, 10);
         assert_eq!(second.deadline_ticks, 31_800);
+        Ok(())
+    }
+
+    #[test]
+    fn media_wire_encodes_audio_packet_for_sender() -> Result<()> {
+        let wire = encode_audio_packet_wire_record(
+            AudioPacketWireOptions {
+                packetize: AudioPacketizeOptions {
+                    stream_id: "muninn.raven.av.rudp",
+                    session_id: "session-1",
+                    codec: "opus",
+                    packet_id: 12,
+                    pts_ticks: 48_000,
+                    duration_ticks: 960,
+                    timebase_num: 1,
+                    timebase_den: 48_000,
+                    deadline_ticks: 48_960,
+                },
+                stored_at: "2026-06-18T00:00:00Z",
+                source_runtime_id: "muninn-test",
+                source_role: "media-test",
+            },
+            &[0xf8, 0xff, 0xfe],
+        )?;
+
+        let decoded = decode_media_wire_record(&wire)?;
+        let MuninnMediaWireRecord::Audio(decoded) = decoded else {
+            panic!("expected audio media record");
+        };
+        assert_eq!(decoded.packet_id, 12);
+        assert_eq!(decoded.codec, "opus");
+        assert_eq!(decoded.payload, vec![0xf8, 0xff, 0xfe]);
         Ok(())
     }
 
