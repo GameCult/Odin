@@ -1519,6 +1519,7 @@ fn record_rudp_media_receiver_feedback(
 }
 
 fn open_media_rudp_transport(options: &Options) -> Result<CultNetRudpSocketTransportConnection> {
+    let media_profile = muninn_rudp_media_profile();
     let endpoint: SocketAddr = format!("{}:{}", options.target_host, options.port)
         .parse()
         .with_context(|| {
@@ -1539,6 +1540,8 @@ fn open_media_rudp_transport(options: &Options) -> Result<CultNetRudpSocketTrans
             MUNINN_MEDIA_RUDP_CONNECTION_ID,
         );
         options.resend_delay_ms = 5;
+        options.media_reliable_expire_after_ms =
+            Some(media_profile.sender_reliable_expire_after_ms);
         options
     })?;
     transport.connect(options.stream_id.as_bytes().to_vec())?;

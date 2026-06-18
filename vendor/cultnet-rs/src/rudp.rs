@@ -21,7 +21,7 @@ use crate::CultNetTransportStats;
 const RUDP_MAGIC: [u8; 4] = [0x43, 0x4e, 0x52, 0x30];
 const RUDP_VERSION: u8 = 0;
 const RUDP_FIXED_HEADER_BYTES: usize = 36;
-const MEDIA_RELIABLE_EXPIRE_AFTER_MS: u64 = 75;
+const DEFAULT_MEDIA_RELIABLE_EXPIRE_AFTER_MS: u64 = 75;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CultNetRudpPacketType {
@@ -73,6 +73,7 @@ pub struct CultNetRudpSessionOptions {
     pub connection_id: u32,
     pub initial_sequence: u32,
     pub resend_delay_ms: u64,
+    pub media_reliable_expire_after_ms: Option<u64>,
     pub max_pending_reliable_packets: Option<usize>,
 }
 
@@ -82,6 +83,7 @@ impl Default for CultNetRudpSessionOptions {
             connection_id: 0,
             initial_sequence: 1,
             resend_delay_ms: 250,
+            media_reliable_expire_after_ms: Some(DEFAULT_MEDIA_RELIABLE_EXPIRE_AFTER_MS),
             max_pending_reliable_packets: None,
         }
     }
@@ -121,6 +123,7 @@ struct FragmentBuffer {
 pub struct CultNetRudpSession {
     connection_id: u32,
     resend_delay_ms: u64,
+    media_reliable_expire_after_ms: Option<u64>,
     max_pending_reliable_packets: Option<usize>,
     next_sequence: u32,
     next_fragment_id: u16,
@@ -140,6 +143,7 @@ impl CultNetRudpSession {
         Self {
             connection_id: options.connection_id,
             resend_delay_ms: options.resend_delay_ms,
+            media_reliable_expire_after_ms: options.media_reliable_expire_after_ms,
             max_pending_reliable_packets: options.max_pending_reliable_packets,
             next_sequence: options.initial_sequence,
             next_fragment_id: 1,
@@ -809,6 +813,7 @@ pub struct CultNetRudpSocketTransportOptions {
     pub max_payload_bytes: Option<u32>,
     pub max_fragment_bytes: Option<u32>,
     pub max_pending_reliable_packets: Option<u32>,
+    pub media_reliable_expire_after_ms: Option<u64>,
 }
 
 impl CultNetRudpSocketTransportOptions {
@@ -830,6 +835,7 @@ impl CultNetRudpSocketTransportOptions {
             max_payload_bytes: None,
             max_fragment_bytes: None,
             max_pending_reliable_packets: None,
+            media_reliable_expire_after_ms: Some(DEFAULT_MEDIA_RELIABLE_EXPIRE_AFTER_MS),
         }
     }
 
@@ -846,6 +852,7 @@ impl CultNetRudpSocketTransportOptions {
             max_payload_bytes: None,
             max_fragment_bytes: None,
             max_pending_reliable_packets: None,
+            media_reliable_expire_after_ms: Some(DEFAULT_MEDIA_RELIABLE_EXPIRE_AFTER_MS),
         }
     }
 }
@@ -875,6 +882,7 @@ impl CultNetRudpSocketTransportConnection {
                 max_payload_bytes: options.max_payload_bytes,
                 max_fragment_bytes: options.max_fragment_bytes,
                 max_pending_reliable_packets: options.max_pending_reliable_packets,
+                media_reliable_expire_after_ms: options.media_reliable_expire_after_ms,
             },
         );
         let max_pending_reliable_packets = options
@@ -886,6 +894,7 @@ impl CultNetRudpSocketTransportConnection {
                 connection_id: options.connection_id,
                 initial_sequence: options.initial_sequence,
                 resend_delay_ms: options.resend_delay_ms,
+                media_reliable_expire_after_ms: options.media_reliable_expire_after_ms,
                 max_pending_reliable_packets,
             }),
             mode: options.mode,
@@ -928,7 +937,7 @@ impl CultNetRudpSocketTransportConnection {
     }
 
     pub fn send(&mut self, channel_id: &str, payload: Vec<u8>) -> Result<()> {
-        let options = channel_send_options(channel_id, now_ms());
+        let options = self.channel_send_options(channel_id, now_ms());
         let packets =
             self.session
                 .send_many(channel_id, payload, options, self.max_fragment_bytes)?;
@@ -951,6 +960,39 @@ impl CultNetRudpSocketTransportConnection {
 
     pub fn check_timeout(&mut self, timeout_ms: u64) -> bool {
         self.session.check_timeout(now_ms(), timeout_ms)
+    }
+
+    fn channel_send_options(&self, channel_id: &str, now_ms: u64) -> CultNetRudpSendOptions {
+        match channel_id {
+            "schema" => CultNetRudpSendOptions {
+                reliable: true,
+                ordered: true,
+                sequenced: false,
+                now_ms,
+                reliable_expire_after_ms: None,
+            },
+            "latest" => CultNetRudpSendOptions {
+                reliable: false,
+                ordered: false,
+                sequenced: true,
+                now_ms,
+                reliable_expire_after_ms: None,
+            },
+            "media" => CultNetRudpSendOptions {
+                reliable: true,
+                ordered: false,
+                sequenced: false,
+                now_ms,
+                reliable_expire_after_ms: self.session.media_reliable_expire_after_ms,
+            },
+            _ => CultNetRudpSendOptions {
+                reliable: false,
+                ordered: false,
+                sequenced: false,
+                now_ms,
+                reliable_expire_after_ms: None,
+            },
+        }
     }
 
     pub fn receive_once(&mut self) -> Result<Option<CultNetTransportFrame>> {
@@ -1043,6 +1085,7 @@ pub struct RudpTransportProfileOptions {
     pub max_payload_bytes: Option<u32>,
     pub max_fragment_bytes: Option<u32>,
     pub max_pending_reliable_packets: Option<u32>,
+    pub media_reliable_expire_after_ms: Option<u64>,
 }
 
 pub fn create_rudp_transport_profile(
@@ -1095,7 +1138,7 @@ pub fn create_rudp_transport_profile(
                     max_payload_bytes: options.max_payload_bytes,
                     max_fragment_bytes: options.max_fragment_bytes,
                     max_pending_reliable_packets: options.max_pending_reliable_packets,
-                    reliable_expire_after_ms: Some(MEDIA_RELIABLE_EXPIRE_AFTER_MS),
+                    reliable_expire_after_ms: options.media_reliable_expire_after_ms,
                 },
             ],
         }],
@@ -1201,39 +1244,6 @@ fn packet_type_to_code(packet_type: CultNetRudpPacketType) -> u8 {
         CultNetRudpPacketType::Ping => 5,
         CultNetRudpPacketType::Pong => 6,
         CultNetRudpPacketType::Disconnect => 7,
-    }
-}
-
-fn channel_send_options(channel_id: &str, now_ms: u64) -> CultNetRudpSendOptions {
-    match channel_id {
-        "schema" => CultNetRudpSendOptions {
-            reliable: true,
-            ordered: true,
-            sequenced: false,
-            now_ms,
-            reliable_expire_after_ms: None,
-        },
-        "latest" => CultNetRudpSendOptions {
-            reliable: false,
-            ordered: false,
-            sequenced: true,
-            now_ms,
-            reliable_expire_after_ms: None,
-        },
-        "media" => CultNetRudpSendOptions {
-            reliable: true,
-            ordered: false,
-            sequenced: false,
-            now_ms,
-            reliable_expire_after_ms: Some(MEDIA_RELIABLE_EXPIRE_AFTER_MS),
-        },
-        _ => CultNetRudpSendOptions {
-            reliable: false,
-            ordered: false,
-            sequenced: false,
-            now_ms,
-            reliable_expire_after_ms: None,
-        },
     }
 }
 

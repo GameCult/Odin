@@ -272,6 +272,7 @@ fn rudp_transport_profile_advertises_state_and_realtime_channels() {
             max_payload_bytes: Some(1200),
             max_fragment_bytes: Some(1000),
             max_pending_reliable_packets: Some(64),
+            media_reliable_expire_after_ms: Some(75),
         },
     );
 
@@ -518,6 +519,7 @@ fn rudp_session_expires_bounded_reliable_media_resends() -> Result<()> {
         connection_id: 100,
         initial_sequence: 1,
         resend_delay_ms: 20,
+        media_reliable_expire_after_ms: Some(50),
         max_pending_reliable_packets: Some(1),
     });
     session.receive(
@@ -901,6 +903,7 @@ fn rudp_socket_transport_handshakes_and_carries_reliable_ordered_schema_frames()
             max_payload_bytes: None,
             max_fragment_bytes: None,
             max_pending_reliable_packets: None,
+            media_reliable_expire_after_ms: Some(75),
         })?;
     let mut client =
         CultNetRudpSocketTransportConnection::new(CultNetRudpSocketTransportOptions {
@@ -915,6 +918,7 @@ fn rudp_socket_transport_handshakes_and_carries_reliable_ordered_schema_frames()
             max_payload_bytes: None,
             max_fragment_bytes: None,
             max_pending_reliable_packets: None,
+            media_reliable_expire_after_ms: Some(75),
         })?;
 
     client.connect(b"join".to_vec())?;
@@ -960,6 +964,7 @@ fn rudp_socket_transport_reports_expired_reliable_media_packets() -> Result<()> 
             max_payload_bytes: None,
             max_fragment_bytes: None,
             max_pending_reliable_packets: None,
+            media_reliable_expire_after_ms: Some(25),
         })?;
     let mut client =
         CultNetRudpSocketTransportConnection::new(CultNetRudpSocketTransportOptions {
@@ -974,6 +979,7 @@ fn rudp_socket_transport_reports_expired_reliable_media_packets() -> Result<()> 
             max_payload_bytes: None,
             max_fragment_bytes: None,
             max_pending_reliable_packets: None,
+            media_reliable_expire_after_ms: Some(25),
         })?;
 
     client.connect(b"join".to_vec())?;
@@ -981,7 +987,7 @@ fn rudp_socket_transport_reports_expired_reliable_media_packets() -> Result<()> 
     client.send("media", b"late-frame".to_vec())?;
     assert_eq!(client.stats().reliable_packets_expired, 0);
 
-    thread::sleep(StdDuration::from_millis(90));
+    thread::sleep(StdDuration::from_millis(40));
     client.poll_resends()?;
 
     assert_eq!(client.stats().reliable_packets_expired, 1);
@@ -1007,6 +1013,7 @@ fn rudp_socket_transport_carries_fragmented_reliable_ordered_schema_frames() -> 
             max_payload_bytes: None,
             max_fragment_bytes: Some(8),
             max_pending_reliable_packets: None,
+            media_reliable_expire_after_ms: Some(75),
         })?;
     let mut client =
         CultNetRudpSocketTransportConnection::new(CultNetRudpSocketTransportOptions {
@@ -1021,6 +1028,7 @@ fn rudp_socket_transport_carries_fragmented_reliable_ordered_schema_frames() -> 
             max_payload_bytes: None,
             max_fragment_bytes: Some(8),
             max_pending_reliable_packets: None,
+            media_reliable_expire_after_ms: Some(75),
         })?;
 
     client.connect(b"join".to_vec())?;

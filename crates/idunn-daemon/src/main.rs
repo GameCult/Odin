@@ -876,6 +876,7 @@ fn handle_rudp_health_datagram(
             connection_id: IDUNN_HEALTH_RUDP_CONNECTION_ID,
             initial_sequence: 1,
             resend_delay_ms: 100,
+            media_reliable_expire_after_ms: None,
             max_pending_reliable_packets: None,
         });
         let accept = session.accept_connect(&packet, now, Vec::new())?;
@@ -896,6 +897,7 @@ fn handle_rudp_health_datagram(
             connection_id: IDUNN_HEALTH_RUDP_CONNECTION_ID,
             initial_sequence: 1,
             resend_delay_ms: 100,
+            media_reliable_expire_after_ms: None,
             max_pending_reliable_packets: None,
         })
     });
