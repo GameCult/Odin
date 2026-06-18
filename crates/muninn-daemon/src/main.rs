@@ -27,7 +27,7 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::env;
 use std::fs;
-use std::io::Read;
+use std::io::{ErrorKind, Read};
 #[cfg(not(windows))]
 use std::io::Write;
 use std::net::{SocketAddr, UdpSocket};
@@ -42,8 +42,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 #[cfg(windows)]
 use std::ffi::OsStr;
 #[cfg(unix)]
-use std::io::ErrorKind;
-#[cfg(unix)]
 use std::os::fd::AsRawFd;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
@@ -56,7 +54,7 @@ const MUNINN_COMMAND_RUDP_CONNECTION_ID: u32 = 0x6d75_0002;
 const MUNINN_MEDIA_RUDP_CONNECTION_ID: u32 = 0x6d75_0001;
 const MUNINN_MEDIA_SEND_QUEUE_DEADLINE_MS: u64 = 75;
 const MUNINN_RUDP_MEDIA_PROFILE_ID: &str = "muninn.rudp.low_latency_h264_lan.v1";
-const MUNINN_RUDP_MEDIA_VIDEO_BITRATE_KBPS: u32 = 12_000;
+const MUNINN_RUDP_MEDIA_VIDEO_BITRATE_KBPS: u32 = 8_000;
 const MUNINN_RUDP_MEDIA_PACKET_BYTES: usize = 480;
 const MUNINN_RUDP_IPV4_UDP_PAYLOAD_BYTES: usize = 1_472;
 const MUNINN_RUDP_FIXED_HEADER_BYTES: usize = 36;
@@ -64,10 +62,9 @@ const MUNINN_RUDP_MEDIA_MAX_FRAGMENT_BYTES: usize = MUNINN_RUDP_IPV4_UDP_PAYLOAD
     - MUNINN_RUDP_FIXED_HEADER_BYTES
     - crate::media_packetizer::MUNINN_MEDIA_RUDP_CHANNEL.len();
 const MUNINN_RUDP_MEDIA_RESEND_DELAY_MS: u64 = 5;
-const MUNINN_RUDP_MEDIA_RELIABLE_EXPIRE_AFTER_MS: u64 = 75;
-const MUNINN_RUDP_MEDIA_RECEIVER_ASSEMBLY_DEADLINE_MS: u64 = 75;
+const MUNINN_RUDP_MEDIA_RELIABLE_EXPIRE_AFTER_MS: u64 = 250;
+const MUNINN_RUDP_MEDIA_RECEIVER_ASSEMBLY_DEADLINE_MS: u64 = 150;
 const MUNINN_RUDP_MEDIA_RECEIVER_GAP_WAIT_MS: u64 = 8;
-const MUNINN_MEDIA_RECEIVER_KEYFRAME_RESTART_DELAY_MS: u64 = 100;
 const PS_MOVE_LED_REPORT_LEN: usize = 49;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -638,6 +635,10 @@ fn spawn_capture_stream_activation(
     command: &MuninnCaptureStreamCommandRecord,
 ) -> Result<Child> {
     let exe = env::current_exe().context("resolving current Muninn executable")?;
+    let activation_stderr = options.log_root.join(format!(
+        "muninn-activation-{}.err.log",
+        safe_log_component(&command.command_id)
+    ));
     let mut args = vec![
         "activate".to_string(),
         "--store".to_string(),
@@ -683,9 +684,27 @@ fn spawn_capture_stream_activation(
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(fs::File::create(&activation_stderr).with_context(|| {
+            format!(
+                "creating activation stderr log {}",
+                activation_stderr.display()
+            )
+        })?)
         .spawn()
         .context("spawning daemon-owned Muninn capture activation child")
+}
+
+fn safe_log_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 fn active_move_state_sources(sources: Vec<MoveStateSource>) -> Vec<ActiveMoveStateSource> {
@@ -1256,7 +1275,7 @@ fn run_rudp_mux_once(
             timebase_den: 90_000,
             deadline_delay_ticks: i64::from(video_frame_duration_ticks(options)?),
             max_payload_bytes: options.media_packet_bytes.max(256),
-            max_pending_bytes: options.media_packet_bytes.max(256) * 256,
+            max_pending_bytes: options.media_packet_bytes.max(256) * 4096,
             source_runtime_id: options.host_id.clone(),
             source_role: "muninn.rudp.video".to_string(),
         },
@@ -1295,19 +1314,11 @@ fn run_rudp_mux_once(
                 ) {
                     payloads_dropped += 1;
                     poll_rudp_media_receiver_feedback(&mut transport, &mut receiver_feedback)?;
-                    if receiver_feedback_requests_encoder_restart(
+                    record_receiver_keyframe_pressure(
                         &receiver_feedback,
                         &mut handled_keyframe_requests,
-                    ) {
-                        let expired = transport.stats().reliable_packets_expired;
-                        break Ok(rudp_media_keyframe_restart(
-                            payloads_sent,
-                            payloads_dropped,
-                            expired,
-                            &receiver_feedback,
-                        ));
-                    }
-                    transport.poll_resends()?;
+                    );
+                    poll_rudp_resends_with_backpressure(&mut transport)?;
                     if payloads_dropped == 1 || payloads_dropped % 300 == 0 {
                         let expired = transport.stats().reliable_packets_expired;
                         eprintln!(
@@ -1324,23 +1335,21 @@ fn run_rudp_mux_once(
                 }
 
                 let payload_len = queued.payload.payload.len();
-                transport
-                    .send(queued.payload.channel_id, queued.payload.payload)
-                    .context("sending typed Muninn media payload over RUDP media")?;
+                if !send_rudp_media_payload_with_backpressure(
+                    &mut transport,
+                    queued.payload,
+                    queued.queued_at,
+                    Duration::from_millis(media_profile.sender_queue_deadline_ms),
+                )? {
+                    payloads_dropped += 1;
+                    continue;
+                }
                 poll_rudp_media_receiver_feedback(&mut transport, &mut receiver_feedback)?;
-                if receiver_feedback_requests_encoder_restart(
+                record_receiver_keyframe_pressure(
                     &receiver_feedback,
                     &mut handled_keyframe_requests,
-                ) {
-                    let expired = transport.stats().reliable_packets_expired;
-                    break Ok(rudp_media_keyframe_restart(
-                        payloads_sent,
-                        payloads_dropped,
-                        expired,
-                        &receiver_feedback,
-                    ));
-                }
-                transport.poll_resends()?;
+                );
+                poll_rudp_resends_with_backpressure(&mut transport)?;
                 payloads_sent += 1;
                 if payloads_sent == 1 || payloads_sent % 900 == 0 {
                     let expired = transport.stats().reliable_packets_expired;
@@ -1358,19 +1367,11 @@ fn run_rudp_mux_once(
             Ok(Err(error)) => break Err(error),
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 poll_rudp_media_receiver_feedback(&mut transport, &mut receiver_feedback)?;
-                if receiver_feedback_requests_encoder_restart(
+                record_receiver_keyframe_pressure(
                     &receiver_feedback,
                     &mut handled_keyframe_requests,
-                ) {
-                    let expired = transport.stats().reliable_packets_expired;
-                    break Ok(rudp_media_keyframe_restart(
-                        payloads_sent,
-                        payloads_dropped,
-                        expired,
-                        &receiver_feedback,
-                    ));
-                }
-                transport.poll_resends()?;
+                );
+                poll_rudp_resends_with_backpressure(&mut transport)?;
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 let expired = transport.stats().reliable_packets_expired;
@@ -1431,38 +1432,63 @@ fn media_payload_queue_age_exceeded(queued_at: Instant, now: Instant, max_age: D
     now.saturating_duration_since(queued_at) > max_age
 }
 
+fn poll_rudp_resends_with_backpressure(
+    transport: &mut CultNetRudpSocketTransportConnection,
+) -> Result<()> {
+    match transport.poll_resends() {
+        Ok(()) => Ok(()),
+        Err(error) if is_would_block_error(&error) => Ok(()),
+        Err(error) => Err(error).context("polling Muninn RUDP media resends"),
+    }
+}
+
+fn send_rudp_media_payload_with_backpressure(
+    transport: &mut CultNetRudpSocketTransportConnection,
+    payload: MuninnMediaSendPayload,
+    queued_at: Instant,
+    max_age: Duration,
+) -> Result<bool> {
+    loop {
+        match transport.send(payload.channel_id, payload.payload.clone()) {
+            Ok(()) => return Ok(true),
+            Err(error) if is_would_block_error(&error) => {
+                if media_payload_queue_age_exceeded(queued_at, Instant::now(), max_age) {
+                    return Ok(false);
+                }
+                poll_rudp_resends_with_backpressure(transport)?;
+                thread::sleep(Duration::from_millis(1));
+            }
+            Err(error) => {
+                return Err(error).context("sending typed Muninn media payload over RUDP media");
+            }
+        }
+    }
+}
+
+fn is_would_block_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == ErrorKind::WouldBlock)
+            || cause.to_string().contains("os error 10035")
+    })
+}
+
 fn default_rudp_mux_restart_delay(restart_count: u32) -> Duration {
     Duration::from_secs((2 + restart_count).min(30) as u64)
 }
 
-fn receiver_keyframe_restart_delay() -> Duration {
-    Duration::from_millis(MUNINN_MEDIA_RECEIVER_KEYFRAME_RESTART_DELAY_MS)
-}
-
-fn receiver_feedback_requests_encoder_restart(
+fn record_receiver_keyframe_pressure(
     receiver_feedback: &MuninnRudpReceiverFeedbackStats,
     handled_keyframe_requests: &mut u64,
-) -> bool {
+) {
     if receiver_feedback.requested_keyframes <= *handled_keyframe_requests {
-        return false;
+        return;
     }
     *handled_keyframe_requests = receiver_feedback.requested_keyframes;
-    true
-}
-
-fn rudp_media_keyframe_restart(
-    sent: u64,
-    queue_dropped: u64,
-    reliable_expired: u64,
-    receiver_feedback: &MuninnRudpReceiverFeedbackStats,
-) -> RudpMuxRestart {
-    RudpMuxRestart {
-        detail: format!(
-            "receiver requested a fresh keyframe; {}",
-            rudp_media_progress_detail(sent, queue_dropped, reliable_expired, receiver_feedback)
-        ),
-        delay: receiver_keyframe_restart_delay(),
-    }
+    eprintln!(
+        "Muninn RUDP receiver requested a fresh keyframe; continuing current low-latency encoder session until explicit encoder control exists."
+    );
 }
 
 fn rudp_media_progress_detail(
@@ -1488,10 +1514,14 @@ fn poll_rudp_media_receiver_feedback(
     transport: &mut CultNetRudpSocketTransportConnection,
     stats: &mut MuninnRudpReceiverFeedbackStats,
 ) -> Result<()> {
-    while let Some(frame) = transport.receive_once()? {
-        record_rudp_media_receiver_feedback(&frame, stats)?;
+    loop {
+        match transport.receive_once() {
+            Ok(Some(frame)) => record_rudp_media_receiver_feedback(&frame, stats)?,
+            Ok(None) => return Ok(()),
+            Err(error) if is_would_block_error(&error) => return Ok(()),
+            Err(error) => return Err(error).context("polling Muninn RUDP media feedback"),
+        }
     }
-    Ok(())
 }
 
 fn record_rudp_media_receiver_feedback(
@@ -5095,6 +5125,11 @@ fn muninn_rudp_video_vbv_buffer_arg(options: &Options, profile: &MuninnRudpMedia
     format!("{frame_budget_kbits}k")
 }
 
+fn muninn_rudp_video_gop_frames(options: &Options) -> u32 {
+    let _ = options;
+    1
+}
+
 fn loopback_args(options: &Options) -> Vec<String> {
     vec![
         "-NoProfile".to_string(),
@@ -5151,6 +5186,14 @@ fn rudp_video_ffmpeg_args(options: &Options) -> Vec<String> {
         "cbr".to_string(),
         "-rc-lookahead".to_string(),
         profile.video_rc_lookahead.to_string(),
+        "-multipass".to_string(),
+        "disabled".to_string(),
+        "-strict_gop".to_string(),
+        "1".to_string(),
+        "-nonref_p".to_string(),
+        "1".to_string(),
+        "-b_ref_mode".to_string(),
+        "disabled".to_string(),
         "-b:v".to_string(),
         muninn_rudp_video_bitrate_arg(&profile),
         "-maxrate".to_string(),
@@ -5158,9 +5201,15 @@ fn rudp_video_ffmpeg_args(options: &Options) -> Vec<String> {
         "-bufsize".to_string(),
         muninn_rudp_video_vbv_buffer_arg(options, &profile),
         "-g".to_string(),
-        options.framerate.max(1).to_string(),
+        muninn_rudp_video_gop_frames(options).to_string(),
+        "-keyint_min".to_string(),
+        muninn_rudp_video_gop_frames(options).to_string(),
         "-forced-idr".to_string(),
         "1".to_string(),
+        "-fps_mode".to_string(),
+        "cfr".to_string(),
+        "-r".to_string(),
+        options.framerate.max(1).to_string(),
         "-f".to_string(),
         profile.video_codec.to_string(),
         "pipe:1".to_string(),
@@ -5259,6 +5308,10 @@ fn ffmpeg_args(options: &Options) -> Vec<String> {
         "30".to_string(),
         "-forced-idr".to_string(),
         "1".to_string(),
+        "-fps_mode".to_string(),
+        "cfr".to_string(),
+        "-r".to_string(),
+        options.framerate.max(1).to_string(),
         "-c:a".to_string(),
         "aac".to_string(),
         "-b:a".to_string(),
@@ -6020,7 +6073,7 @@ mod tests {
         assert_eq!(
             plan.targets,
             vec![
-                "rudp://10.77.0.2:5204/muninn.raven.av.rudp?channel=media&format=muninn-typed-media&connection=0x6d750001&profile=muninn.rudp.low_latency_h264_lan.v1&sender_resend_delay_ms=5&reliable_expire_after_ms=75&assembly_deadline_ms=75&gap_wait_ms=8"
+                "rudp://10.77.0.2:5204/muninn.raven.av.rudp?channel=media&format=muninn-typed-media&connection=0x6d750001&profile=muninn.rudp.low_latency_h264_lan.v1&sender_resend_delay_ms=5&reliable_expire_after_ms=250&assembly_deadline_ms=150&gap_wait_ms=8"
             ]
         );
         assert!(!plan.command_line.contains("tee"));
@@ -6061,19 +6114,47 @@ mod tests {
         );
         assert!(
             args.windows(2)
-                .any(|pair| pair[0] == "-b:v" && pair[1] == "12000k")
+                .any(|pair| pair[0] == "-multipass" && pair[1] == "disabled")
         );
         assert!(
             args.windows(2)
-                .any(|pair| pair[0] == "-maxrate" && pair[1] == "12000k")
+                .any(|pair| pair[0] == "-strict_gop" && pair[1] == "1")
         );
         assert!(
             args.windows(2)
-                .any(|pair| pair[0] == "-bufsize" && pair[1] == "200k")
+                .any(|pair| pair[0] == "-nonref_p" && pair[1] == "1")
         );
         assert!(
             args.windows(2)
-                .any(|pair| pair[0] == "-g" && pair[1] == "60")
+                .any(|pair| pair[0] == "-b_ref_mode" && pair[1] == "disabled")
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-b:v" && pair[1] == "8000k")
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-maxrate" && pair[1] == "8000k")
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-bufsize" && pair[1] == "134k")
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-g" && pair[1] == "1")
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-keyint_min" && pair[1] == "1")
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-fps_mode" && pair[1] == "cfr")
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-r" && pair[1] == "60")
         );
         assert!(
             args.windows(2)
@@ -6100,11 +6181,11 @@ mod tests {
 
         assert_eq!(
             muninn_rudp_video_vbv_buffer_arg(&thirty_fps, &profile),
-            "400k"
+            "267k"
         );
         assert_eq!(
             muninn_rudp_video_vbv_buffer_arg(&sixty_fps, &profile),
-            "200k"
+            "134k"
         );
     }
 
@@ -6240,57 +6321,22 @@ mod tests {
     }
 
     #[test]
-    fn receiver_feedback_keyframe_requests_are_single_restart_edges() {
+    fn receiver_feedback_keyframe_requests_are_recorded_without_encoder_restart() {
         let mut handled = 0;
         let mut receiver_feedback = MuninnRudpReceiverFeedbackStats::default();
 
-        assert!(!receiver_feedback_requests_encoder_restart(
-            &receiver_feedback,
-            &mut handled
-        ));
+        record_receiver_keyframe_pressure(&receiver_feedback, &mut handled);
+        assert_eq!(handled, 0);
 
         receiver_feedback.requested_keyframes = 1;
-        assert!(receiver_feedback_requests_encoder_restart(
-            &receiver_feedback,
-            &mut handled
-        ));
+        record_receiver_keyframe_pressure(&receiver_feedback, &mut handled);
         assert_eq!(handled, 1);
-        assert!(!receiver_feedback_requests_encoder_restart(
-            &receiver_feedback,
-            &mut handled
-        ));
+        record_receiver_keyframe_pressure(&receiver_feedback, &mut handled);
+        assert_eq!(handled, 1);
 
         receiver_feedback.requested_keyframes = 2;
-        assert!(receiver_feedback_requests_encoder_restart(
-            &receiver_feedback,
-            &mut handled
-        ));
+        record_receiver_keyframe_pressure(&receiver_feedback, &mut handled);
         assert_eq!(handled, 2);
-    }
-
-    #[test]
-    fn receiver_keyframe_restart_uses_short_delay_and_live_pressure_detail() {
-        let receiver_feedback = MuninnRudpReceiverFeedbackStats {
-            feedback_records: 1,
-            requested_keyframes: 1,
-            late_frames: 2,
-            missing_video_chunks: 3,
-            highest_decodable_frame_id: Some(40),
-        };
-
-        let restart = rudp_media_keyframe_restart(120, 4, 7, &receiver_feedback);
-
-        assert_eq!(restart.delay, receiver_keyframe_restart_delay());
-        assert!(
-            restart
-                .detail
-                .contains("receiver requested a fresh keyframe")
-        );
-        assert!(restart.detail.contains("sent=120"));
-        assert!(restart.detail.contains("queue_dropped=4"));
-        assert!(restart.detail.contains("reliable_expired=7"));
-        assert!(restart.detail.contains("receiver_keyframes=1"));
-        assert_eq!(default_rudp_mux_restart_delay(0), Duration::from_secs(2));
     }
 
     #[test]
