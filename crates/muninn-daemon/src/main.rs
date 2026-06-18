@@ -6825,6 +6825,42 @@ Device 00:07:04:A8:00:D0 (public)
                 .is_some_and(|entry| entry.contains("C:/Meta/Odin/state/muninn.activate.cc"))
         }));
 
+        let media_profile = transport
+            .value
+            .get("media_profile")
+            .and_then(|value| value.as_object())
+            .unwrap();
+        assert_eq!(
+            media_profile
+                .get("profile_id")
+                .and_then(|value| value.as_str()),
+            Some(MUNINN_RUDP_MEDIA_PROFILE_ID)
+        );
+        assert_eq!(
+            media_profile
+                .get("video_rate_control")
+                .and_then(|value| value.as_str()),
+            Some("cbr")
+        );
+        assert_eq!(
+            media_profile
+                .get("video_rc_lookahead")
+                .and_then(|value| value.as_u64()),
+            Some(0)
+        );
+        assert_eq!(
+            media_profile
+                .get("video_bufsize")
+                .and_then(|value| value.as_str()),
+            Some("400k")
+        );
+        assert_eq!(
+            media_profile
+                .get("receiver_gap_wait_ms")
+                .and_then(|value| value.as_u64()),
+            Some(8)
+        );
+
         let routes = provider
             .value
             .get("routes")
