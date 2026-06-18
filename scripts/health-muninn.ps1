@@ -103,6 +103,27 @@ foreach (`$expectation in `$taskExpectations) {
   if (`$expectation.Name -eq "GameCult-Muninn-VideoProof" -and `$psContent -notmatch 'srt://.+:\d+\?mode=caller') {
     throw "`$(`$expectation.Ps) does not carry the expected SRT caller target"
   }
+  if (`$expectation.Name -eq "GameCult-Muninn-VideoProof") {
+    foreach (`$requiredPair in @(
+      @("'-c:v'\s*,\s*'h264_nvenc'", "h264_nvenc video encoder"),
+      @("'-preset'\s*,\s*'p1'", "NVENC p1 preset"),
+      @("'-tune'\s*,\s*'ull'", "ultra-low-latency tune"),
+      @("'-zerolatency'\s*,\s*'1'", "zero-latency encoder flag"),
+      @("'-bf'\s*,\s*'0'", "disabled B-frames"),
+      @("'-delay'\s*,\s*'0'", "zero encoder delay"),
+      @("'-rc'\s*,\s*'cbr'", "CBR rate control"),
+      @("'-rc-lookahead'\s*,\s*'0'", "disabled lookahead"),
+      @("'-bufsize'\s*,\s*'400k'", "one-frame VBV buffer"),
+      @("'-forced-idr'\s*,\s*'1'", "forced IDR keyframes")
+    )) {
+      if (`$psContent -notmatch `$requiredPair[0]) {
+        throw "`$(`$expectation.Ps) does not carry `$(`$requiredPair[1])"
+      }
+    }
+    if (`$psContent -match "'-preset'\s*,\s*'p4'|24000k") {
+      throw "`$(`$expectation.Ps) still carries legacy buffered NVENC settings"
+    }
+  }
   `$vbs = Get-Content -LiteralPath `$expectation.Vbs -Raw
   if (`$vbs -match 'cmdPath\s*=') {
     throw "`$(`$expectation.Vbs) still routes through a cmdPath trampoline"
