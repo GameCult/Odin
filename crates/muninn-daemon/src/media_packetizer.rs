@@ -937,6 +937,7 @@ pub fn decode_media_wire_record(payload: &[u8]) -> Result<MuninnMediaWireRecord>
         MUNINN_MEDIA_VIDEO_ACCESS_UNIT_SCHEMA => {
             let record: MuninnMediaVideoAccessUnitRecord =
                 decode_record_payload(&document.payload)?;
+            validate_video_record(&record)?;
             let expected_key = video_record_key(&record);
             if document.record_key != expected_key {
                 return Err(anyhow!(
@@ -949,6 +950,7 @@ pub fn decode_media_wire_record(payload: &[u8]) -> Result<MuninnMediaWireRecord>
         }
         MUNINN_MEDIA_AUDIO_PACKET_SCHEMA => {
             let record: MuninnMediaAudioPacketRecord = decode_record_payload(&document.payload)?;
+            validate_audio_record(&record)?;
             let expected_key = audio_record_key(&record);
             if document.record_key != expected_key {
                 return Err(anyhow!(
@@ -962,6 +964,7 @@ pub fn decode_media_wire_record(payload: &[u8]) -> Result<MuninnMediaWireRecord>
         MUNINN_MEDIA_RECEIVER_FEEDBACK_SCHEMA => {
             let record: MuninnMediaReceiverFeedbackRecord =
                 decode_record_payload(&document.payload)?;
+            validate_feedback_record(&record)?;
             let expected_key = feedback_record_key(&record);
             if document.record_key != expected_key {
                 return Err(anyhow!(
@@ -982,6 +985,109 @@ fn encode_record_payload<T: Serialize>(record: &T) -> Result<Vec<u8>> {
 
 fn decode_record_payload<T: DeserializeOwned>(payload: &[u8]) -> Result<T> {
     rmp_serde::from_slice(payload).map_err(Into::into)
+}
+
+fn validate_video_record(record: &MuninnMediaVideoAccessUnitRecord) -> Result<()> {
+    if record.stream_id.is_empty() {
+        return Err(anyhow!("video media record stream_id must be non-empty"));
+    }
+    if record.session_id.is_empty() {
+        return Err(anyhow!("video media record session_id must be non-empty"));
+    }
+    if record.codec.is_empty() {
+        return Err(anyhow!("video media record codec must be non-empty"));
+    }
+    if record.timebase_num == 0 || record.timebase_den == 0 {
+        return Err(anyhow!("video media record timebase must be non-zero"));
+    }
+    if record.duration_ticks == 0 {
+        return Err(anyhow!(
+            "video media record duration_ticks must be greater than zero"
+        ));
+    }
+    if record.deadline_ticks < record.pts_ticks {
+        return Err(anyhow!(
+            "video media record deadline_ticks must not precede pts_ticks"
+        ));
+    }
+    if record.chunk_count == 0 {
+        return Err(anyhow!("video media record chunk_count must be non-zero"));
+    }
+    if record.chunk_index >= record.chunk_count {
+        return Err(anyhow!(
+            "video media record chunk_index {} is outside chunk_count {}",
+            record.chunk_index,
+            record.chunk_count
+        ));
+    }
+    if record.payload.is_empty() {
+        return Err(anyhow!("video media record payload must be non-empty"));
+    }
+    Ok(())
+}
+
+fn validate_audio_record(record: &MuninnMediaAudioPacketRecord) -> Result<()> {
+    if record.stream_id.is_empty() {
+        return Err(anyhow!("audio media record stream_id must be non-empty"));
+    }
+    if record.session_id.is_empty() {
+        return Err(anyhow!("audio media record session_id must be non-empty"));
+    }
+    if record.codec.is_empty() {
+        return Err(anyhow!("audio media record codec must be non-empty"));
+    }
+    if record.timebase_num == 0 || record.timebase_den == 0 {
+        return Err(anyhow!("audio media record timebase must be non-zero"));
+    }
+    if record.duration_ticks == 0 {
+        return Err(anyhow!(
+            "audio media record duration_ticks must be greater than zero"
+        ));
+    }
+    if record.deadline_ticks < record.pts_ticks {
+        return Err(anyhow!(
+            "audio media record deadline_ticks must not precede pts_ticks"
+        ));
+    }
+    if record.payload.is_empty() {
+        return Err(anyhow!("audio media record payload must be non-empty"));
+    }
+    Ok(())
+}
+
+fn validate_feedback_record(record: &MuninnMediaReceiverFeedbackRecord) -> Result<()> {
+    if record.stream_id.is_empty() {
+        return Err(anyhow!(
+            "receiver feedback media record stream_id must be non-empty"
+        ));
+    }
+    if record.session_id.is_empty() {
+        return Err(anyhow!(
+            "receiver feedback media record session_id must be non-empty"
+        ));
+    }
+    if record.receiver_id.is_empty() {
+        return Err(anyhow!(
+            "receiver feedback media record receiver_id must be non-empty"
+        ));
+    }
+    if record.observed_at.is_empty() {
+        return Err(anyhow!(
+            "receiver feedback media record observed_at must be non-empty"
+        ));
+    }
+    if record.jitter_us < 0 {
+        return Err(anyhow!(
+            "receiver feedback media record jitter_us must be non-negative"
+        ));
+    }
+    if record.decode_queue_us < 0 {
+        return Err(anyhow!(
+            "receiver feedback media record decode_queue_us must be non-negative"
+        ));
+    }
+    normalize_video_chunk_feedback_keys(record.missing_video_chunk_keys.clone())?;
+    Ok(())
 }
 
 fn video_record_key(record: &MuninnMediaVideoAccessUnitRecord) -> String {
@@ -2176,6 +2282,113 @@ mod tests {
         assert_eq!(
             decode_media_wire_record(&wire)?,
             MuninnMediaWireRecord::Feedback(record)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn media_wire_rejects_invalid_video_record_timing() -> Result<()> {
+        let access_unit = VideoAccessUnit {
+            bytes: vec![1, 2, 3],
+            keyframe: true,
+        };
+        let mut record = packetize_video_access_unit(
+            VideoFramePacketizeOptions {
+                stream_id: "muninn.raven.av.rudp",
+                session_id: "session-1",
+                codec: "h264",
+                frame_id: 9,
+                pts_ticks: 27_000,
+                duration_ticks: 3_000,
+                timebase_num: 1,
+                timebase_den: 90_000,
+                deadline_ticks: 28_800,
+                max_payload_bytes: 4,
+            },
+            &access_unit,
+        )?
+        .remove(0);
+        record.deadline_ticks = 26_999;
+        let wire = encode_media_wire_record(
+            &MuninnMediaWireRecord::Video(record),
+            "2026-06-18T00:00:00Z",
+            "muninn-test",
+            "media-test",
+        )?;
+
+        let error = decode_media_wire_record(&wire).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("video media record deadline_ticks must not precede pts_ticks")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn media_wire_rejects_invalid_audio_record_payload() -> Result<()> {
+        let mut record = packetize_audio_packet(
+            AudioPacketizeOptions {
+                stream_id: "muninn.raven.av.rudp",
+                session_id: "session-1",
+                codec: "opus",
+                packet_id: 12,
+                pts_ticks: 48_000,
+                duration_ticks: 960,
+                timebase_num: 1,
+                timebase_den: 48_000,
+                deadline_ticks: 48_960,
+            },
+            &[0xf8, 0xff, 0xfe],
+        )?;
+        record.payload.clear();
+        let wire = encode_media_wire_record(
+            &MuninnMediaWireRecord::Audio(record),
+            "2026-06-18T00:00:00Z",
+            "muninn-test",
+            "media-test",
+        )?;
+
+        let error = decode_media_wire_record(&wire).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("audio media record payload must be non-empty")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn media_wire_rejects_invalid_feedback_record_pressure() -> Result<()> {
+        let mut record = build_receiver_feedback(ReceiverFeedbackOptions {
+            stream_id: "muninn.raven.av.rudp",
+            session_id: "session-1",
+            receiver_id: "starfire.obs",
+            highest_decodable_frame_id: Some(40),
+            missing_frame_ids: vec![42],
+            missing_video_chunk_keys: vec![video_chunk_feedback_key(42, 2)],
+            late_frame_ids: vec![39],
+            requested_keyframe: true,
+            jitter_us: 700,
+            decode_queue_us: 2_000,
+            observed_at: "2026-06-18T00:00:00Z",
+        })?;
+        record.decode_queue_us = -1;
+        let wire = encode_media_wire_record(
+            &MuninnMediaWireRecord::Feedback(record),
+            "2026-06-18T00:00:00Z",
+            "muninn-test",
+            "media-test",
+        )?;
+
+        let error = decode_media_wire_record(&wire).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("receiver feedback media record decode_queue_us must be non-negative")
         );
         Ok(())
     }
