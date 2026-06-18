@@ -480,6 +480,7 @@ pub struct AudioPacketBuffer {
     timebase_num: Option<u32>,
     timebase_den: Option<u32>,
     next_packet_id: Option<u64>,
+    emitted_any: bool,
     packets: BTreeMap<u64, MuninnMediaAudioPacketRecord>,
 }
 
@@ -495,8 +496,19 @@ impl AudioPacketBuffer {
                 packet.packet_id
             ));
         }
-        if self.next_packet_id.is_none() {
-            self.next_packet_id = Some(packet.packet_id);
+        match self.next_packet_id {
+            None => self.next_packet_id = Some(packet.packet_id),
+            Some(next_packet_id) if packet.packet_id < next_packet_id && !self.emitted_any => {
+                self.next_packet_id = Some(packet.packet_id);
+            }
+            Some(next_packet_id) if packet.packet_id < next_packet_id => {
+                return Err(anyhow!(
+                    "audio packet buffer received stale packet_id {} before next expected {}",
+                    packet.packet_id,
+                    next_packet_id
+                ));
+            }
+            _ => {}
         }
         self.packets.insert(packet.packet_id, packet);
         Ok(())
@@ -510,6 +522,9 @@ impl AudioPacketBuffer {
         while let Some(packet) = self.packets.remove(&next_packet_id) {
             ready.push(packet);
             next_packet_id = next_packet_id.saturating_add(1);
+        }
+        if !ready.is_empty() {
+            self.emitted_any = true;
         }
         self.next_packet_id = Some(next_packet_id);
         ready
@@ -1237,6 +1252,39 @@ mod tests {
             vec![8, 9]
         );
         assert_eq!(buffer.pending_packet_count(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn audio_packet_buffer_tracks_lowest_packet_before_first_emit() -> Result<()> {
+        let mut buffer = AudioPacketBuffer::default();
+
+        buffer.insert(audio_packet(9, 12_000))?;
+        buffer.insert(audio_packet(7, 10_000))?;
+        buffer.insert(audio_packet(8, 11_000))?;
+
+        let ready = buffer.pop_ready_packets();
+
+        assert_eq!(
+            ready
+                .iter()
+                .map(|packet| packet.packet_id)
+                .collect::<Vec<_>>(),
+            vec![7, 8, 9]
+        );
+        assert_eq!(buffer.pending_packet_count(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn audio_packet_buffer_rejects_stale_packets_after_emit() -> Result<()> {
+        let mut buffer = AudioPacketBuffer::default();
+
+        buffer.insert(audio_packet(7, 10_000))?;
+        assert_eq!(buffer.pop_ready_packets().len(), 1);
+        let error = buffer.insert(audio_packet(6, 9_000)).unwrap_err();
+
+        assert!(error.to_string().contains("stale packet_id"));
         Ok(())
     }
 
