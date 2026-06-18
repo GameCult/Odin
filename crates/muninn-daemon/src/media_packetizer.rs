@@ -11,6 +11,8 @@ use odin_core::{
 use serde::{Serialize, de::DeserializeOwned};
 use std::collections::BTreeMap;
 
+pub const MUNINN_MEDIA_RUDP_CHANNEL: &str = "media";
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VideoAccessUnit {
     pub bytes: Vec<u8>,
@@ -216,6 +218,12 @@ pub enum MuninnMediaWireRecord {
     Video(MuninnMediaVideoAccessUnitRecord),
     Audio(MuninnMediaAudioPacketRecord),
     Feedback(MuninnMediaReceiverFeedbackRecord),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MuninnMediaSendPayload {
+    pub channel_id: &'static str,
+    pub payload: Vec<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -1031,6 +1039,13 @@ pub fn encode_video_annex_b_stream_wire_records(
     )
 }
 
+pub fn video_annex_b_stream_send_payloads(
+    options: VideoAnnexBStreamWireOptions<'_>,
+    input: &[u8],
+) -> Result<Vec<MuninnMediaSendPayload>> {
+    encode_video_annex_b_stream_wire_records(options, input).map(wire_payloads_to_media_send)
+}
+
 pub fn encode_audio_packet_wire_record(
     options: AudioPacketWireOptions<'_>,
     payload: &[u8],
@@ -1042,6 +1057,27 @@ pub fn encode_audio_packet_wire_record(
         options.source_runtime_id,
         options.source_role,
     )
+}
+
+pub fn audio_packet_send_payload(
+    options: AudioPacketWireOptions<'_>,
+    payload: &[u8],
+) -> Result<MuninnMediaSendPayload> {
+    encode_audio_packet_wire_record(options, payload).map(wire_payload_to_media_send)
+}
+
+fn wire_payloads_to_media_send(payloads: Vec<Vec<u8>>) -> Vec<MuninnMediaSendPayload> {
+    payloads
+        .into_iter()
+        .map(wire_payload_to_media_send)
+        .collect()
+}
+
+fn wire_payload_to_media_send(payload: Vec<u8>) -> MuninnMediaSendPayload {
+    MuninnMediaSendPayload {
+        channel_id: MUNINN_MEDIA_RUDP_CHANNEL,
+        payload,
+    }
 }
 
 pub fn decode_media_wire_record(payload: &[u8]) -> Result<MuninnMediaWireRecord> {
@@ -2495,6 +2531,43 @@ mod tests {
     }
 
     #[test]
+    fn media_send_payloads_pin_video_to_media_channel() -> Result<()> {
+        let mut stream = Vec::new();
+        stream.extend_from_slice(&start_code());
+        stream.extend_from_slice(&[0x65, 0x80]);
+
+        let payloads = video_annex_b_stream_send_payloads(
+            VideoAnnexBStreamWireOptions {
+                packetize: VideoAnnexBStreamPacketizeOptions {
+                    stream_id: "muninn.raven.av.rudp",
+                    session_id: "session-1",
+                    codec: "h264",
+                    first_frame_id: 9,
+                    first_pts_ticks: 27_000,
+                    frame_duration_ticks: 3_000,
+                    timebase_num: 1,
+                    timebase_den: 90_000,
+                    deadline_delay_ticks: 1_800,
+                    max_payload_bytes: 16,
+                },
+                stored_at: "2026-06-18T00:00:00Z",
+                source_runtime_id: "muninn-test",
+                source_role: "media-test",
+            },
+            &stream,
+        )?;
+
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads[0].channel_id, MUNINN_MEDIA_RUDP_CHANNEL);
+        let MuninnMediaWireRecord::Video(record) = decode_media_wire_record(&payloads[0].payload)?
+        else {
+            panic!("expected video media record");
+        };
+        assert_eq!(record.frame_id, 9);
+        Ok(())
+    }
+
+    #[test]
     fn media_wire_encodes_audio_packet_for_sender() -> Result<()> {
         let wire = encode_audio_packet_wire_record(
             AudioPacketWireOptions {
@@ -2523,6 +2596,37 @@ mod tests {
         assert_eq!(decoded.packet_id, 12);
         assert_eq!(decoded.codec, "opus");
         assert_eq!(decoded.payload, vec![0xf8, 0xff, 0xfe]);
+        Ok(())
+    }
+
+    #[test]
+    fn media_send_payload_pins_audio_to_media_channel() -> Result<()> {
+        let payload = audio_packet_send_payload(
+            AudioPacketWireOptions {
+                packetize: AudioPacketizeOptions {
+                    stream_id: "muninn.raven.av.rudp",
+                    session_id: "session-1",
+                    codec: "opus",
+                    packet_id: 12,
+                    pts_ticks: 48_000,
+                    duration_ticks: 960,
+                    timebase_num: 1,
+                    timebase_den: 48_000,
+                    deadline_ticks: 48_960,
+                },
+                stored_at: "2026-06-18T00:00:00Z",
+                source_runtime_id: "muninn-test",
+                source_role: "media-test",
+            },
+            &[0xf8, 0xff, 0xfe],
+        )?;
+
+        assert_eq!(payload.channel_id, MUNINN_MEDIA_RUDP_CHANNEL);
+        let MuninnMediaWireRecord::Audio(record) = decode_media_wire_record(&payload.payload)?
+        else {
+            panic!("expected audio media record");
+        };
+        assert_eq!(record.packet_id, 12);
         Ok(())
     }
 
