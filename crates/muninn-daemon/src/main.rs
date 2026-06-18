@@ -57,6 +57,7 @@ const MUNINN_MEDIA_RUDP_CONNECTION_ID: u32 = 0x6d75_0001;
 const MUNINN_MEDIA_SEND_QUEUE_DEADLINE_MS: u64 = 75;
 const MUNINN_RUDP_MEDIA_PROFILE_ID: &str = "muninn.rudp.low_latency_h264_lan.v1";
 const MUNINN_RUDP_MEDIA_VIDEO_BITRATE_KBPS: u32 = 12_000;
+const MUNINN_RUDP_MEDIA_RELIABLE_EXPIRE_AFTER_MS: u64 = 75;
 const MUNINN_RUDP_MEDIA_RECEIVER_ASSEMBLY_DEADLINE_MS: u64 = 75;
 const MUNINN_RUDP_MEDIA_RECEIVER_GAP_WAIT_MS: u64 = 8;
 const MUNINN_MEDIA_RECEIVER_KEYFRAME_RESTART_DELAY_MS: u64 = 100;
@@ -144,6 +145,7 @@ struct MuninnRudpMediaProfile {
     video_b_frames: u8,
     video_rc_lookahead: u8,
     sender_queue_deadline_ms: u64,
+    sender_reliable_expire_after_ms: u64,
     receiver_assembly_deadline_ms: u64,
     receiver_gap_wait_ms: u64,
 }
@@ -1809,6 +1811,7 @@ fn publish_runtime_boundary_records(
                 "video_rate_control": "cbr",
                 "video_rc_lookahead": media_profile.video_rc_lookahead,
                 "sender_queue_deadline_ms": media_profile.sender_queue_deadline_ms,
+                "sender_reliable_expire_after_ms": media_profile.sender_reliable_expire_after_ms,
                 "receiver_assembly_deadline_ms": media_profile.receiver_assembly_deadline_ms,
                 "receiver_gap_wait_ms": media_profile.receiver_gap_wait_ms,
                 "recovery": "receiver feedback may request keyframe; sender restarts low-latency encoder on new keyframe edges"
@@ -5023,8 +5026,11 @@ fn srt_endpoint(host: &str, port: u16) -> String {
 fn rudp_endpoint(host: &str, port: u16, stream_id: &str) -> String {
     let profile = muninn_rudp_media_profile();
     format!(
-        "rudp://{host}:{port}/{stream_id}?channel=media&format=muninn-typed-media&connection=0x{MUNINN_MEDIA_RUDP_CONNECTION_ID:08x}&profile={}&assembly_deadline_ms={}&gap_wait_ms={}",
-        profile.profile_id, profile.receiver_assembly_deadline_ms, profile.receiver_gap_wait_ms
+        "rudp://{host}:{port}/{stream_id}?channel=media&format=muninn-typed-media&connection=0x{MUNINN_MEDIA_RUDP_CONNECTION_ID:08x}&profile={}&reliable_expire_after_ms={}&assembly_deadline_ms={}&gap_wait_ms={}",
+        profile.profile_id,
+        profile.sender_reliable_expire_after_ms,
+        profile.receiver_assembly_deadline_ms,
+        profile.receiver_gap_wait_ms
     )
 }
 
@@ -5039,6 +5045,7 @@ fn muninn_rudp_media_profile() -> MuninnRudpMediaProfile {
         video_b_frames: 0,
         video_rc_lookahead: 0,
         sender_queue_deadline_ms: MUNINN_MEDIA_SEND_QUEUE_DEADLINE_MS,
+        sender_reliable_expire_after_ms: MUNINN_RUDP_MEDIA_RELIABLE_EXPIRE_AFTER_MS,
         receiver_assembly_deadline_ms: MUNINN_RUDP_MEDIA_RECEIVER_ASSEMBLY_DEADLINE_MS,
         receiver_gap_wait_ms: MUNINN_RUDP_MEDIA_RECEIVER_GAP_WAIT_MS,
     }
@@ -5978,7 +5985,7 @@ mod tests {
         assert_eq!(
             plan.targets,
             vec![
-                "rudp://10.77.0.2:5204/muninn.raven.av.rudp?channel=media&format=muninn-typed-media&connection=0x6d750001&profile=muninn.rudp.low_latency_h264_lan.v1&assembly_deadline_ms=75&gap_wait_ms=8"
+                "rudp://10.77.0.2:5204/muninn.raven.av.rudp?channel=media&format=muninn-typed-media&connection=0x6d750001&profile=muninn.rudp.low_latency_h264_lan.v1&reliable_expire_after_ms=75&assembly_deadline_ms=75&gap_wait_ms=8"
             ]
         );
         assert!(!plan.command_line.contains("tee"));
@@ -6859,6 +6866,12 @@ Device 00:07:04:A8:00:D0 (public)
                 .get("receiver_gap_wait_ms")
                 .and_then(|value| value.as_u64()),
             Some(8)
+        );
+        assert_eq!(
+            media_profile
+                .get("sender_reliable_expire_after_ms")
+                .and_then(|value| value.as_u64()),
+            Some(75)
         );
 
         let routes = provider

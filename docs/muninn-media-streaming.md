@@ -164,9 +164,10 @@ Recommended first LAN profile:
 - Control: sender may adapt bitrate, keyframe cadence, chunk size, and playout
   budget from receiver feedback; the receiver must not silently stretch latency
   to preserve visual perfection.
-- Receiver URL policy: RUDP stream URLs carry `profile`, `assembly_deadline_ms`,
-  and `gap_wait_ms` so the OBS bridge receives playout budget from Muninn's
-  stream profile instead of hard-coding receiver policy privately.
+- Receiver URL policy: RUDP stream URLs carry `profile`,
+  `reliable_expire_after_ms`, `assembly_deadline_ms`, and `gap_wait_ms` so the
+  OBS bridge receives playout budget from Muninn's stream profile instead of
+  hard-coding receiver policy privately.
 
 ### Motion Vectors And Reconstruction
 
