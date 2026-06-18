@@ -132,6 +132,7 @@ pub struct CultNetRudpSession {
     ordered_next_sequence_by_channel: BTreeMap<String, u32>,
     ordered_buffers: BTreeMap<String, BTreeMap<u32, PendingOrderedFrame>>,
     fragment_buffers: BTreeMap<(String, u16), FragmentBuffer>,
+    reliable_packets_expired: u64,
 }
 
 impl CultNetRudpSession {
@@ -150,6 +151,7 @@ impl CultNetRudpSession {
             ordered_next_sequence_by_channel: BTreeMap::new(),
             ordered_buffers: BTreeMap::new(),
             fragment_buffers: BTreeMap::new(),
+            reliable_packets_expired: 0,
         }
     }
 
@@ -171,6 +173,10 @@ impl CultNetRudpSession {
 
     pub fn last_received_at_ms(&self) -> Option<u64> {
         self.last_received_at_ms
+    }
+
+    pub fn reliable_packets_expired(&self) -> u64 {
+        self.reliable_packets_expired
     }
 
     pub fn create_connect(&mut self, now_ms: u64, payload: Vec<u8>) -> Result<CultNetRudpPacket> {
@@ -581,11 +587,13 @@ impl CultNetRudpSession {
     }
 
     fn purge_expired_reliable(&mut self, now_ms: u64) {
+        let before = self.pending_reliable.len();
         self.pending_reliable.retain(|_, pending| {
             pending
                 .expires_at_ms
                 .map_or(true, |expires_at_ms| now_ms <= expires_at_ms)
         });
+        self.reliable_packets_expired += (before - self.pending_reliable.len()) as u64;
     }
 
     fn apply_acknowledgements(&mut self, packet: &CultNetRudpPacket) {
@@ -896,7 +904,9 @@ impl CultNetRudpSocketTransportConnection {
     }
 
     pub fn stats(&self) -> CultNetTransportStats {
-        self.stats.clone()
+        let mut stats = self.stats.clone();
+        stats.reliable_packets_expired = self.session.reliable_packets_expired();
+        stats
     }
 
     pub fn disconnect_reason(&self) -> Option<&[u8]> {

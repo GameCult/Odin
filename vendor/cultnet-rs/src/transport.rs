@@ -20,6 +20,7 @@ pub struct CultNetTransportStats {
     pub bytes_sent: u64,
     pub frames_received: u64,
     pub frames_sent: u64,
+    pub reliable_packets_expired: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

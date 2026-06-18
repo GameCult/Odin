@@ -556,6 +556,7 @@ fn rudp_session_expires_bounded_reliable_media_resends() -> Result<()> {
     );
     assert!(session.due_resends(61).is_empty());
     assert!(session.pending_reliable_sequences().is_empty());
+    assert_eq!(session.reliable_packets_expired(), 1);
 
     session.send(
         "media",
@@ -568,6 +569,7 @@ fn rudp_session_expires_bounded_reliable_media_resends() -> Result<()> {
             ..CultNetRudpSendOptions::default()
         },
     )?;
+    assert_eq!(session.reliable_packets_expired(), 1);
     Ok(())
 }
 
@@ -930,6 +932,53 @@ fn rudp_socket_transport_handshakes_and_carries_reliable_ordered_schema_frames()
     assert_eq!(client.stats().frames_sent, 1);
     assert_eq!(server.stats().frames_received, 1);
 
+    Ok(())
+}
+
+#[test]
+fn rudp_socket_transport_reports_expired_reliable_media_packets() -> Result<()> {
+    let server_socket = bind_udp_socket()?;
+    let client_socket = bind_udp_socket()?;
+    let server_addr = server_socket.local_addr()?;
+    let connection_id = 0x1020_3042;
+    let mut server =
+        CultNetRudpSocketTransportConnection::new(CultNetRudpSocketTransportOptions {
+            runtime_id: "rust-rudp-media-expiry-server".to_string(),
+            socket: server_socket,
+            mode: CultNetRudpSocketMode::Server,
+            remote_addr: None,
+            connection_id,
+            initial_sequence: 100,
+            resend_delay_ms: 5,
+            transport_id: None,
+            max_payload_bytes: None,
+            max_fragment_bytes: None,
+            max_pending_reliable_packets: None,
+        })?;
+    let mut client =
+        CultNetRudpSocketTransportConnection::new(CultNetRudpSocketTransportOptions {
+            runtime_id: "rust-rudp-media-expiry-client".to_string(),
+            socket: client_socket,
+            mode: CultNetRudpSocketMode::Client,
+            remote_addr: Some(server_addr),
+            connection_id,
+            initial_sequence: 1,
+            resend_delay_ms: 5,
+            transport_id: None,
+            max_payload_bytes: None,
+            max_fragment_bytes: None,
+            max_pending_reliable_packets: None,
+        })?;
+
+    client.connect(b"join".to_vec())?;
+    pump_rudp_handshake(&mut client, &mut server)?;
+    client.send("media", b"late-frame".to_vec())?;
+    assert_eq!(client.stats().reliable_packets_expired, 0);
+
+    thread::sleep(StdDuration::from_millis(90));
+    client.poll_resends()?;
+
+    assert_eq!(client.stats().reliable_packets_expired, 1);
     Ok(())
 }
 
