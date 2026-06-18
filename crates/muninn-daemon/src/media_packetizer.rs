@@ -164,6 +164,116 @@ pub fn video_chunk_feedback_key(frame_id: u64, chunk_index: u16) -> String {
     VideoChunkKey::new(frame_id, chunk_index).as_feedback_key()
 }
 
+#[derive(Clone, Debug)]
+pub struct VideoFrameAssembly {
+    stream_id: String,
+    session_id: String,
+    frame_id: u64,
+    chunk_count: u16,
+    chunks: BTreeMap<u16, MuninnMediaVideoAccessUnitRecord>,
+}
+
+impl VideoFrameAssembly {
+    pub fn new(first_chunk: MuninnMediaVideoAccessUnitRecord) -> Result<Self> {
+        if first_chunk.chunk_count == 0 {
+            return Err(anyhow!("video frame assembly chunk_count must be non-zero"));
+        }
+        if first_chunk.chunk_index >= first_chunk.chunk_count {
+            return Err(anyhow!(
+                "video frame assembly chunk_index {} is outside chunk_count {}",
+                first_chunk.chunk_index,
+                first_chunk.chunk_count
+            ));
+        }
+        if first_chunk.payload.is_empty() {
+            return Err(anyhow!(
+                "video frame assembly chunk payload must be non-empty"
+            ));
+        }
+
+        let mut chunks = BTreeMap::new();
+        chunks.insert(first_chunk.chunk_index, first_chunk.clone());
+        Ok(Self {
+            stream_id: first_chunk.stream_id,
+            session_id: first_chunk.session_id,
+            frame_id: first_chunk.frame_id,
+            chunk_count: first_chunk.chunk_count,
+            chunks,
+        })
+    }
+
+    pub fn insert(&mut self, chunk: MuninnMediaVideoAccessUnitRecord) -> Result<()> {
+        self.require_matching_frame(&chunk)?;
+        if self.chunks.contains_key(&chunk.chunk_index) {
+            return Err(anyhow!(
+                "video frame assembly has duplicate chunk_index {}",
+                chunk.chunk_index
+            ));
+        }
+        self.chunks.insert(chunk.chunk_index, chunk);
+        Ok(())
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.chunks.len() == self.chunk_count as usize
+    }
+
+    pub fn missing_video_chunk_keys(&self) -> Vec<String> {
+        (0..self.chunk_count)
+            .filter(|chunk_index| !self.chunks.contains_key(chunk_index))
+            .map(|chunk_index| video_chunk_feedback_key(self.frame_id, chunk_index))
+            .collect()
+    }
+
+    pub fn reassemble(&self) -> Result<VideoAccessUnit> {
+        let chunks = self.chunks.values().cloned().collect::<Vec<_>>();
+        reassemble_video_access_unit(&chunks)
+    }
+
+    fn require_matching_frame(&self, chunk: &MuninnMediaVideoAccessUnitRecord) -> Result<()> {
+        if chunk.stream_id != self.stream_id {
+            return Err(anyhow!("video frame assembly received mixed stream_id"));
+        }
+        if chunk.session_id != self.session_id {
+            return Err(anyhow!("video frame assembly received mixed session_id"));
+        }
+        if chunk.frame_id != self.frame_id {
+            return Err(anyhow!("video frame assembly received mixed frame_id"));
+        }
+        if chunk.chunk_count != self.chunk_count {
+            return Err(anyhow!("video frame assembly received mixed chunk_count"));
+        }
+        if chunk.chunk_index >= self.chunk_count {
+            return Err(anyhow!(
+                "video frame assembly chunk_index {} is outside chunk_count {}",
+                chunk.chunk_index,
+                self.chunk_count
+            ));
+        }
+        if chunk.payload.is_empty() {
+            return Err(anyhow!(
+                "video frame assembly chunk payload must be non-empty"
+            ));
+        }
+        if let Some(first) = self.chunks.values().next() {
+            if chunk.codec != first.codec
+                || chunk.pts_ticks != first.pts_ticks
+                || chunk.duration_ticks != first.duration_ticks
+                || chunk.timebase_num != first.timebase_num
+                || chunk.timebase_den != first.timebase_den
+                || chunk.deadline_ticks != first.deadline_ticks
+                || chunk.keyframe != first.keyframe
+                || chunk.dependency_frame_id != first.dependency_frame_id
+            {
+                return Err(anyhow!(
+                    "video frame assembly received mixed media metadata"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 pub fn packetize_video_access_unit(
     options: VideoFramePacketizeOptions<'_>,
     access_unit: &VideoAccessUnit,
@@ -967,6 +1077,80 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("frame_id"));
+    }
+
+    #[test]
+    fn video_frame_assembly_reports_missing_chunks_and_reassembles() -> Result<()> {
+        let access_unit = VideoAccessUnit {
+            bytes: vec![1, 2, 3, 4, 5],
+            keyframe: true,
+        };
+        let records = packetize_video_access_unit(
+            VideoFramePacketizeOptions {
+                stream_id: "muninn.raven.av.rudp",
+                session_id: "session-1",
+                codec: "h264",
+                frame_id: 9,
+                pts_ticks: 27_000,
+                duration_ticks: 3_000,
+                timebase_num: 1,
+                timebase_den: 90_000,
+                deadline_ticks: 28_800,
+                max_payload_bytes: 2,
+            },
+            &access_unit,
+        )?;
+        let mut assembly = VideoFrameAssembly::new(records[0].clone())?;
+
+        assert!(!assembly.is_complete());
+        assert_eq!(
+            assembly.missing_video_chunk_keys(),
+            vec![
+                video_chunk_feedback_key(9, 1),
+                video_chunk_feedback_key(9, 2)
+            ]
+        );
+
+        assembly.insert(records[2].clone())?;
+        assert_eq!(
+            assembly.missing_video_chunk_keys(),
+            vec![video_chunk_feedback_key(9, 1)]
+        );
+
+        assembly.insert(records[1].clone())?;
+        assert!(assembly.is_complete());
+        assert_eq!(assembly.reassemble()?, access_unit);
+        Ok(())
+    }
+
+    #[test]
+    fn video_frame_assembly_rejects_mixed_metadata() -> Result<()> {
+        let access_unit = VideoAccessUnit {
+            bytes: vec![1, 2, 3, 4],
+            keyframe: false,
+        };
+        let mut records = packetize_video_access_unit(
+            VideoFramePacketizeOptions {
+                stream_id: "muninn.raven.av.rudp",
+                session_id: "session-1",
+                codec: "h264",
+                frame_id: 9,
+                pts_ticks: 27_000,
+                duration_ticks: 3_000,
+                timebase_num: 1,
+                timebase_den: 90_000,
+                deadline_ticks: 28_800,
+                max_payload_bytes: 2,
+            },
+            &access_unit,
+        )?;
+        let mut assembly = VideoFrameAssembly::new(records[0].clone())?;
+        records[1].pts_ticks += 1;
+
+        let error = assembly.insert(records[1].clone()).unwrap_err();
+
+        assert!(error.to_string().contains("metadata"));
+        Ok(())
     }
 
     #[test]
