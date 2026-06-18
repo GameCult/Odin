@@ -184,6 +184,7 @@ pub struct VideoAnnexBStreamSendConfig {
     pub timebase_den: u32,
     pub deadline_delay_ticks: i64,
     pub max_payload_bytes: usize,
+    pub max_pending_bytes: usize,
     pub source_runtime_id: String,
     pub source_role: String,
 }
@@ -273,6 +274,9 @@ impl VideoAnnexBStreamSendState {
         if config.max_payload_bytes == 0 {
             return Err(anyhow!("max_payload_bytes must be greater than zero"));
         }
+        if config.max_pending_bytes == 0 {
+            return Err(anyhow!("max_pending_bytes must be greater than zero"));
+        }
         if config.source_runtime_id.is_empty() {
             return Err(anyhow!("source_runtime_id must be non-empty"));
         }
@@ -291,6 +295,12 @@ impl VideoAnnexBStreamSendState {
     pub fn push(&mut self, stored_at: &str, bytes: &[u8]) -> Result<Vec<MuninnMediaSendPayload>> {
         if !bytes.is_empty() {
             self.pending.extend_from_slice(bytes);
+        }
+        if self.pending.len() > self.config.max_pending_bytes {
+            return Err(anyhow!(
+                "Annex B stream sender pending buffer exceeded {} bytes without a complete frame",
+                self.config.max_pending_bytes
+            ));
         }
         self.emit_available(stored_at, false)
     }
@@ -2746,6 +2756,7 @@ mod tests {
             timebase_den: 90_000,
             deadline_delay_ticks: 1_800,
             max_payload_bytes: 16,
+            max_pending_bytes: 64,
             source_runtime_id: "muninn-test".to_string(),
             source_role: "media-test".to_string(),
         }
@@ -2812,6 +2823,24 @@ mod tests {
                 .to_string()
                 .contains("Annex B stream sender requires H.264/AVC or H.265/HEVC codec")
         );
+    }
+
+    #[test]
+    fn annex_b_stream_send_state_rejects_unbounded_pending_bytes() -> Result<()> {
+        let mut config = stream_send_config();
+        config.max_pending_bytes = 4;
+        let mut sender = VideoAnnexBStreamSendState::new(config)?;
+
+        let error = sender
+            .push("2026-06-18T00:00:00Z", &[0x47, 0x40, 0x00, 0x10, 0x00])
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("pending buffer exceeded 4 bytes")
+        );
+        Ok(())
     }
 
     #[test]
