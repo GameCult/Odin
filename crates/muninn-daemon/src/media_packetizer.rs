@@ -115,6 +115,13 @@ pub struct ReceiverFeedbackOptions<'a> {
     pub observed_at: &'a str,
 }
 
+pub struct ExpiredVideoFrameFeedbackOptions<'a> {
+    pub receiver_id: &'a str,
+    pub jitter_us: i64,
+    pub decode_queue_us: i64,
+    pub observed_at: &'a str,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MuninnMediaWireRecord {
     Video(MuninnMediaVideoAccessUnitRecord),
@@ -162,6 +169,13 @@ impl VideoChunkKey {
 
 pub fn video_chunk_feedback_key(frame_id: u64, chunk_index: u16) -> String {
     VideoChunkKey::new(frame_id, chunk_index).as_feedback_key()
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExpiredVideoFrame {
+    pub key: VideoFrameKey,
+    pub deadline_ticks: i64,
+    pub missing_video_chunk_keys: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -223,6 +237,14 @@ impl VideoFrameAssembly {
             .filter(|chunk_index| !self.chunks.contains_key(chunk_index))
             .map(|chunk_index| video_chunk_feedback_key(self.frame_id, chunk_index))
             .collect()
+    }
+
+    pub fn deadline_ticks(&self) -> i64 {
+        self.chunks
+            .values()
+            .next()
+            .map(|chunk| chunk.deadline_ticks)
+            .unwrap_or_default()
     }
 
     pub fn reassemble(&self) -> Result<VideoAccessUnit> {
@@ -329,6 +351,31 @@ impl VideoFrameAssemblySet {
 
     pub fn pending_frame_count(&self) -> usize {
         self.frames.len()
+    }
+
+    pub fn expire_late_frames(&mut self, now_ticks: i64) -> Vec<ExpiredVideoFrame> {
+        let expired_keys = self
+            .frames
+            .iter()
+            .filter_map(|(key, assembly)| {
+                if assembly.deadline_ticks() <= now_ticks {
+                    Some(key.clone())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+
+        expired_keys
+            .into_iter()
+            .filter_map(|key| {
+                self.frames.remove(&key).map(|assembly| ExpiredVideoFrame {
+                    key,
+                    deadline_ticks: assembly.deadline_ticks(),
+                    missing_video_chunk_keys: assembly.missing_video_chunk_keys(),
+                })
+            })
+            .collect()
     }
 }
 
@@ -568,6 +615,44 @@ pub fn build_receiver_feedback(
         observed_at: options.observed_at.to_string(),
         missing_video_chunk_keys,
     })
+}
+
+pub fn build_feedback_for_expired_video_frames(
+    expired: &[ExpiredVideoFrame],
+    options: ExpiredVideoFrameFeedbackOptions<'_>,
+) -> Result<Option<MuninnMediaReceiverFeedbackRecord>> {
+    let Some(first) = expired.first() else {
+        return Ok(None);
+    };
+
+    let mut late_frame_ids = Vec::with_capacity(expired.len());
+    let mut missing_video_chunk_keys = Vec::new();
+    for frame in expired {
+        if frame.key.stream_id != first.key.stream_id
+            || frame.key.session_id != first.key.session_id
+        {
+            return Err(anyhow!(
+                "expired video frame feedback requires one stream_id/session_id"
+            ));
+        }
+        late_frame_ids.push(frame.key.frame_id);
+        missing_video_chunk_keys.extend(frame.missing_video_chunk_keys.iter().cloned());
+    }
+
+    build_receiver_feedback(ReceiverFeedbackOptions {
+        stream_id: &first.key.stream_id,
+        session_id: &first.key.session_id,
+        receiver_id: options.receiver_id,
+        highest_decodable_frame_id: first.key.frame_id.checked_sub(1),
+        missing_frame_ids: Vec::new(),
+        missing_video_chunk_keys,
+        late_frame_ids,
+        requested_keyframe: true,
+        jitter_us: options.jitter_us,
+        decode_queue_us: options.decode_queue_us,
+        observed_at: options.observed_at,
+    })
+    .map(Some)
 }
 
 pub fn encode_media_wire_record(
@@ -1286,6 +1371,127 @@ mod tests {
         assert_eq!(assemblies.pending_frame_count(), 1);
         assert!(assemblies.missing_video_chunk_keys(&key_one).is_empty());
         Ok(())
+    }
+
+    #[test]
+    fn video_frame_assembly_set_expires_late_incomplete_frames() -> Result<()> {
+        let frame_one = VideoAccessUnit {
+            bytes: vec![1, 2, 3, 4, 5],
+            keyframe: true,
+        };
+        let frame_two = VideoAccessUnit {
+            bytes: vec![6, 7, 8, 9],
+            keyframe: false,
+        };
+        let frame_one_chunks = packetize_video_access_unit(
+            VideoFramePacketizeOptions {
+                stream_id: "muninn.raven.av.rudp",
+                session_id: "session-1",
+                codec: "h264",
+                frame_id: 9,
+                pts_ticks: 27_000,
+                duration_ticks: 3_000,
+                timebase_num: 1,
+                timebase_den: 90_000,
+                deadline_ticks: 28_800,
+                max_payload_bytes: 2,
+            },
+            &frame_one,
+        )?;
+        let frame_two_chunks = packetize_video_access_unit(
+            VideoFramePacketizeOptions {
+                stream_id: "muninn.raven.av.rudp",
+                session_id: "session-1",
+                codec: "h264",
+                frame_id: 10,
+                pts_ticks: 30_000,
+                duration_ticks: 3_000,
+                timebase_num: 1,
+                timebase_den: 90_000,
+                deadline_ticks: 31_800,
+                max_payload_bytes: 2,
+            },
+            &frame_two,
+        )?;
+        let key_one = VideoFrameKey::from_chunk(&frame_one_chunks[0]);
+        let key_two = VideoFrameKey::from_chunk(&frame_two_chunks[0]);
+        let mut assemblies = VideoFrameAssemblySet::default();
+
+        assemblies.insert_chunk(frame_one_chunks[0].clone())?;
+        assemblies.insert_chunk(frame_two_chunks[0].clone())?;
+
+        let expired = assemblies.expire_late_frames(30_000);
+
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0].key, key_one);
+        assert_eq!(
+            expired[0].missing_video_chunk_keys,
+            vec![
+                video_chunk_feedback_key(9, 1),
+                video_chunk_feedback_key(9, 2)
+            ]
+        );
+        assert_eq!(assemblies.pending_frame_count(), 1);
+        assert!(!assemblies.missing_video_chunk_keys(&key_two).is_empty());
+
+        let feedback = build_feedback_for_expired_video_frames(
+            &expired,
+            ExpiredVideoFrameFeedbackOptions {
+                receiver_id: "starfire.obs",
+                jitter_us: 700,
+                decode_queue_us: 2_000,
+                observed_at: "2026-06-18T00:00:00Z",
+            },
+        )?
+        .expect("expired frames should produce feedback");
+
+        assert_eq!(feedback.late_frame_ids, vec![9]);
+        assert_eq!(
+            feedback.missing_video_chunk_keys,
+            vec![
+                video_chunk_feedback_key(9, 1),
+                video_chunk_feedback_key(9, 2)
+            ]
+        );
+        assert!(feedback.requested_keyframe);
+        Ok(())
+    }
+
+    #[test]
+    fn expired_video_feedback_rejects_mixed_streams() {
+        let expired = vec![
+            ExpiredVideoFrame {
+                key: VideoFrameKey {
+                    stream_id: "muninn.raven.av.rudp".to_string(),
+                    session_id: "session-1".to_string(),
+                    frame_id: 9,
+                },
+                deadline_ticks: 28_800,
+                missing_video_chunk_keys: vec![video_chunk_feedback_key(9, 1)],
+            },
+            ExpiredVideoFrame {
+                key: VideoFrameKey {
+                    stream_id: "muninn.nightwing.av.rudp".to_string(),
+                    session_id: "session-1".to_string(),
+                    frame_id: 10,
+                },
+                deadline_ticks: 31_800,
+                missing_video_chunk_keys: vec![video_chunk_feedback_key(10, 1)],
+            },
+        ];
+
+        let error = build_feedback_for_expired_video_frames(
+            &expired,
+            ExpiredVideoFrameFeedbackOptions {
+                receiver_id: "starfire.obs",
+                jitter_us: 700,
+                decode_queue_us: 2_000,
+                observed_at: "2026-06-18T00:00:00Z",
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("one stream_id/session_id"));
     }
 
     #[test]
