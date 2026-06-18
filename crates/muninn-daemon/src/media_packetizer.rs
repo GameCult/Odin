@@ -208,6 +208,21 @@ pub struct AudioPacketWireOptions<'a> {
     pub source_role: &'a str,
 }
 
+pub struct AudioAdtsStreamSendConfig {
+    pub stream_id: String,
+    pub session_id: String,
+    pub codec: String,
+    pub first_packet_id: u64,
+    pub first_pts_ticks: i64,
+    pub packet_duration_ticks: u32,
+    pub timebase_num: u32,
+    pub timebase_den: u32,
+    pub deadline_delay_ticks: i64,
+    pub max_pending_bytes: usize,
+    pub source_runtime_id: String,
+    pub source_role: String,
+}
+
 pub struct ReceiverFeedbackOptions<'a> {
     pub stream_id: &'a str,
     pub session_id: &'a str,
@@ -399,6 +414,141 @@ impl VideoAnnexBStreamSendState {
             .next_pts_ticks
             .checked_add(i64::from(self.config.frame_duration_ticks))
             .ok_or_else(|| anyhow!("video pts_ticks overflow"))?;
+        Ok(())
+    }
+}
+
+pub struct AudioAdtsStreamSendState {
+    config: AudioAdtsStreamSendConfig,
+    pending: Vec<u8>,
+    next_packet_id: u64,
+    next_pts_ticks: i64,
+}
+
+impl AudioAdtsStreamSendState {
+    pub fn new(config: AudioAdtsStreamSendConfig) -> Result<Self> {
+        if !matches!(
+            config.codec.trim().to_ascii_lowercase().as_str(),
+            "aac" | "aac-adts" | "adts" | "audio/aac"
+        ) {
+            return Err(anyhow!("ADTS stream sender requires AAC/ADTS codec"));
+        }
+        if config.stream_id.is_empty() {
+            return Err(anyhow!("stream_id must be non-empty"));
+        }
+        if config.session_id.is_empty() {
+            return Err(anyhow!("session_id must be non-empty"));
+        }
+        if config.packet_duration_ticks == 0 {
+            return Err(anyhow!("packet_duration_ticks must be greater than zero"));
+        }
+        if config.timebase_num == 0 || config.timebase_den == 0 {
+            return Err(anyhow!("audio timebase must be non-zero"));
+        }
+        if config.deadline_delay_ticks < 0 {
+            return Err(anyhow!("deadline_delay_ticks must be non-negative"));
+        }
+        if config.max_pending_bytes == 0 {
+            return Err(anyhow!("max_pending_bytes must be greater than zero"));
+        }
+        if config.source_runtime_id.is_empty() {
+            return Err(anyhow!("source_runtime_id must be non-empty"));
+        }
+        if config.source_role.is_empty() {
+            return Err(anyhow!("source_role must be non-empty"));
+        }
+
+        Ok(Self {
+            next_packet_id: config.first_packet_id,
+            next_pts_ticks: config.first_pts_ticks,
+            config,
+            pending: Vec::new(),
+        })
+    }
+
+    pub fn push(&mut self, stored_at: &str, bytes: &[u8]) -> Result<Vec<MuninnMediaSendPayload>> {
+        if !bytes.is_empty() {
+            self.pending.extend_from_slice(bytes);
+        }
+        if self.pending.len() > self.config.max_pending_bytes {
+            return Err(anyhow!(
+                "ADTS stream sender pending buffer exceeded {} bytes without a complete packet",
+                self.config.max_pending_bytes
+            ));
+        }
+        self.emit_available(stored_at)
+    }
+
+    pub fn finish(&mut self, stored_at: &str) -> Result<Vec<MuninnMediaSendPayload>> {
+        let payloads = self.emit_available(stored_at)?;
+        if !self.pending.is_empty() {
+            return Err(anyhow!(
+                "ADTS stream sender finished with {} trailing bytes",
+                self.pending.len()
+            ));
+        }
+        Ok(payloads)
+    }
+
+    pub fn pending_bytes(&self) -> usize {
+        self.pending.len()
+    }
+
+    pub fn next_packet_id(&self) -> u64 {
+        self.next_packet_id
+    }
+
+    fn emit_available(&mut self, stored_at: &str) -> Result<Vec<MuninnMediaSendPayload>> {
+        if stored_at.is_empty() {
+            return Err(anyhow!("stored_at must be non-empty"));
+        }
+
+        let frames = complete_adts_frames(&self.pending)?;
+        if frames.consumed_bytes == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut payloads = Vec::new();
+        for frame in frames.frames {
+            let deadline_ticks = self
+                .next_pts_ticks
+                .checked_add(self.config.deadline_delay_ticks)
+                .ok_or_else(|| anyhow!("audio deadline_ticks overflow"))?;
+            payloads.push(audio_packet_send_payload(
+                AudioPacketWireOptions {
+                    packetize: AudioPacketizeOptions {
+                        stream_id: &self.config.stream_id,
+                        session_id: &self.config.session_id,
+                        codec: &self.config.codec,
+                        packet_id: self.next_packet_id,
+                        pts_ticks: self.next_pts_ticks,
+                        duration_ticks: self.config.packet_duration_ticks,
+                        timebase_num: self.config.timebase_num,
+                        timebase_den: self.config.timebase_den,
+                        deadline_ticks,
+                    },
+                    stored_at,
+                    source_runtime_id: &self.config.source_runtime_id,
+                    source_role: &self.config.source_role,
+                },
+                &frame,
+            )?);
+            self.advance_packet_clock()?;
+        }
+
+        self.pending.drain(..frames.consumed_bytes);
+        Ok(payloads)
+    }
+
+    fn advance_packet_clock(&mut self) -> Result<()> {
+        self.next_packet_id = self
+            .next_packet_id
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("audio packet_id overflow"))?;
+        self.next_pts_ticks = self
+            .next_pts_ticks
+            .checked_add(i64::from(self.config.packet_duration_ticks))
+            .ok_or_else(|| anyhow!("audio pts_ticks overflow"))?;
         Ok(())
     }
 }
@@ -1464,6 +1614,53 @@ fn normalized_video_codec(codec: &str) -> Option<&'static str> {
         "av1" | "av01" | "video/av1" => Some("av1"),
         _ => None,
     }
+}
+
+struct CompleteAdtsFrames {
+    frames: Vec<Vec<u8>>,
+    consumed_bytes: usize,
+}
+
+fn complete_adts_frames(input: &[u8]) -> Result<CompleteAdtsFrames> {
+    let mut frames = Vec::new();
+    let mut offset = 0_usize;
+
+    while offset < input.len() {
+        let remaining = &input[offset..];
+        if remaining.len() < 2 {
+            break;
+        }
+        if remaining[0] != 0xff || (remaining[1] & 0xf0) != 0xf0 {
+            return Err(anyhow!("ADTS frame must start with sync word"));
+        }
+        if remaining.len() < 7 {
+            break;
+        }
+
+        let protection_absent = (remaining[1] & 0x01) != 0;
+        let header_len = if protection_absent { 7 } else { 9 };
+        let frame_len = (((remaining[3] & 0x03) as usize) << 11)
+            | ((remaining[4] as usize) << 3)
+            | ((remaining[5] as usize) >> 5);
+        if frame_len < header_len {
+            return Err(anyhow!(
+                "ADTS frame length {frame_len} is shorter than header length {header_len}"
+            ));
+        }
+        if remaining.len() < frame_len {
+            break;
+        }
+
+        frames.push(remaining[..frame_len].to_vec());
+        offset = offset
+            .checked_add(frame_len)
+            .ok_or_else(|| anyhow!("ADTS consumed byte count overflow"))?;
+    }
+
+    Ok(CompleteAdtsFrames {
+        frames,
+        consumed_bytes: offset,
+    })
 }
 
 fn annex_b_nal_units<'a>(
@@ -2762,6 +2959,38 @@ mod tests {
         }
     }
 
+    fn adts_stream_send_config() -> AudioAdtsStreamSendConfig {
+        AudioAdtsStreamSendConfig {
+            stream_id: "muninn.raven.av.rudp".to_string(),
+            session_id: "session-1".to_string(),
+            codec: "aac-adts".to_string(),
+            first_packet_id: 12,
+            first_pts_ticks: 48_000,
+            packet_duration_ticks: 1_024,
+            timebase_num: 1,
+            timebase_den: 48_000,
+            deadline_delay_ticks: 1_024,
+            max_pending_bytes: 128,
+            source_runtime_id: "muninn-test".to_string(),
+            source_role: "media-test".to_string(),
+        }
+    }
+
+    fn adts_frame(payload: &[u8]) -> Vec<u8> {
+        let frame_length = 7 + payload.len();
+        let mut frame = vec![
+            0xff,
+            0xf1,
+            0x4c,
+            0x80 | (((frame_length >> 11) & 0x03) as u8),
+            ((frame_length >> 3) & 0xff) as u8,
+            (((frame_length & 0x07) << 5) as u8) | 0x1f,
+            0xfc,
+        ];
+        frame.extend_from_slice(payload);
+        frame
+    }
+
     #[test]
     fn annex_b_stream_send_state_emits_only_completed_frames() -> Result<()> {
         let mut first_frame = Vec::new();
@@ -2841,6 +3070,97 @@ mod tests {
                 .contains("pending buffer exceeded 4 bytes")
         );
         Ok(())
+    }
+
+    #[test]
+    fn adts_stream_send_state_emits_complete_packets() -> Result<()> {
+        let first_frame = adts_frame(&[0x11, 0x22, 0x33]);
+        let second_frame = adts_frame(&[0x44, 0x55]);
+        let mut sender = AudioAdtsStreamSendState::new(adts_stream_send_config())?;
+
+        let first_push = sender.push("2026-06-18T00:00:00Z", &first_frame[..4])?;
+
+        assert!(first_push.is_empty());
+        assert_eq!(sender.pending_bytes(), 4);
+        assert_eq!(sender.next_packet_id(), 12);
+
+        let mut tail = first_frame[4..].to_vec();
+        tail.extend_from_slice(&second_frame);
+        let second_push = sender.push("2026-06-18T00:00:00Z", &tail)?;
+
+        assert_eq!(second_push.len(), 2);
+        assert_eq!(second_push[0].channel_id, MUNINN_MEDIA_RUDP_CHANNEL);
+        assert_eq!(second_push[1].channel_id, MUNINN_MEDIA_RUDP_CHANNEL);
+
+        let MuninnMediaWireRecord::Audio(first) =
+            decode_media_wire_record(&second_push[0].payload)?
+        else {
+            panic!("expected audio media record");
+        };
+        assert_eq!(first.packet_id, 12);
+        assert_eq!(first.pts_ticks, 48_000);
+        assert_eq!(first.deadline_ticks, 49_024);
+        assert_eq!(first.codec, "aac-adts");
+        assert_eq!(first.payload, first_frame);
+
+        let MuninnMediaWireRecord::Audio(second) =
+            decode_media_wire_record(&second_push[1].payload)?
+        else {
+            panic!("expected audio media record");
+        };
+        assert_eq!(second.packet_id, 13);
+        assert_eq!(second.pts_ticks, 49_024);
+        assert_eq!(second.deadline_ticks, 50_048);
+        assert_eq!(second.payload, second_frame);
+        assert_eq!(sender.pending_bytes(), 0);
+        assert_eq!(sender.next_packet_id(), 14);
+        Ok(())
+    }
+
+    #[test]
+    fn adts_stream_send_state_rejects_wrong_sync() -> Result<()> {
+        let mut sender = AudioAdtsStreamSendState::new(adts_stream_send_config())?;
+
+        let error = sender
+            .push("2026-06-18T00:00:00Z", &[0x47, 0x40, 0x00, 0x10])
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("ADTS frame must start with sync word")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn adts_stream_send_state_rejects_trailing_bytes_on_finish() -> Result<()> {
+        let mut sender = AudioAdtsStreamSendState::new(adts_stream_send_config())?;
+
+        let push = sender.push("2026-06-18T00:00:00Z", &[0xff])?;
+        assert!(push.is_empty());
+
+        let error = sender.finish("2026-06-18T00:00:00Z").unwrap_err();
+
+        assert!(error.to_string().contains("trailing bytes"));
+        Ok(())
+    }
+
+    #[test]
+    fn adts_stream_send_state_rejects_non_adts_codecs() {
+        let mut config = adts_stream_send_config();
+        config.codec = "opus".to_string();
+
+        let error = match AudioAdtsStreamSendState::new(config) {
+            Ok(_) => panic!("Opus must not create an ADTS stream sender"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("ADTS stream sender requires AAC/ADTS codec")
+        );
     }
 
     #[test]
