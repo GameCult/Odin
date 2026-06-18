@@ -1,5 +1,5 @@
 use anyhow::{Result, anyhow};
-use odin_core::MuninnMediaVideoAccessUnitRecord;
+use odin_core::{MuninnMediaAudioPacketRecord, MuninnMediaVideoAccessUnitRecord};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VideoAccessUnit {
@@ -79,6 +79,18 @@ pub struct VideoFramePacketizeOptions<'a> {
     pub max_payload_bytes: usize,
 }
 
+pub struct AudioPacketizeOptions<'a> {
+    pub stream_id: &'a str,
+    pub session_id: &'a str,
+    pub codec: &'a str,
+    pub packet_id: u64,
+    pub pts_ticks: i64,
+    pub duration_ticks: u32,
+    pub timebase_num: u32,
+    pub timebase_den: u32,
+    pub deadline_ticks: i64,
+}
+
 pub fn packetize_video_access_unit(
     options: VideoFramePacketizeOptions<'_>,
     access_unit: &VideoAccessUnit,
@@ -136,6 +148,40 @@ pub fn packetize_video_access_unit(
     }
 
     Ok(records)
+}
+
+pub fn packetize_audio_packet(
+    options: AudioPacketizeOptions<'_>,
+    payload: &[u8],
+) -> Result<MuninnMediaAudioPacketRecord> {
+    if options.stream_id.is_empty() {
+        return Err(anyhow!("stream_id must be non-empty"));
+    }
+    if options.session_id.is_empty() {
+        return Err(anyhow!("session_id must be non-empty"));
+    }
+    if options.codec.is_empty() {
+        return Err(anyhow!("codec must be non-empty"));
+    }
+    if options.timebase_num == 0 || options.timebase_den == 0 {
+        return Err(anyhow!("audio timebase must be non-zero"));
+    }
+    if payload.is_empty() {
+        return Err(anyhow!("audio packet payload must be non-empty"));
+    }
+
+    Ok(MuninnMediaAudioPacketRecord {
+        stream_id: options.stream_id.to_string(),
+        session_id: options.session_id.to_string(),
+        packet_id: options.packet_id,
+        codec: options.codec.to_string(),
+        pts_ticks: options.pts_ticks,
+        duration_ticks: options.duration_ticks,
+        timebase_num: options.timebase_num,
+        timebase_den: options.timebase_den,
+        deadline_ticks: options.deadline_ticks,
+        payload: payload.to_vec(),
+    })
 }
 
 fn h264_annex_b_nal_units(input: &[u8]) -> Result<Vec<NalUnit<'_>>> {
@@ -336,5 +382,50 @@ mod tests {
         assert_eq!(records[0].dependency_frame_id, Some(8));
         assert_eq!(records[2].payload, vec![5]);
         Ok(())
+    }
+
+    #[test]
+    fn packetizes_audio_payload_into_typed_packet() -> Result<()> {
+        let record = packetize_audio_packet(
+            AudioPacketizeOptions {
+                stream_id: "muninn.raven.av.rudp",
+                session_id: "session-1",
+                codec: "opus",
+                packet_id: 12,
+                pts_ticks: 48_000,
+                duration_ticks: 960,
+                timebase_num: 1,
+                timebase_den: 48_000,
+                deadline_ticks: 48_960,
+            },
+            &[0xf8, 0xff, 0xfe],
+        )?;
+
+        assert_eq!(record.stream_id, "muninn.raven.av.rudp");
+        assert_eq!(record.codec, "opus");
+        assert_eq!(record.packet_id, 12);
+        assert_eq!(record.payload, vec![0xf8, 0xff, 0xfe]);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_empty_audio_payloads() {
+        let error = packetize_audio_packet(
+            AudioPacketizeOptions {
+                stream_id: "muninn.raven.av.rudp",
+                session_id: "session-1",
+                codec: "opus",
+                packet_id: 12,
+                pts_ticks: 48_000,
+                duration_ticks: 960,
+                timebase_num: 1,
+                timebase_den: 48_000,
+                deadline_ticks: 48_960,
+            },
+            &[],
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("payload must be non-empty"));
     }
 }
