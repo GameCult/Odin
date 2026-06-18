@@ -164,7 +164,11 @@ Recommended first LAN profile:
 - Packet size: default typed media chunks are `480` bytes. That leaves headroom
   for CultNet/MessagePack/RUDP headers inside a normal Ethernet MTU so the OBS
   bridge does not depend on IP fragmentation or private RUDP fragment
-  reassembly.
+  reassembly. The sender also sets CultNet RUDP `max_fragment_bytes` to `1431`
+  bytes (`1472` byte IPv4 UDP payload budget minus `36` RUDP fixed header bytes
+  minus the five-byte `media` channel id), so oversized typed records fragment
+  in CultNet deliberately instead of falling through to accidental IP
+  fragmentation.
 - Control: sender may adapt bitrate, keyframe cadence, chunk size, and playout
   budget from receiver feedback; the receiver must not silently stretch latency
   to preserve visual perfection.

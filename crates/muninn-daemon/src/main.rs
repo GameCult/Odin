@@ -58,6 +58,11 @@ const MUNINN_MEDIA_SEND_QUEUE_DEADLINE_MS: u64 = 75;
 const MUNINN_RUDP_MEDIA_PROFILE_ID: &str = "muninn.rudp.low_latency_h264_lan.v1";
 const MUNINN_RUDP_MEDIA_VIDEO_BITRATE_KBPS: u32 = 12_000;
 const MUNINN_RUDP_MEDIA_PACKET_BYTES: usize = 480;
+const MUNINN_RUDP_IPV4_UDP_PAYLOAD_BYTES: usize = 1_472;
+const MUNINN_RUDP_FIXED_HEADER_BYTES: usize = 36;
+const MUNINN_RUDP_MEDIA_MAX_FRAGMENT_BYTES: usize = MUNINN_RUDP_IPV4_UDP_PAYLOAD_BYTES
+    - MUNINN_RUDP_FIXED_HEADER_BYTES
+    - crate::media_packetizer::MUNINN_MEDIA_RUDP_CHANNEL.len();
 const MUNINN_RUDP_MEDIA_RELIABLE_EXPIRE_AFTER_MS: u64 = 75;
 const MUNINN_RUDP_MEDIA_RECEIVER_ASSEMBLY_DEADLINE_MS: u64 = 75;
 const MUNINN_RUDP_MEDIA_RECEIVER_GAP_WAIT_MS: u64 = 8;
@@ -144,6 +149,7 @@ struct MuninnRudpMediaProfile {
     video_tune: &'static str,
     video_bitrate_kbps: u32,
     media_packet_bytes: usize,
+    max_fragment_bytes: usize,
     video_b_frames: u8,
     video_rc_lookahead: u8,
     sender_queue_deadline_ms: u64,
@@ -1542,6 +1548,7 @@ fn open_media_rudp_transport(options: &Options) -> Result<CultNetRudpSocketTrans
             MUNINN_MEDIA_RUDP_CONNECTION_ID,
         );
         options.resend_delay_ms = 5;
+        options.max_fragment_bytes = Some(media_profile.max_fragment_bytes as u32);
         options.media_reliable_expire_after_ms =
             Some(media_profile.sender_reliable_expire_after_ms);
         options
@@ -1813,6 +1820,7 @@ fn publish_runtime_boundary_records(
                 "video_maxrate": muninn_rudp_video_bitrate_arg(&media_profile),
                 "video_bufsize": muninn_rudp_video_vbv_buffer_arg(options, &media_profile),
                 "media_packet_bytes": media_profile.media_packet_bytes,
+                "max_fragment_bytes": media_profile.max_fragment_bytes,
                 "video_b_frames": media_profile.video_b_frames,
                 "video_rate_control": "cbr",
                 "video_rc_lookahead": media_profile.video_rc_lookahead,
@@ -5049,6 +5057,7 @@ fn muninn_rudp_media_profile() -> MuninnRudpMediaProfile {
         video_tune: "ull",
         video_bitrate_kbps: MUNINN_RUDP_MEDIA_VIDEO_BITRATE_KBPS,
         media_packet_bytes: MUNINN_RUDP_MEDIA_PACKET_BYTES,
+        max_fragment_bytes: MUNINN_RUDP_MEDIA_MAX_FRAGMENT_BYTES,
         video_b_frames: 0,
         video_rc_lookahead: 0,
         sender_queue_deadline_ms: MUNINN_MEDIA_SEND_QUEUE_DEADLINE_MS,
@@ -6111,9 +6120,15 @@ mod tests {
 
         assert_eq!(payloads.len(), 1);
         assert!(
-            payloads[0].payload.len() <= 1_472,
+            payloads[0].payload.len() <= MUNINN_RUDP_MEDIA_MAX_FRAGMENT_BYTES,
             "typed media payload was {} bytes",
             payloads[0].payload.len()
+        );
+        assert!(
+            payloads[0].payload.len()
+                + MUNINN_RUDP_FIXED_HEADER_BYTES
+                + crate::media_packetizer::MUNINN_MEDIA_RUDP_CHANNEL.len()
+                <= MUNINN_RUDP_IPV4_UDP_PAYLOAD_BYTES
         );
     }
 
@@ -6910,6 +6925,12 @@ Device 00:07:04:A8:00:D0 (public)
                 .get("media_packet_bytes")
                 .and_then(|value| value.as_u64()),
             Some(MUNINN_RUDP_MEDIA_PACKET_BYTES as u64)
+        );
+        assert_eq!(
+            media_profile
+                .get("max_fragment_bytes")
+                .and_then(|value| value.as_u64()),
+            Some(MUNINN_RUDP_MEDIA_MAX_FRAGMENT_BYTES as u64)
         );
         assert_eq!(
             media_profile
