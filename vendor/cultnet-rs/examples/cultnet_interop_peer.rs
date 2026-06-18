@@ -14,6 +14,12 @@ use cultnet_rs::CultNetMutationAuthority;
 use cultnet_rs::CultNetSchemaKind;
 use cultnet_rs::CultNetSchemaRegistration;
 use cultnet_rs::CultNetSchemaRegistry;
+use cultnet_rs::CultNetTransportChannel;
+use cultnet_rs::CultNetTransportDelivery;
+use cultnet_rs::CultNetTransportDescriptor;
+use cultnet_rs::CultNetTransportOrdering;
+use cultnet_rs::CultNetTransportProfile;
+use cultnet_rs::CultNetTransportProtocol;
 use cultnet_rs::CultNetWireContract;
 use cultnet_rs::builtin_schema_registry;
 use cultnet_rs::decode_cultnet_message_from_slice;
@@ -364,6 +370,12 @@ fn dial(config: DialConfig) -> Result<()> {
             supported_document_types: Some(vec![INTEROP_DOCUMENT_TYPE.to_string()]),
             supported_mutation_contracts: Some(interaction_contracts()),
             supported_message_versions: Some(vec![INTEROP_SCHEMA_VERSION.to_string()]),
+            transport_profiles: Some(tcp_framed_transport_profiles(
+                &config.runtime_id,
+                None,
+                None,
+                None,
+            )),
             supports_schema_catalog: Some(true),
         },
     )?;
@@ -615,6 +627,12 @@ fn handle_connection(
                         supported_document_types: Some(vec![INTEROP_DOCUMENT_TYPE.to_string()]),
                         supported_mutation_contracts: Some(interaction_contracts()),
                         supported_message_versions: Some(vec![INTEROP_SCHEMA_VERSION.to_string()]),
+                        transport_profiles: Some(tcp_framed_transport_profiles(
+                            &config.runtime_id,
+                            Some(&config.advertise_host),
+                            Some(config.tcp_port),
+                            Some(config.discovery_group),
+                        )),
                         supports_schema_catalog: Some(true),
                     },
                 )?;
@@ -811,6 +829,45 @@ fn interaction_contracts() -> Vec<CultNetDocumentMutationContract> {
             FIRE_RECEIPT_TYPE.to_string(),
         ]),
         notes: None,
+    }]
+}
+
+fn tcp_framed_transport_profiles(
+    runtime_id: &str,
+    host: Option<&str>,
+    port: Option<u16>,
+    discovery_group: Option<Ipv4Addr>,
+) -> Vec<CultNetTransportProfile> {
+    vec![CultNetTransportProfile {
+        schema_version: "cultnet.transport_profile.v0".to_string(),
+        runtime_id: runtime_id.to_string(),
+        transports: vec![CultNetTransportDescriptor {
+            transport_id: "interop-tcp-framed".to_string(),
+            protocol: CultNetTransportProtocol::TcpFramed,
+            host: host.map(ToString::to_string),
+            port,
+            path: None,
+            discovery_group: discovery_group.map(|group| group.to_string()),
+            wire_contracts: Some(vec!["cultnet.schema.v0".to_string()]),
+            channels: vec![
+                CultNetTransportChannel {
+                    channel_id: "schema".to_string(),
+                    delivery: CultNetTransportDelivery::Reliable,
+                    ordering: CultNetTransportOrdering::Ordered,
+                    max_payload_bytes: None,
+                    max_fragment_bytes: None,
+                    max_pending_reliable_packets: None,
+                },
+                CultNetTransportChannel {
+                    channel_id: "state".to_string(),
+                    delivery: CultNetTransportDelivery::Reliable,
+                    ordering: CultNetTransportOrdering::Ordered,
+                    max_payload_bytes: None,
+                    max_fragment_bytes: None,
+                    max_pending_reliable_packets: None,
+                },
+            ],
+        }],
     }]
 }
 
