@@ -1257,8 +1257,10 @@ fn run_rudp_mux_once(
                     let _ = transport.receive_once()?;
                     transport.poll_resends()?;
                     if payloads_dropped == 1 || payloads_dropped % 300 == 0 {
+                        let expired = transport.stats().reliable_packets_expired;
                         eprintln!(
-                            "Muninn RUDP media sender dropped {payloads_dropped} stale queued payloads before send."
+                            "{}",
+                            rudp_media_progress_detail(payloads_sent, payloads_dropped, expired)
                         );
                     }
                     continue;
@@ -1272,8 +1274,10 @@ fn run_rudp_mux_once(
                 transport.poll_resends()?;
                 payloads_sent += 1;
                 if payloads_sent == 1 || payloads_sent % 900 == 0 {
+                    let expired = transport.stats().reliable_packets_expired;
                     eprintln!(
-                        "Muninn RUDP media sender sent {payloads_sent} typed payloads; latest payload was {payload_len} bytes."
+                        "{}; latest payload was {payload_len} bytes.",
+                        rudp_media_progress_detail(payloads_sent, payloads_dropped, expired)
                     );
                 }
             }
@@ -1283,8 +1287,10 @@ fn run_rudp_mux_once(
                 transport.poll_resends()?;
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
+                let expired = transport.stats().reliable_packets_expired;
                 break Ok(format!(
-                    "encoder stdout ended after {payloads_sent} typed RUDP media payloads sent and {payloads_dropped} stale queued payloads dropped"
+                    "encoder stdout ended; {}",
+                    rudp_media_progress_detail(payloads_sent, payloads_dropped, expired)
                 ));
             }
         }
@@ -1320,6 +1326,12 @@ fn queue_muninn_media_payload(
 
 fn media_payload_queue_age_exceeded(queued_at: Instant, now: Instant, max_age: Duration) -> bool {
     now.saturating_duration_since(queued_at) > max_age
+}
+
+fn rudp_media_progress_detail(sent: u64, queue_dropped: u64, reliable_expired: u64) -> String {
+    format!(
+        "Muninn RUDP media progress: sent={sent} queue_dropped={queue_dropped} reliable_expired={reliable_expired}"
+    )
 }
 
 fn open_media_rudp_transport(options: &Options) -> Result<CultNetRudpSocketTransportConnection> {
@@ -5820,6 +5832,14 @@ mod tests {
             queued_at + deadline + Duration::from_millis(1),
             deadline
         ));
+    }
+
+    #[test]
+    fn rudp_media_progress_detail_reports_queue_and_transport_pressure() {
+        assert_eq!(
+            rudp_media_progress_detail(120, 3, 9),
+            "Muninn RUDP media progress: sent=120 queue_dropped=3 reliable_expired=9"
+        );
     }
 
     #[test]
