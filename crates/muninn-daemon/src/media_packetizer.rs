@@ -472,6 +472,129 @@ pub fn packetize_audio_packet(
     })
 }
 
+#[derive(Default)]
+pub struct AudioPacketBuffer {
+    stream_id: Option<String>,
+    session_id: Option<String>,
+    codec: Option<String>,
+    timebase_num: Option<u32>,
+    timebase_den: Option<u32>,
+    next_packet_id: Option<u64>,
+    packets: BTreeMap<u64, MuninnMediaAudioPacketRecord>,
+}
+
+impl AudioPacketBuffer {
+    pub fn insert(&mut self, packet: MuninnMediaAudioPacketRecord) -> Result<()> {
+        self.require_matching_audio_stream(&packet)?;
+        if packet.payload.is_empty() {
+            return Err(anyhow!("audio packet buffer payload must be non-empty"));
+        }
+        if self.packets.contains_key(&packet.packet_id) {
+            return Err(anyhow!(
+                "audio packet buffer has duplicate packet_id {}",
+                packet.packet_id
+            ));
+        }
+        if self.next_packet_id.is_none() {
+            self.next_packet_id = Some(packet.packet_id);
+        }
+        self.packets.insert(packet.packet_id, packet);
+        Ok(())
+    }
+
+    pub fn pop_ready_packets(&mut self) -> Vec<MuninnMediaAudioPacketRecord> {
+        let Some(mut next_packet_id) = self.next_packet_id else {
+            return Vec::new();
+        };
+        let mut ready = Vec::new();
+        while let Some(packet) = self.packets.remove(&next_packet_id) {
+            ready.push(packet);
+            next_packet_id = next_packet_id.saturating_add(1);
+        }
+        self.next_packet_id = Some(next_packet_id);
+        ready
+    }
+
+    pub fn expire_late_packets(&mut self, now_ticks: i64) -> Vec<u64> {
+        let expired_ids = self
+            .packets
+            .iter()
+            .filter_map(|(packet_id, packet)| {
+                if packet.deadline_ticks <= now_ticks {
+                    Some(*packet_id)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        for packet_id in &expired_ids {
+            self.packets.remove(packet_id);
+        }
+        if let Some(next_packet_id) = self.next_packet_id {
+            if expired_ids.contains(&next_packet_id) {
+                self.next_packet_id = self.packets.keys().next().copied();
+            }
+        }
+        expired_ids
+    }
+
+    pub fn pending_packet_count(&self) -> usize {
+        self.packets.len()
+    }
+
+    fn require_matching_audio_stream(
+        &mut self,
+        packet: &MuninnMediaAudioPacketRecord,
+    ) -> Result<()> {
+        if packet.stream_id.is_empty() {
+            return Err(anyhow!("audio packet buffer stream_id must be non-empty"));
+        }
+        if packet.session_id.is_empty() {
+            return Err(anyhow!("audio packet buffer session_id must be non-empty"));
+        }
+        if packet.codec.is_empty() {
+            return Err(anyhow!("audio packet buffer codec must be non-empty"));
+        }
+        if packet.timebase_num == 0 || packet.timebase_den == 0 {
+            return Err(anyhow!("audio packet buffer timebase must be non-zero"));
+        }
+
+        match (
+            self.stream_id.as_deref(),
+            self.session_id.as_deref(),
+            self.codec.as_deref(),
+            self.timebase_num,
+            self.timebase_den,
+        ) {
+            (None, None, None, None, None) => {
+                self.stream_id = Some(packet.stream_id.clone());
+                self.session_id = Some(packet.session_id.clone());
+                self.codec = Some(packet.codec.clone());
+                self.timebase_num = Some(packet.timebase_num);
+                self.timebase_den = Some(packet.timebase_den);
+                Ok(())
+            }
+            (
+                Some(stream_id),
+                Some(session_id),
+                Some(codec),
+                Some(timebase_num),
+                Some(timebase_den),
+            ) if stream_id == packet.stream_id
+                && session_id == packet.session_id
+                && codec == packet.codec
+                && timebase_num == packet.timebase_num
+                && timebase_den == packet.timebase_den =>
+            {
+                Ok(())
+            }
+            _ => Err(anyhow!(
+                "audio packet buffer received mixed stream metadata"
+            )),
+        }
+    }
+}
+
 pub fn reassemble_video_access_unit(
     chunks: &[MuninnMediaVideoAccessUnitRecord],
 ) -> Result<VideoAccessUnit> {
@@ -1066,6 +1189,90 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("payload must be non-empty"));
+    }
+
+    fn audio_packet(packet_id: u64, deadline_ticks: i64) -> MuninnMediaAudioPacketRecord {
+        packetize_audio_packet(
+            AudioPacketizeOptions {
+                stream_id: "muninn.raven.av.rudp",
+                session_id: "session-1",
+                codec: "opus",
+                packet_id,
+                pts_ticks: (packet_id as i64) * 960,
+                duration_ticks: 960,
+                timebase_num: 1,
+                timebase_den: 48_000,
+                deadline_ticks,
+            },
+            &[0xf8, 0xff, packet_id as u8],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn audio_packet_buffer_emits_contiguous_packets_in_order() -> Result<()> {
+        let mut buffer = AudioPacketBuffer::default();
+
+        buffer.insert(audio_packet(7, 10_000))?;
+        buffer.insert(audio_packet(9, 12_000))?;
+        let ready = buffer.pop_ready_packets();
+
+        assert_eq!(
+            ready
+                .iter()
+                .map(|packet| packet.packet_id)
+                .collect::<Vec<_>>(),
+            vec![7]
+        );
+        assert_eq!(buffer.pending_packet_count(), 1);
+
+        buffer.insert(audio_packet(8, 11_000))?;
+        let ready = buffer.pop_ready_packets();
+
+        assert_eq!(
+            ready
+                .iter()
+                .map(|packet| packet.packet_id)
+                .collect::<Vec<_>>(),
+            vec![8, 9]
+        );
+        assert_eq!(buffer.pending_packet_count(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn audio_packet_buffer_expires_late_packets() -> Result<()> {
+        let mut buffer = AudioPacketBuffer::default();
+
+        buffer.insert(audio_packet(7, 10_000))?;
+        buffer.insert(audio_packet(8, 12_000))?;
+
+        let expired = buffer.expire_late_packets(10_000);
+
+        assert_eq!(expired, vec![7]);
+        assert_eq!(buffer.pending_packet_count(), 1);
+        assert_eq!(
+            buffer
+                .pop_ready_packets()
+                .into_iter()
+                .map(|packet| packet.packet_id)
+                .collect::<Vec<_>>(),
+            vec![8]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn audio_packet_buffer_rejects_mixed_stream_metadata() -> Result<()> {
+        let mut buffer = AudioPacketBuffer::default();
+        let mut mixed = audio_packet(8, 12_000);
+        mixed.session_id = "session-2".to_string();
+
+        buffer.insert(audio_packet(7, 10_000))?;
+        let error = buffer.insert(mixed).unwrap_err();
+
+        assert!(error.to_string().contains("mixed stream metadata"));
+        Ok(())
     }
 
     #[test]
