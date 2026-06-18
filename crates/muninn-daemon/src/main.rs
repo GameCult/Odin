@@ -56,8 +56,7 @@ const MUNINN_COMMAND_RUDP_CONNECTION_ID: u32 = 0x6d75_0002;
 const MUNINN_MEDIA_RUDP_CONNECTION_ID: u32 = 0x6d75_0001;
 const MUNINN_MEDIA_SEND_QUEUE_DEADLINE_MS: u64 = 75;
 const MUNINN_RUDP_MEDIA_PROFILE_ID: &str = "muninn.rudp.low_latency_h264_lan.v1";
-const MUNINN_RUDP_MEDIA_VIDEO_BITRATE: &str = "12000k";
-const MUNINN_RUDP_MEDIA_VIDEO_BUFFER: &str = "6000k";
+const MUNINN_RUDP_MEDIA_VIDEO_BITRATE_KBPS: u32 = 12_000;
 const MUNINN_RUDP_MEDIA_RECEIVER_ASSEMBLY_DEADLINE_MS: u64 = 75;
 const MUNINN_RUDP_MEDIA_RECEIVER_GAP_WAIT_MS: u64 = 8;
 const MUNINN_MEDIA_RECEIVER_KEYFRAME_RESTART_DELAY_MS: u64 = 100;
@@ -141,10 +140,9 @@ struct MuninnRudpMediaProfile {
     video_encoder: &'static str,
     video_preset: &'static str,
     video_tune: &'static str,
-    video_bitrate: &'static str,
-    video_maxrate: &'static str,
-    video_bufsize: &'static str,
+    video_bitrate_kbps: u32,
     video_b_frames: u8,
+    video_rc_lookahead: u8,
     sender_queue_deadline_ms: u64,
     receiver_assembly_deadline_ms: u64,
     receiver_gap_wait_ms: u64,
@@ -1803,10 +1801,13 @@ fn publish_runtime_boundary_records(
                 "encoder": media_profile.video_encoder,
                 "encoder_preset": media_profile.video_preset,
                 "encoder_tune": media_profile.video_tune,
-                "video_bitrate": media_profile.video_bitrate,
-                "video_maxrate": media_profile.video_maxrate,
-                "video_bufsize": media_profile.video_bufsize,
+                "video_bitrate_kbps": media_profile.video_bitrate_kbps,
+                "video_bitrate": muninn_rudp_video_bitrate_arg(&media_profile),
+                "video_maxrate": muninn_rudp_video_bitrate_arg(&media_profile),
+                "video_bufsize": muninn_rudp_video_vbv_buffer_arg(options, &media_profile),
                 "video_b_frames": media_profile.video_b_frames,
+                "video_rate_control": "cbr",
+                "video_rc_lookahead": media_profile.video_rc_lookahead,
                 "sender_queue_deadline_ms": media_profile.sender_queue_deadline_ms,
                 "receiver_assembly_deadline_ms": media_profile.receiver_assembly_deadline_ms,
                 "receiver_gap_wait_ms": media_profile.receiver_gap_wait_ms,
@@ -5034,14 +5035,23 @@ fn muninn_rudp_media_profile() -> MuninnRudpMediaProfile {
         video_encoder: "h264_nvenc",
         video_preset: "p1",
         video_tune: "ull",
-        video_bitrate: MUNINN_RUDP_MEDIA_VIDEO_BITRATE,
-        video_maxrate: MUNINN_RUDP_MEDIA_VIDEO_BITRATE,
-        video_bufsize: MUNINN_RUDP_MEDIA_VIDEO_BUFFER,
+        video_bitrate_kbps: MUNINN_RUDP_MEDIA_VIDEO_BITRATE_KBPS,
         video_b_frames: 0,
+        video_rc_lookahead: 0,
         sender_queue_deadline_ms: MUNINN_MEDIA_SEND_QUEUE_DEADLINE_MS,
         receiver_assembly_deadline_ms: MUNINN_RUDP_MEDIA_RECEIVER_ASSEMBLY_DEADLINE_MS,
         receiver_gap_wait_ms: MUNINN_RUDP_MEDIA_RECEIVER_GAP_WAIT_MS,
     }
+}
+
+fn muninn_rudp_video_bitrate_arg(profile: &MuninnRudpMediaProfile) -> String {
+    format!("{}k", profile.video_bitrate_kbps)
+}
+
+fn muninn_rudp_video_vbv_buffer_arg(options: &Options, profile: &MuninnRudpMediaProfile) -> String {
+    let framerate = options.framerate.max(1);
+    let frame_budget_kbits = profile.video_bitrate_kbps.div_ceil(framerate).max(1);
+    format!("{frame_budget_kbits}k")
 }
 
 fn loopback_args(options: &Options) -> Vec<String> {
@@ -5096,12 +5106,16 @@ fn rudp_video_ffmpeg_args(options: &Options) -> Vec<String> {
         profile.video_b_frames.to_string(),
         "-delay".to_string(),
         "0".to_string(),
+        "-rc".to_string(),
+        "cbr".to_string(),
+        "-rc-lookahead".to_string(),
+        profile.video_rc_lookahead.to_string(),
         "-b:v".to_string(),
-        profile.video_bitrate.to_string(),
+        muninn_rudp_video_bitrate_arg(&profile),
         "-maxrate".to_string(),
-        profile.video_maxrate.to_string(),
+        muninn_rudp_video_bitrate_arg(&profile),
         "-bufsize".to_string(),
-        profile.video_bufsize.to_string(),
+        muninn_rudp_video_vbv_buffer_arg(options, &profile),
         "-g".to_string(),
         options.framerate.max(1).to_string(),
         "-forced-idr".to_string(),
@@ -5997,6 +6011,26 @@ mod tests {
         );
         assert!(
             args.windows(2)
+                .any(|pair| pair[0] == "-rc" && pair[1] == "cbr")
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-rc-lookahead" && pair[1] == "0")
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-b:v" && pair[1] == "12000k")
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-maxrate" && pair[1] == "12000k")
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-bufsize" && pair[1] == "200k")
+        );
+        assert!(
+            args.windows(2)
                 .any(|pair| pair[0] == "-g" && pair[1] == "60")
         );
         assert!(
@@ -6004,6 +6038,32 @@ mod tests {
                 .any(|pair| pair[0] == "-an" && pair[1] == "-c:v")
         );
         assert_eq!(args.last().map(String::as_str), Some("pipe:1"));
+    }
+
+    #[test]
+    fn rudp_video_vbv_buffer_tracks_single_frame_budget() {
+        let thirty_fps = Options::parse(
+            ["activate", "--media-transport", "rudp", "--framerate", "30"]
+                .into_iter()
+                .map(String::from),
+        )
+        .unwrap();
+        let sixty_fps = Options::parse(
+            ["activate", "--media-transport", "rudp", "--framerate", "60"]
+                .into_iter()
+                .map(String::from),
+        )
+        .unwrap();
+        let profile = muninn_rudp_media_profile();
+
+        assert_eq!(
+            muninn_rudp_video_vbv_buffer_arg(&thirty_fps, &profile),
+            "400k"
+        );
+        assert_eq!(
+            muninn_rudp_video_vbv_buffer_arg(&sixty_fps, &profile),
+            "200k"
+        );
     }
 
     #[test]

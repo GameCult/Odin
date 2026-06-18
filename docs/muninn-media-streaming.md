@@ -151,9 +151,12 @@ a temporary PCM/AAC compatibility bridge.
 Recommended first LAN profile:
 
 - Profile id: `muninn.rudp.low_latency_h264_lan.v1`.
-- Video: H.264 NVENC, `p1`, ultra-low-latency tune, CBR/VBR high enough that
-  LAN bandwidth is not the constraint, no B-frames, no lookahead, short GOP or
+- Video: H.264 NVENC, `p1`, ultra-low-latency tune, CBR high enough that LAN
+  bandwidth is not the constraint, no B-frames, no lookahead, short GOP or
   intra-refresh, periodic IDR/keyframe on feedback pressure.
+- VBV: derive `bufsize` from roughly one frame of bitrate
+  (`bitrate_kbps / framerate`) instead of a large fixed encoder reservoir.
+  The point is bounded latency, not hoarding compressed video in a nicer hat.
 - Audio: Opus low-delay when OBS lowering can consume it directly; otherwise a
   temporary PCM/AAC bridge with separate packet identity and clock.
 - Transport: payload elementary access units as typed media records, never a
