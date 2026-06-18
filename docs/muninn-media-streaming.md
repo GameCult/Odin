@@ -133,15 +133,78 @@ in this space is NVENC/NVDEC, low-latency encode presets, high LAN bitrate,
 short GOP or intra-refresh, no B-frames, no lookahead, and application-level
 transport that understands frame deadlines.
 
-Preferred order:
+Shipping order:
 
-1. AV1 NVENC when both encode and decode bodies support it.
-2. HEVC NVENC for strong quality at high LAN bitrates.
-3. H.264 NVENC as the compatibility fallback for broad decoder support.
+1. HEVC NVENC low-latency when Raven encode and OBS decode both prove the
+   target latency budget.
+2. H.264 NVENC low-latency as the compatibility baseline for broad decoder
+   support and simple failure analysis.
+3. AV1 NVENC only after the exact Raven-to-OBS path proves encode, decode, and
+   queue latency inside budget. AV1 can be the quality/bandwidth winner, but it
+   must earn the low-latency lane on our hardware instead of getting promoted by
+   codec fashion.
 
 The codec should produce elementary video access units, not a muxed MPEG-TS
 program. Audio should use Opus low-delay packets unless the OBS lowering needs
 a temporary PCM/AAC compatibility bridge.
+
+Recommended first LAN profile:
+
+- Video: HEVC or H.264 NVENC, low-latency tune, fast preset, CBR/VBR high enough
+  that LAN bandwidth is not the constraint, no B-frames, no lookahead, short GOP
+  or intra-refresh, periodic IDR/keyframe on feedback pressure.
+- Audio: Opus low-delay when OBS lowering can consume it directly; otherwise a
+  temporary PCM/AAC bridge with separate packet identity and clock.
+- Transport: payload elementary access units as typed media records, never a
+  muxed container as the unit of truth.
+- Control: sender may adapt bitrate, keyframe cadence, chunk size, and playout
+  budget from receiver feedback; the receiver must not silently stretch latency
+  to preserve visual perfection.
+
+### Motion Vectors And Reconstruction
+
+Do not make CultMesh a bespoke game-streaming codec in the first shipping path.
+The motion-vector/delta idea is real, but it belongs as an augmentation around
+the hardware codec, not as the primary authority.
+
+NVIDIA's relevant public pattern is:
+
+- NVENC/NVDEC for hardware video encode and decode.
+- Low-latency encode tuning, high refresh rate, adaptive bitrate, and explicit
+  network/frame timing for cloud gaming.
+- Foveated streaming for bandwidth reduction when a trusted focus region exists.
+- Optical Flow / motion estimation hardware for interpolation, extrapolation,
+  analysis, or concealment experiments.
+
+For Muninn, that means:
+
+- If we only have desktop capture pixels, trust NVENC for motion estimation and
+  compression. Do not compute our own patch stream before the codec has failed a
+  measured requirement.
+- If a game or renderer we control can expose motion vectors, depth, regions of
+  interest, or dirty rectangles, publish them as optional sideband media hints.
+  They may guide encoder ROI, decoder concealment, frame extrapolation, or
+  foveated quality allocation. They do not replace the encoded video access
+  unit unless a separate research path proves that decoder under the same OBS
+  latency budget.
+- Stochastic reconstruction is allowed only inside a bounded playout budget.
+  When the deadline expires, the receiver displays the best available frame,
+  conceals damage, or requests a keyframe. It must not preserve dead packets by
+  growing latency.
+
+Useful references for this direction:
+
+- NVIDIA Video Codec SDK presets describe low-latency and ultra-low-latency
+  tuning plus preset tradeoffs for encoder tools such as GOP structure,
+  B-frames, and lookahead:
+  <https://developer.nvidia.com/blog/introducing-video-codec-sdk-10-presets/>
+- NVIDIA CloudXR publicly frames low-latency spatial streaming around NVENC,
+  adaptive bitrate, foveated streaming, diagnostics, and bidirectional data
+  channels:
+  <https://docs.nvidia.com/cloudxr-sdk/latest/overview/overview.html>
+- NVIDIA's Optical Flow SDK exposes hardware motion vectors for real-time
+  interpolation/extrapolation and related video processing:
+  <https://developer.nvidia.com/optical-flow-sdk>
 
 ## CultNet RUDP Media Policy
 
