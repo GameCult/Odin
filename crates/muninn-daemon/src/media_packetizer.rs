@@ -122,6 +122,48 @@ pub enum MuninnMediaWireRecord {
     Feedback(MuninnMediaReceiverFeedbackRecord),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct VideoChunkKey {
+    pub frame_id: u64,
+    pub chunk_index: u16,
+}
+
+impl VideoChunkKey {
+    pub fn new(frame_id: u64, chunk_index: u16) -> Self {
+        Self {
+            frame_id,
+            chunk_index,
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self> {
+        if value.matches(':').count() != 1 {
+            return Err(anyhow!(
+                "video chunk key must contain exactly one ':' separator"
+            ));
+        }
+        let (frame_id, chunk_index) = value
+            .split_once(':')
+            .ok_or_else(|| anyhow!("video chunk key must be '<frame_id>:<chunk_index>'"))?;
+        Ok(Self {
+            frame_id: frame_id
+                .parse()
+                .map_err(|_| anyhow!("video chunk key frame_id must be an integer"))?,
+            chunk_index: chunk_index
+                .parse()
+                .map_err(|_| anyhow!("video chunk key chunk_index must be an integer"))?,
+        })
+    }
+
+    pub fn as_feedback_key(&self) -> String {
+        format!("{}:{}", self.frame_id, self.chunk_index)
+    }
+}
+
+pub fn video_chunk_feedback_key(frame_id: u64, chunk_index: u16) -> String {
+    VideoChunkKey::new(frame_id, chunk_index).as_feedback_key()
+}
+
 pub fn packetize_video_access_unit(
     options: VideoFramePacketizeOptions<'_>,
     access_unit: &VideoAccessUnit,
@@ -334,9 +376,8 @@ pub fn build_receiver_feedback(
     missing_frame_ids.sort_unstable();
     missing_frame_ids.dedup();
 
-    let mut missing_video_chunk_keys = options.missing_video_chunk_keys;
-    missing_video_chunk_keys.sort();
-    missing_video_chunk_keys.dedup();
+    let missing_video_chunk_keys =
+        normalize_video_chunk_feedback_keys(options.missing_video_chunk_keys)?;
 
     let mut late_frame_ids = options.late_frame_ids;
     late_frame_ids.sort_unstable();
@@ -497,6 +538,19 @@ fn feedback_record_key(record: &MuninnMediaReceiverFeedbackRecord) -> String {
         "{}:{}:feedback:{}",
         record.stream_id, record.session_id, record.receiver_id
     )
+}
+
+fn normalize_video_chunk_feedback_keys(keys: Vec<String>) -> Result<Vec<String>> {
+    let mut parsed = keys
+        .iter()
+        .map(|key| VideoChunkKey::parse(key))
+        .collect::<Result<Vec<_>>>()?;
+    parsed.sort_unstable();
+    parsed.dedup();
+    Ok(parsed
+        .into_iter()
+        .map(|key| key.as_feedback_key())
+        .collect())
 }
 
 fn h264_annex_b_nal_units(input: &[u8]) -> Result<Vec<NalUnit<'_>>> {
@@ -700,6 +754,23 @@ mod tests {
     }
 
     #[test]
+    fn video_chunk_key_round_trips_feedback_key() -> Result<()> {
+        let key = VideoChunkKey::parse("42:7")?;
+
+        assert_eq!(key, VideoChunkKey::new(42, 7));
+        assert_eq!(key.as_feedback_key(), "42:7");
+        assert_eq!(video_chunk_feedback_key(42, 7), "42:7");
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_malformed_video_chunk_keys() {
+        let error = VideoChunkKey::parse("42:7:extra").unwrap_err();
+
+        assert!(error.to_string().contains("exactly one"));
+    }
+
+    #[test]
     fn packetizes_audio_payload_into_typed_packet() -> Result<()> {
         let record = packetize_audio_packet(
             AudioPacketizeOptions {
@@ -840,9 +911,9 @@ mod tests {
             highest_decodable_frame_id: Some(40),
             missing_frame_ids: vec![43, 42, 43],
             missing_video_chunk_keys: vec![
-                "43:2".to_string(),
-                "42:1".to_string(),
-                "42:1".to_string(),
+                video_chunk_feedback_key(43, 2),
+                video_chunk_feedback_key(42, 1),
+                video_chunk_feedback_key(42, 1),
             ],
             late_frame_ids: vec![39, 39, 38],
             requested_keyframe: false,
@@ -876,6 +947,26 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("jitter_us"));
+    }
+
+    #[test]
+    fn rejects_malformed_receiver_feedback_chunk_keys() {
+        let error = build_receiver_feedback(ReceiverFeedbackOptions {
+            stream_id: "muninn.raven.av.rudp",
+            session_id: "session-1",
+            receiver_id: "starfire.obs",
+            highest_decodable_frame_id: Some(40),
+            missing_frame_ids: Vec::new(),
+            missing_video_chunk_keys: vec!["frame:chunk".to_string()],
+            late_frame_ids: Vec::new(),
+            requested_keyframe: false,
+            jitter_us: 0,
+            decode_queue_us: 2_000,
+            observed_at: "2026-06-18T00:00:00Z",
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("frame_id"));
     }
 
     #[test]
@@ -954,7 +1045,7 @@ mod tests {
             receiver_id: "starfire.obs",
             highest_decodable_frame_id: Some(40),
             missing_frame_ids: vec![42],
-            missing_video_chunk_keys: vec!["42:2".to_string()],
+            missing_video_chunk_keys: vec![video_chunk_feedback_key(42, 2)],
             late_frame_ids: vec![39],
             requested_keyframe: true,
             jitter_us: 700,
