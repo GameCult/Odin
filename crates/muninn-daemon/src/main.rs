@@ -5053,8 +5053,9 @@ fn srt_endpoint(host: &str, port: u16) -> String {
 fn rudp_endpoint(host: &str, port: u16, stream_id: &str) -> String {
     let profile = muninn_rudp_media_profile();
     format!(
-        "rudp://{host}:{port}/{stream_id}?channel=media&format=muninn-typed-media&connection=0x{MUNINN_MEDIA_RUDP_CONNECTION_ID:08x}&profile={}&reliable_expire_after_ms={}&assembly_deadline_ms={}&gap_wait_ms={}",
+        "rudp://{host}:{port}/{stream_id}?channel=media&format=muninn-typed-media&connection=0x{MUNINN_MEDIA_RUDP_CONNECTION_ID:08x}&profile={}&sender_resend_delay_ms={}&reliable_expire_after_ms={}&assembly_deadline_ms={}&gap_wait_ms={}",
         profile.profile_id,
+        profile.sender_resend_delay_ms,
         profile.sender_reliable_expire_after_ms,
         profile.receiver_assembly_deadline_ms,
         profile.receiver_gap_wait_ms
@@ -6016,7 +6017,7 @@ mod tests {
         assert_eq!(
             plan.targets,
             vec![
-                "rudp://10.77.0.2:5204/muninn.raven.av.rudp?channel=media&format=muninn-typed-media&connection=0x6d750001&profile=muninn.rudp.low_latency_h264_lan.v1&reliable_expire_after_ms=75&assembly_deadline_ms=75&gap_wait_ms=8"
+                "rudp://10.77.0.2:5204/muninn.raven.av.rudp?channel=media&format=muninn-typed-media&connection=0x6d750001&profile=muninn.rudp.low_latency_h264_lan.v1&sender_resend_delay_ms=5&reliable_expire_after_ms=75&assembly_deadline_ms=75&gap_wait_ms=8"
             ]
         );
         assert!(!plan.command_line.contains("tee"));
