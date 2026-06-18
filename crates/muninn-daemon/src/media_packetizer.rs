@@ -457,6 +457,12 @@ pub fn packetize_video_access_unit(
     if options.timebase_num == 0 || options.timebase_den == 0 {
         return Err(anyhow!("video timebase must be non-zero"));
     }
+    if options.duration_ticks == 0 {
+        return Err(anyhow!("video duration_ticks must be greater than zero"));
+    }
+    if options.deadline_ticks < options.pts_ticks {
+        return Err(anyhow!("video deadline_ticks must not precede pts_ticks"));
+    }
     if options.max_payload_bytes == 0 {
         return Err(anyhow!("max_payload_bytes must be greater than zero"));
     }
@@ -515,6 +521,12 @@ pub fn packetize_audio_packet(
     }
     if options.timebase_num == 0 || options.timebase_den == 0 {
         return Err(anyhow!("audio timebase must be non-zero"));
+    }
+    if options.duration_ticks == 0 {
+        return Err(anyhow!("audio duration_ticks must be greater than zero"));
+    }
+    if options.deadline_ticks < options.pts_ticks {
+        return Err(anyhow!("audio deadline_ticks must not precede pts_ticks"));
     }
     if payload.is_empty() {
         return Err(anyhow!("audio packet payload must be non-empty"));
@@ -1354,6 +1366,68 @@ mod tests {
     }
 
     #[test]
+    fn rejects_zero_duration_video_access_units() {
+        let access_unit = VideoAccessUnit {
+            bytes: vec![1, 2, 3],
+            keyframe: true,
+        };
+
+        let error = packetize_video_access_unit(
+            VideoFramePacketizeOptions {
+                stream_id: "muninn.raven.av.rudp",
+                session_id: "session-1",
+                codec: "h264",
+                frame_id: 9,
+                pts_ticks: 27_000,
+                duration_ticks: 0,
+                timebase_num: 1,
+                timebase_den: 90_000,
+                deadline_ticks: 28_800,
+                max_payload_bytes: 2,
+            },
+            &access_unit,
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("video duration_ticks must be greater than zero")
+        );
+    }
+
+    #[test]
+    fn rejects_video_deadline_before_pts() {
+        let access_unit = VideoAccessUnit {
+            bytes: vec![1, 2, 3],
+            keyframe: true,
+        };
+
+        let error = packetize_video_access_unit(
+            VideoFramePacketizeOptions {
+                stream_id: "muninn.raven.av.rudp",
+                session_id: "session-1",
+                codec: "h264",
+                frame_id: 9,
+                pts_ticks: 27_000,
+                duration_ticks: 3_000,
+                timebase_num: 1,
+                timebase_den: 90_000,
+                deadline_ticks: 26_999,
+                max_payload_bytes: 2,
+            },
+            &access_unit,
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("video deadline_ticks must not precede pts_ticks")
+        );
+    }
+
+    #[test]
     fn video_chunk_key_round_trips_feedback_key() -> Result<()> {
         let key = VideoChunkKey::parse("42:7")?;
 
@@ -1413,6 +1487,56 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("payload must be non-empty"));
+    }
+
+    #[test]
+    fn rejects_zero_duration_audio_packets() {
+        let error = packetize_audio_packet(
+            AudioPacketizeOptions {
+                stream_id: "muninn.raven.av.rudp",
+                session_id: "session-1",
+                codec: "opus",
+                packet_id: 12,
+                pts_ticks: 48_000,
+                duration_ticks: 0,
+                timebase_num: 1,
+                timebase_den: 48_000,
+                deadline_ticks: 48_960,
+            },
+            &[0xf8, 0xff, 0xfe],
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("audio duration_ticks must be greater than zero")
+        );
+    }
+
+    #[test]
+    fn rejects_audio_deadline_before_pts() {
+        let error = packetize_audio_packet(
+            AudioPacketizeOptions {
+                stream_id: "muninn.raven.av.rudp",
+                session_id: "session-1",
+                codec: "opus",
+                packet_id: 12,
+                pts_ticks: 48_000,
+                duration_ticks: 960,
+                timebase_num: 1,
+                timebase_den: 48_000,
+                deadline_ticks: 47_999,
+            },
+            &[0xf8, 0xff, 0xfe],
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("audio deadline_ticks must not precede pts_ticks")
+        );
     }
 
     fn audio_packet(packet_id: u64, deadline_ticks: i64) -> MuninnMediaAudioPacketRecord {
