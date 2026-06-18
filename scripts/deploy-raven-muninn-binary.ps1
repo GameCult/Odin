@@ -34,6 +34,14 @@ if ($ConnectTimeoutSeconds -lt 1) {
   throw "ConnectTimeoutSeconds must be at least 1."
 }
 
+if (-not $SkipRestart) {
+  & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "verify-muninn-media-profile.ps1") `
+    -RestartScript (Join-Path $PSScriptRoot "restart-muninn.ps1")
+  if ($LASTEXITCODE -ne 0) {
+    throw "verify-muninn-media-profile.ps1 failed with exit code $LASTEXITCODE"
+  }
+}
+
 function Set-AsciiFile {
   param(
     [Parameter(Mandatory = $true)] [string] $Path,
