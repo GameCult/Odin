@@ -311,6 +311,12 @@ fn rudp_transport_profile_advertises_state_and_realtime_channels() {
                 CultNetTransportOrdering::Unordered,
                 Some(64)
             ),
+            (
+                "media",
+                CultNetTransportDelivery::Reliable,
+                CultNetTransportOrdering::Unordered,
+                Some(64)
+            ),
         ]
     );
 }
@@ -497,6 +503,71 @@ fn rudp_session_schedules_reliable_resends_until_acked() -> Result<()> {
         0,
     )?;
     assert!(session.due_resends(250).is_empty());
+    Ok(())
+}
+
+#[test]
+fn rudp_session_expires_bounded_reliable_media_resends() -> Result<()> {
+    let mut session = CultNetRudpSession::new(CultNetRudpSessionOptions {
+        connection_id: 100,
+        initial_sequence: 1,
+        resend_delay_ms: 20,
+        max_pending_reliable_packets: Some(1),
+    });
+    session.receive(
+        &CultNetRudpPacket {
+            packet_type: CultNetRudpPacketType::Accept,
+            connection_id: 100,
+            sequence: 50,
+            ack: 0,
+            ack_mask: 0,
+            channel_id: "control".to_string(),
+            reliable: false,
+            ordered: false,
+            sequenced: false,
+            fragment_id: 0,
+            fragment_index: 0,
+            fragment_count: 0,
+            payload: Vec::new(),
+        },
+        0,
+    )?;
+    let sent = session.send(
+        "media",
+        b"frame-chunk".to_vec(),
+        CultNetRudpSendOptions {
+            reliable: true,
+            ordered: false,
+            now_ms: 10,
+            reliable_expire_after_ms: Some(50),
+            ..CultNetRudpSendOptions::default()
+        },
+    )?;
+
+    assert_eq!(session.pending_reliable_sequences(), vec![sent.sequence]);
+    assert!(session.due_resends(25).is_empty());
+    assert_eq!(
+        session
+            .due_resends(35)
+            .iter()
+            .map(|packet| packet.sequence)
+            .collect::<Vec<_>>(),
+        vec![sent.sequence]
+    );
+    assert!(session.due_resends(61).is_empty());
+    assert!(session.pending_reliable_sequences().is_empty());
+
+    session.send(
+        "media",
+        b"fresh-frame-chunk".to_vec(),
+        CultNetRudpSendOptions {
+            reliable: true,
+            ordered: false,
+            now_ms: 62,
+            reliable_expire_after_ms: Some(50),
+            ..CultNetRudpSendOptions::default()
+        },
+    )?;
     Ok(())
 }
 
