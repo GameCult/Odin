@@ -7,13 +7,16 @@ param(
   [string] $LoopbackScript = "C:\Meta\Odin\Muninn\scripts\wasapi-loopback-capture.ps1",
   [string] $Ffmpeg = "C:\Users\Madman's Lullaby\AppData\Local\Microsoft\WinGet\Links\ffmpeg.exe",
   [string] $TargetHost = "10.77.0.2",
-  [int] $Port = 5200,
+  [int] $Port = 5204,
+  [string] $MediaTransport = "rudp",
   [string] $ObsTargetHost = "10.77.0.2",
   [int] $ObsPort = 5204,
   [string] $AudioDevice = "Realtek",
   [string] $IdunnRudpHealth = "10.77.0.2:17870",
   [string] $IdunnDaemon = "muninn",
-  [string] $IdunnHealthContract = "muninn.cultnet-rudp-remote-telemetry-health"
+  [string] $IdunnHealthContract = "muninn.cultnet-rudp-remote-telemetry-health",
+  [string] $CaptureCommandRudpBind = "0.0.0.0:17872",
+  [string] $CaptureCommandRudpTarget = "127.0.0.1:17872"
 )
 
 $ErrorActionPreference = "Stop"
@@ -185,23 +188,36 @@ $videoProofVbsPath = Join-Path $muninnDir "muninn-raven-video-to-starfire-obs-hi
 $serveArguments = @(
   "serve",
   "--store", $StorePath,
+  "--activate-store", $ActivateStorePath,
   "--log-root", $LogRoot,
   "--host", "raven",
+  "--stream", "muninn.raven.av.rudp",
+  "--target-host", $TargetHost,
+  "--port", $Port.ToString(),
+  "--media-transport", $MediaTransport,
+  "--audio-device", $AudioDevice,
+  "--ffmpeg", $Ffmpeg,
+  "--loopback-script", $LoopbackScript,
   "--interval-seconds", "15",
+  "--capture-command-rudp-bind", $CaptureCommandRudpBind,
   "--idunn-rudp-health", $IdunnRudpHealth,
   "--idunn-daemon", $IdunnDaemon,
   "--idunn-health-contract", $IdunnHealthContract
 )
 
 $activateArguments = @(
-  "activate",
-  "--store", $ActivateStorePath,
+  "request-stream",
+  "--store", $StorePath,
+  "--activate-store", $ActivateStorePath,
+  "--capture-command-rudp-target", $CaptureCommandRudpTarget,
   "--host", "raven",
-  "--stream", "muninn.raven.av.srt",
+  "--stream", "muninn.raven.av.rudp",
+  "--stream-action", "start",
   "--target-host", $TargetHost,
-  "--port", $Port.ToString()
+  "--port", $Port.ToString(),
+  "--media-transport", $MediaTransport
 )
-if ($TargetHost -eq $ObsTargetHost -and $Port -eq $ObsPort) {
+if ($MediaTransport -ne "srt" -or ($TargetHost -eq $ObsTargetHost -and $Port -eq $ObsPort)) {
   $activateArguments += "--no-obs-target"
 } else {
   $activateArguments += @("--obs-target-host", $ObsTargetHost, "--obs-port", $ObsPort.ToString())
@@ -318,13 +334,15 @@ foreach (`$path in @(
 }
 
 Get-CimInstance Win32_Process |
-  Where-Object { `$_.Name -ieq "muninn.exe" } |
+  Where-Object { `$_.Name -like "muninn*.exe" } |
   ForEach-Object {
     & taskkill.exe /PID `$_.ProcessId /T /F | Out-Null
   }
 
 New-Item -ItemType Directory -Force -Path "$LogRoot" | Out-Null
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent "$StorePath") | Out-Null
+& netsh.exe advfirewall firewall delete rule name="GameCult Muninn Capture Command RUDP" | Out-Null 2>`$null
+& netsh.exe advfirewall firewall add rule name="GameCult Muninn Capture Command RUDP" dir=in action=allow protocol=UDP localport=17872 | Out-Null
 
 function Register-HiddenVbsTask {
   param(

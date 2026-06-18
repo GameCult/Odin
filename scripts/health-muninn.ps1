@@ -2,6 +2,9 @@ param(
   [string] $RavenHost = "raven",
   [string] $MuninnExe = "C:\Meta\Odin\Muninn\muninn.exe",
   [string] $StorePath = "C:\Meta\Odin\state\muninn.telemetry.cc",
+  [string] $ActivateStorePath = "C:\Meta\Odin\state\muninn.activate.cc",
+  [string] $LogRoot = "C:\Meta\Odin\logs\muninn",
+  [int] $MaxStoreAgeSeconds = 180,
   [string] $IdunnRudpHealth = "10.77.0.2:17870"
 )
 
@@ -94,9 +97,6 @@ foreach (`$expectation in `$taskExpectations) {
   if (`$psContent -notmatch 'Start-Process') {
     throw "`$(`$expectation.Ps) does not launch a hidden process"
   }
-  if (`$expectation.Name -eq "GameCult-Muninn-Activate" -and `$psContent -notmatch 'muninn\.exe') {
-    throw "`$(`$expectation.Ps) does not launch muninn.exe"
-  }
   if (`$expectation.Name -eq "GameCult-Muninn-VideoProof" -and `$psContent -notmatch 'ffmpeg\.exe') {
     throw "`$(`$expectation.Ps) does not launch ffmpeg.exe"
   }
@@ -119,6 +119,8 @@ if (`$null -eq `$process) {
 }
 foreach (`$pattern in @(
   "--host raven",
+  "--activate-store $ActivateStorePath",
+  "--capture-command-rudp-bind 0.0.0.0:17872",
   "--idunn-rudp-health $IdunnRudpHealth",
   "--idunn-daemon muninn",
   "--idunn-health-contract muninn.cultnet-rudp-remote-telemetry-health"
@@ -127,11 +129,29 @@ foreach (`$pattern in @(
     throw "Muninn serve process is missing expected command-line segment `${pattern}: `$(`$process.CommandLine)"
   }
 }
-`$healthArgs = @(
-  "--health",
-  "--store", "$StorePath"
-)
-& "$MuninnExe" @healthArgs
+`$conflictingWriter = Get-CimInstance Win32_Process |
+  Where-Object {
+    `$_.Name -like "muninn*.exe" -and
+    `$_.ProcessId -ne `$process.ProcessId -and
+    `$_.ParentProcessId -ne `$process.ProcessId -and
+    `$_.CommandLine -like "*activate*" -and
+    `$_.CommandLine -like "*$StorePath*"
+  } |
+  Select-Object -First 1
+if (`$null -ne `$conflictingWriter) {
+  throw "Conflicting Muninn activate writer still targets ${StorePath}: `$(`$conflictingWriter.CommandLine)"
+}
+if (-not (Test-Path -LiteralPath "$StorePath")) {
+  throw "Muninn telemetry store is missing at $StorePath"
+}
+`$storeAgeSeconds = (([DateTime]::UtcNow) - (Get-Item -LiteralPath "$StorePath").LastWriteTimeUtc).TotalSeconds
+if (`$storeAgeSeconds -gt $MaxStoreAgeSeconds) {
+  throw "Muninn telemetry store is stale (`$([math]::Round(`$storeAgeSeconds))s old)"
+}
+`$servePidPath = Join-Path "$LogRoot" "muninn-serve.pid"
+if (-not (Test-Path -LiteralPath `$servePidPath)) {
+  throw "Muninn serve PID file is missing at `$servePidPath"
+}
 "@
 
 Invoke-RavenUploadedPowerShell -RavenHost $RavenHost -RemoteScriptContent $remoteScript -TempPrefix "odin-raven-muninn-health"

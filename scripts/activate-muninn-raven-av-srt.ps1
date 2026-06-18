@@ -6,7 +6,8 @@ param(
   [string] $LogRoot = "C:\Meta\Odin\logs\muninn",
   [string] $Ffmpeg = "C:\Users\Madman's Lullaby\AppData\Local\Microsoft\WinGet\Links\ffmpeg.exe",
   [string] $TargetHost = "10.77.0.2",
-  [int] $Port = 5200,
+  [int] $Port = 5204,
+  [string] $MediaTransport = "rudp",
   [string] $ObsTargetHost = "10.77.0.2",
   [int] $ObsPort = 5204,
   [string] $AudioDevice = "Realtek",
@@ -123,14 +124,16 @@ $activatePsPath = Join-Path $muninnDir "activate-raven-av-srt.ps1"
 $activateVbsPath = Join-Path $muninnDir "activate-raven-av-srt-hidden.vbs"
 
 $activateArguments = @(
-  "activate",
+  "request-stream",
   "--store", $StorePath,
   "--host", "raven",
-  "--stream", "muninn.raven.av.srt",
+  "--stream", "muninn.raven.av.rudp",
+  "--stream-action", "start",
   "--target-host", $TargetHost,
-  "--port", $Port.ToString()
+  "--port", $Port.ToString(),
+  "--media-transport", $MediaTransport
 )
-if ($NoObsTarget.IsPresent -or ($TargetHost -eq $ObsTargetHost -and $Port -eq $ObsPort)) {
+if ($NoObsTarget.IsPresent -or $MediaTransport -ne "srt" -or ($TargetHost -eq $ObsTargetHost -and $Port -eq $ObsPort)) {
   $activateArguments += "--no-obs-target"
 } else {
   $activateArguments += @("--obs-target-host", $ObsTargetHost, "--obs-port", $ObsPort.ToString())
@@ -202,7 +205,7 @@ foreach (`$path in @(
 
 Get-CimInstance Win32_Process |
   Where-Object {
-    (`$_.Name -ieq "muninn.exe" -and `$_.CommandLine -like "*activate*") -or
+    (`$_.Name -like "muninn*.exe" -and `$_.CommandLine -like "*activate*") -or
     (`$_.Name -ieq "ffmpeg.exe" -and `$_.CommandLine -like "*srt://$TargetHost*") -or
     (`$_.Name -ieq "powershell.exe" -and `$_.CommandLine -like "*wasapi-loopback-capture.ps1*")
   } |

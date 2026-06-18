@@ -7,9 +7,11 @@ function defineOdinDocuments(defineDocumentType) {
     return {
       interfaceBindingDefinition: null,
       idunnDaemonHealthDefinition: null,
+      muninnCaptureStreamCommandDefinition: null,
       muninnCaptureStreamDefinition: null,
       muninnCommandBoundaryDefinition: null,
       muninnMoveControllerStateDefinition: null,
+      muninnMoveIdentityDefinition: null,
       muninnMoveLightCommandDefinition: null,
       muninnMoveMarkerCandidateDefinition: null,
       muninnObsStreamCatalogDefinition: null,
@@ -86,6 +88,15 @@ function defineOdinDocuments(defineDocumentType) {
     name: (value) => value?.stream_id || value?.streamId || "capture-stream",
     schema: parseObjectDocument("Muninn capture stream"),
   });
+  const muninnCaptureStreamCommandDefinition = defineDocumentType({
+    type: "muninn.capture_stream_command",
+    schemaName: "muninn.capture_stream_command",
+    schemaId: "muninn.capture_stream_command.v1",
+    schemaVersion: "muninn.capture_stream_command.v1",
+    global: false,
+    name: (value) => value?.command_id || value?.commandId || value?.stream_id || value?.streamId || "capture-stream-command",
+    schema: parseObjectDocument("Muninn capture stream command"),
+  });
   const muninnCommandBoundaryDefinition = defineDocumentType({
     type: "muninn.command_boundary",
     schemaName: "muninn.command_boundary",
@@ -103,6 +114,15 @@ function defineOdinDocuments(defineDocumentType) {
     global: false,
     name: (value) => value?.stream_id || value?.streamId || value?.move_id || value?.moveId || "move-controller-state",
     schema: parseObjectDocument("Muninn Move controller state"),
+  });
+  const muninnMoveIdentityDefinition = defineDocumentType({
+    type: "muninn.move_identity",
+    schemaName: "muninn.move_identity",
+    schemaId: "muninn.move_identity.v1",
+    schemaVersion: "muninn.move_identity.v1",
+    global: false,
+    name: (value) => value?.identity_id || value?.identityId || value?.move_id || value?.moveId || "move-identity",
+    schema: parseObjectDocument("Muninn Move identity"),
   });
   const muninnMoveLightCommandDefinition = defineDocumentType({
     type: "muninn.move_light_command",
@@ -277,9 +297,11 @@ function defineOdinDocuments(defineDocumentType) {
   return {
     interfaceBindingDefinition,
     idunnDaemonHealthDefinition,
+    muninnCaptureStreamCommandDefinition,
     muninnCaptureStreamDefinition,
     muninnCommandBoundaryDefinition,
     muninnMoveControllerStateDefinition,
+    muninnMoveIdentityDefinition,
     muninnMoveLightCommandDefinition,
     muninnMoveMarkerCandidateDefinition,
     muninnObsStreamCatalogDefinition,

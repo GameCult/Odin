@@ -33,6 +33,7 @@ pub const IDUNN_RUNTIME_TRANSPORT_CHECK_SCHEMA: &str = "idunn.runtime_transport_
 pub const IDUNN_RUDP_HEALTH_INGRESS_SCHEMA: &str = "idunn.rudp_health_ingress.v1";
 pub const MUNINN_TELEMETRY_SURFACE_SCHEMA: &str = "muninn.telemetry_surface.v1";
 pub const MUNINN_CAPTURE_STREAM_SCHEMA: &str = "muninn.capture_stream.v1";
+pub const MUNINN_CAPTURE_STREAM_COMMAND_SCHEMA: &str = "muninn.capture_stream_command.v1";
 pub const MUNINN_OBS_STREAM_CATALOG_SCHEMA: &str = "muninn.obs_stream_catalog.v1";
 pub const MUNINN_MOVE_MARKER_CANDIDATE_SCHEMA: &str = "muninn.move_marker_candidate.v1";
 pub const MUNINN_MOVE_CONTROLLER_STATE_SCHEMA: &str = "muninn.move_controller_state.v1";
@@ -709,6 +710,42 @@ pub struct MuninnCaptureStreamRecord {
 
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
 #[cultcache(
+    type = "muninn.capture_stream_command",
+    schema = "muninn.capture_stream_command.v1"
+)]
+pub struct MuninnCaptureStreamCommandRecord {
+    #[cultcache(key = 0)]
+    pub command_id: String,
+    #[cultcache(key = 1)]
+    pub host_id: String,
+    #[cultcache(key = 2)]
+    pub stream_id: String,
+    #[cultcache(key = 3)]
+    pub state: String,
+    #[cultcache(key = 4)]
+    pub action: String,
+    #[cultcache(key = 5)]
+    pub target_host: String,
+    #[cultcache(key = 6)]
+    pub port: u16,
+    #[cultcache(key = 7)]
+    pub obs_target_host: Option<String>,
+    #[cultcache(key = 8)]
+    pub obs_port: u16,
+    #[cultcache(key = 9)]
+    pub media_transport: String,
+    #[cultcache(key = 10)]
+    pub media_packet_bytes: u32,
+    #[cultcache(key = 11)]
+    pub requested_by: String,
+    #[cultcache(key = 12)]
+    pub detail: String,
+    #[cultcache(key = 13)]
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(
     type = "muninn.telemetry_surface",
     schema = "muninn.telemetry_surface.v1"
 )]
@@ -966,6 +1003,7 @@ cultmesh_rs::cultmesh_documents!(OdinDocuments {
     IdunnRudpHealthIngressRecord => IDUNN_RUDP_HEALTH_INGRESS_SCHEMA,
     MuninnTelemetrySurfaceRecord => MUNINN_TELEMETRY_SURFACE_SCHEMA,
     MuninnCaptureStreamRecord => MUNINN_CAPTURE_STREAM_SCHEMA,
+    MuninnCaptureStreamCommandRecord => MUNINN_CAPTURE_STREAM_COMMAND_SCHEMA,
     MuninnObsStreamCatalogRecord => MUNINN_OBS_STREAM_CATALOG_SCHEMA,
     MuninnMoveMarkerCandidateRecord => MUNINN_MOVE_MARKER_CANDIDATE_SCHEMA,
     MuninnMoveControllerStateRecord => MUNINN_MOVE_CONTROLLER_STATE_SCHEMA,
