@@ -1,24 +1,29 @@
 mod media_packetizer;
 
-use anyhow::{anyhow, Context, Result};
+use crate::media_packetizer::{
+    AudioAdtsStreamSendConfig, AudioAdtsStreamSendState, MuninnMediaSendPayload,
+    VideoAnnexBStreamSendConfig, VideoAnnexBStreamSendState,
+};
+use anyhow::{Context, Result, anyhow};
 use cultmesh_rs::{
     CultMesh, CultMeshNodeOptions, CultMeshSharedMemoryFrameRing, CultMeshStreamBodyTransport,
     CultMeshStreamCatalog, CultMeshStreamClock, CultMeshStreamDescriptor, CultMeshStreamKind,
 };
 use cultnet_rs::{
-    decode_cultnet_message_from_slice, encode_cultnet_message_to_vec, CultNetMessage,
-    CultNetRawDocumentRecord, CultNetRawPayloadEncoding, CultNetRudpSocketTransportConnection,
-    CultNetRudpSocketTransportOptions, CultNetWireContract,
+    CultNetMessage, CultNetRawDocumentRecord, CultNetRawPayloadEncoding,
+    CultNetRudpSocketTransportConnection, CultNetRudpSocketTransportOptions, CultNetWireContract,
+    decode_cultnet_message_from_slice, encode_cultnet_message_to_vec,
 };
 use odin_core::{
-    EveProviderAdvertisementCompatRecord, IdunnDaemonHealthRecord, MuninnCaptureStreamCommandRecord,
-    MuninnCaptureStreamRecord, MuninnCommandBoundaryCompatRecord, MuninnMoveControllerStateRecord,
-    MuninnMoveIdentityRecord, MuninnMoveLightCommandRecord, MuninnObsStreamCatalogRecord,
-    MuninnQuestAccessRecord, MuninnTelemetrySurfaceRecord, MuninnTransportProfileCompatRecord,
-    OdinDocuments,
+    EveProviderAdvertisementCompatRecord, IdunnDaemonHealthRecord,
+    MuninnCaptureStreamCommandRecord, MuninnCaptureStreamRecord, MuninnCommandBoundaryCompatRecord,
+    MuninnMoveControllerStateRecord, MuninnMoveIdentityRecord, MuninnMoveLightCommandRecord,
+    MuninnObsStreamCatalogRecord, MuninnQuestAccessRecord, MuninnTelemetrySurfaceRecord,
+    MuninnTransportProfileCompatRecord, OdinDocuments,
 };
 use serde::Serialize;
 use serde_json::json;
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::io::Read;
@@ -29,6 +34,7 @@ use std::net::{SocketAddr, UdpSocket};
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -254,7 +260,12 @@ fn serve(options: Options) -> Result<()> {
             tick_capture_stream_commands(&options, &mut active_capture_streams)?;
         {
             let mut node = open_node(&options, "muninn-daemon")?;
-            reconcile_move_identity_records(&mut node, &options, &live_move_sources, &active_move_states)?;
+            reconcile_move_identity_records(
+                &mut node,
+                &options,
+                &live_move_sources,
+                &active_move_states,
+            )?;
             register_move_light_commands(&mut node, &options, &mut active_move_lights)?;
             tick_move_light_commands(&mut node, &mut active_move_lights, &mut HidMoveLightWriter)?;
             tick_default_move_light_pulse(
@@ -285,10 +296,7 @@ fn serve(options: Options) -> Result<()> {
             &active_move_states,
             &mut last_move_bluetooth_pickup_attempt_at,
         );
-        publish_daemon_health_if_configured(
-            &options,
-            &mut last_idunn_health_publish_attempt_at,
-        )?;
+        publish_daemon_health_if_configured(&options, &mut last_idunn_health_publish_attempt_at)?;
         let has_platform_default_move_lights = serve_should_manage_platform_move_lights(&options);
         if options.interval_seconds.is_none()
             && active_move_lights.is_empty()
@@ -317,15 +325,31 @@ fn tick_capture_stream_commands(
 ) -> Result<Vec<String>> {
     reap_capture_stream_children(options, active)?;
     let Some(activation_store_path) = options.activation_store_path.as_ref() else {
-        return Ok(active.iter().map(|session| session.stream_id.clone()).collect());
+        return Ok(active
+            .iter()
+            .map(|session| session.stream_id.clone())
+            .collect());
     };
     let mut activation_options = options.clone();
     activation_options.store_path = activation_store_path.clone();
     let mut node = open_node(&activation_options, "muninn-activation-controller")?;
     let mut commands = node.cache().get_all::<MuninnCaptureStreamCommandRecord>()?;
     commands.sort_by(|left, right| left.updated_at.cmp(&right.updated_at));
+    let mut latest_command_by_stream = HashMap::new();
+    for command in commands
+        .iter()
+        .filter(|command| command.host_id == options.host_id)
+    {
+        latest_command_by_stream.insert(command.stream_id.clone(), command.command_id.clone());
+    }
     for command in commands {
         if command.host_id != options.host_id {
+            continue;
+        }
+        if latest_command_by_stream
+            .get(&command.stream_id)
+            .is_some_and(|command_id| command_id != &command.command_id)
+        {
             continue;
         }
         match (command.action.as_str(), command.state.as_str()) {
@@ -346,7 +370,10 @@ fn tick_capture_stream_commands(
             _ => {}
         }
     }
-    Ok(active.iter().map(|session| session.stream_id.clone()).collect())
+    Ok(active
+        .iter()
+        .map(|session| session.stream_id.clone())
+        .collect())
 }
 
 fn reap_capture_stream_children(
@@ -367,7 +394,11 @@ fn reap_capture_stream_children(
                     node.get::<MuninnCaptureStreamCommandRecord>(&active[index].command_id)?
                 {
                     let command_id = command.command_id.clone();
-                    let state = if status.success() { "completed" } else { "failed" };
+                    let state = if status.success() {
+                        "completed"
+                    } else {
+                        "failed"
+                    };
                     node.put(
                         &command_id,
                         &MuninnCaptureStreamCommandRecord {
@@ -399,8 +430,9 @@ fn start_capture_command_rudp_ingress(options: &Options) -> Result<()> {
         return Ok(());
     };
 
-    let socket = UdpSocket::bind(bind_address)
-        .with_context(|| format!("binding Muninn capture command RUDP ingress at {bind_address}"))?;
+    let socket = UdpSocket::bind(bind_address).with_context(|| {
+        format!("binding Muninn capture command RUDP ingress at {bind_address}")
+    })?;
     socket.set_read_timeout(Some(Duration::from_millis(100)))?;
     let runtime_options = options.clone();
     thread::spawn(move || {
@@ -420,38 +452,45 @@ fn run_capture_command_rudp_ingress(
 ) -> Result<()> {
     let local_addr = socket.local_addr()?;
     println!("Muninn capture command RUDP ingress listening at {local_addr}.");
-    let mut transport = CultNetRudpSocketTransportConnection::new(
-        CultNetRudpSocketTransportOptions::server(
-            "muninn-capture-command-ingress",
-            socket,
-            MUNINN_COMMAND_RUDP_CONNECTION_ID,
-        ),
-    )?;
     let mut command_options = options.clone();
     command_options.store_path = command_store_path;
     ensure_state_dirs(&command_options)?;
 
     loop {
-        if let Some(frame) = transport.receive_once()? {
-            transport.poll_resends()?;
-            if frame.channel_id != "schema" {
-                continue;
-            }
-            match capture_command_from_rudp_frame(&frame.payload) {
-                Ok(command) => {
-                    let mut node = open_node(&command_options, "muninn-capture-command-rudp")?;
-                    node.put(&command.command_id, &command)?;
-                    println!(
-                        "Muninn accepted RUDP capture command {} {} {} for {}.",
-                        command.command_id, command.action, command.stream_id, command.host_id
-                    );
+        let mut transport =
+            CultNetRudpSocketTransportConnection::new(CultNetRudpSocketTransportOptions::server(
+                "muninn-capture-command-ingress",
+                socket
+                    .try_clone()
+                    .context("cloning Muninn capture command RUDP socket")?,
+                MUNINN_COMMAND_RUDP_CONNECTION_ID,
+            ))?;
+        loop {
+            if let Some(frame) = transport.receive_once()? {
+                transport.poll_resends()?;
+                if frame.channel_id != "schema" {
+                    continue;
                 }
-                Err(error) => {
-                    eprintln!("Muninn rejected RUDP capture command frame: {error:#}");
+                match capture_command_from_rudp_frame(&frame.payload) {
+                    Ok(command) => {
+                        let mut node = open_node(&command_options, "muninn-capture-command-rudp")?;
+                        node.put(&command.command_id, &command)?;
+                        println!(
+                            "Muninn accepted RUDP capture command {} {} {} for {}.",
+                            command.command_id, command.action, command.stream_id, command.host_id
+                        );
+                    }
+                    Err(error) => {
+                        eprintln!("Muninn rejected RUDP capture command frame: {error:#}");
+                    }
+                }
+                break;
+            } else {
+                transport.poll_resends()?;
+                if transport.connected() && transport.check_timeout(2_000) {
+                    break;
                 }
             }
-        } else {
-            transport.poll_resends()?;
         }
     }
 }
@@ -491,7 +530,7 @@ fn start_capture_stream_command(
 ) -> Result<()> {
     for session in active.iter_mut() {
         if session.stream_id == command.stream_id {
-            let _ = session.child.kill();
+            terminate_child_tree(&mut session.child);
             let _ = session.child.wait();
         }
     }
@@ -522,7 +561,7 @@ fn stop_capture_stream_command(
     let mut index = 0;
     while index < active.len() {
         if active[index].stream_id == command.stream_id {
-            let _ = active[index].child.kill();
+            terminate_child_tree(&mut active[index].child);
             let _ = active[index].child.wait();
             active.remove(index);
             stopped = true;
@@ -545,6 +584,19 @@ fn stop_capture_stream_command(
         },
     )?;
     Ok(())
+}
+
+fn terminate_child_tree(child: &mut Child) {
+    #[cfg(windows)]
+    {
+        let _ = Command::new("taskkill.exe")
+            .args(["/PID", &child.id().to_string(), "/T", "/F"])
+            .status();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = child.kill();
+    }
 }
 
 fn spawn_capture_stream_activation(
@@ -1080,35 +1132,61 @@ fn run_rudp_mux_once(
     let loopback_stderr = options
         .log_root
         .join(format!("muninn-{timestamp}.loopback.err.log"));
-    let ffmpeg_stderr = options
+    let video_ffmpeg_stderr = options
         .log_root
-        .join(format!("muninn-{timestamp}.ffmpeg.err.log"));
+        .join(format!("muninn-{timestamp}.ffmpeg-video.err.log"));
+    let audio_ffmpeg_stderr = options
+        .log_root
+        .join(format!("muninn-{timestamp}.ffmpeg-audio.err.log"));
 
     let mut loopback = Command::new("powershell.exe")
         .args(loopback_args(options))
         .stdout(Stdio::piped())
         .stderr(fs::File::create(&loopback_stderr)?)
         .spawn()
-        .with_context(|| format!("starting loopback capture {}", options.loopback_script.display()))?;
+        .with_context(|| {
+            format!(
+                "starting loopback capture {}",
+                options.loopback_script.display()
+            )
+        })?;
     let loopback_stdout = loopback
         .stdout
         .take()
         .context("loopback stdout was not piped")?;
 
-    let mut ffmpeg = Command::new(&options.ffmpeg_path)
-        .args(ffmpeg_args(options))
+    let mut video_ffmpeg = Command::new(&options.ffmpeg_path)
+        .args(rudp_video_ffmpeg_args(options))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(fs::File::create(&video_ffmpeg_stderr)?)
+        .spawn()
+        .with_context(|| format!("starting {} video encoder", options.ffmpeg_path))?;
+    let video_ffmpeg_stdout = video_ffmpeg
+        .stdout
+        .take()
+        .context("video ffmpeg stdout was not piped")?;
+    let video_ffmpeg_pid = video_ffmpeg.id();
+
+    let mut audio_ffmpeg = Command::new(&options.ffmpeg_path)
+        .args(rudp_audio_ffmpeg_args(options))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(fs::File::create(&ffmpeg_stderr)?)
+        .stderr(fs::File::create(&audio_ffmpeg_stderr)?)
         .spawn()
-        .with_context(|| format!("starting {}", options.ffmpeg_path))?;
-    let mut ffmpeg_stdin = ffmpeg.stdin.take().context("ffmpeg stdin was not piped")?;
-    let mut ffmpeg_stdout = ffmpeg.stdout.take().context("ffmpeg stdout was not piped")?;
-    let ffmpeg_pid = ffmpeg.id();
+        .with_context(|| format!("starting {} audio encoder", options.ffmpeg_path))?;
+    let mut audio_ffmpeg_stdin = audio_ffmpeg
+        .stdin
+        .take()
+        .context("audio ffmpeg stdin was not piped")?;
+    let audio_ffmpeg_stdout = audio_ffmpeg
+        .stdout
+        .take()
+        .context("audio ffmpeg stdout was not piped")?;
 
     let audio_pump = thread::spawn(move || -> Result<()> {
         let mut reader = loopback_stdout;
-        std::io::copy(&mut reader, &mut ffmpeg_stdin)?;
+        std::io::copy(&mut reader, &mut audio_ffmpeg_stdin)?;
         Ok(())
     });
 
@@ -1119,66 +1197,116 @@ fn run_rudp_mux_once(
         plan,
         "running",
         supervisor_pid,
-        Some(ffmpeg_pid),
+        Some(video_ffmpeg_pid),
         restart_count,
-        "encoded MPEG-TS is publishing over CultNet RUDP realtime",
+        "typed video/audio access units are publishing over CultNet RUDP media",
     )?;
 
-    let packet_bytes = options.media_packet_bytes.max(188);
-    let mut buffer = vec![0_u8; packet_bytes * 8];
-    let mut pending = Vec::with_capacity(packet_bytes * 16);
-    let mut frames_sent = 0_u64;
+    let (payload_tx, payload_rx) = mpsc::channel::<Result<MuninnMediaSendPayload>>();
+    let video_sender = video_rudp_payload_reader(
+        payload_tx.clone(),
+        video_ffmpeg_stdout,
+        VideoAnnexBStreamSendConfig {
+            stream_id: options.stream_id.clone(),
+            session_id: format!("{}:{timestamp}:video", options.host_id),
+            codec: "h264".to_string(),
+            first_frame_id: 0,
+            first_pts_ticks: 0,
+            frame_duration_ticks: video_frame_duration_ticks(options)?,
+            timebase_num: 1,
+            timebase_den: 90_000,
+            deadline_delay_ticks: i64::from(video_frame_duration_ticks(options)?),
+            max_payload_bytes: options.media_packet_bytes.max(256),
+            max_pending_bytes: options.media_packet_bytes.max(256) * 256,
+            source_runtime_id: options.host_id.clone(),
+            source_role: "muninn.rudp.video".to_string(),
+        },
+    );
+    let audio_sender = audio_rudp_payload_reader(
+        payload_tx.clone(),
+        audio_ffmpeg_stdout,
+        AudioAdtsStreamSendConfig {
+            stream_id: options.stream_id.clone(),
+            session_id: format!("{}:{timestamp}:audio", options.host_id),
+            codec: "aac-adts".to_string(),
+            first_packet_id: 0,
+            first_pts_ticks: 0,
+            packet_duration_ticks: 1_024,
+            timebase_num: 1,
+            timebase_den: options.audio_sample_rate,
+            deadline_delay_ticks: 1_024,
+            max_pending_bytes: options.media_packet_bytes.max(256) * 64,
+            source_runtime_id: options.host_id.clone(),
+            source_role: "muninn.rudp.audio".to_string(),
+        },
+    );
+    drop(payload_tx);
+
+    let mut payloads_sent = 0_u64;
     let result = loop {
-        match ffmpeg_stdout.read(&mut buffer) {
-            Ok(0) => {
-                if !pending.is_empty() {
-                    transport
-                        .send("realtime", std::mem::take(&mut pending))
-                        .context("sending final Muninn media packet over RUDP realtime")?;
-                    frames_sent += 1;
-                }
-                break Ok(format!("ffmpeg stdout ended after {frames_sent} RUDP packets"));
-            }
-            Ok(read) => {
-                pending.extend_from_slice(&buffer[..read]);
-                while pending.len() >= packet_bytes {
-                    let chunk = pending.drain(..packet_bytes).collect::<Vec<_>>();
-                    transport
-                        .send("realtime", chunk)
-                        .context("sending Muninn media packet over RUDP realtime")?;
-                    let _ = transport.receive_once()?;
-                    transport.poll_resends()?;
-                    frames_sent += 1;
+        match payload_rx.recv_timeout(Duration::from_millis(5)) {
+            Ok(Ok(payload)) => {
+                let payload_len = payload.payload.len();
+                transport
+                    .send(payload.channel_id, payload.payload)
+                    .context("sending typed Muninn media payload over RUDP media")?;
+                let _ = transport.receive_once()?;
+                transport.poll_resends()?;
+                payloads_sent += 1;
+                if payloads_sent == 1 || payloads_sent % 900 == 0 {
+                    eprintln!(
+                        "Muninn RUDP media sender sent {payloads_sent} typed payloads; latest payload was {payload_len} bytes."
+                    );
                 }
             }
-            Err(error) => break Err(error).context("reading encoded MPEG-TS from ffmpeg stdout"),
+            Ok(Err(error)) => break Err(error),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                let _ = transport.receive_once()?;
+                transport.poll_resends()?;
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                break Ok(format!(
+                    "encoder stdout ended after {payloads_sent} typed RUDP media payloads"
+                ));
+            }
         }
     };
 
-    let _ = ffmpeg.kill();
+    let _ = video_ffmpeg.kill();
+    let _ = audio_ffmpeg.kill();
     let _ = loopback.kill();
-    let _ = ffmpeg.wait();
+    let _ = video_ffmpeg.wait();
+    let _ = audio_ffmpeg.wait();
     let _ = loopback.wait();
     let _ = audio_pump.join();
+    let _ = video_sender.join();
+    let _ = audio_sender.join();
     result
 }
 
 fn open_media_rudp_transport(options: &Options) -> Result<CultNetRudpSocketTransportConnection> {
     let endpoint: SocketAddr = format!("{}:{}", options.target_host, options.port)
         .parse()
-        .with_context(|| format!("parsing RUDP media endpoint {}:{}", options.target_host, options.port))?;
+        .with_context(|| {
+            format!(
+                "parsing RUDP media endpoint {}:{}",
+                options.target_host, options.port
+            )
+        })?;
     let socket = UdpSocket::bind("0.0.0.0:0").context("binding Muninn media RUDP client socket")?;
     socket
         .set_nonblocking(true)
         .context("setting Muninn media RUDP client nonblocking")?;
-    let mut transport = CultNetRudpSocketTransportConnection::new(
-        CultNetRudpSocketTransportOptions::client(
+    let mut transport = CultNetRudpSocketTransportConnection::new({
+        let mut options = CultNetRudpSocketTransportOptions::client(
             "muninn-media",
             socket,
             endpoint,
             MUNINN_MEDIA_RUDP_CONNECTION_ID,
-        ),
-    )?;
+        );
+        options.resend_delay_ms = 5;
+        options
+    })?;
     transport.connect(options.stream_id.as_bytes().to_vec())?;
     let deadline = Instant::now() + Duration::from_secs(5);
     while !transport.connected() {
@@ -1192,6 +1320,99 @@ fn open_media_rudp_transport(options: &Options) -> Result<CultNetRudpSocketTrans
         thread::sleep(Duration::from_millis(2));
     }
     Ok(transport)
+}
+
+fn video_rudp_payload_reader<R>(
+    tx: mpsc::Sender<Result<MuninnMediaSendPayload>>,
+    mut reader: R,
+    config: VideoAnnexBStreamSendConfig,
+) -> thread::JoinHandle<()>
+where
+    R: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        if let Err(error) = read_video_rudp_payloads(&tx, &mut reader, config) {
+            let _ = tx.send(Err(error));
+        }
+    })
+}
+
+fn audio_rudp_payload_reader<R>(
+    tx: mpsc::Sender<Result<MuninnMediaSendPayload>>,
+    mut reader: R,
+    config: AudioAdtsStreamSendConfig,
+) -> thread::JoinHandle<()>
+where
+    R: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        if let Err(error) = read_audio_rudp_payloads(&tx, &mut reader, config) {
+            let _ = tx.send(Err(error));
+        }
+    })
+}
+
+fn read_video_rudp_payloads<R>(
+    tx: &mpsc::Sender<Result<MuninnMediaSendPayload>>,
+    reader: &mut R,
+    config: VideoAnnexBStreamSendConfig,
+) -> Result<()>
+where
+    R: Read,
+{
+    let mut sender = VideoAnnexBStreamSendState::new(config)?;
+    let mut buffer = vec![0_u8; 64 * 1024];
+    loop {
+        let read = reader
+            .read(&mut buffer)
+            .context("reading encoded Annex B video from ffmpeg stdout")?;
+        if read == 0 {
+            for payload in sender.finish(&timestamp()?)? {
+                tx.send(Ok(payload))
+                    .context("queueing final typed video media payload")?;
+            }
+            return Ok(());
+        }
+        for payload in sender.push(&timestamp()?, &buffer[..read])? {
+            tx.send(Ok(payload))
+                .context("queueing typed video media payload")?;
+        }
+    }
+}
+
+fn read_audio_rudp_payloads<R>(
+    tx: &mpsc::Sender<Result<MuninnMediaSendPayload>>,
+    reader: &mut R,
+    config: AudioAdtsStreamSendConfig,
+) -> Result<()>
+where
+    R: Read,
+{
+    let mut sender = AudioAdtsStreamSendState::new(config)?;
+    let mut buffer = vec![0_u8; 16 * 1024];
+    loop {
+        let read = reader
+            .read(&mut buffer)
+            .context("reading encoded ADTS audio from ffmpeg stdout")?;
+        if read == 0 {
+            for payload in sender.finish(&timestamp()?)? {
+                tx.send(Ok(payload))
+                    .context("queueing final typed audio media payload")?;
+            }
+            return Ok(());
+        }
+        for payload in sender.push(&timestamp()?, &buffer[..read])? {
+            tx.send(Ok(payload))
+                .context("queueing typed audio media payload")?;
+        }
+    }
+}
+
+fn video_frame_duration_ticks(options: &Options) -> Result<u32> {
+    if options.framerate == 0 {
+        return Err(anyhow!("framerate must be greater than zero"));
+    }
+    Ok((90_000_u32 / options.framerate).max(1))
 }
 
 fn publish_surface(
@@ -2740,12 +2961,12 @@ fn platform_default_move_light_paths() -> Vec<DefaultMoveLightTarget> {
 #[cfg(windows)]
 fn windows_ps_move_light_paths() -> Result<Vec<DefaultMoveLightTarget>> {
     use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
-        SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW,
         DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, SP_DEVICE_INTERFACE_DATA,
+        SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW,
     };
     use windows_sys::Win32::Devices::HumanInterfaceDevice::{
-        HidD_FreePreparsedData, HidD_GetAttributes, HidD_GetHidGuid, HidD_GetPreparsedData,
-        HidP_GetCaps, HIDD_ATTRIBUTES, HIDP_CAPS, HIDP_STATUS_SUCCESS,
+        HIDD_ATTRIBUTES, HIDP_CAPS, HIDP_STATUS_SUCCESS, HidD_FreePreparsedData,
+        HidD_GetAttributes, HidD_GetHidGuid, HidD_GetPreparsedData, HidP_GetCaps,
     };
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{
@@ -2850,12 +3071,12 @@ fn windows_ps_move_light_paths() -> Result<Vec<DefaultMoveLightTarget>> {
 #[cfg(windows)]
 fn windows_ps_move_state_paths() -> Result<Vec<DefaultMoveLightTarget>> {
     use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
-        SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW,
         DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, SP_DEVICE_INTERFACE_DATA,
+        SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW,
     };
     use windows_sys::Win32::Devices::HumanInterfaceDevice::{
-        HidD_FreePreparsedData, HidD_GetAttributes, HidD_GetHidGuid, HidD_GetPreparsedData,
-        HidP_GetCaps, HIDD_ATTRIBUTES, HIDP_CAPS, HIDP_STATUS_SUCCESS,
+        HIDD_ATTRIBUTES, HIDP_CAPS, HIDP_STATUS_SUCCESS, HidD_FreePreparsedData,
+        HidD_GetAttributes, HidD_GetHidGuid, HidD_GetPreparsedData, HidP_GetCaps,
     };
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{
@@ -2961,11 +3182,11 @@ fn windows_ps_move_state_paths() -> Result<Vec<DefaultMoveLightTarget>> {
 #[cfg(windows)]
 fn windows_ps_move_identity_by_physical_key() -> Result<std::collections::HashMap<String, String>> {
     use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
-        SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW,
         DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, SP_DEVICE_INTERFACE_DATA,
+        SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW,
     };
     use windows_sys::Win32::Devices::HumanInterfaceDevice::{
-        HidD_GetAttributes, HidD_GetHidGuid, HIDD_ATTRIBUTES,
+        HIDD_ATTRIBUTES, HidD_GetAttributes, HidD_GetHidGuid,
     };
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{
@@ -3141,12 +3362,12 @@ fn windows_ps_move_bluetooth_addresses(handle: *mut std::ffi::c_void) -> Option<
 #[cfg(windows)]
 fn windows_claim_ps_move_host(host: &[u8; 6]) -> Result<usize> {
     use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
-        SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW,
         DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, SP_DEVICE_INTERFACE_DATA,
+        SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW,
     };
     use windows_sys::Win32::Devices::HumanInterfaceDevice::{
-        HidD_FreePreparsedData, HidD_GetAttributes, HidD_GetHidGuid, HidD_GetPreparsedData,
-        HidD_SetFeature, HidP_GetCaps, HIDD_ATTRIBUTES, HIDP_CAPS, HIDP_STATUS_SUCCESS,
+        HIDD_ATTRIBUTES, HIDP_CAPS, HIDP_STATUS_SUCCESS, HidD_FreePreparsedData,
+        HidD_GetAttributes, HidD_GetHidGuid, HidD_GetPreparsedData, HidD_SetFeature, HidP_GetCaps,
     };
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{
@@ -3287,8 +3508,8 @@ fn windows_claim_ps_move_host(host: &[u8; 6]) -> Result<usize> {
 #[cfg(windows)]
 fn windows_ps_move_input_report(source: &str) -> Result<Option<Vec<u8>>> {
     use windows_sys::Win32::Devices::HumanInterfaceDevice::{
-        HidD_FreePreparsedData, HidD_GetInputReport, HidD_GetPreparsedData, HidP_GetCaps,
-        HIDP_CAPS, HIDP_STATUS_SUCCESS,
+        HIDP_CAPS, HIDP_STATUS_SUCCESS, HidD_FreePreparsedData, HidD_GetInputReport,
+        HidD_GetPreparsedData, HidP_GetCaps,
     };
     use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_READ, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{
@@ -3379,8 +3600,8 @@ fn windows_read_hid_interrupt_report(
         WAIT_OBJECT_0, WAIT_TIMEOUT,
     };
     use windows_sys::Win32::Storage::FileSystem::ReadFile;
-    use windows_sys::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
     use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
+    use windows_sys::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 
     let event = unsafe { CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) };
     if event.is_null() {
@@ -3466,7 +3687,7 @@ unsafe fn windows_hid_interface_path(
     interface_data: &mut windows_sys::Win32::Devices::DeviceAndDriverInstallation::SP_DEVICE_INTERFACE_DATA,
 ) -> Option<String> {
     use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
-        SetupDiGetDeviceInterfaceDetailW, SP_DEVICE_INTERFACE_DETAIL_DATA_W,
+        SP_DEVICE_INTERFACE_DETAIL_DATA_W, SetupDiGetDeviceInterfaceDetailW,
     };
 
     let mut required_size = 0;
@@ -3523,8 +3744,8 @@ unsafe fn windows_hid_interface_path(
 fn write_windows_hid_report(path: &str, report: &[u8]) -> Result<()> {
     use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_WRITE, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, WriteFile, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE,
-        OPEN_EXISTING,
+        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+        WriteFile,
     };
 
     let wide = wide_null(path);
@@ -4158,7 +4379,10 @@ fn move_state_status(options: Options) -> Result<()> {
         {
             continue;
         }
-        let key = format!("{}:{}:move-controller-state", options.host_id, source.move_id);
+        let key = format!(
+            "{}:{}:move-controller-state",
+            options.host_id, source.move_id
+        );
         if let Some(state) = node.get::<MuninnMoveControllerStateRecord>(&key)? {
             states.push(state);
         }
@@ -4172,7 +4396,9 @@ fn move_state_status(options: Options) -> Result<()> {
             )
             .then(a.sequence.cmp(&b.sequence))
     });
-    states.dedup_by(|left, right| left.stream_id == right.stream_id && left.sequence == right.sequence);
+    states.dedup_by(|left, right| {
+        left.stream_id == right.stream_id && left.sequence == right.sequence
+    });
     if states.is_empty() {
         println!(
             "No Muninn Move controller state records found for host {}.",
@@ -4286,7 +4512,10 @@ fn current_move_identity_records_from_sources(
             observed_at: observed_at.clone(),
         })
         .collect::<Vec<_>>();
-    identities.extend(current_bluetooth_move_identity_records(options, &observed_at));
+    identities.extend(current_bluetooth_move_identity_records(
+        options,
+        &observed_at,
+    ));
     identities.sort_by(|a, b| {
         a.identity_id.cmp(&b.identity_id).then(
             unix_timestamp_sort_key(&b.observed_at).cmp(&unix_timestamp_sort_key(&a.observed_at)),
@@ -4526,7 +4755,11 @@ fn build_targets(options: &Options) -> Vec<String> {
             targets
         }
         MediaTransport::Rudp => {
-            vec![rudp_endpoint(&options.target_host, options.port, &options.stream_id)]
+            vec![rudp_endpoint(
+                &options.target_host,
+                options.port,
+                &options.stream_id,
+            )]
         }
     }
 }
@@ -4537,7 +4770,7 @@ fn srt_endpoint(host: &str, port: u16) -> String {
 
 fn rudp_endpoint(host: &str, port: u16, stream_id: &str) -> String {
     format!(
-        "rudp://{host}:{port}/{stream_id}?channel=realtime&format=mpegts&connection=0x{MUNINN_MEDIA_RUDP_CONNECTION_ID:08x}"
+        "rudp://{host}:{port}/{stream_id}?channel=media&format=muninn-typed-media&connection=0x{MUNINN_MEDIA_RUDP_CONNECTION_ID:08x}"
     )
 }
 
@@ -4559,13 +4792,104 @@ fn loopback_args(options: &Options) -> Vec<String> {
     ]
 }
 
+fn rudp_video_ffmpeg_args(options: &Options) -> Vec<String> {
+    vec![
+        "-hide_banner".to_string(),
+        "-loglevel".to_string(),
+        "warning".to_string(),
+        "-fflags".to_string(),
+        "nobuffer".to_string(),
+        "-flags".to_string(),
+        "low_delay".to_string(),
+        "-thread_queue_size".to_string(),
+        "256".to_string(),
+        "-f".to_string(),
+        "lavfi".to_string(),
+        "-i".to_string(),
+        format!(
+            "ddagrab=framerate={}:output_idx={}:draw_mouse=1",
+            options.framerate, options.ddagrab_output_index
+        ),
+        "-map".to_string(),
+        "0:v:0".to_string(),
+        "-an".to_string(),
+        "-c:v".to_string(),
+        "h264_nvenc".to_string(),
+        "-preset".to_string(),
+        "p1".to_string(),
+        "-tune".to_string(),
+        "ull".to_string(),
+        "-zerolatency".to_string(),
+        "1".to_string(),
+        "-bf".to_string(),
+        "0".to_string(),
+        "-delay".to_string(),
+        "0".to_string(),
+        "-b:v".to_string(),
+        "12000k".to_string(),
+        "-maxrate".to_string(),
+        "12000k".to_string(),
+        "-bufsize".to_string(),
+        "6000k".to_string(),
+        "-g".to_string(),
+        options.framerate.max(1).to_string(),
+        "-forced-idr".to_string(),
+        "1".to_string(),
+        "-f".to_string(),
+        "h264".to_string(),
+        "pipe:1".to_string(),
+    ]
+}
+
+fn rudp_audio_ffmpeg_args(options: &Options) -> Vec<String> {
+    vec![
+        "-hide_banner".to_string(),
+        "-loglevel".to_string(),
+        "warning".to_string(),
+        "-fflags".to_string(),
+        "nobuffer".to_string(),
+        "-flags".to_string(),
+        "low_delay".to_string(),
+        "-thread_queue_size".to_string(),
+        "256".to_string(),
+        "-f".to_string(),
+        "f32le".to_string(),
+        "-ar".to_string(),
+        options.audio_sample_rate.to_string(),
+        "-ac".to_string(),
+        options.audio_channels.to_string(),
+        "-i".to_string(),
+        "pipe:0".to_string(),
+        "-vn".to_string(),
+        "-c:a".to_string(),
+        "aac".to_string(),
+        "-b:a".to_string(),
+        "192k".to_string(),
+        "-ar".to_string(),
+        options.audio_sample_rate.to_string(),
+        "-ac".to_string(),
+        options.audio_channels.to_string(),
+        "-f".to_string(),
+        "adts".to_string(),
+        "pipe:1".to_string(),
+    ]
+}
+
 fn ffmpeg_args(options: &Options) -> Vec<String> {
+    if options.media_transport == MediaTransport::Rudp {
+        return rudp_video_ffmpeg_args(options);
+    }
+
     let mut args = vec![
         "-hide_banner".to_string(),
         "-loglevel".to_string(),
         "warning".to_string(),
+        "-fflags".to_string(),
+        "nobuffer".to_string(),
+        "-flags".to_string(),
+        "low_delay".to_string(),
         "-thread_queue_size".to_string(),
-        "1024".to_string(),
+        "256".to_string(),
         "-f".to_string(),
         "lavfi".to_string(),
         "-i".to_string(),
@@ -4574,7 +4898,7 @@ fn ffmpeg_args(options: &Options) -> Vec<String> {
             options.framerate, options.ddagrab_output_index
         ),
         "-thread_queue_size".to_string(),
-        "1024".to_string(),
+        "256".to_string(),
         "-f".to_string(),
         "f32le".to_string(),
         "-ar".to_string(),
@@ -4590,17 +4914,25 @@ fn ffmpeg_args(options: &Options) -> Vec<String> {
         "-c:v".to_string(),
         "h264_nvenc".to_string(),
         "-preset".to_string(),
-        "p4".to_string(),
+        "p1".to_string(),
         "-tune".to_string(),
-        "ll".to_string(),
+        "ull".to_string(),
+        "-zerolatency".to_string(),
+        "1".to_string(),
+        "-bf".to_string(),
+        "0".to_string(),
+        "-delay".to_string(),
+        "0".to_string(),
         "-b:v".to_string(),
         "12000k".to_string(),
         "-maxrate".to_string(),
         "12000k".to_string(),
         "-bufsize".to_string(),
-        "24000k".to_string(),
+        "6000k".to_string(),
         "-g".to_string(),
-        "60".to_string(),
+        "30".to_string(),
+        "-forced-idr".to_string(),
+        "1".to_string(),
         "-c:a".to_string(),
         "aac".to_string(),
         "-b:a".to_string(),
@@ -4624,6 +4956,10 @@ fn ffmpeg_args(options: &Options) -> Vec<String> {
             args.extend([
                 "-flush_packets".to_string(),
                 "1".to_string(),
+                "-muxdelay".to_string(),
+                "0".to_string(),
+                "-muxpreload".to_string(),
+                "0".to_string(),
                 "-mpegts_flags".to_string(),
                 "resend_headers".to_string(),
                 "-f".to_string(),
@@ -4757,7 +5093,9 @@ impl Options {
                 }
                 "--surface" => options.surface_id = take_value(&mut args, "--surface")?,
                 "--stream" => options.stream_id = take_value(&mut args, "--stream")?,
-                "--stream-action" => options.stream_action = take_value(&mut args, "--stream-action")?,
+                "--stream-action" => {
+                    options.stream_action = take_value(&mut args, "--stream-action")?
+                }
                 "--host" => options.host_id = take_value(&mut args, "--host")?,
                 "--target-host" => options.target_host = take_value(&mut args, "--target-host")?,
                 "--port" => options.port = take_value(&mut args, "--port")?.parse()?,
@@ -5302,9 +5640,17 @@ mod tests {
         assert!(plan.command_line.contains(" | ffmpeg "));
         assert!(plan.command_line.contains("srt://10.77.0.2:5200"));
         assert!(plan.command_line.contains("srt://10.77.0.2:5204"));
-        assert!(plan.command_line.contains("5200?mode=caller&latency=120000&timeout=30000000|[f=mpegts]srt://10.77.0.2:5204"));
-        assert!(plan.command_script.contains("RedirectStandardInput = $true"));
-        assert!(plan.command_script.contains("BaseStream.Write($buffer, 0, $read)"));
+        assert!(plan.command_line.contains(
+            "5200?mode=caller&latency=120000&timeout=30000000|[f=mpegts]srt://10.77.0.2:5204"
+        ));
+        assert!(
+            plan.command_script
+                .contains("RedirectStandardInput = $true")
+        );
+        assert!(
+            plan.command_script
+                .contains("BaseStream.Write($buffer, 0, $read)")
+        );
     }
 
     #[test]
@@ -5347,12 +5693,78 @@ mod tests {
         assert_eq!(
             plan.targets,
             vec![
-                "rudp://10.77.0.2:5204/muninn.raven.av.rudp?channel=realtime&format=mpegts&connection=0x6d750001"
+                "rudp://10.77.0.2:5204/muninn.raven.av.rudp?channel=media&format=muninn-typed-media&connection=0x6d750001"
             ]
         );
-        assert!(plan.command_line.contains("'mpegts'"));
-        assert!(plan.command_line.contains("'pipe:1'"));
         assert!(!plan.command_line.contains("tee"));
+    }
+
+    #[test]
+    fn rudp_video_encoder_outputs_annex_b_h264_for_packetizer() {
+        let options = Options::parse(
+            ["activate", "--media-transport", "rudp", "--framerate", "60"]
+                .into_iter()
+                .map(String::from),
+        )
+        .unwrap();
+
+        let args = rudp_video_ffmpeg_args(&options);
+
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-f" && pair[1] == "h264")
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-tune" && pair[1] == "ull")
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-bf" && pair[1] == "0")
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-g" && pair[1] == "60")
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-an" && pair[1] == "-c:v")
+        );
+        assert_eq!(args.last().map(String::as_str), Some("pipe:1"));
+    }
+
+    #[test]
+    fn rudp_audio_encoder_outputs_adts_for_packetizer() {
+        let options = Options::parse(
+            [
+                "activate",
+                "--media-transport",
+                "rudp",
+                "--audio-sample-rate",
+                "48000",
+                "--audio-channels",
+                "2",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap();
+
+        let args = rudp_audio_ffmpeg_args(&options);
+
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-f" && pair[1] == "adts")
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-c:a" && pair[1] == "aac")
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-vn" && pair[1] == "-c:a")
+        );
+        assert_eq!(args.last().map(String::as_str), Some("pipe:1"));
     }
 
     #[test]
@@ -5361,9 +5773,11 @@ mod tests {
         let sources = available_sources(&options);
 
         assert!(sources.iter().any(|source| source.starts_with("screen:")));
-        assert!(sources
-            .iter()
-            .any(|source| source.starts_with("audio-loopback:")));
+        assert!(
+            sources
+                .iter()
+                .any(|source| source.starts_with("audio-loopback:"))
+        );
     }
 
     #[test]
@@ -5559,12 +5973,18 @@ mod tests {
 
     #[test]
     fn serve_only_claims_move_host_when_explicitly_configured() {
-        let implicit = Options::parse(["serve", "--host", "raven"].into_iter().map(String::from))
-            .unwrap();
+        let implicit =
+            Options::parse(["serve", "--host", "raven"].into_iter().map(String::from)).unwrap();
         let explicit = Options::parse(
-            ["serve", "--host", "starfire", "--move-host", "5C:93:A2:9C:A8:A8"]
-                .into_iter()
-                .map(String::from),
+            [
+                "serve",
+                "--host",
+                "starfire",
+                "--move-host",
+                "5C:93:A2:9C:A8:A8",
+            ]
+            .into_iter()
+            .map(String::from),
         )
         .unwrap();
 
@@ -5574,18 +5994,30 @@ mod tests {
 
     #[test]
     fn serve_only_manages_platform_move_lights_when_move_runtime_is_explicit() {
-        let plain = Options::parse(["serve", "--host", "raven"].into_iter().map(String::from))
-            .unwrap();
+        let plain =
+            Options::parse(["serve", "--host", "raven"].into_iter().map(String::from)).unwrap();
         let move_host = Options::parse(
-            ["serve", "--host", "starfire", "--move-host", "5C:93:A2:9C:A8:A8"]
-                .into_iter()
-                .map(String::from),
+            [
+                "serve",
+                "--host",
+                "starfire",
+                "--move-host",
+                "5C:93:A2:9C:A8:A8",
+            ]
+            .into_iter()
+            .map(String::from),
         )
         .unwrap();
         let move_state = Options::parse(
-            ["serve", "--host", "starfire", "--move-state", "move-usb=windows-psmove"]
-                .into_iter()
-                .map(String::from),
+            [
+                "serve",
+                "--host",
+                "starfire",
+                "--move-state",
+                "move-usb=windows-psmove",
+            ]
+            .into_iter()
+            .map(String::from),
         )
         .unwrap();
 
@@ -5606,10 +6038,10 @@ mod tests {
             .as_deref(),
             Some("00:07:04:A8:00:D0")
         );
-        assert!(parse_bluetoothctl_motion_controller_device_line(
-            "Device 00:11:22:33:44:55 Keyboard"
-        )
-        .is_none());
+        assert!(
+            parse_bluetoothctl_motion_controller_device_line("Device 00:11:22:33:44:55 Keyboard")
+                .is_none()
+        );
     }
 
     #[test]
@@ -5874,10 +6306,8 @@ Device 00:07:04:A8:00:D0 (public)
 
     #[test]
     fn runtime_boundary_records_use_explicit_activation_store_path() {
-        let store_path = std::env::temp_dir().join(format!(
-            "muninn-boundary-{}.cc",
-            timestamp_ns().unwrap()
-        ));
+        let store_path =
+            std::env::temp_dir().join(format!("muninn-boundary-{}.cc", timestamp_ns().unwrap()));
         let options = Options::parse(
             [
                 "serve",
@@ -6027,10 +6457,11 @@ Device 00:07:04:A8:00:D0 (public)
 
         reconcile_move_identity_records(&mut node, &options, &current, &[]).unwrap();
 
-        assert!(node
-            .get::<MuninnMoveIdentityRecord>("starfire:move-0006f523e2d1:move-identity")
-            .unwrap()
-            .is_none());
+        assert!(
+            node.get::<MuninnMoveIdentityRecord>("starfire:move-0006f523e2d1:move-identity")
+                .unwrap()
+                .is_none()
+        );
         let current_record = node
             .get_required::<MuninnMoveIdentityRecord>("starfire:move-000704a800d0:move-identity")
             .unwrap();
@@ -6119,11 +6550,12 @@ Device 00:07:04:A8:00:D0 (public)
         publish_move_controller_states(&mut node, &options, &mut active, &mut reader, None)
             .unwrap();
 
-        assert!(node
-            .get_required::<MuninnMoveControllerStateRecord>(
+        assert!(
+            node.get_required::<MuninnMoveControllerStateRecord>(
                 "nightwing:missing:move-controller-state"
             )
-            .is_err());
+            .is_err()
+        );
         let record = node
             .get_required::<MuninnMoveControllerStateRecord>(
                 "nightwing:present:move-controller-state",
@@ -6155,13 +6587,17 @@ Device 00:07:04:A8:00:D0 (public)
         );
 
         assert_eq!(active.len(), 2);
-        assert!(active
-            .iter()
-            .any(|state| state.source.move_id == "move-new"));
+        assert!(
+            active
+                .iter()
+                .any(|state| state.source.move_id == "move-new")
+        );
         assert!(active.iter().any(|state| state.source.move_id == "move-bt"));
-        assert!(!active
-            .iter()
-            .any(|state| state.source.move_id == "move-old"));
+        assert!(
+            !active
+                .iter()
+                .any(|state| state.source.move_id == "move-old")
+        );
     }
 
     #[test]
