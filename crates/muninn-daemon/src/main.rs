@@ -53,6 +53,7 @@ const CULTNET_RUDP_PROTOCOL_ID: &str = "cultnet.transport.rudp.v0";
 const IDUNN_HEALTH_RUDP_CONNECTION_ID: u32 = 0x1d0d_0001;
 const MUNINN_COMMAND_RUDP_CONNECTION_ID: u32 = 0x6d75_0002;
 const MUNINN_MEDIA_RUDP_CONNECTION_ID: u32 = 0x6d75_0001;
+const MUNINN_MEDIA_SEND_QUEUE_DEADLINE_MS: u64 = 75;
 const PS_MOVE_LED_REPORT_LEN: usize = 49;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1202,7 +1203,7 @@ fn run_rudp_mux_once(
         "typed video/audio access units are publishing over CultNet RUDP media",
     )?;
 
-    let (payload_tx, payload_rx) = mpsc::channel::<Result<MuninnMediaSendPayload>>();
+    let (payload_tx, payload_rx) = mpsc::channel::<Result<QueuedMuninnMediaSendPayload>>();
     let video_sender = video_rudp_payload_reader(
         payload_tx.clone(),
         video_ffmpeg_stdout,
@@ -1243,12 +1244,29 @@ fn run_rudp_mux_once(
     drop(payload_tx);
 
     let mut payloads_sent = 0_u64;
+    let mut payloads_dropped = 0_u64;
     let result = loop {
         match payload_rx.recv_timeout(Duration::from_millis(5)) {
-            Ok(Ok(payload)) => {
-                let payload_len = payload.payload.len();
+            Ok(Ok(queued)) => {
+                if media_payload_queue_age_exceeded(
+                    queued.queued_at,
+                    Instant::now(),
+                    Duration::from_millis(MUNINN_MEDIA_SEND_QUEUE_DEADLINE_MS),
+                ) {
+                    payloads_dropped += 1;
+                    let _ = transport.receive_once()?;
+                    transport.poll_resends()?;
+                    if payloads_dropped == 1 || payloads_dropped % 300 == 0 {
+                        eprintln!(
+                            "Muninn RUDP media sender dropped {payloads_dropped} stale queued payloads before send."
+                        );
+                    }
+                    continue;
+                }
+
+                let payload_len = queued.payload.payload.len();
                 transport
-                    .send(payload.channel_id, payload.payload)
+                    .send(queued.payload.channel_id, queued.payload.payload)
                     .context("sending typed Muninn media payload over RUDP media")?;
                 let _ = transport.receive_once()?;
                 transport.poll_resends()?;
@@ -1266,7 +1284,7 @@ fn run_rudp_mux_once(
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 break Ok(format!(
-                    "encoder stdout ended after {payloads_sent} typed RUDP media payloads"
+                    "encoder stdout ended after {payloads_sent} typed RUDP media payloads sent and {payloads_dropped} stale queued payloads dropped"
                 ));
             }
         }
@@ -1282,6 +1300,26 @@ fn run_rudp_mux_once(
     let _ = video_sender.join();
     let _ = audio_sender.join();
     result
+}
+
+struct QueuedMuninnMediaSendPayload {
+    payload: MuninnMediaSendPayload,
+    queued_at: Instant,
+}
+
+fn queue_muninn_media_payload(
+    tx: &mpsc::Sender<Result<QueuedMuninnMediaSendPayload>>,
+    payload: MuninnMediaSendPayload,
+) -> Result<()> {
+    tx.send(Ok(QueuedMuninnMediaSendPayload {
+        payload,
+        queued_at: Instant::now(),
+    }))
+    .context("queueing typed Muninn media payload")
+}
+
+fn media_payload_queue_age_exceeded(queued_at: Instant, now: Instant, max_age: Duration) -> bool {
+    now.saturating_duration_since(queued_at) > max_age
 }
 
 fn open_media_rudp_transport(options: &Options) -> Result<CultNetRudpSocketTransportConnection> {
@@ -1323,7 +1361,7 @@ fn open_media_rudp_transport(options: &Options) -> Result<CultNetRudpSocketTrans
 }
 
 fn video_rudp_payload_reader<R>(
-    tx: mpsc::Sender<Result<MuninnMediaSendPayload>>,
+    tx: mpsc::Sender<Result<QueuedMuninnMediaSendPayload>>,
     mut reader: R,
     config: VideoAnnexBStreamSendConfig,
 ) -> thread::JoinHandle<()>
@@ -1338,7 +1376,7 @@ where
 }
 
 fn audio_rudp_payload_reader<R>(
-    tx: mpsc::Sender<Result<MuninnMediaSendPayload>>,
+    tx: mpsc::Sender<Result<QueuedMuninnMediaSendPayload>>,
     mut reader: R,
     config: AudioAdtsStreamSendConfig,
 ) -> thread::JoinHandle<()>
@@ -1353,7 +1391,7 @@ where
 }
 
 fn read_video_rudp_payloads<R>(
-    tx: &mpsc::Sender<Result<MuninnMediaSendPayload>>,
+    tx: &mpsc::Sender<Result<QueuedMuninnMediaSendPayload>>,
     reader: &mut R,
     config: VideoAnnexBStreamSendConfig,
 ) -> Result<()>
@@ -1368,20 +1406,20 @@ where
             .context("reading encoded Annex B video from ffmpeg stdout")?;
         if read == 0 {
             for payload in sender.finish(&timestamp()?)? {
-                tx.send(Ok(payload))
+                queue_muninn_media_payload(tx, payload)
                     .context("queueing final typed video media payload")?;
             }
             return Ok(());
         }
         for payload in sender.push(&timestamp()?, &buffer[..read])? {
-            tx.send(Ok(payload))
+            queue_muninn_media_payload(tx, payload)
                 .context("queueing typed video media payload")?;
         }
     }
 }
 
 fn read_audio_rudp_payloads<R>(
-    tx: &mpsc::Sender<Result<MuninnMediaSendPayload>>,
+    tx: &mpsc::Sender<Result<QueuedMuninnMediaSendPayload>>,
     reader: &mut R,
     config: AudioAdtsStreamSendConfig,
 ) -> Result<()>
@@ -1396,13 +1434,13 @@ where
             .context("reading encoded ADTS audio from ffmpeg stdout")?;
         if read == 0 {
             for payload in sender.finish(&timestamp()?)? {
-                tx.send(Ok(payload))
+                queue_muninn_media_payload(tx, payload)
                     .context("queueing final typed audio media payload")?;
             }
             return Ok(());
         }
         for payload in sender.push(&timestamp()?, &buffer[..read])? {
-            tx.send(Ok(payload))
+            queue_muninn_media_payload(tx, payload)
                 .context("queueing typed audio media payload")?;
         }
     }
@@ -5765,6 +5803,23 @@ mod tests {
                 .any(|pair| pair[0] == "-vn" && pair[1] == "-c:a")
         );
         assert_eq!(args.last().map(String::as_str), Some("pipe:1"));
+    }
+
+    #[test]
+    fn media_payload_queue_deadline_is_strictly_bounded() {
+        let queued_at = Instant::now();
+        let deadline = Duration::from_millis(MUNINN_MEDIA_SEND_QUEUE_DEADLINE_MS);
+
+        assert!(!media_payload_queue_age_exceeded(
+            queued_at,
+            queued_at + deadline,
+            deadline
+        ));
+        assert!(media_payload_queue_age_exceeded(
+            queued_at,
+            queued_at + deadline + Duration::from_millis(1),
+            deadline
+        ));
     }
 
     #[test]
