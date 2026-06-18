@@ -56,6 +56,106 @@ function ConvertTo-PowerShellStringLiteral {
   return "'" + $Value.Replace("'", "''") + "'"
 }
 
+function Get-SshEffectiveConfig {
+  param([Parameter(Mandatory = $true)] [string] $Target)
+
+  $previousErrorActionPreference = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  try {
+    $output = & ssh.exe -G $Target 2>&1
+  } finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+  }
+
+  $config = @{
+    hostname = $Target
+    user = $null
+    identityfile = @()
+  }
+  if ($LASTEXITCODE -ne 0) {
+    $config.error = ($output -join " ")
+    return $config
+  }
+
+  foreach ($line in $output) {
+    if ($line -match "^hostname\s+(.+)$") {
+      $config.hostname = $Matches[1]
+    } elseif ($line -match "^user\s+(.+)$") {
+      $config.user = $Matches[1]
+    } elseif ($line -match "^identityfile\s+(.+)$") {
+      $config.identityfile += $Matches[1]
+    }
+  }
+
+  return $config
+}
+
+function Test-TcpPort {
+  param(
+    [Parameter(Mandatory = $true)] [string] $HostName,
+    [Parameter(Mandatory = $true)] [int] $Port,
+    [Parameter(Mandatory = $true)] [int] $TimeoutSeconds
+  )
+
+  $client = [System.Net.Sockets.TcpClient]::new()
+  try {
+    $async = $client.BeginConnect($HostName, $Port, $null, $null)
+    if (-not $async.AsyncWaitHandle.WaitOne([TimeSpan]::FromSeconds($TimeoutSeconds))) {
+      return "timeout"
+    }
+    $client.EndConnect($async)
+    return "reachable"
+  } catch {
+    return $_.Exception.Message
+  } finally {
+    $client.Close()
+  }
+}
+
+function Test-IcmpHost {
+  param(
+    [Parameter(Mandatory = $true)] [string] $HostName,
+    [Parameter(Mandatory = $true)] [int] $TimeoutSeconds
+  )
+
+  $ping = [System.Net.NetworkInformation.Ping]::new()
+  try {
+    $reply = $ping.Send($HostName, [Math]::Max(1, $TimeoutSeconds) * 1000)
+    if ($null -ne $reply -and $reply.Status -eq [System.Net.NetworkInformation.IPStatus]::Success) {
+      return "reachable"
+    }
+    if ($null -ne $reply) {
+      return $reply.Status.ToString()
+    }
+    return "unreachable"
+  } catch {
+    return $_.Exception.Message
+  } finally {
+    $ping.Dispose()
+  }
+}
+
+function Get-RavenSshDiagnostic {
+  param(
+    [Parameter(Mandatory = $true)] [string] $Target,
+    [Parameter(Mandatory = $true)] [int] $TimeoutSeconds
+  )
+
+  $config = Get-SshEffectiveConfig -Target $Target
+  $hostName = [string] $config.hostname
+  $icmp = Test-IcmpHost -HostName $hostName -TimeoutSeconds $TimeoutSeconds
+  $tcp22 = Test-TcpPort -HostName $hostName -Port 22 -TimeoutSeconds $TimeoutSeconds
+  $identity = if ($config.identityfile.Count -gt 0) {
+    ($config.identityfile -join ",")
+  } else {
+    "default"
+  }
+  $user = if ([string]::IsNullOrWhiteSpace($config.user)) { "default" } else { $config.user }
+  $configError = if ($config.ContainsKey("error")) { "; ssh_config_error=$($config.error)" } else { "" }
+
+  return "resolved_host=$hostName user=$user identityfile=$identity icmp=$icmp tcp22=$tcp22$configError"
+}
+
 function Invoke-RavenSshPreflight {
   param(
     [Parameter(Mandatory = $true)] [string] $Target,
@@ -77,7 +177,8 @@ function Invoke-RavenSshPreflight {
     $ErrorActionPreference = $previousErrorActionPreference
   }
   if ($LASTEXITCODE -ne 0) {
-    throw "Raven SSH preflight failed for '$Target' within ${TimeoutSeconds}s: $($output -join ' ')"
+    $diagnostic = Get-RavenSshDiagnostic -Target $Target -TimeoutSeconds $TimeoutSeconds
+    throw "Raven SSH preflight failed for '$Target' within ${TimeoutSeconds}s: $($output -join ' '); $diagnostic"
   }
 }
 
