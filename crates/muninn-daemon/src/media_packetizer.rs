@@ -3288,6 +3288,30 @@ mod tests {
     }
 
     #[test]
+    fn media_wire_decodes_obs_bridge_receiver_feedback_fixture() -> Result<()> {
+        let wire = hex_fixture(
+            "83ad736368656d6156657273696f6ebb63756c746e65742e646f63756d656e745f7075745f7261772e7630a96d6573736167654964d96a6d756e696e6e2d6d656469613a6d756e696e6e2e6d656469615f72656365697665725f666565646261636b2e76313a6d756e696e6e2e726176656e2e61762e727564703a726176656e3a746573743a766964656f3a666565646261636b3a73746172666972652e6f6273a8646f63756d656e7489a8736368656d614964d9216d756e696e6e2e6d656469615f72656365697665725f666565646261636b2e7631a97265636f72644b6579d93b6d756e696e6e2e726176656e2e61762e727564703a726176656e3a746573743a766964656f3a666565646261636b3a73746172666972652e6f6273a873746f7265644174ac756e69782d6d733a31303030af7061796c6f6164456e636f64696e67ab6d6573736167657061636ba77061796c6f6164c4539bb46d756e696e6e2e726176656e2e61762e72756470b0726176656e3a746573743a766964656fac73746172666972652e6f62732990912ac30000ac756e69782d6d733a3130303092a434323a31a434323a33af736f7572636552756e74696d654964a87374617266697265ad736f757263654167656e744964c0aa736f75726365526f6c65a96d696d69722e6f6273a47461677391ac6d756e696e6e2e6d65646961",
+        )?;
+
+        let MuninnMediaWireRecord::Feedback(feedback) = decode_media_wire_record(&wire)? else {
+            panic!("expected receiver feedback");
+        };
+
+        assert_eq!(feedback.stream_id, "muninn.raven.av.rudp");
+        assert_eq!(feedback.session_id, "raven:test:video");
+        assert_eq!(feedback.receiver_id, "starfire.obs");
+        assert_eq!(feedback.highest_decodable_frame_id, Some(41));
+        assert!(feedback.missing_frame_ids.is_empty());
+        assert_eq!(feedback.late_frame_ids, vec![42]);
+        assert!(feedback.requested_keyframe);
+        assert_eq!(feedback.jitter_us, 0);
+        assert_eq!(feedback.decode_queue_us, 0);
+        assert_eq!(feedback.observed_at, "unix-ms:1000");
+        assert_eq!(feedback.missing_video_chunk_keys, vec!["42:1", "42:3"]);
+        Ok(())
+    }
+
+    #[test]
     fn media_wire_rejects_invalid_video_record_timing() -> Result<()> {
         let access_unit = VideoAccessUnit {
             bytes: vec![1, 2, 3],
@@ -3550,5 +3574,18 @@ mod tests {
                 .contains("expected cultnet.document_put_raw.v0")
         );
         Ok(())
+    }
+
+    fn hex_fixture(value: &str) -> Result<Vec<u8>> {
+        if value.len() % 2 != 0 {
+            return Err(anyhow!("hex fixture must have an even length"));
+        }
+        let mut bytes = Vec::with_capacity(value.len() / 2);
+        for index in (0..value.len()).step_by(2) {
+            let byte = u8::from_str_radix(&value[index..index + 2], 16)
+                .with_context(|| format!("parsing hex fixture byte at offset {index}"))?;
+            bytes.push(byte);
+        }
+        Ok(bytes)
     }
 }
