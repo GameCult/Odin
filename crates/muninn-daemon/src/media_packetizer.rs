@@ -988,6 +988,18 @@ pub fn encode_media_wire_record(
         .map_err(Into::into)
 }
 
+pub fn encode_media_wire_records(
+    records: &[MuninnMediaWireRecord],
+    stored_at: &str,
+    source_runtime_id: &str,
+    source_role: &str,
+) -> Result<Vec<Vec<u8>>> {
+    records
+        .iter()
+        .map(|record| encode_media_wire_record(record, stored_at, source_runtime_id, source_role))
+        .collect()
+}
+
 pub fn decode_media_wire_record(payload: &[u8]) -> Result<MuninnMediaWireRecord> {
     let message = decode_cultnet_message_from_slice(payload, CultNetWireContract::CultNetSchemaV0)?;
     let CultNetMessage::DocumentPutRaw { document, .. } = message else {
@@ -2349,6 +2361,47 @@ mod tests {
             decode_media_wire_record(&wire)?,
             MuninnMediaWireRecord::Video(record)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn media_wire_batches_annex_b_video_records() -> Result<()> {
+        let mut stream = Vec::new();
+        stream.extend_from_slice(&start_code());
+        stream.extend_from_slice(&[0x65, 0x80]);
+        stream.extend_from_slice(&start_code());
+        stream.extend_from_slice(&[0x41, 0x80]);
+        let records = packetize_video_annex_b_stream(
+            VideoAnnexBStreamPacketizeOptions {
+                stream_id: "muninn.raven.av.rudp",
+                session_id: "session-1",
+                codec: "h264",
+                first_frame_id: 9,
+                first_pts_ticks: 27_000,
+                frame_duration_ticks: 3_000,
+                timebase_num: 1,
+                timebase_den: 90_000,
+                deadline_delay_ticks: 1_800,
+                max_payload_bytes: 16,
+            },
+            &stream,
+        )?;
+        let wire_records = records
+            .iter()
+            .cloned()
+            .map(MuninnMediaWireRecord::Video)
+            .collect::<Vec<_>>();
+
+        let wire = encode_media_wire_records(
+            &wire_records,
+            "2026-06-18T00:00:00Z",
+            "muninn-test",
+            "media-test",
+        )?;
+
+        assert_eq!(wire.len(), 2);
+        assert_eq!(decode_media_wire_record(&wire[0])?, wire_records[0]);
+        assert_eq!(decode_media_wire_record(&wire[1])?, wire_records[1]);
         Ok(())
     }
 
