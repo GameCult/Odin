@@ -94,6 +94,7 @@ muninn.media_receiver_feedback.v1
   receiver_id
   highest_decodable_frame_id
   missing_frame_ids
+  missing_video_chunk_keys
   late_frame_ids
   requested_keyframe
   jitter_us
@@ -203,4 +204,3 @@ The rebuild is not proven by "OBS shows video once." Minimum proof:
   stale command receipts.
 - Restarting Raven Muninn restores catalog/health without starting capture
   until requested.
-

@@ -837,6 +837,8 @@ pub struct MuninnMediaReceiverFeedbackRecord {
     pub decode_queue_us: i64,
     #[cultcache(key = 9)]
     pub observed_at: String,
+    #[cultcache(key = 10, default)]
+    pub missing_video_chunk_keys: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
@@ -1180,6 +1182,7 @@ mod tests {
             jitter_us: 750,
             decode_queue_us: 2_000,
             observed_at: "2026-06-18T00:00:00Z".to_string(),
+            missing_video_chunk_keys: vec!["42:2".to_string()],
         };
 
         node.put("video:42:0", &video)?;
@@ -1232,6 +1235,12 @@ mod tests {
             reloaded
                 .get_required::<MuninnMediaReceiverFeedbackRecord>("feedback:starfire.obs")?
                 .requested_keyframe
+        );
+        assert_eq!(
+            reloaded
+                .get_required::<MuninnMediaReceiverFeedbackRecord>("feedback:starfire.obs")?
+                .missing_video_chunk_keys,
+            vec!["42:2".to_string()]
         );
         Ok(())
     }

@@ -107,6 +107,7 @@ pub struct ReceiverFeedbackOptions<'a> {
     pub receiver_id: &'a str,
     pub highest_decodable_frame_id: Option<u64>,
     pub missing_frame_ids: Vec<u64>,
+    pub missing_video_chunk_keys: Vec<String>,
     pub late_frame_ids: Vec<u64>,
     pub requested_keyframe: bool,
     pub jitter_us: i64,
@@ -333,11 +334,17 @@ pub fn build_receiver_feedback(
     missing_frame_ids.sort_unstable();
     missing_frame_ids.dedup();
 
+    let mut missing_video_chunk_keys = options.missing_video_chunk_keys;
+    missing_video_chunk_keys.sort();
+    missing_video_chunk_keys.dedup();
+
     let mut late_frame_ids = options.late_frame_ids;
     late_frame_ids.sort_unstable();
     late_frame_ids.dedup();
 
-    let requested_keyframe = options.requested_keyframe || !missing_frame_ids.is_empty();
+    let requested_keyframe = options.requested_keyframe
+        || !missing_frame_ids.is_empty()
+        || !missing_video_chunk_keys.is_empty();
 
     Ok(MuninnMediaReceiverFeedbackRecord {
         stream_id: options.stream_id.to_string(),
@@ -350,6 +357,7 @@ pub fn build_receiver_feedback(
         jitter_us: options.jitter_us,
         decode_queue_us: options.decode_queue_us,
         observed_at: options.observed_at.to_string(),
+        missing_video_chunk_keys,
     })
 }
 
@@ -831,6 +839,11 @@ mod tests {
             receiver_id: "starfire.obs",
             highest_decodable_frame_id: Some(40),
             missing_frame_ids: vec![43, 42, 43],
+            missing_video_chunk_keys: vec![
+                "43:2".to_string(),
+                "42:1".to_string(),
+                "42:1".to_string(),
+            ],
             late_frame_ids: vec![39, 39, 38],
             requested_keyframe: false,
             jitter_us: 700,
@@ -839,6 +852,7 @@ mod tests {
         })?;
 
         assert_eq!(feedback.missing_frame_ids, vec![42, 43]);
+        assert_eq!(feedback.missing_video_chunk_keys, vec!["42:1", "43:2"]);
         assert_eq!(feedback.late_frame_ids, vec![38, 39]);
         assert!(feedback.requested_keyframe);
         Ok(())
@@ -852,6 +866,7 @@ mod tests {
             receiver_id: "starfire.obs",
             highest_decodable_frame_id: Some(40),
             missing_frame_ids: Vec::new(),
+            missing_video_chunk_keys: Vec::new(),
             late_frame_ids: Vec::new(),
             requested_keyframe: false,
             jitter_us: -1,
@@ -939,6 +954,7 @@ mod tests {
             receiver_id: "starfire.obs",
             highest_decodable_frame_id: Some(40),
             missing_frame_ids: vec![42],
+            missing_video_chunk_keys: vec!["42:2".to_string()],
             late_frame_ids: vec![39],
             requested_keyframe: true,
             jitter_us: 700,
