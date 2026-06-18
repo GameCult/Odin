@@ -1,5 +1,6 @@
 use anyhow::{Result, anyhow};
 use odin_core::{MuninnMediaAudioPacketRecord, MuninnMediaVideoAccessUnitRecord};
+use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VideoAccessUnit {
@@ -181,6 +182,99 @@ pub fn packetize_audio_packet(
         timebase_den: options.timebase_den,
         deadline_ticks: options.deadline_ticks,
         payload: payload.to_vec(),
+    })
+}
+
+pub fn reassemble_video_access_unit(
+    chunks: &[MuninnMediaVideoAccessUnitRecord],
+) -> Result<VideoAccessUnit> {
+    let first = chunks
+        .first()
+        .ok_or_else(|| anyhow!("video access unit requires at least one chunk"))?;
+    if first.chunk_count == 0 {
+        return Err(anyhow!("video access unit chunk_count must be non-zero"));
+    }
+
+    let mut by_index = BTreeMap::new();
+    for chunk in chunks {
+        if chunk.stream_id != first.stream_id {
+            return Err(anyhow!(
+                "video access unit chunks have mixed stream_id values"
+            ));
+        }
+        if chunk.session_id != first.session_id {
+            return Err(anyhow!(
+                "video access unit chunks have mixed session_id values"
+            ));
+        }
+        if chunk.frame_id != first.frame_id {
+            return Err(anyhow!(
+                "video access unit chunks have mixed frame_id values"
+            ));
+        }
+        if chunk.codec != first.codec {
+            return Err(anyhow!("video access unit chunks have mixed codec values"));
+        }
+        if chunk.pts_ticks != first.pts_ticks
+            || chunk.duration_ticks != first.duration_ticks
+            || chunk.timebase_num != first.timebase_num
+            || chunk.timebase_den != first.timebase_den
+            || chunk.deadline_ticks != first.deadline_ticks
+        {
+            return Err(anyhow!("video access unit chunks have mixed timing values"));
+        }
+        if chunk.keyframe != first.keyframe
+            || chunk.dependency_frame_id != first.dependency_frame_id
+        {
+            return Err(anyhow!(
+                "video access unit chunks have mixed dependency values"
+            ));
+        }
+        if chunk.chunk_count != first.chunk_count {
+            return Err(anyhow!(
+                "video access unit chunks have mixed chunk_count values"
+            ));
+        }
+        if chunk.chunk_index >= first.chunk_count {
+            return Err(anyhow!(
+                "video access unit chunk_index {} is outside chunk_count {}",
+                chunk.chunk_index,
+                first.chunk_count
+            ));
+        }
+        if chunk.payload.is_empty() {
+            return Err(anyhow!("video access unit chunk payload must be non-empty"));
+        }
+        if by_index
+            .insert(chunk.chunk_index, chunk.payload.as_slice())
+            .is_some()
+        {
+            return Err(anyhow!(
+                "video access unit has duplicate chunk_index {}",
+                chunk.chunk_index
+            ));
+        }
+    }
+
+    if by_index.len() != first.chunk_count as usize {
+        return Err(anyhow!(
+            "video access unit is missing chunks: expected {}, received {}",
+            first.chunk_count,
+            by_index.len()
+        ));
+    }
+
+    let mut bytes = Vec::new();
+    for index in 0..first.chunk_count {
+        let payload = by_index
+            .get(&index)
+            .ok_or_else(|| anyhow!("video access unit is missing chunk_index {index}"))?;
+        bytes.extend_from_slice(payload);
+    }
+
+    Ok(VideoAccessUnit {
+        bytes,
+        keyframe: first.keyframe,
     })
 }
 
@@ -427,5 +521,92 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("payload must be non-empty"));
+    }
+
+    #[test]
+    fn reassembles_video_chunks_in_chunk_index_order() -> Result<()> {
+        let access_unit = VideoAccessUnit {
+            bytes: vec![1, 2, 3, 4, 5],
+            keyframe: true,
+        };
+        let records = packetize_video_access_unit(
+            VideoFramePacketizeOptions {
+                stream_id: "muninn.raven.av.rudp",
+                session_id: "session-1",
+                codec: "h264",
+                frame_id: 9,
+                pts_ticks: 27_000,
+                duration_ticks: 3_000,
+                timebase_num: 1,
+                timebase_den: 90_000,
+                deadline_ticks: 28_800,
+                max_payload_bytes: 2,
+            },
+            &access_unit,
+        )?;
+        let shuffled = vec![records[2].clone(), records[0].clone(), records[1].clone()];
+
+        let reassembled = reassemble_video_access_unit(&shuffled)?;
+
+        assert_eq!(reassembled, access_unit);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_video_chunks_from_mixed_frames() -> Result<()> {
+        let access_unit = VideoAccessUnit {
+            bytes: vec![1, 2, 3, 4],
+            keyframe: false,
+        };
+        let mut records = packetize_video_access_unit(
+            VideoFramePacketizeOptions {
+                stream_id: "muninn.raven.av.rudp",
+                session_id: "session-1",
+                codec: "h264",
+                frame_id: 9,
+                pts_ticks: 27_000,
+                duration_ticks: 3_000,
+                timebase_num: 1,
+                timebase_den: 90_000,
+                deadline_ticks: 28_800,
+                max_payload_bytes: 2,
+            },
+            &access_unit,
+        )?;
+        records[1].frame_id = 10;
+
+        let error = reassemble_video_access_unit(&records).unwrap_err();
+
+        assert!(error.to_string().contains("mixed frame_id"));
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_incomplete_video_chunk_sets() -> Result<()> {
+        let access_unit = VideoAccessUnit {
+            bytes: vec![1, 2, 3, 4, 5],
+            keyframe: false,
+        };
+        let mut records = packetize_video_access_unit(
+            VideoFramePacketizeOptions {
+                stream_id: "muninn.raven.av.rudp",
+                session_id: "session-1",
+                codec: "h264",
+                frame_id: 9,
+                pts_ticks: 27_000,
+                duration_ticks: 3_000,
+                timebase_num: 1,
+                timebase_den: 90_000,
+                deadline_ticks: 28_800,
+                max_payload_bytes: 2,
+            },
+            &access_unit,
+        )?;
+        records.pop();
+
+        let error = reassemble_video_access_unit(&records).unwrap_err();
+
+        assert!(error.to_string().contains("missing chunks"));
+        Ok(())
     }
 }
