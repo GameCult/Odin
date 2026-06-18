@@ -2,7 +2,8 @@ mod media_packetizer;
 
 use crate::media_packetizer::{
     AudioAdtsStreamSendConfig, AudioAdtsStreamSendState, MuninnMediaSendPayload,
-    VideoAnnexBStreamSendConfig, VideoAnnexBStreamSendState,
+    MuninnMediaWireRecord, VideoAnnexBStreamSendConfig, VideoAnnexBStreamSendState,
+    decode_media_wire_record,
 };
 use anyhow::{Context, Result, anyhow};
 use cultmesh_rs::{
@@ -11,8 +12,8 @@ use cultmesh_rs::{
 };
 use cultnet_rs::{
     CultNetMessage, CultNetRawDocumentRecord, CultNetRawPayloadEncoding,
-    CultNetRudpSocketTransportConnection, CultNetRudpSocketTransportOptions, CultNetWireContract,
-    decode_cultnet_message_from_slice, encode_cultnet_message_to_vec,
+    CultNetRudpSocketTransportConnection, CultNetRudpSocketTransportOptions, CultNetTransportFrame,
+    CultNetWireContract, decode_cultnet_message_from_slice, encode_cultnet_message_to_vec,
 };
 use odin_core::{
     EveProviderAdvertisementCompatRecord, IdunnDaemonHealthRecord,
@@ -1245,6 +1246,7 @@ fn run_rudp_mux_once(
 
     let mut payloads_sent = 0_u64;
     let mut payloads_dropped = 0_u64;
+    let mut receiver_feedback = MuninnRudpReceiverFeedbackStats::default();
     let result = loop {
         match payload_rx.recv_timeout(Duration::from_millis(5)) {
             Ok(Ok(queued)) => {
@@ -1254,13 +1256,18 @@ fn run_rudp_mux_once(
                     Duration::from_millis(MUNINN_MEDIA_SEND_QUEUE_DEADLINE_MS),
                 ) {
                     payloads_dropped += 1;
-                    let _ = transport.receive_once()?;
+                    poll_rudp_media_receiver_feedback(&mut transport, &mut receiver_feedback)?;
                     transport.poll_resends()?;
                     if payloads_dropped == 1 || payloads_dropped % 300 == 0 {
                         let expired = transport.stats().reliable_packets_expired;
                         eprintln!(
                             "{}",
-                            rudp_media_progress_detail(payloads_sent, payloads_dropped, expired)
+                            rudp_media_progress_detail(
+                                payloads_sent,
+                                payloads_dropped,
+                                expired,
+                                &receiver_feedback
+                            )
                         );
                     }
                     continue;
@@ -1270,27 +1277,37 @@ fn run_rudp_mux_once(
                 transport
                     .send(queued.payload.channel_id, queued.payload.payload)
                     .context("sending typed Muninn media payload over RUDP media")?;
-                let _ = transport.receive_once()?;
+                poll_rudp_media_receiver_feedback(&mut transport, &mut receiver_feedback)?;
                 transport.poll_resends()?;
                 payloads_sent += 1;
                 if payloads_sent == 1 || payloads_sent % 900 == 0 {
                     let expired = transport.stats().reliable_packets_expired;
                     eprintln!(
                         "{}; latest payload was {payload_len} bytes.",
-                        rudp_media_progress_detail(payloads_sent, payloads_dropped, expired)
+                        rudp_media_progress_detail(
+                            payloads_sent,
+                            payloads_dropped,
+                            expired,
+                            &receiver_feedback
+                        )
                     );
                 }
             }
             Ok(Err(error)) => break Err(error),
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                let _ = transport.receive_once()?;
+                poll_rudp_media_receiver_feedback(&mut transport, &mut receiver_feedback)?;
                 transport.poll_resends()?;
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 let expired = transport.stats().reliable_packets_expired;
                 break Ok(format!(
                     "encoder stdout ended; {}",
-                    rudp_media_progress_detail(payloads_sent, payloads_dropped, expired)
+                    rudp_media_progress_detail(
+                        payloads_sent,
+                        payloads_dropped,
+                        expired,
+                        &receiver_feedback
+                    )
                 ));
             }
         }
@@ -1313,6 +1330,15 @@ struct QueuedMuninnMediaSendPayload {
     queued_at: Instant,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct MuninnRudpReceiverFeedbackStats {
+    feedback_records: u64,
+    requested_keyframes: u64,
+    late_frames: u64,
+    missing_video_chunks: u64,
+    highest_decodable_frame_id: Option<u64>,
+}
+
 fn queue_muninn_media_payload(
     tx: &mpsc::Sender<Result<QueuedMuninnMediaSendPayload>>,
     payload: MuninnMediaSendPayload,
@@ -1328,10 +1354,67 @@ fn media_payload_queue_age_exceeded(queued_at: Instant, now: Instant, max_age: D
     now.saturating_duration_since(queued_at) > max_age
 }
 
-fn rudp_media_progress_detail(sent: u64, queue_dropped: u64, reliable_expired: u64) -> String {
+fn rudp_media_progress_detail(
+    sent: u64,
+    queue_dropped: u64,
+    reliable_expired: u64,
+    receiver_feedback: &MuninnRudpReceiverFeedbackStats,
+) -> String {
     format!(
-        "Muninn RUDP media progress: sent={sent} queue_dropped={queue_dropped} reliable_expired={reliable_expired}"
+        "Muninn RUDP media progress: sent={sent} queue_dropped={queue_dropped} reliable_expired={reliable_expired} receiver_feedback={} receiver_keyframes={} receiver_late_frames={} receiver_missing_chunks={} receiver_highest_decodable={}",
+        receiver_feedback.feedback_records,
+        receiver_feedback.requested_keyframes,
+        receiver_feedback.late_frames,
+        receiver_feedback.missing_video_chunks,
+        receiver_feedback
+            .highest_decodable_frame_id
+            .map(|frame_id| frame_id.to_string())
+            .unwrap_or_else(|| "none".to_string())
     )
+}
+
+fn poll_rudp_media_receiver_feedback(
+    transport: &mut CultNetRudpSocketTransportConnection,
+    stats: &mut MuninnRudpReceiverFeedbackStats,
+) -> Result<()> {
+    while let Some(frame) = transport.receive_once()? {
+        record_rudp_media_receiver_feedback(&frame, stats)?;
+    }
+    Ok(())
+}
+
+fn record_rudp_media_receiver_feedback(
+    frame: &CultNetTransportFrame,
+    stats: &mut MuninnRudpReceiverFeedbackStats,
+) -> Result<()> {
+    if frame.channel_id != crate::media_packetizer::MUNINN_MEDIA_RUDP_CHANNEL {
+        return Ok(());
+    }
+
+    let MuninnMediaWireRecord::Feedback(feedback) = decode_media_wire_record(&frame.payload)?
+    else {
+        return Ok(());
+    };
+
+    stats.feedback_records = stats.feedback_records.saturating_add(1);
+    if feedback.requested_keyframe {
+        stats.requested_keyframes = stats.requested_keyframes.saturating_add(1);
+    }
+    stats.late_frames = stats
+        .late_frames
+        .saturating_add(feedback.late_frame_ids.len() as u64);
+    stats.missing_video_chunks = stats
+        .missing_video_chunks
+        .saturating_add(feedback.missing_video_chunk_keys.len() as u64);
+    if let Some(frame_id) = feedback.highest_decodable_frame_id {
+        stats.highest_decodable_frame_id = Some(
+            stats
+                .highest_decodable_frame_id
+                .map(|current| current.max(frame_id))
+                .unwrap_or(frame_id),
+        );
+    }
+    Ok(())
 }
 
 fn open_media_rudp_transport(options: &Options) -> Result<CultNetRudpSocketTransportConnection> {
@@ -5836,10 +5919,58 @@ mod tests {
 
     #[test]
     fn rudp_media_progress_detail_reports_queue_and_transport_pressure() {
+        let receiver_feedback = MuninnRudpReceiverFeedbackStats {
+            feedback_records: 2,
+            requested_keyframes: 1,
+            late_frames: 3,
+            missing_video_chunks: 4,
+            highest_decodable_frame_id: Some(88),
+        };
+
         assert_eq!(
-            rudp_media_progress_detail(120, 3, 9),
-            "Muninn RUDP media progress: sent=120 queue_dropped=3 reliable_expired=9"
+            rudp_media_progress_detail(120, 3, 9, &receiver_feedback),
+            "Muninn RUDP media progress: sent=120 queue_dropped=3 reliable_expired=9 receiver_feedback=2 receiver_keyframes=1 receiver_late_frames=3 receiver_missing_chunks=4 receiver_highest_decodable=88"
         );
+    }
+
+    #[test]
+    fn rudp_media_receiver_feedback_updates_sender_pressure_stats() {
+        let feedback = crate::media_packetizer::build_receiver_feedback(
+            crate::media_packetizer::ReceiverFeedbackOptions {
+                stream_id: "muninn.raven.av.rudp",
+                session_id: "raven:session:video",
+                receiver_id: "starfire.obs",
+                highest_decodable_frame_id: Some(41),
+                missing_frame_ids: Vec::new(),
+                missing_video_chunk_keys: vec!["42:1".to_string(), "42:3".to_string()],
+                late_frame_ids: vec![42, 43],
+                requested_keyframe: true,
+                jitter_us: 500,
+                decode_queue_us: 2_000,
+                observed_at: "unix:1000",
+            },
+        )
+        .unwrap();
+        let payload = crate::media_packetizer::encode_media_wire_record(
+            &crate::media_packetizer::MuninnMediaWireRecord::Feedback(feedback),
+            "unix:1000",
+            "starfire",
+            "mimir.obs",
+        )
+        .unwrap();
+        let frame = CultNetTransportFrame {
+            channel_id: crate::media_packetizer::MUNINN_MEDIA_RUDP_CHANNEL.to_string(),
+            payload,
+        };
+        let mut stats = MuninnRudpReceiverFeedbackStats::default();
+
+        record_rudp_media_receiver_feedback(&frame, &mut stats).unwrap();
+
+        assert_eq!(stats.feedback_records, 1);
+        assert_eq!(stats.requested_keyframes, 1);
+        assert_eq!(stats.late_frames, 2);
+        assert_eq!(stats.missing_video_chunks, 2);
+        assert_eq!(stats.highest_decodable_frame_id, Some(41));
     }
 
     #[test]
