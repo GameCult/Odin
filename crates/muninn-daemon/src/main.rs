@@ -1540,19 +1540,11 @@ fn open_media_rudp_transport(options: &Options) -> Result<CultNetRudpSocketTrans
     socket
         .set_nonblocking(true)
         .context("setting Muninn media RUDP client nonblocking")?;
-    let mut transport = CultNetRudpSocketTransportConnection::new({
-        let mut options = CultNetRudpSocketTransportOptions::client(
-            "muninn-media",
-            socket,
-            endpoint,
-            MUNINN_MEDIA_RUDP_CONNECTION_ID,
-        );
-        options.resend_delay_ms = 5;
-        options.max_fragment_bytes = Some(media_profile.max_fragment_bytes as u32);
-        options.media_reliable_expire_after_ms =
-            Some(media_profile.sender_reliable_expire_after_ms);
-        options
-    })?;
+    let mut transport = CultNetRudpSocketTransportConnection::new(muninn_media_rudp_options(
+        socket,
+        endpoint,
+        &media_profile,
+    ))?;
     transport.connect(options.stream_id.as_bytes().to_vec())?;
     let deadline = Instant::now() + Duration::from_secs(5);
     while !transport.connected() {
@@ -1566,6 +1558,24 @@ fn open_media_rudp_transport(options: &Options) -> Result<CultNetRudpSocketTrans
         thread::sleep(Duration::from_millis(2));
     }
     Ok(transport)
+}
+
+fn muninn_media_rudp_options(
+    socket: UdpSocket,
+    endpoint: SocketAddr,
+    media_profile: &MuninnRudpMediaProfile,
+) -> CultNetRudpSocketTransportOptions {
+    let mut options = CultNetRudpSocketTransportOptions::client(
+        "muninn-media",
+        socket,
+        endpoint,
+        MUNINN_MEDIA_RUDP_CONNECTION_ID,
+    );
+    options.resend_delay_ms = 5;
+    options.max_fragment_bytes = Some(media_profile.max_fragment_bytes as u32);
+    options.media_reliable_expire_after_ms =
+        Some(media_profile.sender_reliable_expire_after_ms);
+    options
 }
 
 fn video_rudp_payload_reader<R>(
@@ -6129,6 +6139,28 @@ mod tests {
                 + MUNINN_RUDP_FIXED_HEADER_BYTES
                 + crate::media_packetizer::MUNINN_MEDIA_RUDP_CHANNEL.len()
                 <= MUNINN_RUDP_IPV4_UDP_PAYLOAD_BYTES
+        );
+    }
+
+    #[test]
+    fn rudp_media_transport_options_follow_low_latency_profile() {
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let endpoint: SocketAddr = "127.0.0.1:5204".parse().unwrap();
+        let profile = muninn_rudp_media_profile();
+
+        let options = muninn_media_rudp_options(socket, endpoint, &profile);
+
+        assert_eq!(options.runtime_id, "muninn-media");
+        assert_eq!(options.remote_addr, Some(endpoint));
+        assert_eq!(options.connection_id, MUNINN_MEDIA_RUDP_CONNECTION_ID);
+        assert_eq!(options.resend_delay_ms, 5);
+        assert_eq!(
+            options.max_fragment_bytes,
+            Some(MUNINN_RUDP_MEDIA_MAX_FRAGMENT_BYTES as u32)
+        );
+        assert_eq!(
+            options.media_reliable_expire_after_ms,
+            Some(MUNINN_RUDP_MEDIA_RELIABLE_EXPIRE_AFTER_MS)
         );
     }
 
