@@ -164,6 +164,13 @@ pub struct VideoAnnexBStreamPacketizeOptions<'a> {
     pub max_payload_bytes: usize,
 }
 
+pub struct VideoAnnexBStreamWireOptions<'a> {
+    pub packetize: VideoAnnexBStreamPacketizeOptions<'a>,
+    pub stored_at: &'a str,
+    pub source_runtime_id: &'a str,
+    pub source_role: &'a str,
+}
+
 pub struct AudioPacketizeOptions<'a> {
     pub stream_id: &'a str,
     pub session_id: &'a str,
@@ -998,6 +1005,23 @@ pub fn encode_media_wire_records(
         .iter()
         .map(|record| encode_media_wire_record(record, stored_at, source_runtime_id, source_role))
         .collect()
+}
+
+pub fn encode_video_annex_b_stream_wire_records(
+    options: VideoAnnexBStreamWireOptions<'_>,
+    input: &[u8],
+) -> Result<Vec<Vec<u8>>> {
+    let records = packetize_video_annex_b_stream(options.packetize, input)?;
+    let wire_records = records
+        .into_iter()
+        .map(MuninnMediaWireRecord::Video)
+        .collect::<Vec<_>>();
+    encode_media_wire_records(
+        &wire_records,
+        options.stored_at,
+        options.source_runtime_id,
+        options.source_role,
+    )
 }
 
 pub fn decode_media_wire_record(payload: &[u8]) -> Result<MuninnMediaWireRecord> {
@@ -2402,6 +2426,51 @@ mod tests {
         assert_eq!(wire.len(), 2);
         assert_eq!(decode_media_wire_record(&wire[0])?, wire_records[0]);
         assert_eq!(decode_media_wire_record(&wire[1])?, wire_records[1]);
+        Ok(())
+    }
+
+    #[test]
+    fn media_wire_encodes_annex_b_stream_for_sender() -> Result<()> {
+        let mut stream = Vec::new();
+        stream.extend_from_slice(&start_code());
+        stream.extend_from_slice(&[0x65, 0x80]);
+        stream.extend_from_slice(&start_code());
+        stream.extend_from_slice(&[0x41, 0x80]);
+
+        let wire = encode_video_annex_b_stream_wire_records(
+            VideoAnnexBStreamWireOptions {
+                packetize: VideoAnnexBStreamPacketizeOptions {
+                    stream_id: "muninn.raven.av.rudp",
+                    session_id: "session-1",
+                    codec: "h264",
+                    first_frame_id: 9,
+                    first_pts_ticks: 27_000,
+                    frame_duration_ticks: 3_000,
+                    timebase_num: 1,
+                    timebase_den: 90_000,
+                    deadline_delay_ticks: 1_800,
+                    max_payload_bytes: 16,
+                },
+                stored_at: "2026-06-18T00:00:00Z",
+                source_runtime_id: "muninn-test",
+                source_role: "media-test",
+            },
+            &stream,
+        )?;
+
+        assert_eq!(wire.len(), 2);
+        let first = decode_media_wire_record(&wire[0])?;
+        let second = decode_media_wire_record(&wire[1])?;
+        let MuninnMediaWireRecord::Video(first) = first else {
+            panic!("expected video media record");
+        };
+        let MuninnMediaWireRecord::Video(second) = second else {
+            panic!("expected video media record");
+        };
+        assert_eq!(first.frame_id, 9);
+        assert_eq!(first.deadline_ticks, 28_800);
+        assert_eq!(second.frame_id, 10);
+        assert_eq!(second.deadline_ticks, 31_800);
         Ok(())
     }
 
