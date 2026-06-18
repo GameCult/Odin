@@ -2,6 +2,7 @@ param(
   [string] $RavenHost = "raven",
   [string] $MuninnExe = "C:\Meta\Odin\Muninn\muninn.exe",
   [string] $LocalMuninnExe = "",
+  [int] $ConnectTimeoutSeconds = 10,
   [switch] $SkipBuild,
   [switch] $SkipRestart
 )
@@ -29,6 +30,10 @@ if (-not (Test-Path -LiteralPath $LocalMuninnExe)) {
   throw "Local Muninn executable was not found at '$LocalMuninnExe'."
 }
 
+if ($ConnectTimeoutSeconds -lt 1) {
+  throw "ConnectTimeoutSeconds must be at least 1."
+}
+
 function Set-AsciiFile {
   param(
     [Parameter(Mandatory = $true)] [string] $Path,
@@ -42,6 +47,33 @@ function ConvertTo-PowerShellStringLiteral {
   param([Parameter(Mandatory = $true)] [string] $Value)
   return "'" + $Value.Replace("'", "''") + "'"
 }
+
+function Invoke-RavenSshPreflight {
+  param(
+    [Parameter(Mandatory = $true)] [string] $Target,
+    [Parameter(Mandatory = $true)] [int] $TimeoutSeconds
+  )
+
+  $sshArgs = @(
+    "-o", "BatchMode=yes",
+    "-o", "ConnectTimeout=$TimeoutSeconds",
+    "-o", "ConnectionAttempts=1",
+    $Target,
+    "cmd /c echo raven-ssh-ready"
+  )
+  $previousErrorActionPreference = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  try {
+    $output = & ssh.exe @sshArgs 2>&1
+  } finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+  }
+  if ($LASTEXITCODE -ne 0) {
+    throw "Raven SSH preflight failed for '$Target' within ${TimeoutSeconds}s: $($output -join ' ')"
+  }
+}
+
+Invoke-RavenSshPreflight -Target $RavenHost -TimeoutSeconds $ConnectTimeoutSeconds
 
 $deployId = [guid]::NewGuid().ToString("N")
 $localTempRoot = Join-Path $env:TEMP "odin-raven-muninn-binary-$deployId"
@@ -90,7 +122,14 @@ Write-Output ("muninn.exe deployed length={0} path={1}" -f `$item.Length, `$item
     'put "{0}" "{1}"' -f $localRemoteScript, $remoteScriptSftpPath
   ) -join "`r`n")
 
-  & sftp.exe -b $localSftpBatch $RavenHost
+  $sftpArgs = @(
+    "-o", "BatchMode=yes",
+    "-o", "ConnectTimeout=$ConnectTimeoutSeconds",
+    "-o", "ConnectionAttempts=1",
+    "-b", $localSftpBatch,
+    $RavenHost
+  )
+  & sftp.exe @sftpArgs
   if ($LASTEXITCODE -ne 0) {
     throw "sftp upload to Raven failed with exit code $LASTEXITCODE"
   }
@@ -106,7 +145,7 @@ try {
 exit `$code
 "@
   $encodedRunner = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($remoteRunner))
-  & ssh.exe -o BatchMode=yes -o ConnectTimeout=10 $RavenHost "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encodedRunner"
+  & ssh.exe -o BatchMode=yes -o "ConnectTimeout=$ConnectTimeoutSeconds" -o ConnectionAttempts=1 $RavenHost "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encodedRunner"
   if ($LASTEXITCODE -ne 0) {
     throw "remote Muninn binary deploy failed with exit code $LASTEXITCODE"
   }
