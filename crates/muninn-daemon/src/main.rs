@@ -1575,8 +1575,7 @@ fn muninn_media_rudp_options(
     );
     options.resend_delay_ms = media_profile.sender_resend_delay_ms;
     options.max_fragment_bytes = Some(media_profile.max_fragment_bytes as u32);
-    options.media_reliable_expire_after_ms =
-        Some(media_profile.sender_reliable_expire_after_ms);
+    options.media_reliable_expire_after_ms = Some(media_profile.sender_reliable_expire_after_ms);
     options
 }
 
@@ -1823,6 +1822,9 @@ fn publish_runtime_boundary_records(
             "media_profile": {
                 "profile_id": media_profile.profile_id,
                 "owner": "Muninn capture runtime",
+                "strategy": "hardware-codec-owned-prediction-over-fixed-budget-rudp",
+                "visual_prediction_owner": "NVENC H.264 inter-frame prediction",
+                "transport_owner": "CultNet RUDP media channel",
                 "codec": media_profile.video_codec,
                 "encoder": media_profile.video_encoder,
                 "encoder_preset": media_profile.video_preset,
@@ -1841,6 +1843,7 @@ fn publish_runtime_boundary_records(
                 "sender_reliable_expire_after_ms": media_profile.sender_reliable_expire_after_ms,
                 "receiver_assembly_deadline_ms": media_profile.receiver_assembly_deadline_ms,
                 "receiver_gap_wait_ms": media_profile.receiver_gap_wait_ms,
+                "late_media_policy": "drop expired queued media; do not repair frames outside the latency budget",
                 "recovery": "receiver feedback may request keyframe; sender restarts low-latency encoder on new keyframe edges"
             },
             "compatibility_mechanisms": compatibility_mechanisms,
@@ -6941,6 +6944,24 @@ Device 00:07:04:A8:00:D0 (public)
         );
         assert_eq!(
             media_profile
+                .get("strategy")
+                .and_then(|value| value.as_str()),
+            Some("hardware-codec-owned-prediction-over-fixed-budget-rudp")
+        );
+        assert_eq!(
+            media_profile
+                .get("visual_prediction_owner")
+                .and_then(|value| value.as_str()),
+            Some("NVENC H.264 inter-frame prediction")
+        );
+        assert_eq!(
+            media_profile
+                .get("transport_owner")
+                .and_then(|value| value.as_str()),
+            Some("CultNet RUDP media channel")
+        );
+        assert_eq!(
+            media_profile
                 .get("video_rate_control")
                 .and_then(|value| value.as_str()),
             Some("cbr")
@@ -6986,6 +7007,12 @@ Device 00:07:04:A8:00:D0 (public)
                 .get("sender_resend_delay_ms")
                 .and_then(|value| value.as_u64()),
             Some(MUNINN_RUDP_MEDIA_RESEND_DELAY_MS)
+        );
+        assert_eq!(
+            media_profile
+                .get("late_media_policy")
+                .and_then(|value| value.as_str()),
+            Some("drop expired queued media; do not repair frames outside the latency budget")
         );
 
         let routes = provider

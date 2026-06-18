@@ -233,6 +233,17 @@ document ingress for MiMo VoiceDesign before its HTTP command route can become
 debug-only, and Odin still owes removal of hashed-store/C# witness shims once
 direct interoperable witness publication is ready.
 
+Muninn media uses a codec-owned prediction model, not a custom visual-delta
+codec. The canonical LAN profile is
+`muninn.rudp.low_latency_h264_lan.v1`: NVENC H.264 owns inter-frame prediction,
+motion search, residuals, keyframe production, and the actual lossy visual
+encoding; CultNet/RUDP owns bounded delivery of typed video access units, audio
+packets, receiver feedback, retransmit pressure, expiry, and keyframe requests.
+Late media is dropped when it misses the fixed latency budget. Optical flow,
+foveation, ROI maps, or stochastic patch experiments may become future Muninn
+profiles only after this hardware-codec RUDP path is measured and proven
+insufficient.
+
 Raven Muninn task actions are also an explicit ops invariant: Task Scheduler
 must execute `wscript.exe //B //Nologo` hidden launcher actions directly for
 `GameCult-Muninn`, `GameCult-Muninn-Activate`, and
