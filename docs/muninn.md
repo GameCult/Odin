@@ -42,6 +42,13 @@ The record is type `muninn.obs_stream_catalog` with schema
 syncs Raven's `.cc` store to the same local path so the OBS plugin can read
 CultCache directly without learning Raven SSH.
 
+The current Raven A/V path is a compatibility proof, not the final hot media
+shape. Its rebuild map lives in
+[`docs/muninn-media-streaming.md`](muninn-media-streaming.md): Muninn should
+publish encoded video access units and audio packets as typed CultMesh media
+frames with frame ids, deadlines, receiver feedback, and explicit audio/video
+policy instead of treating MPEG-TS bytes as the transport's unit of truth.
+
 Activation is explicit:
 
 ```powershell
