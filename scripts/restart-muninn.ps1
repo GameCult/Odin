@@ -15,8 +15,12 @@ param(
   [string] $IdunnRudpHealth = "10.77.0.2:17870",
   [string] $IdunnDaemon = "muninn",
   [string] $IdunnHealthContract = "muninn.cultnet-rudp-remote-telemetry-health",
-  [string] $CaptureCommandRudpBind = "0.0.0.0:17872",
-  [string] $CaptureCommandRudpTarget = "127.0.0.1:17872"
+  [string] $CaptureCommandRudpBind = "0.0.0.0:17873",
+  [string] $CaptureCommandRudpTarget = "127.0.0.1:17873",
+  [int] $ConnectTimeoutSeconds = 10,
+  [int] $ServeStartTimeoutSeconds = 20,
+  [string] $SshUser = "",
+  [string] $IdentityFile = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -47,6 +51,27 @@ function ConvertTo-PowerShellArrayLiteral {
   return "@(`r`n{0}`r`n)" -f ($lines -join ",`r`n")
 }
 
+function Get-SshCommonArgs {
+  $args = @(
+    "-o", "BatchMode=yes",
+    "-o", "ConnectTimeout=$ConnectTimeoutSeconds",
+    "-o", "ConnectionAttempts=1"
+  )
+  if (-not [string]::IsNullOrWhiteSpace($IdentityFile)) {
+    $args += @("-i", $IdentityFile)
+  }
+  return $args
+}
+
+function Get-SshTarget {
+  param([Parameter(Mandatory = $true)] [string] $Target)
+
+  if ([string]::IsNullOrWhiteSpace($SshUser)) {
+    return $Target
+  }
+  return "${SshUser}@${Target}"
+}
+
 function New-HiddenNativeLauncherPowerShellContent {
   param(
     [Parameter(Mandatory = $false)] [string] $StorePath,
@@ -56,7 +81,8 @@ function New-HiddenNativeLauncherPowerShellContent {
     [Parameter(Mandatory = $true)] [string] $StdoutPath,
     [Parameter(Mandatory = $true)] [string] $StderrPath,
     [Parameter(Mandatory = $true)] [string] $PidPath,
-    [Parameter(Mandatory = $false)] [string] $WorkingDirectory
+    [Parameter(Mandatory = $false)] [string] $WorkingDirectory,
+    [Parameter(Mandatory = $false)] [switch] $WaitForExit
   )
 
   $template = @'
@@ -64,6 +90,8 @@ $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 __STORE_DIR_LINE__
 New-Item -ItemType Directory -Force -Path __LOG_ROOT__ | Out-Null
+$launcherLog = __PID_PATH__ + '.launcher.log'
+('launcher-start ' + [DateTime]::UtcNow.ToString('o')) | Set-Content -Encoding ASCII -LiteralPath $launcherLog
 $arguments = __ARGUMENTS__
 function Quote-NativeArgument([string] $Value) {
   if ($Value -match '[\s"]') {
@@ -72,8 +100,33 @@ function Quote-NativeArgument([string] $Value) {
   return $Value
 }
 $argumentLine = ($arguments | ForEach-Object { Quote-NativeArgument $_ }) -join ' '
-$process = Start-Process -FilePath __FILE_PATH__ -ArgumentList $argumentLine __WORKING_DIRECTORY_CLAUSE__-WindowStyle Hidden -PassThru -RedirectStandardOutput __STDOUT_PATH__ -RedirectStandardError __STDERR_PATH__
-$process.Id | Set-Content -Encoding ASCII -LiteralPath __PID_PATH__
+('launcher-args ' + $argumentLine) | Add-Content -Encoding ASCII -LiteralPath $launcherLog
+if (__RUN_INLINE__) {
+  $PID | Set-Content -Encoding ASCII -LiteralPath __PID_PATH__
+  ('launcher-pid ' + $PID + ' powershell-inline') | Add-Content -Encoding ASCII -LiteralPath $launcherLog
+  $previousErrorActionPreference = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  try {
+    & __FILE_PATH__ @arguments > __STDOUT_PATH__ 2> __STDERR_PATH__
+    $exitCode = $LASTEXITCODE
+  } catch {
+    ('launcher-error ' + $_.Exception.Message) | Add-Content -Encoding ASCII -LiteralPath $launcherLog
+    throw
+  } finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+  }
+  ('launcher-exit ' + $exitCode) | Add-Content -Encoding ASCII -LiteralPath $launcherLog
+  exit $exitCode
+}
+try {
+  $process = Start-Process -FilePath __FILE_PATH__ -ArgumentList $argumentLine __WORKING_DIRECTORY_CLAUSE__-WindowStyle Hidden -PassThru -RedirectStandardOutput __STDOUT_PATH__ -RedirectStandardError __STDERR_PATH__
+  $process.Id | Set-Content -Encoding ASCII -LiteralPath __PID_PATH__
+  ('launcher-pid ' + $process.Id) | Add-Content -Encoding ASCII -LiteralPath $launcherLog
+} catch {
+  ('launcher-error ' + $_.Exception.Message) | Add-Content -Encoding ASCII -LiteralPath $launcherLog
+  throw
+}
+__WAIT_FOR_EXIT_LINE__
 '@
 
   $storeDirLine = if ([string]::IsNullOrWhiteSpace($StorePath)) {
@@ -95,22 +148,32 @@ $process.Id | Set-Content -Encoding ASCII -LiteralPath __PID_PATH__
     Replace("__WORKING_DIRECTORY_CLAUSE__", $workingDirectoryClause).
     Replace("__STDOUT_PATH__", (ConvertTo-PowerShellStringLiteral $StdoutPath)).
     Replace("__STDERR_PATH__", (ConvertTo-PowerShellStringLiteral $StderrPath)).
-    Replace("__PID_PATH__", (ConvertTo-PowerShellStringLiteral $PidPath))
+    Replace("__PID_PATH__", (ConvertTo-PowerShellStringLiteral $PidPath)).
+    Replace("__RUN_INLINE__", $(if ($WaitForExit) { '$true' } else { '$false' })).
+    Replace("__WAIT_FOR_EXIT_LINE__", $(if ($WaitForExit) { '$process.WaitForExit(); exit $process.ExitCode' } else { "" }))
 }
 
 function New-HiddenPowerShellVbsLauncherContent {
   param(
-    [Parameter(Mandatory = $true)] [string] $PsPath
+    [Parameter(Mandatory = $true)] [string] $PsPath,
+    [Parameter(Mandatory = $false)] [switch] $WaitForExit
   )
 
   return (@'
 Set fso = CreateObject("Scripting.FileSystemObject")
 scriptDir = fso.GetParentFolderName(WScript.ScriptFullName)
 psLauncher = "{0}"
+logPath = psLauncher & ".vbs.log"
+Set logFile = fso.OpenTextFile(logPath, 8, True)
+logFile.WriteLine "vbs-start " & Now
+logFile.Close
 Set shell = CreateObject("WScript.Shell")
 shell.CurrentDirectory = scriptDir
-shell.Run "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File """ & psLauncher & """", 0, False
-'@) -f $PsPath
+exitCode = shell.Run("powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File """ & psLauncher & """", 0, {1})
+Set logFile = fso.OpenTextFile(logPath, 8, True)
+logFile.WriteLine "vbs-exit " & exitCode & " " & Now
+logFile.Close
+'@) -f $PsPath, ($(if ($WaitForExit) { "True" } else { "False" }))
 }
 
 function New-WscriptCmdLauncherContent {
@@ -152,7 +215,9 @@ function Invoke-RavenUploadedPowerShell {
     $batchLines += 'put "{0}" "{1}"' -f $localRemoteScript, $remoteSftpPath
     Set-AsciiFile -Path $localSftpBatch -Content ($batchLines -join "`r`n")
 
-    & sftp.exe -b $localSftpBatch $RavenHost
+    $commonArgs = Get-SshCommonArgs
+    $sshTarget = Get-SshTarget -Target $RavenHost
+    & sftp.exe @commonArgs -b $localSftpBatch $sshTarget
     if ($LASTEXITCODE -ne 0) {
       exit $LASTEXITCODE
     }
@@ -168,7 +233,9 @@ try {
 exit `$code
 "@
     $encodedRunner = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($remoteRunner))
-    & ssh.exe -o BatchMode=yes -o ConnectTimeout=10 $RavenHost "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encodedRunner"
+    $commonArgs = Get-SshCommonArgs
+    $sshTarget = Get-SshTarget -Target $RavenHost
+    & ssh.exe @commonArgs $sshTarget "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encodedRunner"
   } finally {
     Remove-Item -LiteralPath $localTempRoot -Recurse -Force -ErrorAction SilentlyContinue
   }
@@ -274,7 +341,8 @@ $servePsContent = New-HiddenNativeLauncherPowerShellContent `
   -FilePath $MuninnExe `
   -StdoutPath (Join-Path $LogRoot "muninn-serve.out.log") `
   -StderrPath (Join-Path $LogRoot "muninn-serve.err.log") `
-  -PidPath (Join-Path $LogRoot "muninn-serve.pid")
+  -PidPath (Join-Path $LogRoot "muninn-serve.pid") `
+  -WaitForExit
 
 $activatePsContent = New-HiddenNativeLauncherPowerShellContent `
   -StorePath $ActivateStorePath `
@@ -310,7 +378,7 @@ try {
   $localVideoProofCmd = Join-Path $uploadRoot "muninn-raven-video-to-starfire-obs.cmd"
 
   Set-AsciiFile -Path $localServePs -Content $servePsContent
-  Set-AsciiFile -Path $localServeVbs -Content (New-HiddenPowerShellVbsLauncherContent -PsPath $servePsPath)
+  Set-AsciiFile -Path $localServeVbs -Content (New-HiddenPowerShellVbsLauncherContent -PsPath $servePsPath -WaitForExit)
   Set-AsciiFile -Path $localServeCmd -Content (New-WscriptCmdLauncherContent -WorkingDirectory $muninnDir -VbsPath $serveVbsPath)
   Set-AsciiFile -Path $localActivatePs -Content $activatePsContent
   Set-AsciiFile -Path $localActivateVbs -Content (New-HiddenPowerShellVbsLauncherContent -PsPath $activatePsPath)
@@ -354,7 +422,7 @@ Get-CimInstance Win32_Process |
 New-Item -ItemType Directory -Force -Path "$LogRoot" | Out-Null
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent "$StorePath") | Out-Null
 & netsh.exe advfirewall firewall delete rule name="GameCult Muninn Capture Command RUDP" | Out-Null 2>`$null
-& netsh.exe advfirewall firewall add rule name="GameCult Muninn Capture Command RUDP" dir=in action=allow protocol=UDP localport=17872 | Out-Null
+& netsh.exe advfirewall firewall add rule name="GameCult Muninn Capture Command RUDP" dir=in action=allow protocol=UDP localport=17873 | Out-Null
 
 function Register-HiddenVbsTask {
   param(
@@ -362,9 +430,23 @@ function Register-HiddenVbsTask {
     [Parameter(Mandatory = `$true)] [string] `$VbsPath
   )
 
-  `$taskAction = New-ScheduledTaskAction -Execute "wscript.exe" -Argument "//B //Nologo ""`$VbsPath"""
+  `$taskAction = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\wscript.exe" -Argument "//B //Nologo ""`$VbsPath""" -WorkingDirectory (Split-Path -Parent `$VbsPath)
   `$taskTrigger = New-ScheduledTaskTrigger -Once -At ([DateTime]::Today.AddHours(23).AddMinutes(59))
-  `$taskPrincipal = New-ScheduledTaskPrincipal -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
+  `$taskPrincipal = New-ScheduledTaskPrincipal -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Highest
+  `$taskSettings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew
+  Register-ScheduledTask -TaskName `$TaskName -Action `$taskAction -Trigger `$taskTrigger -Principal `$taskPrincipal -Settings `$taskSettings -Force | Out-Null
+}
+
+function Register-HiddenPowerShellTask {
+  param(
+    [Parameter(Mandatory = `$true)] [string] `$TaskName,
+    [Parameter(Mandatory = `$true)] [string] `$PsPath
+  )
+
+  `$taskArguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + `$PsPath + '"'
+  `$taskAction = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -Argument `$taskArguments -WorkingDirectory (Split-Path -Parent `$PsPath)
+  `$taskTrigger = New-ScheduledTaskTrigger -Once -At ([DateTime]::Today.AddHours(23).AddMinutes(59))
+  `$taskPrincipal = New-ScheduledTaskPrincipal -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Highest
   `$taskSettings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew
   Register-ScheduledTask -TaskName `$TaskName -Action `$taskAction -Trigger `$taskTrigger -Principal `$taskPrincipal -Settings `$taskSettings -Force | Out-Null
 }
@@ -399,22 +481,48 @@ function Assert-HiddenVbsTask {
   }
 }
 
-Register-HiddenVbsTask -TaskName "GameCult-Muninn" -VbsPath "$serveVbsPath"
+function Assert-HiddenPowerShellTask {
+  param(
+    [Parameter(Mandatory = `$true)] [string] `$TaskName,
+    [Parameter(Mandatory = `$true)] [string] `$PsPath
+  )
+
+  `$task = Get-ScheduledTask -TaskName `$TaskName -ErrorAction Stop
+  `$action = @(`$task.Actions)[0]
+  if (`$action.Execute -notmatch 'powershell\.exe$') {
+    throw "`$TaskName action executes `$(`$action.Execute), expected powershell.exe"
+  }
+  if (`$action.Arguments -notlike "*`$PsPath*") {
+    throw "`$TaskName action arguments `$(`$action.Arguments) do not reference `$PsPath"
+  }
+  if (`$action.Arguments -notlike "*-File*") {
+    throw "`$TaskName action arguments `$(`$action.Arguments) do not execute a PowerShell launcher"
+  }
+  if (-not (Test-Path -LiteralPath `$PsPath)) {
+    throw "`$TaskName PowerShell launcher not found at `$PsPath"
+  }
+}
+
+Register-HiddenPowerShellTask -TaskName "GameCult-Muninn" -PsPath "$servePsPath"
 Register-HiddenVbsTask -TaskName "GameCult-Muninn-Activate" -VbsPath "$activateVbsPath"
 Register-HiddenVbsTask -TaskName "GameCult-Muninn-VideoProof" -VbsPath "$videoProofVbsPath"
 
-Assert-HiddenVbsTask -TaskName "GameCult-Muninn" -VbsPath "$serveVbsPath" -PsPath "$servePsPath"
+Assert-HiddenPowerShellTask -TaskName "GameCult-Muninn" -PsPath "$servePsPath"
 Assert-HiddenVbsTask -TaskName "GameCult-Muninn-Activate" -VbsPath "$activateVbsPath" -PsPath "$activatePsPath"
 Assert-HiddenVbsTask -TaskName "GameCult-Muninn-VideoProof" -VbsPath "$videoProofVbsPath" -PsPath "$videoProofPsPath"
 
 Start-ScheduledTask -TaskName "GameCult-Muninn"
-Start-Sleep -Seconds 2
 
-`$process = Get-CimInstance Win32_Process |
-  Where-Object { `$_.Name -ieq "muninn.exe" -and `$_.CommandLine -like "*serve*" -and `$_.CommandLine -like "*--host*raven*" } |
-  Select-Object -First 1
+`$deadline = [DateTime]::UtcNow.AddSeconds($ServeStartTimeoutSeconds)
+`$process = `$null
+do {
+  Start-Sleep -Milliseconds 500
+  `$process = Get-CimInstance Win32_Process |
+    Where-Object { `$_.Name -ieq "muninn.exe" -and `$_.CommandLine -like "*serve*" -and `$_.CommandLine -like "*--host*raven*" } |
+    Select-Object -First 1
+} while (`$null -eq `$process -and [DateTime]::UtcNow -lt `$deadline)
 if (`$null -eq `$process) {
-  throw "Muninn serve process is not running on Raven"
+  throw "Muninn serve process did not start on Raven within $ServeStartTimeoutSeconds seconds"
 }
 foreach (`$pattern in @(
   "--idunn-rudp-health",
@@ -451,6 +559,13 @@ $restartExit = $LASTEXITCODE
 if ($restartExit -eq 0) {
   Start-Sleep -Seconds 2
   $healthScript = Join-Path $PSScriptRoot "health-muninn.ps1"
-  & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $healthScript -RavenHost $RavenHost -MuninnExe $MuninnExe -StorePath $StorePath
+  & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $healthScript `
+    -RavenHost $RavenHost `
+    -MuninnExe $MuninnExe `
+    -StorePath $StorePath `
+    -ConnectTimeoutSeconds $ConnectTimeoutSeconds `
+    -MaxStoreAgeSeconds ([Math]::Max(180, $ServeStartTimeoutSeconds + 60)) `
+    -SshUser $SshUser `
+    -IdentityFile $IdentityFile
 }
 exit $restartExit

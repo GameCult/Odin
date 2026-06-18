@@ -3,8 +3,11 @@ param(
   [string] $MuninnExe = "C:\Meta\Odin\Muninn\muninn.exe",
   [string] $LocalMuninnExe = "",
   [int] $ConnectTimeoutSeconds = 10,
+  [string] $SshUser = "",
+  [string] $IdentityFile = "",
   [switch] $SkipBuild,
-  [switch] $SkipRestart
+  [switch] $SkipRestart,
+  [switch] $PreflightOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -56,13 +59,38 @@ function ConvertTo-PowerShellStringLiteral {
   return "'" + $Value.Replace("'", "''") + "'"
 }
 
+function Get-SshCommonArgs {
+  param([int] $TimeoutSeconds = $ConnectTimeoutSeconds)
+
+  $args = @(
+    "-o", "BatchMode=yes",
+    "-o", "ConnectTimeout=$TimeoutSeconds",
+    "-o", "ConnectionAttempts=1"
+  )
+  if (-not [string]::IsNullOrWhiteSpace($IdentityFile)) {
+    $args += @("-i", $IdentityFile)
+  }
+  return $args
+}
+
+function Get-SshTarget {
+  param([Parameter(Mandatory = $true)] [string] $Target)
+
+  if ([string]::IsNullOrWhiteSpace($SshUser)) {
+    return $Target
+  }
+  return "${SshUser}@${Target}"
+}
+
 function Get-SshEffectiveConfig {
   param([Parameter(Mandatory = $true)] [string] $Target)
 
   $previousErrorActionPreference = $ErrorActionPreference
   $ErrorActionPreference = "Continue"
   try {
-    $output = & ssh.exe -G $Target 2>&1
+    $commonArgs = Get-SshCommonArgs
+    $sshTarget = Get-SshTarget -Target $Target
+    $output = & ssh.exe -G @commonArgs $sshTarget 2>&1
   } finally {
     $ErrorActionPreference = $previousErrorActionPreference
   }
@@ -163,16 +191,14 @@ function Invoke-RavenSshPreflight {
   )
 
   $sshArgs = @(
-    "-o", "BatchMode=yes",
-    "-o", "ConnectTimeout=$TimeoutSeconds",
-    "-o", "ConnectionAttempts=1",
-    $Target,
+    (Get-SshTarget -Target $Target),
     "cmd /c echo raven-ssh-ready"
   )
   $previousErrorActionPreference = $ErrorActionPreference
   $ErrorActionPreference = "Continue"
   try {
-    $output = & ssh.exe @sshArgs 2>&1
+    $commonArgs = Get-SshCommonArgs -TimeoutSeconds $TimeoutSeconds
+    $output = & ssh.exe @commonArgs @sshArgs 2>&1
   } finally {
     $ErrorActionPreference = $previousErrorActionPreference
   }
@@ -183,6 +209,11 @@ function Invoke-RavenSshPreflight {
 }
 
 Invoke-RavenSshPreflight -Target $RavenHost -TimeoutSeconds $ConnectTimeoutSeconds
+
+if ($PreflightOnly) {
+  Write-Host "Raven SSH preflight succeeded for '$RavenHost'."
+  exit 0
+}
 
 $deployId = [guid]::NewGuid().ToString("N")
 $localTempRoot = Join-Path $env:TEMP "odin-raven-muninn-binary-$deployId"
@@ -232,13 +263,11 @@ Write-Output ("muninn.exe deployed length={0} path={1}" -f `$item.Length, `$item
   ) -join "`r`n")
 
   $sftpArgs = @(
-    "-o", "BatchMode=yes",
-    "-o", "ConnectTimeout=$ConnectTimeoutSeconds",
-    "-o", "ConnectionAttempts=1",
     "-b", $localSftpBatch,
-    $RavenHost
+    (Get-SshTarget -Target $RavenHost)
   )
-  & sftp.exe @sftpArgs
+  $commonArgs = Get-SshCommonArgs
+  & sftp.exe @commonArgs @sftpArgs
   if ($LASTEXITCODE -ne 0) {
     throw "sftp upload to Raven failed with exit code $LASTEXITCODE"
   }
@@ -254,7 +283,9 @@ try {
 exit `$code
 "@
   $encodedRunner = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($remoteRunner))
-  & ssh.exe -o BatchMode=yes -o "ConnectTimeout=$ConnectTimeoutSeconds" -o ConnectionAttempts=1 $RavenHost "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encodedRunner"
+  $commonArgs = Get-SshCommonArgs
+  $sshTarget = Get-SshTarget -Target $RavenHost
+  & ssh.exe @commonArgs $sshTarget "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encodedRunner"
   if ($LASTEXITCODE -ne 0) {
     throw "remote Muninn binary deploy failed with exit code $LASTEXITCODE"
   }
@@ -265,7 +296,10 @@ exit `$code
 if (-not $SkipRestart) {
   & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "restart-muninn.ps1") `
     -RavenHost $RavenHost `
-    -MuninnExe $MuninnExe
+    -MuninnExe $MuninnExe `
+    -ConnectTimeoutSeconds $ConnectTimeoutSeconds `
+    -SshUser $SshUser `
+    -IdentityFile $IdentityFile
   if ($LASTEXITCODE -ne 0) {
     throw "restart-muninn.ps1 failed with exit code $LASTEXITCODE"
   }

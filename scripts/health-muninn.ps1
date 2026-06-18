@@ -5,7 +5,10 @@ param(
   [string] $ActivateStorePath = "C:\Meta\Odin\state\muninn.activate.cc",
   [string] $LogRoot = "C:\Meta\Odin\logs\muninn",
   [int] $MaxStoreAgeSeconds = 180,
-  [string] $IdunnRudpHealth = "10.77.0.2:17870"
+  [string] $IdunnRudpHealth = "10.77.0.2:17870",
+  [int] $ConnectTimeoutSeconds = 10,
+  [string] $SshUser = "",
+  [string] $IdentityFile = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -17,6 +20,27 @@ function Set-AsciiFile {
   )
 
   [System.IO.File]::WriteAllText($Path, ($Content -replace "`r?`n", "`r`n"), [System.Text.Encoding]::ASCII)
+}
+
+function Get-SshCommonArgs {
+  $args = @(
+    "-o", "BatchMode=yes",
+    "-o", "ConnectTimeout=$ConnectTimeoutSeconds",
+    "-o", "ConnectionAttempts=1"
+  )
+  if (-not [string]::IsNullOrWhiteSpace($IdentityFile)) {
+    $args += @("-i", $IdentityFile)
+  }
+  return $args
+}
+
+function Get-SshTarget {
+  param([Parameter(Mandatory = $true)] [string] $Target)
+
+  if ([string]::IsNullOrWhiteSpace($SshUser)) {
+    return $Target
+  }
+  return "${SshUser}@${Target}"
 }
 
 function Invoke-RavenUploadedPowerShell {
@@ -38,7 +62,9 @@ function Invoke-RavenUploadedPowerShell {
     Set-AsciiFile -Path $localRemoteScript -Content $RemoteScriptContent
     Set-AsciiFile -Path $localSftpBatch -Content ('put "{0}" "{1}"' -f $localRemoteScript, $remoteSftpPath)
 
-    & sftp.exe -b $localSftpBatch $RavenHost
+    $commonArgs = Get-SshCommonArgs
+    $sshTarget = Get-SshTarget -Target $RavenHost
+    & sftp.exe @commonArgs -b $localSftpBatch $sshTarget
     if ($LASTEXITCODE -ne 0) {
       exit $LASTEXITCODE
     }
@@ -54,7 +80,9 @@ try {
 exit `$code
 "@
     $encodedRunner = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($remoteRunner))
-    & ssh.exe -o BatchMode=yes -o ConnectTimeout=10 $RavenHost "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encodedRunner"
+    $commonArgs = Get-SshCommonArgs
+    $sshTarget = Get-SshTarget -Target $RavenHost
+    & ssh.exe @commonArgs $sshTarget "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encodedRunner"
   } finally {
     Remove-Item -LiteralPath $localTempRoot -Recurse -Force -ErrorAction SilentlyContinue
   }
@@ -68,21 +96,33 @@ if (-not (Test-Path -LiteralPath "$MuninnExe")) {
 }
 `$muninnDir = Split-Path -Parent "$MuninnExe"
 `$taskExpectations = @(
-  @{ Name = "GameCult-Muninn"; Vbs = Join-Path `$muninnDir "start-muninn-serve-hidden.vbs"; Ps = Join-Path `$muninnDir "start-muninn-serve.ps1" },
-  @{ Name = "GameCult-Muninn-Activate"; Vbs = Join-Path `$muninnDir "activate-raven-av-srt-hidden.vbs"; Ps = Join-Path `$muninnDir "activate-raven-av-srt.ps1" },
-  @{ Name = "GameCult-Muninn-VideoProof"; Vbs = Join-Path `$muninnDir "muninn-raven-video-to-starfire-obs-hidden.vbs"; Ps = Join-Path `$muninnDir "muninn-raven-video-to-starfire-obs.ps1" }
+  @{ Name = "GameCult-Muninn"; Launcher = "powershell"; Vbs = Join-Path `$muninnDir "start-muninn-serve-hidden.vbs"; Ps = Join-Path `$muninnDir "start-muninn-serve.ps1" },
+  @{ Name = "GameCult-Muninn-Activate"; Launcher = "wscript"; Vbs = Join-Path `$muninnDir "activate-raven-av-srt-hidden.vbs"; Ps = Join-Path `$muninnDir "activate-raven-av-srt.ps1" },
+  @{ Name = "GameCult-Muninn-VideoProof"; Launcher = "wscript"; Vbs = Join-Path `$muninnDir "muninn-raven-video-to-starfire-obs-hidden.vbs"; Ps = Join-Path `$muninnDir "muninn-raven-video-to-starfire-obs.ps1" }
 )
 foreach (`$expectation in `$taskExpectations) {
   `$task = Get-ScheduledTask -TaskName `$expectation.Name -ErrorAction Stop
   `$action = @(`$task.Actions)[0]
-  if (`$action.Execute -notmatch '(^|\\)wscript\.exe$') {
-    throw "`$(`$expectation.Name) action executes `$(`$action.Execute), expected wscript.exe"
-  }
-  if (`$action.Arguments -notlike "*`$(`$expectation.Vbs)*") {
-    throw "`$(`$expectation.Name) action arguments `$(`$action.Arguments) do not reference `$(`$expectation.Vbs)"
-  }
-  if (`$action.Arguments -notlike "*//B*" -or `$action.Arguments -notlike "*//Nologo*") {
-    throw "`$(`$expectation.Name) action arguments `$(`$action.Arguments) do not force hidden WScript execution"
+  if (`$expectation.Launcher -eq "powershell") {
+    if (`$action.Execute -notmatch 'powershell\.exe$') {
+      throw "`$(`$expectation.Name) action executes `$(`$action.Execute), expected powershell.exe"
+    }
+    if (`$action.Arguments -notlike "*`$(`$expectation.Ps)*") {
+      throw "`$(`$expectation.Name) action arguments `$(`$action.Arguments) do not reference `$(`$expectation.Ps)"
+    }
+    if (`$action.Arguments -notlike "*-File*") {
+      throw "`$(`$expectation.Name) action arguments `$(`$action.Arguments) do not execute a PowerShell launcher"
+    }
+  } else {
+    if (`$action.Execute -notmatch '(^|\\)wscript\.exe$') {
+      throw "`$(`$expectation.Name) action executes `$(`$action.Execute), expected wscript.exe"
+    }
+    if (`$action.Arguments -notlike "*`$(`$expectation.Vbs)*") {
+      throw "`$(`$expectation.Name) action arguments `$(`$action.Arguments) do not reference `$(`$expectation.Vbs)"
+    }
+    if (`$action.Arguments -notlike "*//B*" -or `$action.Arguments -notlike "*//Nologo*") {
+      throw "`$(`$expectation.Name) action arguments `$(`$action.Arguments) do not force hidden WScript execution"
+    }
   }
   if (-not (Test-Path -LiteralPath `$expectation.Vbs)) {
     throw "Missing hidden launcher for `$(`$expectation.Name) at `$(`$expectation.Vbs)"
@@ -141,7 +181,7 @@ if (`$null -eq `$process) {
 foreach (`$pattern in @(
   "--host raven",
   "--activate-store $ActivateStorePath",
-  "--capture-command-rudp-bind 0.0.0.0:17872",
+  "--capture-command-rudp-bind 0.0.0.0:17873",
   "--idunn-rudp-health $IdunnRudpHealth",
   "--idunn-daemon muninn",
   "--idunn-health-contract muninn.cultnet-rudp-remote-telemetry-health"
