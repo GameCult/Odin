@@ -63,6 +63,7 @@ const MUNINN_RUDP_FIXED_HEADER_BYTES: usize = 36;
 const MUNINN_RUDP_MEDIA_MAX_FRAGMENT_BYTES: usize = MUNINN_RUDP_IPV4_UDP_PAYLOAD_BYTES
     - MUNINN_RUDP_FIXED_HEADER_BYTES
     - crate::media_packetizer::MUNINN_MEDIA_RUDP_CHANNEL.len();
+const MUNINN_RUDP_MEDIA_RESEND_DELAY_MS: u64 = 5;
 const MUNINN_RUDP_MEDIA_RELIABLE_EXPIRE_AFTER_MS: u64 = 75;
 const MUNINN_RUDP_MEDIA_RECEIVER_ASSEMBLY_DEADLINE_MS: u64 = 75;
 const MUNINN_RUDP_MEDIA_RECEIVER_GAP_WAIT_MS: u64 = 8;
@@ -153,6 +154,7 @@ struct MuninnRudpMediaProfile {
     video_b_frames: u8,
     video_rc_lookahead: u8,
     sender_queue_deadline_ms: u64,
+    sender_resend_delay_ms: u64,
     sender_reliable_expire_after_ms: u64,
     receiver_assembly_deadline_ms: u64,
     receiver_gap_wait_ms: u64,
@@ -1571,7 +1573,7 @@ fn muninn_media_rudp_options(
         endpoint,
         MUNINN_MEDIA_RUDP_CONNECTION_ID,
     );
-    options.resend_delay_ms = 5;
+    options.resend_delay_ms = media_profile.sender_resend_delay_ms;
     options.max_fragment_bytes = Some(media_profile.max_fragment_bytes as u32);
     options.media_reliable_expire_after_ms =
         Some(media_profile.sender_reliable_expire_after_ms);
@@ -1835,6 +1837,7 @@ fn publish_runtime_boundary_records(
                 "video_rate_control": "cbr",
                 "video_rc_lookahead": media_profile.video_rc_lookahead,
                 "sender_queue_deadline_ms": media_profile.sender_queue_deadline_ms,
+                "sender_resend_delay_ms": media_profile.sender_resend_delay_ms,
                 "sender_reliable_expire_after_ms": media_profile.sender_reliable_expire_after_ms,
                 "receiver_assembly_deadline_ms": media_profile.receiver_assembly_deadline_ms,
                 "receiver_gap_wait_ms": media_profile.receiver_gap_wait_ms,
@@ -5071,6 +5074,7 @@ fn muninn_rudp_media_profile() -> MuninnRudpMediaProfile {
         video_b_frames: 0,
         video_rc_lookahead: 0,
         sender_queue_deadline_ms: MUNINN_MEDIA_SEND_QUEUE_DEADLINE_MS,
+        sender_resend_delay_ms: MUNINN_RUDP_MEDIA_RESEND_DELAY_MS,
         sender_reliable_expire_after_ms: MUNINN_RUDP_MEDIA_RELIABLE_EXPIRE_AFTER_MS,
         receiver_assembly_deadline_ms: MUNINN_RUDP_MEDIA_RECEIVER_ASSEMBLY_DEADLINE_MS,
         receiver_gap_wait_ms: MUNINN_RUDP_MEDIA_RECEIVER_GAP_WAIT_MS,
@@ -6153,7 +6157,7 @@ mod tests {
         assert_eq!(options.runtime_id, "muninn-media");
         assert_eq!(options.remote_addr, Some(endpoint));
         assert_eq!(options.connection_id, MUNINN_MEDIA_RUDP_CONNECTION_ID);
-        assert_eq!(options.resend_delay_ms, 5);
+        assert_eq!(options.resend_delay_ms, MUNINN_RUDP_MEDIA_RESEND_DELAY_MS);
         assert_eq!(
             options.max_fragment_bytes,
             Some(MUNINN_RUDP_MEDIA_MAX_FRAGMENT_BYTES as u32)
@@ -6975,6 +6979,12 @@ Device 00:07:04:A8:00:D0 (public)
                 .get("sender_reliable_expire_after_ms")
                 .and_then(|value| value.as_u64()),
             Some(75)
+        );
+        assert_eq!(
+            media_profile
+                .get("sender_resend_delay_ms")
+                .and_then(|value| value.as_u64()),
+            Some(MUNINN_RUDP_MEDIA_RESEND_DELAY_MS)
         );
 
         let routes = provider

@@ -169,6 +169,8 @@ Recommended first LAN profile:
   minus the five-byte `media` channel id), so oversized typed records fragment
   in CultNet deliberately instead of falling through to accidental IP
   fragmentation.
+- Resend cadence: sender RUDP media resends are scheduled every `5` ms while
+  the packet is still inside the `75` ms reliable-expiry budget.
 - Control: sender may adapt bitrate, keyframe cadence, chunk size, and playout
   budget from receiver feedback; the receiver must not silently stretch latency
   to preserve visual perfection.
