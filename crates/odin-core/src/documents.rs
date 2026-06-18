@@ -34,6 +34,9 @@ pub const IDUNN_RUDP_HEALTH_INGRESS_SCHEMA: &str = "idunn.rudp_health_ingress.v1
 pub const MUNINN_TELEMETRY_SURFACE_SCHEMA: &str = "muninn.telemetry_surface.v1";
 pub const MUNINN_CAPTURE_STREAM_SCHEMA: &str = "muninn.capture_stream.v1";
 pub const MUNINN_CAPTURE_STREAM_COMMAND_SCHEMA: &str = "muninn.capture_stream_command.v1";
+pub const MUNINN_MEDIA_VIDEO_ACCESS_UNIT_SCHEMA: &str = "muninn.media_video_access_unit.v1";
+pub const MUNINN_MEDIA_AUDIO_PACKET_SCHEMA: &str = "muninn.media_audio_packet.v1";
+pub const MUNINN_MEDIA_RECEIVER_FEEDBACK_SCHEMA: &str = "muninn.media_receiver_feedback.v1";
 pub const MUNINN_OBS_STREAM_CATALOG_SCHEMA: &str = "muninn.obs_stream_catalog.v1";
 pub const MUNINN_MOVE_MARKER_CANDIDATE_SCHEMA: &str = "muninn.move_marker_candidate.v1";
 pub const MUNINN_MOVE_CONTROLLER_STATE_SCHEMA: &str = "muninn.move_controller_state.v1";
@@ -746,6 +749,98 @@ pub struct MuninnCaptureStreamCommandRecord {
 
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
 #[cultcache(
+    type = "muninn.media_video_access_unit",
+    schema = "muninn.media_video_access_unit.v1"
+)]
+pub struct MuninnMediaVideoAccessUnitRecord {
+    #[cultcache(key = 0)]
+    pub stream_id: String,
+    #[cultcache(key = 1)]
+    pub session_id: String,
+    #[cultcache(key = 2)]
+    pub frame_id: u64,
+    #[cultcache(key = 3)]
+    pub codec: String,
+    #[cultcache(key = 4)]
+    pub pts_ticks: i64,
+    #[cultcache(key = 5)]
+    pub duration_ticks: u32,
+    #[cultcache(key = 6)]
+    pub timebase_num: u32,
+    #[cultcache(key = 7)]
+    pub timebase_den: u32,
+    #[cultcache(key = 8)]
+    pub keyframe: bool,
+    #[cultcache(key = 9)]
+    pub dependency_frame_id: Option<u64>,
+    #[cultcache(key = 10)]
+    pub deadline_ticks: i64,
+    #[cultcache(key = 11)]
+    pub chunk_index: u16,
+    #[cultcache(key = 12)]
+    pub chunk_count: u16,
+    #[cultcache(key = 13)]
+    pub payload: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(
+    type = "muninn.media_audio_packet",
+    schema = "muninn.media_audio_packet.v1"
+)]
+pub struct MuninnMediaAudioPacketRecord {
+    #[cultcache(key = 0)]
+    pub stream_id: String,
+    #[cultcache(key = 1)]
+    pub session_id: String,
+    #[cultcache(key = 2)]
+    pub packet_id: u64,
+    #[cultcache(key = 3)]
+    pub codec: String,
+    #[cultcache(key = 4)]
+    pub pts_ticks: i64,
+    #[cultcache(key = 5)]
+    pub duration_ticks: u32,
+    #[cultcache(key = 6)]
+    pub timebase_num: u32,
+    #[cultcache(key = 7)]
+    pub timebase_den: u32,
+    #[cultcache(key = 8)]
+    pub deadline_ticks: i64,
+    #[cultcache(key = 9)]
+    pub payload: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(
+    type = "muninn.media_receiver_feedback",
+    schema = "muninn.media_receiver_feedback.v1"
+)]
+pub struct MuninnMediaReceiverFeedbackRecord {
+    #[cultcache(key = 0)]
+    pub stream_id: String,
+    #[cultcache(key = 1)]
+    pub session_id: String,
+    #[cultcache(key = 2)]
+    pub receiver_id: String,
+    #[cultcache(key = 3)]
+    pub highest_decodable_frame_id: Option<u64>,
+    #[cultcache(key = 4)]
+    pub missing_frame_ids: Vec<u64>,
+    #[cultcache(key = 5)]
+    pub late_frame_ids: Vec<u64>,
+    #[cultcache(key = 6)]
+    pub requested_keyframe: bool,
+    #[cultcache(key = 7)]
+    pub jitter_us: i64,
+    #[cultcache(key = 8)]
+    pub decode_queue_us: i64,
+    #[cultcache(key = 9)]
+    pub observed_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(
     type = "muninn.telemetry_surface",
     schema = "muninn.telemetry_surface.v1"
 )]
@@ -1004,6 +1099,9 @@ cultmesh_rs::cultmesh_documents!(OdinDocuments {
     MuninnTelemetrySurfaceRecord => MUNINN_TELEMETRY_SURFACE_SCHEMA,
     MuninnCaptureStreamRecord => MUNINN_CAPTURE_STREAM_SCHEMA,
     MuninnCaptureStreamCommandRecord => MUNINN_CAPTURE_STREAM_COMMAND_SCHEMA,
+    MuninnMediaVideoAccessUnitRecord => MUNINN_MEDIA_VIDEO_ACCESS_UNIT_SCHEMA,
+    MuninnMediaAudioPacketRecord => MUNINN_MEDIA_AUDIO_PACKET_SCHEMA,
+    MuninnMediaReceiverFeedbackRecord => MUNINN_MEDIA_RECEIVER_FEEDBACK_SCHEMA,
     MuninnObsStreamCatalogRecord => MUNINN_OBS_STREAM_CATALOG_SCHEMA,
     MuninnMoveMarkerCandidateRecord => MUNINN_MOVE_MARKER_CANDIDATE_SCHEMA,
     MuninnMoveControllerStateRecord => MUNINN_MOVE_CONTROLLER_STATE_SCHEMA,
@@ -1022,4 +1120,119 @@ pub struct OdinRecords {
     pub interfaces: Vec<OdinInterfaceRecord>,
     pub observation_streams: Vec<OdinObservationStreamRecord>,
     pub translation_routes: Vec<OdinTranslationRouteRecord>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::Result;
+    use cultmesh_rs::{CultMesh, CultMeshNodeOptions};
+
+    #[test]
+    fn muninn_media_documents_round_trip_through_cultmesh() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store_path = temp.path().join("muninn-media.cc");
+        let mut node = CultMesh::create_node(
+            &store_path,
+            OdinDocuments,
+            CultMeshNodeOptions {
+                runtime_id: "muninn-media-test".to_string(),
+                pull_on_start: true,
+            },
+        )?;
+
+        let video = MuninnMediaVideoAccessUnitRecord {
+            stream_id: "muninn.raven.av.rudp".to_string(),
+            session_id: "session-1".to_string(),
+            frame_id: 42,
+            codec: "h264".to_string(),
+            pts_ticks: 126_000,
+            duration_ticks: 3_000,
+            timebase_num: 1,
+            timebase_den: 90_000,
+            keyframe: true,
+            dependency_frame_id: None,
+            deadline_ticks: 127_800,
+            chunk_index: 0,
+            chunk_count: 1,
+            payload: vec![0, 0, 0, 1, 0x65],
+        };
+        let audio = MuninnMediaAudioPacketRecord {
+            stream_id: video.stream_id.clone(),
+            session_id: video.session_id.clone(),
+            packet_id: 7,
+            codec: "opus".to_string(),
+            pts_ticks: 67_200,
+            duration_ticks: 960,
+            timebase_num: 1,
+            timebase_den: 48_000,
+            deadline_ticks: 68_160,
+            payload: vec![0xf8, 0xff, 0xfe],
+        };
+        let feedback = MuninnMediaReceiverFeedbackRecord {
+            stream_id: video.stream_id.clone(),
+            session_id: video.session_id.clone(),
+            receiver_id: "starfire.obs".to_string(),
+            highest_decodable_frame_id: Some(41),
+            missing_frame_ids: vec![42],
+            late_frame_ids: vec![40],
+            requested_keyframe: true,
+            jitter_us: 750,
+            decode_queue_us: 2_000,
+            observed_at: "2026-06-18T00:00:00Z".to_string(),
+        };
+
+        node.put("video:42:0", &video)?;
+        node.put("audio:7", &audio)?;
+        node.put("feedback:starfire.obs", &feedback)?;
+
+        assert_eq!(
+            node.documents()
+                .binding("muninn.media_video_access_unit")
+                .and_then(|binding| binding.payload_schema_version.clone())
+                .as_deref(),
+            Some(MUNINN_MEDIA_VIDEO_ACCESS_UNIT_SCHEMA)
+        );
+        assert_eq!(
+            node.documents()
+                .binding("muninn.media_audio_packet")
+                .and_then(|binding| binding.payload_schema_version.clone())
+                .as_deref(),
+            Some(MUNINN_MEDIA_AUDIO_PACKET_SCHEMA)
+        );
+        assert_eq!(
+            node.documents()
+                .binding("muninn.media_receiver_feedback")
+                .and_then(|binding| binding.payload_schema_version.clone())
+                .as_deref(),
+            Some(MUNINN_MEDIA_RECEIVER_FEEDBACK_SCHEMA)
+        );
+
+        let reloaded = CultMesh::create_node(
+            &store_path,
+            OdinDocuments,
+            CultMeshNodeOptions {
+                runtime_id: "muninn-media-test-reloaded".to_string(),
+                pull_on_start: true,
+            },
+        )?;
+        assert_eq!(
+            reloaded
+                .get_required::<MuninnMediaVideoAccessUnitRecord>("video:42:0")?
+                .payload,
+            vec![0, 0, 0, 1, 0x65]
+        );
+        assert_eq!(
+            reloaded
+                .get_required::<MuninnMediaAudioPacketRecord>("audio:7")?
+                .codec,
+            "opus"
+        );
+        assert!(
+            reloaded
+                .get_required::<MuninnMediaReceiverFeedbackRecord>("feedback:starfire.obs")?
+                .requested_keyframe
+        );
+        Ok(())
+    }
 }

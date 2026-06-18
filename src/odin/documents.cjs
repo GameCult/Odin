@@ -10,6 +10,9 @@ function defineOdinDocuments(defineDocumentType) {
       muninnCaptureStreamCommandDefinition: null,
       muninnCaptureStreamDefinition: null,
       muninnCommandBoundaryDefinition: null,
+      muninnMediaAudioPacketDefinition: null,
+      muninnMediaReceiverFeedbackDefinition: null,
+      muninnMediaVideoAccessUnitDefinition: null,
       muninnMoveControllerStateDefinition: null,
       muninnMoveIdentityDefinition: null,
       muninnMoveLightCommandDefinition: null,
@@ -105,6 +108,49 @@ function defineOdinDocuments(defineDocumentType) {
     global: false,
     name: (value) => value?.boundary_id || value?.boundaryId || value?.daemon_id || value?.daemonId || "muninn",
     schema: parseObjectDocument("Muninn command boundary"),
+  });
+  const muninnMediaVideoAccessUnitDefinition = defineDocumentType({
+    type: "muninn.media_video_access_unit",
+    schemaName: "muninn.media_video_access_unit",
+    schemaId: "muninn.media_video_access_unit.v1",
+    schemaVersion: "muninn.media_video_access_unit.v1",
+    global: false,
+    name: (value) => {
+      const streamId = value?.stream_id || value?.streamId || "stream";
+      const sessionId = value?.session_id || value?.sessionId || "session";
+      const frameId = value?.frame_id ?? value?.frameId ?? "frame";
+      const chunkIndex = value?.chunk_index ?? value?.chunkIndex ?? "chunk";
+      return `${streamId}:${sessionId}:video:${frameId}:${chunkIndex}`;
+    },
+    schema: parseObjectDocument("Muninn media video access unit"),
+  });
+  const muninnMediaAudioPacketDefinition = defineDocumentType({
+    type: "muninn.media_audio_packet",
+    schemaName: "muninn.media_audio_packet",
+    schemaId: "muninn.media_audio_packet.v1",
+    schemaVersion: "muninn.media_audio_packet.v1",
+    global: false,
+    name: (value) => {
+      const streamId = value?.stream_id || value?.streamId || "stream";
+      const sessionId = value?.session_id || value?.sessionId || "session";
+      const packetId = value?.packet_id ?? value?.packetId ?? "packet";
+      return `${streamId}:${sessionId}:audio:${packetId}`;
+    },
+    schema: parseObjectDocument("Muninn media audio packet"),
+  });
+  const muninnMediaReceiverFeedbackDefinition = defineDocumentType({
+    type: "muninn.media_receiver_feedback",
+    schemaName: "muninn.media_receiver_feedback",
+    schemaId: "muninn.media_receiver_feedback.v1",
+    schemaVersion: "muninn.media_receiver_feedback.v1",
+    global: false,
+    name: (value) => {
+      const streamId = value?.stream_id || value?.streamId || "stream";
+      const sessionId = value?.session_id || value?.sessionId || "session";
+      const receiverId = value?.receiver_id || value?.receiverId || "receiver";
+      return `${streamId}:${sessionId}:feedback:${receiverId}`;
+    },
+    schema: parseObjectDocument("Muninn media receiver feedback"),
   });
   const muninnMoveControllerStateDefinition = defineDocumentType({
     type: "muninn.move_controller_state",
@@ -300,6 +346,9 @@ function defineOdinDocuments(defineDocumentType) {
     muninnCaptureStreamCommandDefinition,
     muninnCaptureStreamDefinition,
     muninnCommandBoundaryDefinition,
+    muninnMediaAudioPacketDefinition,
+    muninnMediaReceiverFeedbackDefinition,
+    muninnMediaVideoAccessUnitDefinition,
     muninnMoveControllerStateDefinition,
     muninnMoveIdentityDefinition,
     muninnMoveLightCommandDefinition,
