@@ -1846,4 +1846,96 @@ mod tests {
         );
         Ok(())
     }
+
+    #[test]
+    fn media_wire_rejects_mismatched_record_key() -> Result<()> {
+        let record = packetize_audio_packet(
+            AudioPacketizeOptions {
+                stream_id: "muninn.raven.av.rudp",
+                session_id: "session-1",
+                codec: "opus",
+                packet_id: 12,
+                pts_ticks: 48_000,
+                duration_ticks: 960,
+                timebase_num: 1,
+                timebase_den: 48_000,
+                deadline_ticks: 48_960,
+            },
+            &[0xf8, 0xff, 0xfe],
+        )?;
+        let wire = encode_media_wire_record(
+            &MuninnMediaWireRecord::Audio(record),
+            "2026-06-18T00:00:00Z",
+            "muninn-test",
+            "media-test",
+        )?;
+        let CultNetMessage::DocumentPutRaw {
+            message_id,
+            mut document,
+        } = decode_cultnet_message_from_slice(&wire, CultNetWireContract::CultNetSchemaV0)?
+        else {
+            panic!("expected raw document put");
+        };
+        document.record_key = "wrong:key".to_string();
+        let tampered = encode_cultnet_message_to_vec(
+            &CultNetMessage::DocumentPutRaw {
+                message_id,
+                document,
+            },
+            CultNetWireContract::CultNetSchemaV0,
+        )?;
+
+        let error = decode_media_wire_record(&tampered).unwrap_err();
+
+        assert!(error.to_string().contains("record key mismatch"));
+        Ok(())
+    }
+
+    #[test]
+    fn media_wire_rejects_unsupported_schema() -> Result<()> {
+        let record = packetize_audio_packet(
+            AudioPacketizeOptions {
+                stream_id: "muninn.raven.av.rudp",
+                session_id: "session-1",
+                codec: "opus",
+                packet_id: 12,
+                pts_ticks: 48_000,
+                duration_ticks: 960,
+                timebase_num: 1,
+                timebase_den: 48_000,
+                deadline_ticks: 48_960,
+            },
+            &[0xf8, 0xff, 0xfe],
+        )?;
+        let wire = encode_media_wire_record(
+            &MuninnMediaWireRecord::Audio(record),
+            "2026-06-18T00:00:00Z",
+            "muninn-test",
+            "media-test",
+        )?;
+        let CultNetMessage::DocumentPutRaw {
+            message_id,
+            mut document,
+        } = decode_cultnet_message_from_slice(&wire, CultNetWireContract::CultNetSchemaV0)?
+        else {
+            panic!("expected raw document put");
+        };
+        document.schema_id = "muninn.media_unknown.v1".to_string();
+        let tampered = encode_cultnet_message_to_vec(
+            &CultNetMessage::DocumentPutRaw {
+                message_id,
+                document,
+            },
+            CultNetWireContract::CultNetSchemaV0,
+        )?;
+
+        let error = decode_media_wire_record(&tampered).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported Muninn media schema")
+        );
+        Ok(())
+    }
 }
