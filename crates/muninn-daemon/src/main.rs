@@ -6934,6 +6934,76 @@ mod tests {
     }
 
     #[test]
+    fn parse_accepts_single_leg_rudp_activation_requests() {
+        let video_only = Options::parse(
+            [
+                "activate",
+                "--media-transport",
+                "rudp",
+                "--no-audio",
+                "--stream",
+                "muninn.raven.video.rudp",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap();
+        assert!(video_only.capture_video);
+        assert!(!video_only.capture_audio);
+        assert_eq!(
+            video_source_id_for_options(&video_only),
+            "display:0".to_string()
+        );
+        assert_eq!(
+            audio_source_id_for_options(&video_only),
+            MUNINN_DISABLED_AUDIO_SOURCE_ID.to_string()
+        );
+
+        let audio_only = Options::parse(
+            [
+                "activate",
+                "--media-transport",
+                "rudp",
+                "--no-video",
+                "--stream",
+                "muninn.raven.audio.rudp",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap();
+        assert!(!audio_only.capture_video);
+        assert!(audio_only.capture_audio);
+        assert_eq!(
+            video_source_id_for_options(&audio_only),
+            MUNINN_DISABLED_VIDEO_SOURCE_ID.to_string()
+        );
+        assert_eq!(
+            audio_source_id_for_options(&audio_only),
+            "wasapi-loopback:Realtek".to_string()
+        );
+    }
+
+    #[test]
+    fn parse_rejects_activation_when_both_media_legs_are_disabled() {
+        let error = Options::parse(
+            [
+                "activate",
+                "--media-transport",
+                "rudp",
+                "--no-video",
+                "--no-audio",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("at least one leg alive"));
+    }
+
+    #[test]
     fn parse_rejects_blank_obs_source_catalog_entries() {
         let error = Options::parse(
             ["serve", "--video-source", "display:0="]
@@ -7226,6 +7296,55 @@ mod tests {
     }
 
     #[test]
+    fn repeated_capture_stream_start_is_not_equivalent_when_split_leg_changes() {
+        let mut video_only = build_capture_stream_command(
+            &Options::parse(
+                [
+                    "request-stream",
+                    "--media-transport",
+                    "rudp",
+                    "--stream",
+                    "muninn.raven.video.rudp",
+                    "--no-audio",
+                ]
+                .into_iter()
+                .map(String::from),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        video_only.command_id = "video-only".to_string();
+        video_only.state = "running".to_string();
+
+        let mut combined = build_capture_stream_command(
+            &Options::parse(
+                [
+                    "request-stream",
+                    "--media-transport",
+                    "rudp",
+                    "--stream",
+                    "muninn.raven.video.rudp",
+                ]
+                .into_iter()
+                .map(String::from),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        combined.command_id = "combined".to_string();
+
+        assert!(!capture_stream_commands_start_equivalent(
+            &video_only, &combined
+        ));
+        assert_eq!(
+            command_audio_source_id(&video_only),
+            MUNINN_DISABLED_AUDIO_SOURCE_ID
+        );
+        assert!(command_requests_video(&video_only));
+        assert!(!command_requests_audio(&video_only));
+    }
+
+    #[test]
     fn builds_two_srt_targets_for_explicit_activation() {
         let options = Options::parse(
             [
@@ -7310,6 +7429,55 @@ mod tests {
             ]
         );
         assert!(!plan.command_line.contains("tee"));
+    }
+
+    #[test]
+    fn build_capture_stream_command_marks_disabled_legs_explicitly() {
+        let video_only = build_capture_stream_command(
+            &Options::parse(
+                [
+                    "request-stream",
+                    "--media-transport",
+                    "rudp",
+                    "--stream",
+                    "muninn.raven.video.rudp",
+                    "--no-audio",
+                    "--target-host",
+                    "192.168.1.66",
+                    "--port",
+                    "5204",
+                ]
+                .into_iter()
+                .map(String::from),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(video_only.video_source_id, "display:0");
+        assert_eq!(video_only.audio_source_id, MUNINN_DISABLED_AUDIO_SOURCE_ID);
+
+        let audio_only = build_capture_stream_command(
+            &Options::parse(
+                [
+                    "request-stream",
+                    "--media-transport",
+                    "rudp",
+                    "--stream",
+                    "muninn.raven.audio.rudp",
+                    "--no-video",
+                    "--target-host",
+                    "192.168.1.66",
+                    "--port",
+                    "5204",
+                ]
+                .into_iter()
+                .map(String::from),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(audio_only.video_source_id, MUNINN_DISABLED_VIDEO_SOURCE_ID);
+        assert_eq!(audio_only.audio_source_id, "wasapi-loopback:Realtek");
     }
 
     #[test]
