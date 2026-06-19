@@ -55,7 +55,7 @@ const MUNINN_MEDIA_RUDP_CONNECTION_ID: u32 = 0x6d75_0001;
 const MUNINN_OBS_CATALOG_RUDP_CONNECTION_ID: u32 = 0x6d75_0003;
 const MUNINN_MEDIA_SEND_QUEUE_DEADLINE_MS: u64 = 75;
 const MUNINN_RUDP_MEDIA_PROFILE_ID: &str = "muninn.rudp.low_latency_h264_lan.v1";
-const MUNINN_RUDP_MEDIA_VIDEO_BITRATE_KBPS: u32 = 16_000;
+const MUNINN_RUDP_MEDIA_VIDEO_BITRATE_KBPS: u32 = 24_000;
 const MUNINN_RUDP_MEDIA_PACKET_BYTES: usize = 900;
 const MUNINN_RUDP_IPV4_UDP_PAYLOAD_BYTES: usize = 1_472;
 const MUNINN_RUDP_FIXED_HEADER_BYTES: usize = 36;
@@ -1607,7 +1607,7 @@ fn muninn_media_rudp_options(
     );
     options.resend_delay_ms = media_profile.sender_resend_delay_ms;
     options.max_fragment_bytes = Some(media_profile.max_fragment_bytes as u32);
-    options.media_reliable_expire_after_ms = Some(media_profile.sender_reliable_expire_after_ms);
+    options.media_reliable_expire_after_ms = None;
     options
 }
 
@@ -5161,10 +5161,9 @@ fn srt_endpoint(host: &str, port: u16) -> String {
 fn rudp_endpoint(host: &str, port: u16, stream_id: &str) -> String {
     let profile = muninn_rudp_media_profile();
     format!(
-        "rudp://{host}:{port}/{stream_id}?channel=media&format=muninn-typed-media&connection=0x{MUNINN_MEDIA_RUDP_CONNECTION_ID:08x}&profile={}&sender_resend_delay_ms={}&reliable_expire_after_ms={}&assembly_deadline_ms={}&gap_wait_ms={}",
+        "rudp://{host}:{port}/{stream_id}?channel=media&format=muninn-typed-media&connection=0x{MUNINN_MEDIA_RUDP_CONNECTION_ID:08x}&profile={}&delivery=unreliable&sender_resend_delay_ms={}&assembly_deadline_ms={}&gap_wait_ms={}",
         profile.profile_id,
         profile.sender_resend_delay_ms,
-        profile.sender_reliable_expire_after_ms,
         profile.receiver_assembly_deadline_ms,
         profile.receiver_gap_wait_ms
     )
@@ -5264,6 +5263,12 @@ fn rudp_video_ffmpeg_args(options: &Options) -> Vec<String> {
         "disabled".to_string(),
         "-strict_gop".to_string(),
         "1".to_string(),
+        "-spatial_aq".to_string(),
+        "1".to_string(),
+        "-temporal_aq".to_string(),
+        "1".to_string(),
+        "-aq-strength".to_string(),
+        "8".to_string(),
         "-nonref_p".to_string(),
         "1".to_string(),
         "-b_ref_mode".to_string(),
@@ -6061,7 +6066,8 @@ mod tests {
             decoded.media_packet_bytes,
             MUNINN_RUDP_MEDIA_PACKET_BYTES as u32
         );
-        assert!(decoded.urls[0].contains("reliable_expire_after_ms=600"));
+        assert!(decoded.urls[0].contains("delivery=unreliable"));
+        assert!(!decoded.urls[0].contains("reliable_expire_after_ms"));
         assert!(decoded.urls[0].contains("assembly_deadline_ms=400"));
     }
 
@@ -6217,7 +6223,7 @@ mod tests {
         assert_eq!(
             plan.targets,
             vec![
-                "rudp://10.77.0.2:5204/muninn.raven.av.rudp?channel=media&format=muninn-typed-media&connection=0x6d750001&profile=muninn.rudp.low_latency_h264_lan.v1&sender_resend_delay_ms=5&reliable_expire_after_ms=600&assembly_deadline_ms=400&gap_wait_ms=16"
+                "rudp://10.77.0.2:5204/muninn.raven.av.rudp?channel=media&format=muninn-typed-media&connection=0x6d750001&profile=muninn.rudp.low_latency_h264_lan.v1&delivery=unreliable&sender_resend_delay_ms=5&assembly_deadline_ms=400&gap_wait_ms=16"
             ]
         );
         assert!(!plan.command_line.contains("tee"));
@@ -6266,6 +6272,18 @@ mod tests {
         );
         assert!(
             args.windows(2)
+                .any(|pair| pair[0] == "-spatial_aq" && pair[1] == "1")
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-temporal_aq" && pair[1] == "1")
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-aq-strength" && pair[1] == "8")
+        );
+        assert!(
+            args.windows(2)
                 .any(|pair| pair[0] == "-nonref_p" && pair[1] == "1")
         );
         assert!(
@@ -6278,15 +6296,15 @@ mod tests {
         );
         assert!(
             args.windows(2)
-                .any(|pair| pair[0] == "-b:v" && pair[1] == "16000k")
+                .any(|pair| pair[0] == "-b:v" && pair[1] == "24000k")
         );
         assert!(
             args.windows(2)
-                .any(|pair| pair[0] == "-maxrate" && pair[1] == "16000k")
+                .any(|pair| pair[0] == "-maxrate" && pair[1] == "24000k")
         );
         assert!(
             args.windows(2)
-                .any(|pair| pair[0] == "-bufsize" && pair[1] == "267k")
+                .any(|pair| pair[0] == "-bufsize" && pair[1] == "400k")
         );
         assert!(
             args.windows(2)
@@ -6337,11 +6355,11 @@ mod tests {
 
         assert_eq!(
             muninn_rudp_video_vbv_buffer_arg(&thirty_fps, &profile),
-            "534k"
+            "800k"
         );
         assert_eq!(
             muninn_rudp_video_vbv_buffer_arg(&sixty_fps, &profile),
-            "267k"
+            "400k"
         );
     }
 
@@ -6422,10 +6440,22 @@ mod tests {
             options.max_fragment_bytes,
             Some(MUNINN_RUDP_MEDIA_MAX_FRAGMENT_BYTES as u32)
         );
+        assert_eq!(options.media_reliable_expire_after_ms, None);
+        let transport = CultNetRudpSocketTransportConnection::new(options).unwrap();
+        let media_channel = transport
+            .profile
+            .transports
+            .first()
+            .unwrap()
+            .channels
+            .iter()
+            .find(|channel| channel.channel_id == "media")
+            .unwrap();
         assert_eq!(
-            options.media_reliable_expire_after_ms,
-            Some(MUNINN_RUDP_MEDIA_RELIABLE_EXPIRE_AFTER_MS)
+            media_channel.delivery,
+            cultnet_rs::CultNetTransportDelivery::Unreliable
         );
+        assert_eq!(media_channel.reliable_expire_after_ms, None);
     }
 
     #[test]

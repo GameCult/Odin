@@ -73,7 +73,6 @@ pub struct CultNetRudpSessionOptions {
     pub connection_id: u32,
     pub initial_sequence: u32,
     pub resend_delay_ms: u64,
-    pub media_reliable_expire_after_ms: Option<u64>,
     pub max_pending_reliable_packets: Option<usize>,
 }
 
@@ -83,7 +82,6 @@ impl Default for CultNetRudpSessionOptions {
             connection_id: 0,
             initial_sequence: 1,
             resend_delay_ms: 250,
-            media_reliable_expire_after_ms: Some(DEFAULT_MEDIA_RELIABLE_EXPIRE_AFTER_MS),
             max_pending_reliable_packets: None,
         }
     }
@@ -123,7 +121,6 @@ struct FragmentBuffer {
 pub struct CultNetRudpSession {
     connection_id: u32,
     resend_delay_ms: u64,
-    media_reliable_expire_after_ms: Option<u64>,
     max_pending_reliable_packets: Option<usize>,
     next_sequence: u32,
     next_fragment_id: u16,
@@ -143,7 +140,6 @@ impl CultNetRudpSession {
         Self {
             connection_id: options.connection_id,
             resend_delay_ms: options.resend_delay_ms,
-            media_reliable_expire_after_ms: options.media_reliable_expire_after_ms,
             max_pending_reliable_packets: options.max_pending_reliable_packets,
             next_sequence: options.initial_sequence,
             next_fragment_id: 1,
@@ -894,7 +890,6 @@ impl CultNetRudpSocketTransportConnection {
                 connection_id: options.connection_id,
                 initial_sequence: options.initial_sequence,
                 resend_delay_ms: options.resend_delay_ms,
-                media_reliable_expire_after_ms: options.media_reliable_expire_after_ms,
                 max_pending_reliable_packets,
             }),
             mode: options.mode,
@@ -979,11 +974,11 @@ impl CultNetRudpSocketTransportConnection {
                 reliable_expire_after_ms: None,
             },
             "media" => CultNetRudpSendOptions {
-                reliable: true,
+                reliable: false,
                 ordered: false,
                 sequenced: false,
                 now_ms,
-                reliable_expire_after_ms: self.session.media_reliable_expire_after_ms,
+                reliable_expire_after_ms: None,
             },
             _ => CultNetRudpSendOptions {
                 reliable: false,
@@ -1133,12 +1128,12 @@ pub fn create_rudp_transport_profile(
                 },
                 CultNetTransportChannel {
                     channel_id: "media".to_string(),
-                    delivery: CultNetTransportDelivery::Reliable,
+                    delivery: CultNetTransportDelivery::Unreliable,
                     ordering: CultNetTransportOrdering::Unordered,
                     max_payload_bytes: options.max_payload_bytes,
                     max_fragment_bytes: options.max_fragment_bytes,
                     max_pending_reliable_packets: options.max_pending_reliable_packets,
-                    reliable_expire_after_ms: options.media_reliable_expire_after_ms,
+                    reliable_expire_after_ms: None,
                 },
             ],
         }],
