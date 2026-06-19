@@ -55,8 +55,9 @@ const MUNINN_MEDIA_RUDP_CONNECTION_ID: u32 = 0x6d75_0001;
 const MUNINN_OBS_CATALOG_RUDP_CONNECTION_ID: u32 = 0x6d75_0003;
 const MUNINN_MEDIA_SEND_QUEUE_DEADLINE_MS: u64 = 75;
 const MUNINN_RUDP_MEDIA_PROFILE_ID: &str = "muninn.rudp.low_latency_h264_lan.v1";
-const MUNINN_RUDP_MEDIA_VIDEO_BITRATE_KBPS: u32 = 24_000;
-const MUNINN_RUDP_MEDIA_PACKET_BYTES: usize = 900;
+const MUNINN_RUDP_MEDIA_VIDEO_BITRATE_KBPS: u32 = 48_000;
+const MUNINN_RUDP_MEDIA_VBV_FRAME_BUDGETS: u32 = 4;
+const MUNINN_RUDP_MEDIA_PACKET_BYTES: usize = 800;
 const MUNINN_RUDP_IPV4_UDP_PAYLOAD_BYTES: usize = 1_472;
 const MUNINN_RUDP_FIXED_HEADER_BYTES: usize = 36;
 const MUNINN_RUDP_MEDIA_MAX_FRAGMENT_BYTES: usize = MUNINN_RUDP_IPV4_UDP_PAYLOAD_BYTES
@@ -5196,7 +5197,10 @@ fn muninn_rudp_video_bitrate_arg(profile: &MuninnRudpMediaProfile) -> String {
 fn muninn_rudp_video_vbv_buffer_arg(options: &Options, profile: &MuninnRudpMediaProfile) -> String {
     let framerate = options.framerate.max(1);
     let frame_budget_kbits = profile.video_bitrate_kbps.div_ceil(framerate).max(1);
-    format!("{frame_budget_kbits}k")
+    let burst_budget_kbits = frame_budget_kbits
+        .saturating_mul(MUNINN_RUDP_MEDIA_VBV_FRAME_BUDGETS)
+        .max(frame_budget_kbits);
+    format!("{burst_budget_kbits}k")
 }
 
 fn muninn_rudp_video_gop_frames(options: &Options) -> u32 {
@@ -6296,15 +6300,15 @@ mod tests {
         );
         assert!(
             args.windows(2)
-                .any(|pair| pair[0] == "-b:v" && pair[1] == "24000k")
+                .any(|pair| pair[0] == "-b:v" && pair[1] == "48000k")
         );
         assert!(
             args.windows(2)
-                .any(|pair| pair[0] == "-maxrate" && pair[1] == "24000k")
+                .any(|pair| pair[0] == "-maxrate" && pair[1] == "48000k")
         );
         assert!(
             args.windows(2)
-                .any(|pair| pair[0] == "-bufsize" && pair[1] == "400k")
+                .any(|pair| pair[0] == "-bufsize" && pair[1] == "3200k")
         );
         assert!(
             args.windows(2)
@@ -6338,7 +6342,7 @@ mod tests {
     }
 
     #[test]
-    fn rudp_video_vbv_buffer_tracks_single_frame_budget() {
+    fn rudp_video_vbv_buffer_tracks_lan_burst_budget() {
         let thirty_fps = Options::parse(
             ["activate", "--media-transport", "rudp", "--framerate", "30"]
                 .into_iter()
@@ -6355,11 +6359,11 @@ mod tests {
 
         assert_eq!(
             muninn_rudp_video_vbv_buffer_arg(&thirty_fps, &profile),
-            "800k"
+            "6400k"
         );
         assert_eq!(
             muninn_rudp_video_vbv_buffer_arg(&sixty_fps, &profile),
-            "400k"
+            "3200k"
         );
     }
 
@@ -6383,7 +6387,7 @@ mod tests {
     }
 
     #[test]
-    fn default_rudp_media_packet_size_keeps_compact_typed_video_wire_under_udp_mtu() {
+    fn default_rudp_media_packet_size_keeps_late_typed_video_wire_under_udp_mtu() {
         let mut access_unit = Vec::new();
         access_unit.extend_from_slice(&[0, 0, 0, 1, 0x65]);
         access_unit.resize(MUNINN_RUDP_MEDIA_PACKET_BYTES, 0x80);
@@ -6394,8 +6398,8 @@ mod tests {
                     stream_id: "muninn.raven.av.rudp",
                     session_id: "session-1",
                     codec: "h264",
-                    first_frame_id: 1,
-                    first_pts_ticks: 0,
+                    first_frame_id: 1_000_000,
+                    first_pts_ticks: 3_000_000_000,
                     frame_duration_ticks: 3_000,
                     timebase_num: 1,
                     timebase_den: 90_000,
@@ -7227,7 +7231,7 @@ Device 00:07:04:A8:00:D0 (public)
             media_profile
                 .get("video_bufsize")
                 .and_then(|value| value.as_str()),
-            Some("400k")
+            Some("6400k")
         );
         assert_eq!(
             media_profile

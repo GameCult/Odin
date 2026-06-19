@@ -885,7 +885,9 @@ pub fn packetize_video_access_unit(
             timebase_num: options.timebase_num,
             timebase_den: options.timebase_den,
             keyframe: access_unit.keyframe,
-            dependency_frame_id: if access_unit.keyframe {
+            dependency_frame_id: if access_unit.keyframe
+                || !access_unit_references_previous_frame(options.codec, access_unit)
+            {
                 None
             } else {
                 options.frame_id.checked_sub(1)
@@ -1792,8 +1794,32 @@ fn is_h264_vcl_nal(nal_type: u8) -> bool {
     matches!(nal_type, 1..=5)
 }
 
+fn access_unit_references_previous_frame(codec: &str, access_unit: &VideoAccessUnit) -> bool {
+    if access_unit.keyframe {
+        return false;
+    }
+    match normalized_video_codec(codec).as_deref() {
+        Some("h264") => h264_access_unit_has_reference_vcl(&access_unit.bytes).unwrap_or(true),
+        _ => true,
+    }
+}
+
+fn h264_access_unit_has_reference_vcl(input: &[u8]) -> Result<bool> {
+    let nal_units = annex_b_nal_units(input, "H.264", h264_nal_type)?;
+    Ok(nal_units
+        .iter()
+        .any(|nal| is_h264_vcl_nal(nal.nal_type) && h264_nal_ref_idc(nal.payload) > 0))
+}
+
 fn h264_nal_type(payload: &[u8]) -> Option<u8> {
     payload.first().map(|byte| byte & 0x1f)
+}
+
+fn h264_nal_ref_idc(payload: &[u8]) -> u8 {
+    payload
+        .first()
+        .map(|byte| (byte >> 5) & 0x03)
+        .unwrap_or_default()
 }
 
 fn h264_first_mb_in_slice(nal_payload: &[u8]) -> Option<u64> {
@@ -2101,6 +2127,38 @@ mod tests {
         assert_eq!(records[1].deadline_ticks, 31_800);
         assert_eq!(records[1].dependency_frame_id, Some(9));
         assert_eq!(records[1].codec, "avc");
+        Ok(())
+    }
+
+    #[test]
+    fn packetizes_non_reference_h264_p_frames_without_dependency() -> Result<()> {
+        let mut stream = Vec::new();
+        stream.extend_from_slice(&start_code());
+        stream.extend_from_slice(&[0x65, 0x80]);
+        stream.extend_from_slice(&start_code());
+        stream.extend_from_slice(&[0x01, 0x80]);
+
+        let records = packetize_video_annex_b_stream(
+            VideoAnnexBStreamPacketizeOptions {
+                stream_id: "muninn.raven.av.rudp",
+                session_id: "session-1",
+                codec: "h264",
+                first_frame_id: 9,
+                first_pts_ticks: 27_000,
+                frame_duration_ticks: 3_000,
+                timebase_num: 1,
+                timebase_den: 90_000,
+                deadline_delay_ticks: 1_800,
+                max_payload_bytes: 16,
+            },
+            &stream,
+        )?;
+
+        assert_eq!(records.len(), 2);
+        assert!(records[0].keyframe);
+        assert_eq!(records[0].dependency_frame_id, None);
+        assert!(!records[1].keyframe);
+        assert_eq!(records[1].dependency_frame_id, None);
         Ok(())
     }
 
