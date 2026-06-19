@@ -82,6 +82,8 @@ const MUNINN_RUDP_MEDIA_SEND_PACE_EVERY_PAYLOADS: usize = 4;
 const MUNINN_RUDP_MEDIA_SEND_PACE_SLEEP_US: u64 = 250;
 const MUNINN_RUDP_ACTIVE_CATALOG_REPUBLISH_MS: u64 = 2_000;
 const PS_MOVE_LED_REPORT_LEN: usize = 49;
+const MUNINN_DISABLED_VIDEO_SOURCE_ID: &str = "video:none";
+const MUNINN_DISABLED_AUDIO_SOURCE_ID: &str = "audio:none";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Mode {
@@ -120,6 +122,8 @@ struct Options {
     height: u32,
     framerate: u32,
     ddagrab_output_index: u32,
+    capture_video: bool,
+    capture_audio: bool,
     audio_device: String,
     video_sources: Vec<CatalogSource>,
     audio_sources: Vec<CatalogSource>,
@@ -697,6 +701,14 @@ fn command_audio_source_id(command: &MuninnCaptureStreamCommandRecord) -> &str {
     }
 }
 
+fn command_requests_video(command: &MuninnCaptureStreamCommandRecord) -> bool {
+    command_video_source_id(command) != MUNINN_DISABLED_VIDEO_SOURCE_ID
+}
+
+fn command_requests_audio(command: &MuninnCaptureStreamCommandRecord) -> bool {
+    command_audio_source_id(command) != MUNINN_DISABLED_AUDIO_SOURCE_ID
+}
+
 fn stop_capture_stream_command(
     node: &mut cultmesh_rs::CultMeshNode,
     active: &mut Vec<ActiveCaptureStreamCommand>,
@@ -774,16 +786,24 @@ fn spawn_capture_stream_activation(
         "--rudp-latency-budget-ms".to_string(),
         command_rudp_latency_budget_ms(command).to_string(),
     ];
-    let output_index = video_source_output_index(command_video_source_id(command))
-        .unwrap_or(options.ddagrab_output_index);
-    args.extend([
-        "--ddagrab-output-index".to_string(),
-        output_index.to_string(),
-    ]);
-    if let Some(audio_device) = audio_source_device(command_audio_source_id(command)) {
-        args.extend(["--audio-device".to_string(), audio_device]);
+    if command_requests_video(command) {
+        let output_index = video_source_output_index(command_video_source_id(command))
+            .unwrap_or(options.ddagrab_output_index);
+        args.extend([
+            "--ddagrab-output-index".to_string(),
+            output_index.to_string(),
+        ]);
     } else {
-        args.extend(["--audio-device".to_string(), options.audio_device.clone()]);
+        args.push("--no-video".to_string());
+    }
+    if command_requests_audio(command) {
+        if let Some(audio_device) = audio_source_device(command_audio_source_id(command)) {
+            args.extend(["--audio-device".to_string(), audio_device]);
+        } else {
+            args.extend(["--audio-device".to_string(), options.audio_device.clone()]);
+        }
+    } else {
+        args.push("--no-audio".to_string());
     }
     if let Some(obs_target_host) = command.obs_target_host.as_ref() {
         args.extend([
@@ -825,7 +845,11 @@ fn spawn_capture_stream_activation(
 }
 
 fn video_source_id_for_options(options: &Options) -> String {
-    format!("display:{}", options.ddagrab_output_index)
+    if options.capture_video {
+        format!("display:{}", options.ddagrab_output_index)
+    } else {
+        MUNINN_DISABLED_VIDEO_SOURCE_ID.to_string()
+    }
 }
 
 fn video_source_label_for_options(options: &Options) -> String {
@@ -837,7 +861,11 @@ fn video_source_label_for_options(options: &Options) -> String {
 }
 
 fn audio_source_id_for_options(options: &Options) -> String {
-    format!("wasapi-loopback:{}", options.audio_device)
+    if options.capture_audio {
+        format!("wasapi-loopback:{}", options.audio_device)
+    } else {
+        MUNINN_DISABLED_AUDIO_SOURCE_ID.to_string()
+    }
 }
 
 fn audio_source_label_for_options(options: &Options) -> String {
@@ -1235,6 +1263,11 @@ fn activate(options: Options, spawner: impl ProcessSpawner) -> Result<()> {
     if options.media_transport == MediaTransport::Rudp {
         return activate_rudp(options);
     }
+    if !options.capture_video || !options.capture_audio {
+        return Err(anyhow!(
+            "partial Muninn activation is currently supported only for CultNet RUDP media"
+        ));
+    }
 
     ensure_state_dirs(&options)?;
     let mut node = open_node(&options, "muninn-activation")?;
@@ -1363,12 +1396,22 @@ struct RudpMuxRestart {
     delay: Duration,
 }
 
+fn rudp_media_activity_detail(options: &Options) -> String {
+    match (options.capture_video, options.capture_audio) {
+        (true, true) => "typed video/audio access units are publishing over CultNet RUDP media",
+        (true, false) => "typed video access units are publishing over CultNet RUDP media",
+        (false, true) => "typed audio packets are publishing over CultNet RUDP media",
+        (false, false) => "Muninn RUDP media is idle",
+    }
+    .to_string()
+}
+
 fn republish_running_stream_if_due(
     node: &mut cultmesh_rs::CultMeshNode,
     options: &Options,
     plan: &MuxPlan,
     supervisor_pid: u32,
-    video_ffmpeg_pid: u32,
+    mux_pid: u32,
     restart_count: u32,
     last_stream_publish_at: &mut Instant,
 ) -> Result<()> {
@@ -1383,9 +1426,9 @@ fn republish_running_stream_if_due(
         plan,
         "running",
         supervisor_pid,
-        Some(video_ffmpeg_pid),
+        Some(mux_pid),
         restart_count,
-        "typed video/audio access units are publishing over CultNet RUDP media",
+        &rudp_media_activity_detail(options),
     )?;
     *last_stream_publish_at = Instant::now();
     Ok(())
@@ -1409,56 +1452,93 @@ fn run_rudp_mux_once(
         .log_root
         .join(format!("muninn-{timestamp}.ffmpeg-audio.err.log"));
 
-    let mut loopback = Command::new("powershell.exe")
-        .args(loopback_args(options))
-        .stdout(Stdio::piped())
-        .stderr(fs::File::create(&loopback_stderr)?)
-        .spawn()
-        .with_context(|| {
-            format!(
-                "starting loopback capture {}",
-                options.loopback_script.display()
-            )
-        })?;
-    let loopback_stdout = loopback
-        .stdout
-        .take()
-        .context("loopback stdout was not piped")?;
+    let mut loopback = if options.capture_audio {
+        Some(
+            Command::new("powershell.exe")
+                .args(loopback_args(options))
+                .stdout(Stdio::piped())
+                .stderr(fs::File::create(&loopback_stderr)?)
+                .spawn()
+                .with_context(|| {
+                    format!(
+                        "starting loopback capture {}",
+                        options.loopback_script.display()
+                    )
+                })?,
+        )
+    } else {
+        None
+    };
+    let loopback_stdout = if let Some(process) = loopback.as_mut() {
+        Some(
+            process
+                .stdout
+                .take()
+                .context("loopback stdout was not piped")?,
+        )
+    } else {
+        None
+    };
 
-    let mut video_ffmpeg = Command::new(&options.ffmpeg_path)
-        .args(rudp_video_ffmpeg_args(options))
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(fs::File::create(&video_ffmpeg_stderr)?)
-        .spawn()
-        .with_context(|| format!("starting {} video encoder", options.ffmpeg_path))?;
-    let video_ffmpeg_stdout = video_ffmpeg
-        .stdout
-        .take()
-        .context("video ffmpeg stdout was not piped")?;
-    let video_ffmpeg_pid = video_ffmpeg.id();
-
-    let mut audio_ffmpeg = Command::new(&options.ffmpeg_path)
-        .args(rudp_audio_ffmpeg_args(options))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(fs::File::create(&audio_ffmpeg_stderr)?)
-        .spawn()
-        .with_context(|| format!("starting {} audio encoder", options.ffmpeg_path))?;
-    let mut audio_ffmpeg_stdin = audio_ffmpeg
-        .stdin
-        .take()
-        .context("audio ffmpeg stdin was not piped")?;
-    let audio_ffmpeg_stdout = audio_ffmpeg
-        .stdout
-        .take()
-        .context("audio ffmpeg stdout was not piped")?;
-
-    let audio_pump = thread::spawn(move || -> Result<()> {
-        let mut reader = loopback_stdout;
-        std::io::copy(&mut reader, &mut audio_ffmpeg_stdin)?;
-        Ok(())
-    });
+    let mut video_ffmpeg = if options.capture_video {
+        Some(
+            Command::new(&options.ffmpeg_path)
+                .args(rudp_video_ffmpeg_args(options))
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(fs::File::create(&video_ffmpeg_stderr)?)
+                .spawn()
+                .with_context(|| format!("starting {} video encoder", options.ffmpeg_path))?,
+        )
+    } else {
+        None
+    };
+    let video_ffmpeg_stdout = if let Some(process) = video_ffmpeg.as_mut() {
+        Some(
+            process
+                .stdout
+                .take()
+                .context("video ffmpeg stdout was not piped")?,
+        )
+    } else {
+        None
+    };
+    let mut audio_ffmpeg = if options.capture_audio {
+        Some(
+            Command::new(&options.ffmpeg_path)
+                .args(rudp_audio_ffmpeg_args(options))
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(fs::File::create(&audio_ffmpeg_stderr)?)
+                .spawn()
+                .with_context(|| format!("starting {} audio encoder", options.ffmpeg_path))?,
+        )
+    } else {
+        None
+    };
+    let audio_ffmpeg_stdout = if let Some(process) = audio_ffmpeg.as_mut() {
+        Some(
+            process
+                .stdout
+                .take()
+                .context("audio ffmpeg stdout was not piped")?,
+        )
+    } else {
+        None
+    };
+    let audio_pump = match (loopback_stdout, audio_ffmpeg.as_mut()) {
+        (Some(mut reader), Some(process)) => {
+            let mut audio_ffmpeg_stdin = process
+                .stdin
+                .take()
+                .context("audio ffmpeg stdin was not piped")?;
+            Some(thread::spawn(move || -> Result<()> {
+                std::io::copy(&mut reader, &mut audio_ffmpeg_stdin)?;
+                Ok(())
+            }))
+        }
+        _ => None,
+    };
 
     let media_profile = muninn_rudp_media_profile_for_options(options);
     let mut video_transport =
@@ -1475,50 +1555,61 @@ fn run_rudp_mux_once(
         plan,
         "running",
         supervisor_pid,
-        Some(video_ffmpeg_pid),
+        video_ffmpeg
+            .as_ref()
+            .map(Child::id)
+            .or_else(|| audio_ffmpeg.as_ref().map(Child::id)),
         restart_count,
-        "typed video/audio access units are publishing over CultNet RUDP media",
+        &rudp_media_activity_detail(options),
     )?;
     let mut last_stream_publish_at = Instant::now();
 
     let (payload_tx, payload_rx) = mpsc::channel::<Result<QueuedMuninnMediaSendPayload>>();
-    let video_sender = video_rudp_payload_reader(
-        payload_tx.clone(),
-        video_ffmpeg_stdout,
-        VideoAnnexBStreamSendConfig {
-            stream_id: options.stream_id.clone(),
-            session_id: format!("{}:{timestamp}:video", options.host_id),
-            codec: media_profile.video_codec.to_string(),
-            first_frame_id: 0,
-            first_pts_ticks: 0,
-            frame_duration_ticks: video_frame_duration_ticks(options)?,
-            timebase_num: 1,
-            timebase_den: 90_000,
-            deadline_delay_ticks: rudp_media_deadline_delay_ticks(&media_profile),
-            max_payload_bytes: options.media_packet_bytes.max(256),
-            max_pending_bytes: options.media_packet_bytes.max(256) * 4096,
-            source_runtime_id: options.host_id.clone(),
-            source_role: "muninn.rudp.video".to_string(),
-        },
-    );
-    let audio_sender = audio_rudp_payload_reader(
-        payload_tx.clone(),
-        audio_ffmpeg_stdout,
-        AudioAdtsStreamSendConfig {
-            stream_id: options.stream_id.clone(),
-            session_id: format!("{}:{timestamp}:audio", options.host_id),
-            codec: "aac-adts".to_string(),
-            first_packet_id: 0,
-            first_pts_ticks: 0,
-            packet_duration_ticks: 1_024,
-            timebase_num: 1,
-            timebase_den: options.audio_sample_rate,
-            deadline_delay_ticks: rudp_audio_deadline_delay_ticks(options, &media_profile),
-            max_pending_bytes: options.media_packet_bytes.max(256) * 64,
-            source_runtime_id: options.host_id.clone(),
-            source_role: "muninn.rudp.audio".to_string(),
-        },
-    );
+    let video_sender = if let Some(stdout) = video_ffmpeg_stdout {
+        Some(video_rudp_payload_reader(
+            payload_tx.clone(),
+            stdout,
+            VideoAnnexBStreamSendConfig {
+                stream_id: options.stream_id.clone(),
+                session_id: format!("{}:{timestamp}:video", options.host_id),
+                codec: media_profile.video_codec.to_string(),
+                first_frame_id: 0,
+                first_pts_ticks: 0,
+                frame_duration_ticks: video_frame_duration_ticks(options)?,
+                timebase_num: 1,
+                timebase_den: 90_000,
+                deadline_delay_ticks: rudp_media_deadline_delay_ticks(&media_profile),
+                max_payload_bytes: options.media_packet_bytes.max(256),
+                max_pending_bytes: options.media_packet_bytes.max(256) * 4096,
+                source_runtime_id: options.host_id.clone(),
+                source_role: "muninn.rudp.video".to_string(),
+            },
+        ))
+    } else {
+        None
+    };
+    let audio_sender = if let Some(stdout) = audio_ffmpeg_stdout {
+        Some(audio_rudp_payload_reader(
+            payload_tx.clone(),
+            stdout,
+            AudioAdtsStreamSendConfig {
+                stream_id: options.stream_id.clone(),
+                session_id: format!("{}:{timestamp}:audio", options.host_id),
+                codec: "aac-adts".to_string(),
+                first_packet_id: 0,
+                first_pts_ticks: 0,
+                packet_duration_ticks: 1_024,
+                timebase_num: 1,
+                timebase_den: options.audio_sample_rate,
+                deadline_delay_ticks: rudp_audio_deadline_delay_ticks(options, &media_profile),
+                max_pending_bytes: options.media_packet_bytes.max(256) * 64,
+                source_runtime_id: options.host_id.clone(),
+                source_role: "muninn.rudp.audio".to_string(),
+            },
+        ))
+    } else {
+        None
+    };
     drop(payload_tx);
 
     let mut payloads_sent = 0_u64;
@@ -1578,7 +1669,11 @@ fn run_rudp_mux_once(
                     options,
                     plan,
                     supervisor_pid,
-                    video_ffmpeg_pid,
+                    video_ffmpeg
+                        .as_ref()
+                        .map(Child::id)
+                        .or_else(|| audio_ffmpeg.as_ref().map(Child::id))
+                        .unwrap_or(supervisor_pid),
                     restart_count,
                     &mut last_stream_publish_at,
                 )?;
@@ -1641,7 +1736,11 @@ fn run_rudp_mux_once(
                 options,
                 plan,
                 supervisor_pid,
-                video_ffmpeg_pid,
+                video_ffmpeg
+                    .as_ref()
+                    .map(Child::id)
+                    .or_else(|| audio_ffmpeg.as_ref().map(Child::id))
+                    .unwrap_or(supervisor_pid),
                 restart_count,
                 &mut last_stream_publish_at,
             )?;
@@ -1704,22 +1803,38 @@ fn run_rudp_mux_once(
                 options,
                 plan,
                 supervisor_pid,
-                video_ffmpeg_pid,
+                video_ffmpeg
+                    .as_ref()
+                    .map(Child::id)
+                    .or_else(|| audio_ffmpeg.as_ref().map(Child::id))
+                    .unwrap_or(supervisor_pid),
                 restart_count,
                 &mut last_stream_publish_at,
             )?;
         }
     };
 
-    let _ = video_ffmpeg.kill();
-    let _ = audio_ffmpeg.kill();
-    let _ = loopback.kill();
-    let _ = video_ffmpeg.wait();
-    let _ = audio_ffmpeg.wait();
-    let _ = loopback.wait();
-    let _ = audio_pump.join();
-    let _ = video_sender.join();
-    let _ = audio_sender.join();
+    if let Some(process) = video_ffmpeg.as_mut() {
+        let _ = process.kill();
+        let _ = process.wait();
+    }
+    if let Some(process) = audio_ffmpeg.as_mut() {
+        let _ = process.kill();
+        let _ = process.wait();
+    }
+    if let Some(process) = loopback.as_mut() {
+        let _ = process.kill();
+        let _ = process.wait();
+    }
+    if let Some(pump) = audio_pump {
+        let _ = pump.join();
+    }
+    if let Some(sender) = video_sender {
+        let _ = sender.join();
+    }
+    if let Some(sender) = audio_sender {
+        let _ = sender.join();
+    }
     result
 }
 
@@ -2713,14 +2828,22 @@ fn publish_stream(
         stream_id: options.stream_id.clone(),
         host_id: options.host_id.clone(),
         state: state.to_string(),
-        video_source: format!(
-            "ddagrab:output_idx={}:{}x{}@{}",
-            options.ddagrab_output_index, options.width, options.height, options.framerate
-        ),
-        audio_source: format!(
-            "wasapi-loopback:{}:{}ch@{}",
-            options.audio_device, options.audio_channels, options.audio_sample_rate
-        ),
+        video_source: if options.capture_video {
+            format!(
+                "ddagrab:output_idx={}:{}x{}@{}",
+                options.ddagrab_output_index, options.width, options.height, options.framerate
+            )
+        } else {
+            "disabled".to_string()
+        },
+        audio_source: if options.capture_audio {
+            format!(
+                "wasapi-loopback:{}:{}ch@{}",
+                options.audio_device, options.audio_channels, options.audio_sample_rate
+            )
+        } else {
+            "disabled".to_string()
+        },
         transport: media_transport_id(&options.media_transport).to_string(),
         targets: plan.targets.clone(),
         command_witness: plan.command_file.display().to_string(),
@@ -6251,6 +6374,8 @@ impl Options {
             height: 1080,
             framerate: 30,
             ddagrab_output_index: 0,
+            capture_video: true,
+            capture_audio: true,
             audio_device: "Realtek".to_string(),
             video_sources: Vec::new(),
             audio_sources: Vec::new(),
@@ -6359,6 +6484,8 @@ impl Options {
                     options.ddagrab_output_index =
                         take_value(&mut args, "--ddagrab-output-index")?.parse()?
                 }
+                "--no-video" => options.capture_video = false,
+                "--no-audio" => options.capture_audio = false,
                 "--audio-device" => options.audio_device = take_value(&mut args, "--audio-device")?,
                 "--video-source" => options.video_sources.push(parse_catalog_source(&take_value(
                     &mut args,
@@ -6497,6 +6624,11 @@ impl Options {
         if options.interval_seconds == Some(0) {
             return Err(anyhow!("--interval-seconds must be greater than zero"));
         }
+        if !options.capture_video && !options.capture_audio {
+            return Err(anyhow!(
+                "Muninn activation must keep at least one leg alive; do not pass both --no-video and --no-audio"
+            ));
+        }
         if options.move_evidence_verse_id.trim().is_empty() {
             return Err(anyhow!("--move-evidence-verse must be non-empty"));
         }
@@ -6634,7 +6766,7 @@ fn parse_catalog_source(value: &str) -> Result<CatalogSource> {
 }
 
 fn help_text() -> &'static str {
-    "Usage: muninn [serve|activate|request-stream|request-move-light|move-light-status|move-identity-status|move-source-status|move-state-status|claim-move-host|quest-access-status] [--store <path>] [--activate-store <path>] [--stream-action <start|stop>] [--target-host <host>] [--port <port>] [--obs-target-host <host>] [--obs-port <port>] [--media-transport <srt|rudp>] [--media-packet-bytes <bytes>] [--rudp-video-bitrate-kbps <kbps>] [--rudp-latency-budget-ms <ms>] [--video-source <source-id=label>] [--audio-source <source-id=label>] [--loopback-script <path>] [--ffmpeg <path>] [--capture-command-rudp-bind <addr>] [--capture-command-rudp-target <addr>] [--obs-catalog-rudp-target <addr>] [--move-state <move-id>=<hidraw-path>] [--move-host <bt-addr>] [--move-evidence-stream <stream-id>] [--move-evidence-verse <verse-id>] [--quest-adb] [--quest-serial <serial>] [--quest-input-stream <stream-id>] [--quest-pose-stream <stream-id>] [--quest-video-input-stream <stream-id>] [--idunn-rudp-health <addr>] [--idunn-daemon <id>] [--idunn-health-contract <contract>] [--dry-run] [--health]\n\nMuninn is Odin's portable telemetry Verse assembler. serve publishes cheap typed telemetry affordances, optional Quest USB access surfaces, and the explicitly configured Move runtime; when serve receives --move-state, --move-host, or --move-evidence-stream it may publish source-local Move controller state, typed Move identity records, a CultMesh Move evidence stream, and keep USB-attached PS Moves claimed to that explicit Bluetooth host; serve also consumes typed capture stream commands from --activate-store or --capture-command-rudp-bind and owns the local ffmpeg/loopback activation child lifecycle, and may project the OBS stream catalog to a local OBS plugin over --obs-catalog-rudp-target; activate starts an explicitly requested local stream over SRT or CultNet RUDP as a daemon child; request-stream publishes a typed capture stream command for Muninn serve to execute, either into the activation store or over --capture-command-rudp-target; request-move-light publishes a typed Move light command for Muninn serve to execute; move-light-status reads typed command receipts; move-identity-status reads typed Move identity records; move-source-status prints live Move source discovery; move-state-status reads typed controller-state records; claim-move-host assigns USB-attached PS Moves to a Bluetooth host; quest-access-status reads typed Quest access state. In --health mode, the Idunn RUDP flags publish typed daemon health to Idunn while preserving command-probe exit semantics."
+    "Usage: muninn [serve|activate|request-stream|request-move-light|move-light-status|move-identity-status|move-source-status|move-state-status|claim-move-host|quest-access-status] [--store <path>] [--activate-store <path>] [--stream-action <start|stop>] [--target-host <host>] [--port <port>] [--obs-target-host <host>] [--obs-port <port>] [--media-transport <srt|rudp>] [--media-packet-bytes <bytes>] [--rudp-video-bitrate-kbps <kbps>] [--rudp-latency-budget-ms <ms>] [--video-source <source-id=label>] [--audio-source <source-id=label>] [--no-video] [--no-audio] [--loopback-script <path>] [--ffmpeg <path>] [--capture-command-rudp-bind <addr>] [--capture-command-rudp-target <addr>] [--obs-catalog-rudp-target <addr>] [--move-state <move-id>=<hidraw-path>] [--move-host <bt-addr>] [--move-evidence-stream <stream-id>] [--move-evidence-verse <verse-id>] [--quest-adb] [--quest-serial <serial>] [--quest-input-stream <stream-id>] [--quest-pose-stream <stream-id>] [--quest-video-input-stream <stream-id>] [--idunn-rudp-health <addr>] [--idunn-daemon <id>] [--idunn-health-contract <contract>] [--dry-run] [--health]\n\nMuninn is Odin's portable telemetry Verse assembler. serve publishes cheap typed telemetry affordances, optional Quest USB access surfaces, and the explicitly configured Move runtime; when serve receives --move-state, --move-host, or --move-evidence-stream it may publish source-local Move controller state, typed Move identity records, a CultMesh Move evidence stream, and keep USB-attached PS Moves claimed to that explicit Bluetooth host; serve also consumes typed capture stream commands from --activate-store or --capture-command-rudp-bind and owns the local ffmpeg/loopback activation child lifecycle, and may project the OBS stream catalog to a local OBS plugin over --obs-catalog-rudp-target; activate starts an explicitly requested local stream over SRT or CultNet RUDP as a daemon child; request-stream publishes a typed capture stream command for Muninn serve to execute, either into the activation store or over --capture-command-rudp-target; use --no-video or --no-audio to request one leg without the other when the transport is CultNet RUDP; request-move-light publishes a typed Move light command for Muninn serve to execute; move-light-status reads typed command receipts; move-identity-status reads typed Move identity records; move-source-status prints live Move source discovery; move-state-status reads typed controller-state records; claim-move-host assigns USB-attached PS Moves to a Bluetooth host; quest-access-status reads typed Quest access state. In --health mode, the Idunn RUDP flags publish typed daemon health to Idunn while preserving command-probe exit semantics."
 }
 
 fn parse_move_state_source(value: &str) -> Result<MoveStateSource> {

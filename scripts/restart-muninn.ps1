@@ -296,6 +296,142 @@ $hostLabel = if ($hostArgumentIndex -ge 0 -and ($hostArgumentIndex + 1) -lt $arg
 }
 $hasExplicitVideoSources = @($arguments | Where-Object { $_ -eq '--video-source' }).Count -gt 0
 $hasExplicitAudioSources = @($arguments | Where-Object { $_ -eq '--audio-source' }).Count -gt 0
+if (-not ('Muninn.RenderEndpointDiscovery' -as [type])) {
+  Add-Type -TypeDefinition @"
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+
+namespace Muninn {
+    public static class RenderEndpointDiscovery {
+        const int eRender = 0;
+        const uint DEVICE_STATE_ACTIVE = 0x00000001;
+        static readonly PROPERTYKEY DeviceFriendlyNameKey = new PROPERTYKEY(
+            new Guid("A45C254E-DF1C-4EFD-8020-67D146A850E0"),
+            14);
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct PROPERTYKEY {
+            public Guid fmtid;
+            public uint pid;
+
+            public PROPERTYKEY(Guid formatId, uint propertyId) {
+                fmtid = formatId;
+                pid = propertyId;
+            }
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct PROPVARIANT {
+            public ushort vt;
+            public ushort wReserved1;
+            public ushort wReserved2;
+            public ushort wReserved3;
+            public IntPtr pointerValue;
+            public int intValue;
+        }
+
+        [ComImport]
+        [Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")]
+        class MMDeviceEnumerator { }
+
+        [ComImport]
+        [Guid("A95664D2-9614-4F35-A746-DE8DB63617E6")]
+        [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        interface IMMDeviceEnumerator {
+            [PreserveSig]
+            int EnumAudioEndpoints(int dataFlow, uint stateMask, out IMMDeviceCollection devices);
+        }
+
+        [ComImport]
+        [Guid("0BD7A1BE-7A1A-44DB-8397-CC5392387B5E")]
+        [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        interface IMMDeviceCollection {
+            [PreserveSig]
+            int GetCount(out uint count);
+            [PreserveSig]
+            int Item(uint index, out IMMDevice device);
+        }
+
+        [ComImport]
+        [Guid("D666063F-1587-4E43-81F1-B948E807363F")]
+        [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        interface IMMDevice {
+            [PreserveSig]
+            int Activate(ref Guid iid, int dwClsCtx, IntPtr pActivationParams, out object audioClient);
+            [PreserveSig]
+            int OpenPropertyStore(uint access, out IPropertyStore properties);
+        }
+
+        [ComImport]
+        [Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99")]
+        [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        interface IPropertyStore {
+            [PreserveSig]
+            int GetCount(out uint propertyCount);
+            [PreserveSig]
+            int GetAt(uint propertyIndex, out PROPERTYKEY key);
+            [PreserveSig]
+            int GetValue(ref PROPERTYKEY key, out PROPVARIANT value);
+            [PreserveSig]
+            int SetValue(ref PROPERTYKEY key, ref PROPVARIANT value);
+            [PreserveSig]
+            int Commit();
+        }
+
+        [DllImport("ole32.dll")]
+        static extern int PropVariantClear(ref PROPVARIANT variant);
+
+        public static string[] FriendlyNames() {
+            var names = new List<string>();
+            IMMDeviceEnumerator enumerator = (IMMDeviceEnumerator)(new MMDeviceEnumerator());
+            IMMDeviceCollection devices;
+            Marshal.ThrowExceptionForHR(enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE, out devices));
+            try {
+                uint count;
+                Marshal.ThrowExceptionForHR(devices.GetCount(out count));
+                for (uint index = 0; index < count; index++) {
+                    IMMDevice device;
+                    Marshal.ThrowExceptionForHR(devices.Item(index, out device));
+                    try {
+                        var name = DeviceFriendlyName(device);
+                        if (!String.IsNullOrWhiteSpace(name)) {
+                            names.Add(name.Trim());
+                        }
+                    } finally {
+                        Marshal.ReleaseComObject(device);
+                    }
+                }
+            } finally {
+                Marshal.ReleaseComObject(devices);
+                Marshal.ReleaseComObject(enumerator);
+            }
+            return names.ToArray();
+        }
+
+        static string DeviceFriendlyName(IMMDevice device) {
+            IPropertyStore store;
+            Marshal.ThrowExceptionForHR(device.OpenPropertyStore(0, out store));
+            try {
+                PROPERTYKEY key = DeviceFriendlyNameKey;
+                PROPVARIANT value;
+                Marshal.ThrowExceptionForHR(store.GetValue(ref key, out value));
+                try {
+                    if (value.vt == 31 && value.pointerValue != IntPtr.Zero) {
+                        return Marshal.PtrToStringUni(value.pointerValue) ?? "";
+                    }
+                    return "";
+                } finally {
+                    PropVariantClear(ref value);
+                }
+            } finally {
+                Marshal.ReleaseComObject(store);
+            }
+        }
+    }
+}
+"@
+}
 if (-not $hasExplicitVideoSources) {
   $displayNames = @(
     Get-CimInstance Win32_DesktopMonitor -ErrorAction SilentlyContinue |
@@ -322,12 +458,7 @@ if (-not $hasExplicitVideoSources) {
   }
 }
 if (-not $hasExplicitAudioSources) {
-  $audioNames = @(
-    Get-CimInstance Win32_SoundDevice -ErrorAction SilentlyContinue |
-      ForEach-Object { $_.Name } |
-      Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
-      Sort-Object -Unique
-  )
+  $audioNames = @([Muninn.RenderEndpointDiscovery]::FriendlyNames() | Sort-Object -Unique)
   if ($audioNames.Count -lt 1) {
     $audioDeviceIndex = [Array]::IndexOf($arguments, '--audio-device')
     if ($audioDeviceIndex -ge 0 -and ($audioDeviceIndex + 1) -lt $arguments.Count) {
