@@ -53,7 +53,6 @@ const IDUNN_HEALTH_RUDP_CONNECTION_ID: u32 = 0x1d0d_0001;
 const MUNINN_COMMAND_RUDP_CONNECTION_ID: u32 = 0x6d75_0002;
 const MUNINN_MEDIA_RUDP_CONNECTION_ID: u32 = 0x6d75_0001;
 const MUNINN_OBS_CATALOG_RUDP_CONNECTION_ID: u32 = 0x6d75_0003;
-const MUNINN_MEDIA_SEND_QUEUE_DEADLINE_MS: u64 = 400;
 const MUNINN_RUDP_MEDIA_PROFILE_ID: &str = "muninn.rudp.low_latency_h264_lan.v1";
 const MUNINN_RUDP_MEDIA_VIDEO_BITRATE_KBPS: u32 = 16_000;
 const MUNINN_RUDP_MEDIA_VBV_FRAME_BUDGETS: u32 = 1;
@@ -1379,7 +1378,7 @@ fn run_rudp_mux_once(
             frame_duration_ticks: video_frame_duration_ticks(options)?,
             timebase_num: 1,
             timebase_den: 90_000,
-            deadline_delay_ticks: i64::from(video_frame_duration_ticks(options)?),
+            deadline_delay_ticks: rudp_media_deadline_delay_ticks(&media_profile),
             max_payload_bytes: options.media_packet_bytes.max(256),
             max_pending_bytes: options.media_packet_bytes.max(256) * 4096,
             source_runtime_id: options.host_id.clone(),
@@ -1398,7 +1397,7 @@ fn run_rudp_mux_once(
             packet_duration_ticks: 1_024,
             timebase_num: 1,
             timebase_den: options.audio_sample_rate,
-            deadline_delay_ticks: 1_024,
+            deadline_delay_ticks: rudp_audio_deadline_delay_ticks(options, &media_profile),
             max_pending_bytes: options.media_packet_bytes.max(256) * 64,
             source_runtime_id: options.host_id.clone(),
             source_role: "muninn.rudp.audio".to_string(),
@@ -1429,6 +1428,7 @@ fn run_rudp_mux_once(
                         &mut receiver_feedback,
                         &repair_cache,
                         &mut repair_budget,
+                        &media_profile,
                         payloads_dropped,
                     )?;
                     record_receiver_keyframe_pressure(
@@ -1476,6 +1476,7 @@ fn run_rudp_mux_once(
                     &mut receiver_feedback,
                     &repair_cache,
                     &mut repair_budget,
+                    &media_profile,
                     payloads_dropped,
                 )?;
                 record_receiver_keyframe_pressure(
@@ -1513,6 +1514,7 @@ fn run_rudp_mux_once(
                     &mut receiver_feedback,
                     &repair_cache,
                     &mut repair_budget,
+                    &media_profile,
                     payloads_dropped,
                 )?;
                 record_receiver_keyframe_pressure(
@@ -1837,6 +1839,7 @@ fn poll_rudp_media_receiver_feedback(
     stats: &mut MuninnRudpReceiverFeedbackStats,
     repair_cache: &RecentVideoChunkRepairCache,
     repair_budget: &mut MuninnRudpRepairBudget,
+    media_profile: &MuninnRudpMediaProfile,
     queue_dropped: u64,
 ) -> Result<()> {
     loop {
@@ -1855,7 +1858,7 @@ fn poll_rudp_media_receiver_feedback(
                         transport,
                         payload,
                         Instant::now(),
-                        Duration::from_millis(MUNINN_MEDIA_SEND_QUEUE_DEADLINE_MS),
+                        Duration::from_millis(media_profile.sender_queue_deadline_ms),
                     )? {
                         stats.repaired_video_chunks = stats.repaired_video_chunks.saturating_add(1);
                     }
@@ -2046,6 +2049,32 @@ fn video_frame_duration_ticks(options: &Options) -> Result<u32> {
         return Err(anyhow!("framerate must be greater than zero"));
     }
     Ok((90_000_u32 / options.framerate).max(1))
+}
+
+fn rudp_media_deadline_delay_ticks(media_profile: &MuninnRudpMediaProfile) -> i64 {
+    i64::try_from(
+        media_profile
+            .receiver_assembly_deadline_ms
+            .saturating_mul(90),
+    )
+    .unwrap_or(i64::MAX)
+}
+
+fn rudp_audio_deadline_delay_ticks(
+    options: &Options,
+    media_profile: &MuninnRudpMediaProfile,
+) -> i64 {
+    if options.audio_sample_rate == 0 {
+        return i64::from(1_024);
+    }
+    i64::try_from(
+        media_profile
+            .receiver_assembly_deadline_ms
+            .saturating_mul(u64::from(options.audio_sample_rate))
+            / 1_000,
+    )
+    .unwrap_or(i64::MAX)
+    .max(i64::from(1_024))
 }
 
 fn publish_surface(
@@ -5570,7 +5599,7 @@ fn muninn_rudp_media_profile_for_bitrate_and_latency(
         max_fragment_bytes: MUNINN_RUDP_MEDIA_MAX_FRAGMENT_BYTES,
         video_b_frames: 0,
         video_rc_lookahead: 0,
-        sender_queue_deadline_ms: MUNINN_MEDIA_SEND_QUEUE_DEADLINE_MS,
+        sender_queue_deadline_ms: latency_budget_ms,
         sender_resend_delay_ms: MUNINN_RUDP_MEDIA_RESEND_DELAY_MS,
         sender_reliable_expire_after_ms: latency_budget_ms
             .min(MUNINN_RUDP_MEDIA_RELIABLE_EXPIRE_AFTER_MS)
@@ -7056,6 +7085,33 @@ mod tests {
             queued_at + deadline + Duration::from_millis(1),
             deadline
         ));
+    }
+
+    #[test]
+    fn rudp_latency_budget_owns_sender_and_record_deadlines() {
+        let options = Options::parse(
+            [
+                "activate",
+                "--media-transport",
+                "rudp",
+                "--framerate",
+                "30",
+                "--audio-sample-rate",
+                "48000",
+                "--rudp-latency-budget-ms",
+                "1200",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap();
+        let profile = muninn_rudp_media_profile_for_options(&options);
+
+        assert_eq!(profile.sender_queue_deadline_ms, 1200);
+        assert_eq!(profile.receiver_assembly_deadline_ms, 1200);
+        assert_eq!(rudp_media_deadline_delay_ticks(&profile), 108_000);
+        assert_eq!(rudp_audio_deadline_delay_ticks(&options, &profile), 57_600);
+        assert!(rudp_endpoint_for_options(&options).contains("assembly_deadline_ms=1200"));
     }
 
     #[test]
