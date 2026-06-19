@@ -922,11 +922,13 @@ pub fn packetize_video_access_unit(
     Ok(records)
 }
 
-pub fn build_video_parity_shard(
+const MUNINN_VIDEO_PARITY_STRIPES: u16 = 16;
+
+pub fn build_video_parity_shards(
     chunks: &[MuninnMediaVideoAccessUnitRecord],
-) -> Result<Option<MuninnMediaVideoParityShardRecord>> {
+) -> Result<Vec<MuninnMediaVideoParityShardRecord>> {
     if chunks.len() <= 1 {
-        return Ok(None);
+        return Ok(Vec::new());
     }
     let first = chunks
         .first()
@@ -966,48 +968,59 @@ pub fn build_video_parity_shard(
         }
     }
 
-    let mut payload_len = 0_usize;
+    let mut chunk_payload_len = 0_usize;
     let mut last_chunk_payload_bytes = 0_u32;
     for index in 0..first.chunk_count {
         let chunk = by_index
             .get(&index)
             .ok_or_else(|| anyhow!("video parity missing chunk_index {index}"))?;
-        payload_len = payload_len.max(chunk.payload.len());
+        chunk_payload_len = chunk_payload_len.max(chunk.payload.len());
         if index == first.chunk_count - 1 {
             last_chunk_payload_bytes = u32::try_from(chunk.payload.len())
                 .context("video parity last chunk payload length exceeds u32")?;
         }
     }
-    let chunk_payload_bytes =
-        u32::try_from(payload_len).context("video parity chunk payload length exceeds u32")?;
-
-    let mut parity = vec![0_u8; payload_len];
-    for index in 0..first.chunk_count {
-        let chunk = by_index.get(&index).expect("chunk index was checked above");
-        for (offset, byte) in chunk.payload.iter().enumerate() {
-            parity[offset] ^= *byte;
+    let chunk_payload_bytes = u32::try_from(chunk_payload_len)
+        .context("video parity chunk payload length exceeds u32")?;
+    let parity_count = first.chunk_count.min(MUNINN_VIDEO_PARITY_STRIPES);
+    let mut records = Vec::with_capacity(parity_count as usize);
+    for parity_index in 0..parity_count {
+        let mut parity_len = 0_usize;
+        for index in (parity_index..first.chunk_count).step_by(parity_count as usize) {
+            let chunk = by_index.get(&index).expect("chunk index was checked above");
+            parity_len = parity_len.max(chunk.payload.len());
         }
+        if parity_len == 0 {
+            continue;
+        }
+        let mut parity = vec![0_u8; parity_len];
+        for index in (parity_index..first.chunk_count).step_by(parity_count as usize) {
+            let chunk = by_index.get(&index).expect("chunk index was checked above");
+            for (offset, byte) in chunk.payload.iter().enumerate() {
+                parity[offset] ^= *byte;
+            }
+        }
+        records.push(MuninnMediaVideoParityShardRecord {
+            stream_id: first.stream_id.clone(),
+            session_id: first.session_id.clone(),
+            frame_id: first.frame_id,
+            codec: first.codec.clone(),
+            pts_ticks: first.pts_ticks,
+            duration_ticks: first.duration_ticks,
+            timebase_num: first.timebase_num,
+            timebase_den: first.timebase_den,
+            keyframe: first.keyframe,
+            dependency_frame_id: first.dependency_frame_id,
+            deadline_ticks: first.deadline_ticks,
+            chunk_count: first.chunk_count,
+            parity_index,
+            parity_count,
+            chunk_payload_bytes,
+            last_chunk_payload_bytes,
+            payload: parity,
+        });
     }
-
-    Ok(Some(MuninnMediaVideoParityShardRecord {
-        stream_id: first.stream_id.clone(),
-        session_id: first.session_id.clone(),
-        frame_id: first.frame_id,
-        codec: first.codec.clone(),
-        pts_ticks: first.pts_ticks,
-        duration_ticks: first.duration_ticks,
-        timebase_num: first.timebase_num,
-        timebase_den: first.timebase_den,
-        keyframe: first.keyframe,
-        dependency_frame_id: first.dependency_frame_id,
-        deadline_ticks: first.deadline_ticks,
-        chunk_count: first.chunk_count,
-        parity_index: 0,
-        parity_count: 1,
-        chunk_payload_bytes,
-        last_chunk_payload_bytes,
-        payload: parity,
-    }))
+    Ok(records)
 }
 
 fn video_wire_records_with_parity(
@@ -1032,7 +1045,7 @@ fn video_wire_records_with_parity(
                 .cloned()
                 .map(MuninnMediaWireRecord::Video),
         );
-        if let Some(parity) = build_video_parity_shard(frame_records)? {
+        for parity in build_video_parity_shards(frame_records)? {
             wire_records.push(MuninnMediaWireRecord::VideoParity(parity));
         }
         offset = end;
@@ -1789,9 +1802,14 @@ fn validate_video_parity_record(record: &MuninnMediaVideoParityShardRecord) -> R
             "video parity media record chunk_count must be non-zero"
         ));
     }
-    if record.parity_count != 1 || record.parity_index != 0 {
+    if record.parity_count == 0 || record.parity_index >= record.parity_count {
         return Err(anyhow!(
-            "video parity media record currently supports exactly one XOR parity shard"
+            "video parity media record has invalid parity stripe metadata"
+        ));
+    }
+    if record.parity_count > record.chunk_count {
+        return Err(anyhow!(
+            "video parity media record parity_count exceeds chunk_count"
         ));
     }
     if record.chunk_payload_bytes == 0 || record.last_chunk_payload_bytes == 0 {
@@ -1809,9 +1827,9 @@ fn validate_video_parity_record(record: &MuninnMediaVideoParityShardRecord) -> R
             "video parity media record payload must be non-empty"
         ));
     }
-    if record.chunk_payload_bytes as usize != record.payload.len() {
+    if record.payload.len() > record.chunk_payload_bytes as usize {
         return Err(anyhow!(
-            "video parity media record payload length does not match declared chunk length"
+            "video parity media record payload exceeds declared chunk length"
         ));
     }
     Ok(())
@@ -2341,9 +2359,9 @@ mod tests {
     }
 
     #[test]
-    fn builds_video_parity_shard_for_single_chunk_loss_recovery() -> Result<()> {
+    fn builds_video_parity_shards_for_burst_loss_recovery() -> Result<()> {
         let access_unit = VideoAccessUnit {
-            bytes: vec![1, 2, 3, 4, 5],
+            bytes: (1_u8..=40).collect(),
             keyframe: false,
         };
         let records = packetize_video_access_unit(
@@ -2362,23 +2380,40 @@ mod tests {
             &access_unit,
         )?;
 
-        let parity = build_video_parity_shard(&records)?.expect("multi-chunk frame gets parity");
+        let parity = build_video_parity_shards(&records)?;
 
-        assert_eq!(parity.chunk_count, 3);
-        assert_eq!(parity.parity_index, 0);
-        assert_eq!(parity.parity_count, 1);
-        assert_eq!(parity.chunk_payload_bytes, 2);
-        assert_eq!(parity.last_chunk_payload_bytes, 1);
-        assert_eq!(parity.payload, vec![1 ^ 3 ^ 5, 2 ^ 4]);
+        assert_eq!(records.len(), 20);
+        assert_eq!(parity.len(), 16);
+        assert!(
+            parity.iter().enumerate().all(
+                |(index, shard)| shard.parity_index == index as u16 && shard.parity_count == 16
+            )
+        );
+        assert!(parity.iter().all(|shard| shard.chunk_payload_bytes == 2));
 
-        let mut recovered = parity.payload.clone();
-        for chunk in [&records[0], &records[2]] {
-            for (offset, byte) in chunk.payload.iter().enumerate() {
-                recovered[offset] ^= *byte;
+        let mut recovered_tail = Vec::new();
+        for missing_index in 16_u16..20 {
+            let shard = parity
+                .iter()
+                .find(|shard| shard.parity_index == missing_index % shard.parity_count)
+                .expect("tail chunk stripe exists");
+            let mut recovered = shard.payload.clone();
+            for chunk in records.iter().filter(|chunk| {
+                chunk.chunk_index != missing_index
+                    && chunk.chunk_index % shard.parity_count == shard.parity_index
+            }) {
+                for (offset, byte) in chunk.payload.iter().enumerate() {
+                    recovered[offset] ^= *byte;
+                }
             }
+            recovered.truncate(records[missing_index as usize].payload.len());
+            recovered_tail.extend(recovered);
         }
-        recovered.truncate(parity.chunk_payload_bytes as usize);
-        assert_eq!(recovered, records[1].payload);
+        let expected_tail: Vec<u8> = records[16..20]
+            .iter()
+            .flat_map(|record| record.payload.iter().copied())
+            .collect();
+        assert_eq!(recovered_tail, expected_tail);
         Ok(())
     }
 
@@ -3252,7 +3287,10 @@ mod tests {
             },
             &access_unit,
         )?;
-        let parity = build_video_parity_shard(&records)?.expect("multi-chunk frame gets parity");
+        let parity = build_video_parity_shards(&records)?
+            .into_iter()
+            .next()
+            .expect("multi-chunk frame gets parity");
 
         let wire = encode_media_wire_record(
             &MuninnMediaWireRecord::VideoParity(parity.clone()),

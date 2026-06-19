@@ -54,7 +54,7 @@ const MUNINN_COMMAND_RUDP_CONNECTION_ID: u32 = 0x6d75_0002;
 const MUNINN_MEDIA_RUDP_CONNECTION_ID: u32 = 0x6d75_0001;
 const MUNINN_OBS_CATALOG_RUDP_CONNECTION_ID: u32 = 0x6d75_0003;
 const MUNINN_RUDP_MEDIA_PROFILE_ID: &str = "muninn.rudp.low_latency_h264_lan.v1";
-const MUNINN_RUDP_MEDIA_VIDEO_BITRATE_KBPS: u32 = 16_000;
+const MUNINN_RUDP_MEDIA_VIDEO_BITRATE_KBPS: u32 = 12_000;
 const MUNINN_RUDP_MEDIA_VBV_FRAME_BUDGETS: u32 = 1;
 const MUNINN_RUDP_MEDIA_LOW_DELAY_KEY_FRAME_SCALE: u32 = 4;
 const MUNINN_RUDP_MEDIA_VIDEO_DPB_SIZE: u32 = 1;
@@ -65,7 +65,7 @@ const MUNINN_RUDP_MEDIA_MAX_FRAGMENT_BYTES: usize = MUNINN_RUDP_IPV4_UDP_PAYLOAD
     - MUNINN_RUDP_FIXED_HEADER_BYTES
     - crate::media_packetizer::MUNINN_MEDIA_RUDP_CHANNEL.len();
 const MUNINN_RUDP_MEDIA_RESEND_DELAY_MS: u64 = 5;
-const MUNINN_RUDP_MEDIA_RECEIVER_ASSEMBLY_DEADLINE_MS: u64 = 1_200;
+const MUNINN_RUDP_MEDIA_RECEIVER_ASSEMBLY_DEADLINE_MS: u64 = 2_000;
 const MUNINN_RUDP_MEDIA_RECEIVER_GAP_WAIT_MS: u64 = 16;
 const MUNINN_RUDP_MEDIA_REPAIR_CACHE_CHUNKS: usize = 16_384;
 const MUNINN_RUDP_MEDIA_REPAIR_BURST_CHUNKS: usize = 1_024;
@@ -6627,8 +6627,8 @@ mod tests {
             MUNINN_RUDP_MEDIA_RECEIVER_ASSEMBLY_DEADLINE_MS as u32
         );
         assert!(decoded.urls[0].contains("delivery=unreliable"));
-        assert!(decoded.urls[0].contains("reliable_expire_after_ms=1200"));
-        assert!(decoded.urls[0].contains("assembly_deadline_ms=1200"));
+        assert!(decoded.urls[0].contains("reliable_expire_after_ms=2000"));
+        assert!(decoded.urls[0].contains("assembly_deadline_ms=2000"));
     }
 
     #[test]
@@ -6817,7 +6817,7 @@ mod tests {
         assert_eq!(
             plan.targets,
             vec![
-                "rudp://10.77.0.2:5204/muninn.raven.av.rudp?channel=media&format=muninn-typed-media&connection=0x6d750001&profile=muninn.rudp.low_latency_h264_lan.v1&delivery=unreliable&sender_resend_delay_ms=5&reliable_expire_after_ms=1200&assembly_deadline_ms=1200&gap_wait_ms=16"
+                "rudp://10.77.0.2:5204/muninn.raven.av.rudp?channel=media&format=muninn-typed-media&connection=0x6d750001&profile=muninn.rudp.low_latency_h264_lan.v1&delivery=unreliable&sender_resend_delay_ms=5&reliable_expire_after_ms=2000&assembly_deadline_ms=2000&gap_wait_ms=16"
             ]
         );
         assert!(!plan.command_line.contains("tee"));
@@ -6894,15 +6894,15 @@ mod tests {
         );
         assert!(
             args.windows(2)
-                .any(|pair| pair[0] == "-b:v" && pair[1] == "16000k")
+                .any(|pair| pair[0] == "-b:v" && pair[1] == "12000k")
         );
         assert!(
             args.windows(2)
-                .any(|pair| pair[0] == "-maxrate" && pair[1] == "16000k")
+                .any(|pair| pair[0] == "-maxrate" && pair[1] == "12000k")
         );
         assert!(
             args.windows(2)
-                .any(|pair| pair[0] == "-bufsize" && pair[1] == "267k")
+                .any(|pair| pair[0] == "-bufsize" && pair[1] == "200k")
         );
         assert!(
             args.windows(2)
@@ -6988,11 +6988,11 @@ mod tests {
 
         assert_eq!(
             muninn_rudp_video_vbv_buffer_arg(&thirty_fps, &profile),
-            "534k"
+            "400k"
         );
         assert_eq!(
             muninn_rudp_video_vbv_buffer_arg(&sixty_fps, &profile),
-            "267k"
+            "200k"
         );
     }
 
@@ -7194,7 +7194,7 @@ mod tests {
                 "--audio-sample-rate",
                 "48000",
                 "--rudp-latency-budget-ms",
-                "1200",
+                "2000",
             ]
             .into_iter()
             .map(String::from),
@@ -7202,8 +7202,8 @@ mod tests {
         .unwrap();
         let profile = muninn_rudp_media_profile_for_options(&options);
 
-        assert_eq!(profile.sender_queue_deadline_ms, 1200);
-        assert_eq!(profile.sender_reliable_expire_after_ms, 1200);
+        assert_eq!(profile.sender_queue_deadline_ms, 2000);
+        assert_eq!(profile.sender_reliable_expire_after_ms, 2000);
         assert_eq!(
             profile.sender_pace_every_payloads,
             MUNINN_RUDP_MEDIA_SEND_PACE_EVERY_PAYLOADS
@@ -7212,10 +7212,10 @@ mod tests {
             profile.sender_pace_sleep_us,
             MUNINN_RUDP_MEDIA_SEND_PACE_SLEEP_US
         );
-        assert_eq!(profile.receiver_assembly_deadline_ms, 1200);
-        assert_eq!(rudp_media_deadline_delay_ticks(&profile), 108_000);
-        assert_eq!(rudp_audio_deadline_delay_ticks(&options, &profile), 57_600);
-        assert!(rudp_endpoint_for_options(&options).contains("assembly_deadline_ms=1200"));
+        assert_eq!(profile.receiver_assembly_deadline_ms, 2000);
+        assert_eq!(rudp_media_deadline_delay_ticks(&profile), 180_000);
+        assert_eq!(rudp_audio_deadline_delay_ticks(&options, &profile), 96_000);
+        assert!(rudp_endpoint_for_options(&options).contains("assembly_deadline_ms=2000"));
     }
 
     #[test]
@@ -8038,7 +8038,7 @@ Device 00:07:04:A8:00:D0 (public)
             media_profile
                 .get("video_bitrate")
                 .and_then(|value| value.as_str()),
-            Some("16000k")
+            Some("12000k")
         );
         assert_eq!(
             media_profile
