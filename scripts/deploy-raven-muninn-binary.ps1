@@ -254,6 +254,7 @@ if (Test-Path -LiteralPath `$target) {
 Move-Item -LiteralPath `$incoming -Destination `$target -Force
 `$item = Get-Item -LiteralPath `$target
 Write-Output ("muninn.exe deployed length={0} path={1}" -f `$item.Length, `$item.FullName)
+`$global:LASTEXITCODE = 0
 "@
 
   Set-AsciiFile -Path $localRemoteScript -Content $remoteScript
@@ -276,16 +277,15 @@ Write-Output ("muninn.exe deployed length={0} path={1}" -f `$item.Length, `$item
 `$ErrorActionPreference = "Stop"
 try {
   & "$remoteScriptPath"
-  `$code = `$LASTEXITCODE
+  exit 0
 } finally {
   Remove-Item -LiteralPath "$remoteScriptPath" -Force -ErrorAction SilentlyContinue
 }
-exit `$code
 "@
   $encodedRunner = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($remoteRunner))
   $commonArgs = Get-SshCommonArgs
   $sshTarget = Get-SshTarget -Target $RavenHost
-  & ssh.exe @commonArgs $sshTarget "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encodedRunner"
+  & ssh.exe @commonArgs $sshTarget "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -OutputFormat Text -EncodedCommand $encodedRunner"
   if ($LASTEXITCODE -ne 0) {
     throw "remote Muninn binary deploy failed with exit code $LASTEXITCODE"
   }

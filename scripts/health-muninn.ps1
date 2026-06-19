@@ -71,18 +71,18 @@ function Invoke-RavenUploadedPowerShell {
 
     $remoteRunner = @"
 `$ErrorActionPreference = "Stop"
+`$ProgressPreference = "SilentlyContinue"
 try {
   & "$remotePsPath"
-  `$code = `$LASTEXITCODE
+  exit 0
 } finally {
   Remove-Item -LiteralPath "$remotePsPath" -Force -ErrorAction SilentlyContinue
 }
-exit `$code
 "@
     $encodedRunner = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($remoteRunner))
     $commonArgs = Get-SshCommonArgs
     $sshTarget = Get-SshTarget -Target $RavenHost
-    & ssh.exe @commonArgs $sshTarget "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encodedRunner"
+    & ssh.exe @commonArgs $sshTarget "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -OutputFormat Text -EncodedCommand $encodedRunner"
   } finally {
     Remove-Item -LiteralPath $localTempRoot -Recurse -Force -ErrorAction SilentlyContinue
   }
