@@ -244,7 +244,7 @@ New-Item -ItemType Directory -Force -Path (Split-Path -Parent `$target) | Out-Nu
 Get-CimInstance Win32_Process |
   Where-Object { `$_.Name -ieq "muninn.exe" } |
   ForEach-Object {
-    & taskkill.exe /PID `$_.ProcessId /T /F | Out-Null
+    & cmd.exe /c ("taskkill /PID {0} /T /F >nul 2>&1" -f `$_.ProcessId) | Out-Null
   }
 
 if (Test-Path -LiteralPath `$target) {

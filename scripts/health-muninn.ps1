@@ -172,9 +172,25 @@ foreach (`$expectation in `$taskExpectations) {
     throw "`$(`$expectation.Vbs) does not reference a PowerShell launcher"
   }
 }
-`$process = Get-CimInstance Win32_Process |
-  Where-Object { `$_.Name -ieq "muninn.exe" -and `$_.CommandLine -like "*serve*" } |
-  Select-Object -First 1
+`$servePidPath = Join-Path "$LogRoot" "muninn-serve.pid"
+`$servePid = `$null
+if (Test-Path -LiteralPath `$servePidPath) {
+  `$servePidText = (Get-Content -LiteralPath `$servePidPath -Raw).Trim()
+  if (`$servePidText -match '^\d+$') {
+    `$servePid = [int] `$servePidText
+  }
+}
+`$process = `$null
+if (`$null -ne `$servePid) {
+  `$process = Get-CimInstance Win32_Process -Filter ("ProcessId = {0}" -f `$servePid) -ErrorAction SilentlyContinue |
+    Where-Object { `$_.Name -ieq "muninn.exe" -and `$_.CommandLine -like "*serve*" } |
+    Select-Object -First 1
+}
+if (`$null -eq `$process) {
+  `$process = Get-CimInstance Win32_Process |
+    Where-Object { `$_.Name -ieq "muninn.exe" -and `$_.CommandLine -like "*serve*" } |
+    Select-Object -First 1
+}
 if (`$null -eq `$process) {
   throw "Muninn serve process is not running"
 }
@@ -209,9 +225,11 @@ if (-not (Test-Path -LiteralPath "$StorePath")) {
 if (`$storeAgeSeconds -gt $MaxStoreAgeSeconds) {
   throw "Muninn telemetry store is stale (`$([math]::Round(`$storeAgeSeconds))s old)"
 }
-`$servePidPath = Join-Path "$LogRoot" "muninn-serve.pid"
 if (-not (Test-Path -LiteralPath `$servePidPath)) {
   throw "Muninn serve PID file is missing at `$servePidPath"
+}
+if (`$null -ne `$servePid -and `$process.ProcessId -ne `$servePid) {
+  throw "Muninn serve PID file references `$servePid but live Muninn serve process is `$(`$process.ProcessId)"
 }
 "@
 

@@ -541,8 +541,7 @@ $servePsContent = New-HiddenNativeLauncherPowerShellContent `
   -StdoutPath (Join-Path $LogRoot "muninn-serve.out.log") `
   -StderrPath (Join-Path $LogRoot "muninn-serve.err.log") `
   -PidPath (Join-Path $LogRoot "muninn-serve.pid") `
-  -DynamicArgumentsScript $serveDynamicArgumentsScript `
-  -WaitForExit
+  -DynamicArgumentsScript $serveDynamicArgumentsScript
 
 $activatePsContent = New-HiddenNativeLauncherPowerShellContent `
   -StorePath $ActivateStorePath `
@@ -578,7 +577,7 @@ try {
   $localVideoProofCmd = Join-Path $uploadRoot "muninn-raven-video-to-starfire-obs.cmd"
 
   Set-AsciiFile -Path $localServePs -Content $servePsContent
-  Set-AsciiFile -Path $localServeVbs -Content (New-HiddenPowerShellVbsLauncherContent -PsPath $servePsPath -WaitForExit)
+  Set-AsciiFile -Path $localServeVbs -Content (New-HiddenPowerShellVbsLauncherContent -PsPath $servePsPath)
   Set-AsciiFile -Path $localServeCmd -Content (New-WscriptCmdLauncherContent -WorkingDirectory $muninnDir -VbsPath $serveVbsPath)
   Set-AsciiFile -Path $localActivatePs -Content $activatePsContent
   Set-AsciiFile -Path $localActivateVbs -Content (New-HiddenPowerShellVbsLauncherContent -PsPath $activatePsPath)
@@ -616,7 +615,7 @@ foreach (`$path in @(
 Get-CimInstance Win32_Process |
   Where-Object { `$_.Name -like "muninn*.exe" } |
   ForEach-Object {
-    & taskkill.exe /PID `$_.ProcessId /T /F | Out-Null
+    & cmd.exe /c ("taskkill /PID {0} /T /F >nul 2>&1" -f `$_.ProcessId) | Out-Null
   }
 
 New-Item -ItemType Directory -Force -Path "$LogRoot" | Out-Null
