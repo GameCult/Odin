@@ -71,6 +71,7 @@ const MUNINN_RUDP_MEDIA_RECEIVER_ASSEMBLY_DEADLINE_MS: u64 = 800;
 const MUNINN_RUDP_MEDIA_RECEIVER_GAP_WAIT_MS: u64 = 16;
 const MUNINN_RUDP_MEDIA_REPAIR_CACHE_CHUNKS: usize = 16_384;
 const MUNINN_RUDP_MEDIA_REPAIR_BURST_CHUNKS: usize = 96;
+const MUNINN_RUDP_ACTIVE_CATALOG_REPUBLISH_MS: u64 = 2_000;
 const PS_MOVE_LED_REPORT_LEN: usize = 49;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -196,6 +197,7 @@ struct ActiveMoveLightCommand {
 struct ActiveCaptureStreamCommand {
     command_id: String,
     stream_id: String,
+    command: MuninnCaptureStreamCommandRecord,
     child: Child,
 }
 
@@ -566,6 +568,25 @@ fn start_capture_stream_command(
     active: &mut Vec<ActiveCaptureStreamCommand>,
     command: MuninnCaptureStreamCommandRecord,
 ) -> Result<()> {
+    if let Some(session) = active
+        .iter_mut()
+        .find(|session| session.stream_id == command.stream_id)
+    {
+        if capture_stream_commands_start_equivalent(&session.command, &command) {
+            let running = MuninnCaptureStreamCommandRecord {
+                state: "running".to_string(),
+                detail: format!(
+                    "Muninn serve kept existing activation child from command {}.",
+                    session.command_id
+                ),
+                updated_at: timestamp()?,
+                ..command
+            };
+            node.put(&running.command_id, &running)?;
+            return Ok(());
+        }
+    }
+
     for session in active.iter_mut() {
         if session.stream_id == command.stream_id {
             terminate_child_tree(&mut session.child);
@@ -583,11 +604,28 @@ fn start_capture_stream_command(
     };
     node.put(&running.command_id, &running)?;
     active.push(ActiveCaptureStreamCommand {
-        command_id: command.command_id,
-        stream_id: command.stream_id,
+        command_id: command.command_id.clone(),
+        stream_id: command.stream_id.clone(),
+        command,
         child,
     });
     Ok(())
+}
+
+fn capture_stream_commands_start_equivalent(
+    active: &MuninnCaptureStreamCommandRecord,
+    command: &MuninnCaptureStreamCommandRecord,
+) -> bool {
+    active.host_id == command.host_id
+        && active.stream_id == command.stream_id
+        && active.action == "start"
+        && command.action == "start"
+        && active.target_host == command.target_host
+        && active.port == command.port
+        && active.obs_target_host == command.obs_target_host
+        && active.obs_port == command.obs_port
+        && active.media_transport == command.media_transport
+        && active.media_packet_bytes == command.media_packet_bytes
 }
 
 fn stop_capture_stream_command(
@@ -1188,6 +1226,34 @@ struct RudpMuxRestart {
     delay: Duration,
 }
 
+fn republish_running_stream_if_due(
+    node: &mut cultmesh_rs::CultMeshNode,
+    options: &Options,
+    plan: &MuxPlan,
+    supervisor_pid: u32,
+    video_ffmpeg_pid: u32,
+    restart_count: u32,
+    last_stream_publish_at: &mut Instant,
+) -> Result<()> {
+    if last_stream_publish_at.elapsed()
+        < Duration::from_millis(MUNINN_RUDP_ACTIVE_CATALOG_REPUBLISH_MS)
+    {
+        return Ok(());
+    }
+    publish_stream(
+        node,
+        options,
+        plan,
+        "running",
+        supervisor_pid,
+        Some(video_ffmpeg_pid),
+        restart_count,
+        "typed video/audio access units are publishing over CultNet RUDP media",
+    )?;
+    *last_stream_publish_at = Instant::now();
+    Ok(())
+}
+
 fn run_rudp_mux_once(
     options: &Options,
     plan: &MuxPlan,
@@ -1268,6 +1334,7 @@ fn run_rudp_mux_once(
         restart_count,
         "typed video/audio access units are publishing over CultNet RUDP media",
     )?;
+    let mut last_stream_publish_at = Instant::now();
 
     let media_profile = muninn_rudp_media_profile();
     let (payload_tx, payload_rx) = mpsc::channel::<Result<QueuedMuninnMediaSendPayload>>();
@@ -1334,6 +1401,15 @@ fn run_rudp_mux_once(
                         &mut handled_keyframe_requests,
                     );
                     poll_rudp_resends_with_backpressure(&mut transport)?;
+                    republish_running_stream_if_due(
+                        node,
+                        options,
+                        plan,
+                        supervisor_pid,
+                        video_ffmpeg_pid,
+                        restart_count,
+                        &mut last_stream_publish_at,
+                    )?;
                     if payloads_dropped == 1 || payloads_dropped % 300 == 0 {
                         let expired = transport.stats().reliable_packets_expired;
                         eprintln!(
@@ -1370,6 +1446,15 @@ fn run_rudp_mux_once(
                     &mut handled_keyframe_requests,
                 );
                 poll_rudp_resends_with_backpressure(&mut transport)?;
+                republish_running_stream_if_due(
+                    node,
+                    options,
+                    plan,
+                    supervisor_pid,
+                    video_ffmpeg_pid,
+                    restart_count,
+                    &mut last_stream_publish_at,
+                )?;
                 payloads_sent += 1;
                 if payloads_sent == 1 || payloads_sent % 900 == 0 {
                     let expired = transport.stats().reliable_packets_expired;
@@ -1396,6 +1481,15 @@ fn run_rudp_mux_once(
                     &mut handled_keyframe_requests,
                 );
                 poll_rudp_resends_with_backpressure(&mut transport)?;
+                republish_running_stream_if_due(
+                    node,
+                    options,
+                    plan,
+                    supervisor_pid,
+                    video_ffmpeg_pid,
+                    restart_count,
+                    &mut last_stream_publish_at,
+                )?;
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 let expired = transport.stats().reliable_packets_expired;
@@ -5280,9 +5374,10 @@ fn srt_endpoint(host: &str, port: u16) -> String {
 fn rudp_endpoint(host: &str, port: u16, stream_id: &str) -> String {
     let profile = muninn_rudp_media_profile();
     format!(
-        "rudp://{host}:{port}/{stream_id}?channel=media&format=muninn-typed-media&connection=0x{MUNINN_MEDIA_RUDP_CONNECTION_ID:08x}&profile={}&delivery=unreliable&sender_resend_delay_ms={}&assembly_deadline_ms={}&gap_wait_ms={}",
+        "rudp://{host}:{port}/{stream_id}?channel=media&format=muninn-typed-media&connection=0x{MUNINN_MEDIA_RUDP_CONNECTION_ID:08x}&profile={}&delivery=unreliable&sender_resend_delay_ms={}&reliable_expire_after_ms={}&assembly_deadline_ms={}&gap_wait_ms={}",
         profile.profile_id,
         profile.sender_resend_delay_ms,
+        profile.sender_reliable_expire_after_ms,
         profile.receiver_assembly_deadline_ms,
         profile.receiver_gap_wait_ms
     )
@@ -6193,7 +6288,7 @@ mod tests {
             MUNINN_RUDP_MEDIA_PACKET_BYTES as u32
         );
         assert!(decoded.urls[0].contains("delivery=unreliable"));
-        assert!(!decoded.urls[0].contains("reliable_expire_after_ms"));
+        assert!(decoded.urls[0].contains("reliable_expire_after_ms=600"));
         assert!(decoded.urls[0].contains("assembly_deadline_ms=800"));
     }
 
@@ -6266,6 +6361,40 @@ mod tests {
         assert_eq!(decoded.stream_id, "muninn.raven.av.rudp");
         assert_eq!(decoded.media_transport, "rudp");
         assert_eq!(decoded.port, 5204);
+    }
+
+    #[test]
+    fn repeated_capture_stream_start_is_equivalent_when_media_shape_matches() {
+        let options = Options::parse(
+            [
+                "request-stream",
+                "--host",
+                "raven",
+                "--stream",
+                "muninn.raven.av.rudp",
+                "--target-host",
+                "192.168.1.66",
+                "--port",
+                "5204",
+                "--media-transport",
+                "rudp",
+                "--media-packet-bytes",
+                "800",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap();
+        let mut active = build_capture_stream_command(&options).unwrap();
+        active.command_id = "first-command".to_string();
+        active.state = "running".to_string();
+        let mut retry = build_capture_stream_command(&options).unwrap();
+        retry.command_id = "retry-command".to_string();
+
+        assert!(capture_stream_commands_start_equivalent(&active, &retry));
+
+        retry.media_packet_bytes = 940;
+        assert!(!capture_stream_commands_start_equivalent(&active, &retry));
     }
 
     #[test]
@@ -6349,7 +6478,7 @@ mod tests {
         assert_eq!(
             plan.targets,
             vec![
-                "rudp://10.77.0.2:5204/muninn.raven.av.rudp?channel=media&format=muninn-typed-media&connection=0x6d750001&profile=muninn.rudp.low_latency_h264_lan.v1&delivery=unreliable&sender_resend_delay_ms=5&assembly_deadline_ms=800&gap_wait_ms=16"
+                "rudp://10.77.0.2:5204/muninn.raven.av.rudp?channel=media&format=muninn-typed-media&connection=0x6d750001&profile=muninn.rudp.low_latency_h264_lan.v1&delivery=unreliable&sender_resend_delay_ms=5&reliable_expire_after_ms=600&assembly_deadline_ms=800&gap_wait_ms=16"
             ]
         );
         assert!(!plan.command_line.contains("tee"));
