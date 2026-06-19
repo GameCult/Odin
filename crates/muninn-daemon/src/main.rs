@@ -69,15 +69,15 @@ const MUNINN_RUDP_MEDIA_RESEND_DELAY_MS: u64 = 5;
 const MUNINN_RUDP_MEDIA_RECEIVER_ASSEMBLY_DEADLINE_MS: u64 = 2_000;
 const MUNINN_RUDP_MEDIA_RECEIVER_GAP_WAIT_MS: u64 = 16;
 const MUNINN_RUDP_MEDIA_REPAIR_CACHE_CHUNKS: usize = 16_384;
-const MUNINN_RUDP_MEDIA_REPAIR_BURST_CHUNKS: usize = 1_024;
-const MUNINN_RUDP_MEDIA_REPAIR_INITIAL_CHUNKS_PER_SECOND: usize = 1_024;
+const MUNINN_RUDP_MEDIA_REPAIR_BURST_CHUNKS: usize = 2_048;
+const MUNINN_RUDP_MEDIA_REPAIR_INITIAL_CHUNKS_PER_SECOND: usize = 4_096;
 const MUNINN_RUDP_MEDIA_REPAIR_MIN_CHUNKS_PER_SECOND: usize = 8;
-const MUNINN_RUDP_MEDIA_REPAIR_MAX_CHUNKS_PER_SECOND: usize = 6_144;
-const MUNINN_RUDP_MEDIA_REPAIR_ADD_CHUNKS_PER_SECOND: usize = 512;
+const MUNINN_RUDP_MEDIA_REPAIR_MAX_CHUNKS_PER_SECOND: usize = 16_384;
+const MUNINN_RUDP_MEDIA_REPAIR_ADD_CHUNKS_PER_SECOND: usize = 2_048;
 const MUNINN_RUDP_MEDIA_REPAIR_RECOVERY_INTERVAL_MS: u64 = 2_000;
-const MUNINN_RUDP_MEDIA_REPAIR_MAX_FEEDBACK_PER_POLL: usize = 8;
-const MUNINN_RUDP_MEDIA_REPAIR_MAX_CHUNKS_PER_POLL: usize = 64;
-const MUNINN_RUDP_MEDIA_SOCKET_BUFFER_BYTES: usize = 4 * 1024 * 1024;
+const MUNINN_RUDP_MEDIA_REPAIR_MAX_FEEDBACK_PER_POLL: usize = 32;
+const MUNINN_RUDP_MEDIA_REPAIR_MAX_CHUNKS_PER_POLL: usize = 256;
+const MUNINN_RUDP_MEDIA_SOCKET_BUFFER_BYTES: usize = 16 * 1024 * 1024;
 const MUNINN_RUDP_MEDIA_SEND_PACE_EVERY_PAYLOADS: usize = 4;
 const MUNINN_RUDP_MEDIA_SEND_PACE_SLEEP_US: u64 = 250;
 const MUNINN_RUDP_ACTIVE_CATALOG_REPUBLISH_MS: u64 = 2_000;
@@ -7525,13 +7525,13 @@ mod tests {
         );
         let start = budget.last_refill_at;
 
-        assert_eq!(budget.chunks_per_second(), 1_024);
-        assert_eq!(budget.take(1_024, start, 0), 1_024);
-        assert_eq!(budget.take(8_192, start + Duration::from_secs(1), 0), 1_024);
-        assert_eq!(budget.take(8_192, start + Duration::from_secs(3), 0), 1_024);
-        assert_eq!(budget.chunks_per_second(), 1_536);
+        assert_eq!(budget.chunks_per_second(), 4_096);
+        assert_eq!(budget.take(2_048, start, 0), 2_048);
+        assert_eq!(budget.take(8_192, start + Duration::from_secs(1), 0), 2_048);
+        assert_eq!(budget.take(8_192, start + Duration::from_secs(3), 0), 2_048);
+        assert_eq!(budget.chunks_per_second(), 6_144);
         assert_eq!(budget.take(512, start + Duration::from_secs(4), 1), 512);
-        assert_eq!(budget.chunks_per_second(), 768);
+        assert_eq!(budget.chunks_per_second(), 3_072);
     }
 
     #[test]
