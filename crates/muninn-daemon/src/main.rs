@@ -58,6 +58,7 @@ const MUNINN_RUDP_MEDIA_PROFILE_ID: &str = "muninn.rudp.low_latency_h264_lan.v1"
 const MUNINN_RUDP_MEDIA_VIDEO_BITRATE_KBPS: u32 = 48_000;
 const MUNINN_RUDP_MEDIA_VBV_FRAME_BUDGETS: u32 = 1;
 const MUNINN_RUDP_MEDIA_LOW_DELAY_KEY_FRAME_SCALE: u32 = 4;
+const MUNINN_RUDP_MEDIA_VIDEO_DPB_SIZE: u32 = 1;
 const MUNINN_RUDP_MEDIA_PACKET_BYTES: usize = 800;
 const MUNINN_RUDP_IPV4_UDP_PAYLOAD_BYTES: usize = 1_472;
 const MUNINN_RUDP_FIXED_HEADER_BYTES: usize = 36;
@@ -66,7 +67,7 @@ const MUNINN_RUDP_MEDIA_MAX_FRAGMENT_BYTES: usize = MUNINN_RUDP_IPV4_UDP_PAYLOAD
     - crate::media_packetizer::MUNINN_MEDIA_RUDP_CHANNEL.len();
 const MUNINN_RUDP_MEDIA_RESEND_DELAY_MS: u64 = 5;
 const MUNINN_RUDP_MEDIA_RELIABLE_EXPIRE_AFTER_MS: u64 = 600;
-const MUNINN_RUDP_MEDIA_RECEIVER_ASSEMBLY_DEADLINE_MS: u64 = 400;
+const MUNINN_RUDP_MEDIA_RECEIVER_ASSEMBLY_DEADLINE_MS: u64 = 800;
 const MUNINN_RUDP_MEDIA_RECEIVER_GAP_WAIT_MS: u64 = 16;
 const MUNINN_RUDP_MEDIA_REPAIR_CACHE_CHUNKS: usize = 16_384;
 const MUNINN_RUDP_MEDIA_REPAIR_BURST_CHUNKS: usize = 96;
@@ -686,6 +687,9 @@ fn spawn_capture_stream_activation(
         "--log-root".to_string(),
         options.log_root.display().to_string(),
     ]);
+    if let Some(target) = options.obs_catalog_rudp_target {
+        args.extend(["--obs-catalog-rudp-target".to_string(), target.to_string()]);
+    }
     Command::new(exe)
         .args(args)
         .stdin(Stdio::null())
@@ -1822,7 +1826,9 @@ fn publish_surface(
     state: &str,
     active_streams: &[String],
 ) -> Result<()> {
-    publish_obs_catalog_idle(node, options)?;
+    if active_streams.is_empty() {
+        publish_obs_catalog_idle(node, options)?;
+    }
     let record = MuninnTelemetrySurfaceRecord {
         surface_id: options.surface_id.clone(),
         host_id: options.host_id.clone(),
@@ -5391,6 +5397,8 @@ fn rudp_video_ffmpeg_args(options: &Options) -> Vec<String> {
         "1".to_string(),
         "-b_ref_mode".to_string(),
         "disabled".to_string(),
+        "-dpb_size".to_string(),
+        MUNINN_RUDP_MEDIA_VIDEO_DPB_SIZE.to_string(),
         "-b:v".to_string(),
         muninn_rudp_video_bitrate_arg(&profile),
         "-maxrate".to_string(),
@@ -6186,7 +6194,7 @@ mod tests {
         );
         assert!(decoded.urls[0].contains("delivery=unreliable"));
         assert!(!decoded.urls[0].contains("reliable_expire_after_ms"));
-        assert!(decoded.urls[0].contains("assembly_deadline_ms=400"));
+        assert!(decoded.urls[0].contains("assembly_deadline_ms=800"));
     }
 
     #[test]
@@ -6341,7 +6349,7 @@ mod tests {
         assert_eq!(
             plan.targets,
             vec![
-                "rudp://10.77.0.2:5204/muninn.raven.av.rudp?channel=media&format=muninn-typed-media&connection=0x6d750001&profile=muninn.rudp.low_latency_h264_lan.v1&delivery=unreliable&sender_resend_delay_ms=5&assembly_deadline_ms=400&gap_wait_ms=16"
+                "rudp://10.77.0.2:5204/muninn.raven.av.rudp?channel=media&format=muninn-typed-media&connection=0x6d750001&profile=muninn.rudp.low_latency_h264_lan.v1&delivery=unreliable&sender_resend_delay_ms=5&assembly_deadline_ms=800&gap_wait_ms=16"
             ]
         );
         assert!(!plan.command_line.contains("tee"));
@@ -6410,6 +6418,8 @@ mod tests {
             args.windows(2)
                 .any(|pair| pair[0] == "-b_ref_mode" && pair[1] == "disabled")
         );
+        assert!(args.windows(2).any(|pair| pair[0] == "-dpb_size"
+            && pair[1] == MUNINN_RUDP_MEDIA_VIDEO_DPB_SIZE.to_string()));
         assert!(
             args.windows(2)
                 .any(|pair| pair[0] == "-preset" && pair[1] == "p5")
