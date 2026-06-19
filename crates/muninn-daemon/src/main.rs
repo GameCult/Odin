@@ -583,6 +583,12 @@ fn start_capture_stream_command(
         .find(|session| session.stream_id == command.stream_id)
     {
         if capture_stream_commands_start_equivalent(&session.command, &command) {
+            eprintln!(
+                "Muninn serve kept existing capture stream {} bitrate_kbps={} latency_budget_ms={}.",
+                command.stream_id,
+                command_rudp_video_bitrate_kbps(&command),
+                command_rudp_latency_budget_ms(&command)
+            );
             let running = MuninnCaptureStreamCommandRecord {
                 state: "running".to_string(),
                 detail: format!(
@@ -605,6 +611,12 @@ fn start_capture_stream_command(
     }
     active.retain(|session| session.stream_id != command.stream_id);
 
+    eprintln!(
+        "Muninn serve spawning capture stream {} bitrate_kbps={} latency_budget_ms={}.",
+        command.stream_id,
+        command_rudp_video_bitrate_kbps(&command),
+        command_rudp_latency_budget_ms(&command)
+    );
     let child = spawn_capture_stream_activation(options, &command)?;
     let running = MuninnCaptureStreamCommandRecord {
         state: "running".to_string(),
