@@ -1422,7 +1422,8 @@ fn run_rudp_mux_once(
     drop(payload_tx);
 
     let mut payloads_sent = 0_u64;
-    let mut payloads_dropped = 0_u64;
+    let mut payloads_queue_expired = 0_u64;
+    let mut payloads_send_expired = 0_u64;
     let mut receiver_feedback = MuninnRudpReceiverFeedbackStats::default();
     let mut handled_keyframe_requests = 0_u64;
     let mut repair_cache = RecentVideoChunkRepairCache::new(MUNINN_RUDP_MEDIA_REPAIR_CACHE_CHUNKS);
@@ -1442,7 +1443,8 @@ fn run_rudp_mux_once(
                     Instant::now(),
                     Duration::from_millis(media_profile.sender_queue_deadline_ms),
                 ) {
-                    payloads_dropped += 1;
+                    payloads_queue_expired += 1;
+                    let payloads_dropped = payloads_queue_expired + payloads_send_expired;
                     poll_rudp_media_receiver_feedback(
                         &mut transport,
                         &mut receiver_feedback,
@@ -1473,6 +1475,8 @@ fn run_rudp_mux_once(
                             rudp_media_progress_detail(
                                 payloads_sent,
                                 payloads_dropped,
+                                payloads_queue_expired,
+                                payloads_send_expired,
                                 expired,
                                 &receiver_feedback
                             )
@@ -1489,9 +1493,10 @@ fn run_rudp_mux_once(
                     Duration::from_millis(media_profile.sender_queue_deadline_ms),
                     &mut send_pacer,
                 )? {
-                    payloads_dropped += 1;
+                    payloads_send_expired += 1;
                     continue;
                 }
+                let payloads_dropped = payloads_queue_expired + payloads_send_expired;
                 repair_cache.remember(&queued.payload)?;
                 poll_rudp_media_receiver_feedback(
                     &mut transport,
@@ -1524,6 +1529,8 @@ fn run_rudp_mux_once(
                         rudp_media_progress_detail(
                             payloads_sent,
                             payloads_dropped,
+                            payloads_queue_expired,
+                            payloads_send_expired,
                             expired,
                             &receiver_feedback
                         )
@@ -1532,6 +1539,7 @@ fn run_rudp_mux_once(
             }
             Ok(Err(error)) => break Err(error),
             Err(mpsc::RecvTimeoutError::Timeout) => {
+                let payloads_dropped = payloads_queue_expired + payloads_send_expired;
                 poll_rudp_media_receiver_feedback(
                     &mut transport,
                     &mut receiver_feedback,
@@ -1558,12 +1566,15 @@ fn run_rudp_mux_once(
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 let expired = transport.stats().reliable_packets_expired;
+                let payloads_dropped = payloads_queue_expired + payloads_send_expired;
                 break Ok(RudpMuxRestart {
                     detail: format!(
                         "encoder stdout ended; {}",
                         rudp_media_progress_detail(
                             payloads_sent,
                             payloads_dropped,
+                            payloads_queue_expired,
+                            payloads_send_expired,
                             expired,
                             &receiver_feedback
                         )
@@ -1872,11 +1883,13 @@ fn record_receiver_keyframe_pressure(
 fn rudp_media_progress_detail(
     sent: u64,
     queue_dropped: u64,
+    queue_expired: u64,
+    send_expired: u64,
     reliable_expired: u64,
     receiver_feedback: &MuninnRudpReceiverFeedbackStats,
 ) -> String {
     format!(
-        "Muninn RUDP media progress: sent={sent} queue_dropped={queue_dropped} reliable_expired={reliable_expired} receiver_feedback={} receiver_keyframes={} receiver_late_frames={} receiver_missing_chunks={} receiver_repaired_chunks={} receiver_deferred_repairs={} repair_rate={} receiver_highest_decodable={}",
+        "Muninn RUDP media progress: sent={sent} queue_dropped={queue_dropped} queue_expired={queue_expired} send_expired={send_expired} reliable_expired={reliable_expired} receiver_feedback={} receiver_keyframes={} receiver_late_frames={} receiver_missing_chunks={} receiver_repaired_chunks={} receiver_deferred_repairs={} repair_rate={} receiver_highest_decodable={}",
         receiver_feedback.feedback_records,
         receiver_feedback.requested_keyframes,
         receiver_feedback.late_frames,
@@ -7209,8 +7222,8 @@ mod tests {
         };
 
         assert_eq!(
-            rudp_media_progress_detail(120, 3, 9, &receiver_feedback),
-            "Muninn RUDP media progress: sent=120 queue_dropped=3 reliable_expired=9 receiver_feedback=2 receiver_keyframes=1 receiver_late_frames=3 receiver_missing_chunks=4 receiver_repaired_chunks=0 receiver_deferred_repairs=5 repair_rate=64 receiver_highest_decodable=88"
+            rudp_media_progress_detail(120, 3, 2, 1, 9, &receiver_feedback),
+            "Muninn RUDP media progress: sent=120 queue_dropped=3 queue_expired=2 send_expired=1 reliable_expired=9 receiver_feedback=2 receiver_keyframes=1 receiver_late_frames=3 receiver_missing_chunks=4 receiver_repaired_chunks=0 receiver_deferred_repairs=5 repair_rate=64 receiver_highest_decodable=88"
         );
     }
 
