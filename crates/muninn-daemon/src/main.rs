@@ -58,7 +58,7 @@ const MUNINN_RUDP_MEDIA_VIDEO_BITRATE_KBPS: u32 = 16_000;
 const MUNINN_RUDP_MEDIA_VBV_FRAME_BUDGETS: u32 = 1;
 const MUNINN_RUDP_MEDIA_LOW_DELAY_KEY_FRAME_SCALE: u32 = 4;
 const MUNINN_RUDP_MEDIA_VIDEO_DPB_SIZE: u32 = 1;
-const MUNINN_RUDP_MEDIA_PACKET_BYTES: usize = 860;
+const MUNINN_RUDP_MEDIA_PACKET_BYTES: usize = 848;
 const MUNINN_RUDP_IPV4_UDP_PAYLOAD_BYTES: usize = 1_472;
 const MUNINN_RUDP_FIXED_HEADER_BYTES: usize = 36;
 const MUNINN_RUDP_MEDIA_MAX_FRAGMENT_BYTES: usize = MUNINN_RUDP_IPV4_UDP_PAYLOAD_BYTES
@@ -74,9 +74,11 @@ const MUNINN_RUDP_MEDIA_REPAIR_MIN_CHUNKS_PER_SECOND: usize = 8;
 const MUNINN_RUDP_MEDIA_REPAIR_MAX_CHUNKS_PER_SECOND: usize = 6_144;
 const MUNINN_RUDP_MEDIA_REPAIR_ADD_CHUNKS_PER_SECOND: usize = 512;
 const MUNINN_RUDP_MEDIA_REPAIR_RECOVERY_INTERVAL_MS: u64 = 2_000;
+const MUNINN_RUDP_MEDIA_REPAIR_MAX_FEEDBACK_PER_POLL: usize = 8;
+const MUNINN_RUDP_MEDIA_REPAIR_MAX_CHUNKS_PER_POLL: usize = 64;
 const MUNINN_RUDP_MEDIA_SOCKET_BUFFER_BYTES: usize = 4 * 1024 * 1024;
-const MUNINN_RUDP_MEDIA_SEND_PACE_EVERY_PAYLOADS: usize = 16;
-const MUNINN_RUDP_MEDIA_SEND_PACE_SLEEP_US: u64 = 500;
+const MUNINN_RUDP_MEDIA_SEND_PACE_EVERY_PAYLOADS: usize = 4;
+const MUNINN_RUDP_MEDIA_SEND_PACE_SLEEP_US: u64 = 250;
 const MUNINN_RUDP_ACTIVE_CATALOG_REPUBLISH_MS: u64 = 2_000;
 const PS_MOVE_LED_REPORT_LEN: usize = 49;
 
@@ -1913,17 +1915,25 @@ fn poll_rudp_media_receiver_feedback(
     send_pacer: &mut MuninnRudpMediaSendPacer,
     queue_dropped: u64,
 ) -> Result<()> {
+    let mut feedback_processed = 0_usize;
     loop {
         match transport.receive_once() {
             Ok(Some(frame)) => {
+                if feedback_processed >= MUNINN_RUDP_MEDIA_REPAIR_MAX_FEEDBACK_PER_POLL {
+                    return Ok(());
+                }
+                feedback_processed += 1;
                 let repair_payloads =
                     record_rudp_media_receiver_feedback(&frame, stats, repair_cache)?;
+                let requested_repairs = repair_payloads.len();
+                let poll_limited_repairs =
+                    requested_repairs.min(MUNINN_RUDP_MEDIA_REPAIR_MAX_CHUNKS_PER_POLL);
                 let allowed_repairs =
-                    repair_budget.take(repair_payloads.len(), Instant::now(), queue_dropped);
+                    repair_budget.take(poll_limited_repairs, Instant::now(), queue_dropped);
                 stats.repair_chunks_per_second = repair_budget.chunks_per_second();
                 stats.deferred_repair_chunks = stats
                     .deferred_repair_chunks
-                    .saturating_add(repair_payloads.len().saturating_sub(allowed_repairs) as u64);
+                    .saturating_add(requested_repairs.saturating_sub(allowed_repairs) as u64);
                 for payload in repair_payloads.into_iter().take(allowed_repairs) {
                     if send_rudp_media_payload_with_backpressure(
                         transport,

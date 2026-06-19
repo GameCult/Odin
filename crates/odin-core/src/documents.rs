@@ -35,7 +35,7 @@ pub const MUNINN_TELEMETRY_SURFACE_SCHEMA: &str = "muninn.telemetry_surface.v1";
 pub const MUNINN_CAPTURE_STREAM_SCHEMA: &str = "muninn.capture_stream.v1";
 pub const MUNINN_CAPTURE_STREAM_COMMAND_SCHEMA: &str = "muninn.capture_stream_command.v1";
 pub const MUNINN_MEDIA_VIDEO_ACCESS_UNIT_SCHEMA: &str = "muninn.media_video_access_unit.v1";
-pub const MUNINN_MEDIA_VIDEO_PARITY_SHARD_SCHEMA: &str = "muninn.media_video_parity_shard.v1";
+pub const MUNINN_MEDIA_VIDEO_PARITY_SHARD_SCHEMA: &str = "muninn.media_video_parity_shard.v2";
 pub const MUNINN_MEDIA_AUDIO_PACKET_SCHEMA: &str = "muninn.media_audio_packet.v1";
 pub const MUNINN_MEDIA_RECEIVER_FEEDBACK_SCHEMA: &str = "muninn.media_receiver_feedback.v1";
 pub const MUNINN_OBS_STREAM_CATALOG_SCHEMA: &str = "muninn.obs_stream_catalog.v1";
@@ -791,7 +791,7 @@ pub struct MuninnMediaVideoAccessUnitRecord {
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
 #[cultcache(
     type = "muninn.media_video_parity_shard",
-    schema = "muninn.media_video_parity_shard.v1"
+    schema = "muninn.media_video_parity_shard.v2"
 )]
 pub struct MuninnMediaVideoParityShardRecord {
     #[cultcache(key = 0)]
@@ -823,8 +823,10 @@ pub struct MuninnMediaVideoParityShardRecord {
     #[cultcache(key = 13)]
     pub parity_count: u16,
     #[cultcache(key = 14)]
-    pub chunk_payload_lengths: Vec<u32>,
+    pub chunk_payload_bytes: u32,
     #[cultcache(key = 15)]
+    pub last_chunk_payload_bytes: u32,
+    #[cultcache(key = 16)]
     pub payload: Vec<u8>,
 }
 

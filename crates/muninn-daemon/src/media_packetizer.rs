@@ -287,7 +287,8 @@ struct VideoParityShardWirePayload<'a>(
     u16,
     u16,
     u16,
-    &'a [u32],
+    u32,
+    u32,
     #[serde(with = "serde_bytes")] &'a [u8],
 );
 
@@ -966,17 +967,19 @@ pub fn build_video_parity_shard(
     }
 
     let mut payload_len = 0_usize;
-    let mut payload_lengths = Vec::with_capacity(first.chunk_count as usize);
+    let mut last_chunk_payload_bytes = 0_u32;
     for index in 0..first.chunk_count {
         let chunk = by_index
             .get(&index)
             .ok_or_else(|| anyhow!("video parity missing chunk_index {index}"))?;
         payload_len = payload_len.max(chunk.payload.len());
-        payload_lengths.push(
-            u32::try_from(chunk.payload.len())
-                .context("video parity chunk payload length exceeds u32")?,
-        );
+        if index == first.chunk_count - 1 {
+            last_chunk_payload_bytes = u32::try_from(chunk.payload.len())
+                .context("video parity last chunk payload length exceeds u32")?;
+        }
     }
+    let chunk_payload_bytes =
+        u32::try_from(payload_len).context("video parity chunk payload length exceeds u32")?;
 
     let mut parity = vec![0_u8; payload_len];
     for index in 0..first.chunk_count {
@@ -1001,7 +1004,8 @@ pub fn build_video_parity_shard(
         chunk_count: first.chunk_count,
         parity_index: 0,
         parity_count: 1,
-        chunk_payload_lengths: payload_lengths,
+        chunk_payload_bytes,
+        last_chunk_payload_bytes,
         payload: parity,
     }))
 }
@@ -1687,7 +1691,8 @@ fn encode_video_parity_record_payload(
         record.chunk_count,
         record.parity_index,
         record.parity_count,
-        &record.chunk_payload_lengths,
+        record.chunk_payload_bytes,
+        record.last_chunk_payload_bytes,
         &record.payload,
     ))
 }
@@ -1789,18 +1794,14 @@ fn validate_video_parity_record(record: &MuninnMediaVideoParityShardRecord) -> R
             "video parity media record currently supports exactly one XOR parity shard"
         ));
     }
-    if record.chunk_payload_lengths.len() != record.chunk_count as usize {
+    if record.chunk_payload_bytes == 0 || record.last_chunk_payload_bytes == 0 {
         return Err(anyhow!(
-            "video parity media record payload length table does not match chunk_count"
+            "video parity media record chunk lengths must be non-zero"
         ));
     }
-    if record
-        .chunk_payload_lengths
-        .iter()
-        .any(|length| *length == 0)
-    {
+    if record.last_chunk_payload_bytes > record.chunk_payload_bytes {
         return Err(anyhow!(
-            "video parity media record chunk payload lengths must be non-zero"
+            "video parity media record last chunk length exceeds regular chunk length"
         ));
     }
     if record.payload.is_empty() {
@@ -1808,13 +1809,9 @@ fn validate_video_parity_record(record: &MuninnMediaVideoParityShardRecord) -> R
             "video parity media record payload must be non-empty"
         ));
     }
-    if record
-        .chunk_payload_lengths
-        .iter()
-        .any(|length| *length as usize > record.payload.len())
-    {
+    if record.chunk_payload_bytes as usize != record.payload.len() {
         return Err(anyhow!(
-            "video parity media record payload is shorter than a declared chunk"
+            "video parity media record payload length does not match declared chunk length"
         ));
     }
     Ok(())
@@ -2370,7 +2367,8 @@ mod tests {
         assert_eq!(parity.chunk_count, 3);
         assert_eq!(parity.parity_index, 0);
         assert_eq!(parity.parity_count, 1);
-        assert_eq!(parity.chunk_payload_lengths, vec![2, 2, 1]);
+        assert_eq!(parity.chunk_payload_bytes, 2);
+        assert_eq!(parity.last_chunk_payload_bytes, 1);
         assert_eq!(parity.payload, vec![1 ^ 3 ^ 5, 2 ^ 4]);
 
         let mut recovered = parity.payload.clone();
@@ -2379,7 +2377,7 @@ mod tests {
                 recovered[offset] ^= *byte;
             }
         }
-        recovered.truncate(parity.chunk_payload_lengths[1] as usize);
+        recovered.truncate(parity.chunk_payload_bytes as usize);
         assert_eq!(recovered, records[1].payload);
         Ok(())
     }
