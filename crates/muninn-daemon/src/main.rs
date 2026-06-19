@@ -84,6 +84,7 @@ const MUNINN_RUDP_ACTIVE_CATALOG_REPUBLISH_MS: u64 = 2_000;
 const PS_MOVE_LED_REPORT_LEN: usize = 49;
 const MUNINN_DISABLED_VIDEO_SOURCE_ID: &str = "video:none";
 const MUNINN_DISABLED_AUDIO_SOURCE_ID: &str = "audio:none";
+const MUNINN_DEFAULT_ACTIVATION_STORE_PATH: &str = "C:/Meta/Odin/state/muninn.activate.cc";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Mode {
@@ -6431,7 +6432,7 @@ impl Options {
         let mut options = Options {
             mode: Mode::Serve,
             store_path: PathBuf::from("C:/Meta/Odin/state/muninn.telemetry.cc"),
-            activation_store_path: None,
+            activation_store_path: Some(PathBuf::from(MUNINN_DEFAULT_ACTIVATION_STORE_PATH)),
             surface_id: "muninn.telemetry.local".to_string(),
             stream_id: "muninn.raven.av.srt".to_string(),
             stream_filter_explicit: false,
@@ -6904,7 +6905,10 @@ mod tests {
 
         assert_eq!(options.mode, Mode::Serve);
         assert!(options.interval_seconds.is_none());
-        assert!(options.activation_store_path.is_none());
+        assert_eq!(
+            options.activation_store_path,
+            Some(PathBuf::from(MUNINN_DEFAULT_ACTIVATION_STORE_PATH))
+        );
         assert_eq!(
             options.rudp_video_bitrate_kbps,
             MUNINN_RUDP_MEDIA_VIDEO_BITRATE_KBPS
@@ -8355,6 +8359,21 @@ mod tests {
         assert_eq!(
             options.activation_store_path,
             Some(PathBuf::from("C:/Meta/Odin/state/muninn.activate.cc"))
+        );
+    }
+
+    #[test]
+    fn capture_stream_status_uses_default_activation_store_path() {
+        let options = Options::parse(
+            ["capture-stream-status", "--host", "raven"]
+                .into_iter()
+                .map(String::from),
+        )
+        .unwrap();
+
+        assert_eq!(
+            options.activation_store_path,
+            Some(PathBuf::from(MUNINN_DEFAULT_ACTIVATION_STORE_PATH))
         );
     }
 
