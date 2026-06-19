@@ -251,6 +251,38 @@ pub enum MuninnMediaWireRecord {
     Feedback(MuninnMediaReceiverFeedbackRecord),
 }
 
+#[derive(Serialize)]
+struct VideoAccessUnitWirePayload<'a>(
+    &'a str,
+    &'a str,
+    u64,
+    &'a str,
+    i64,
+    u32,
+    u32,
+    u32,
+    bool,
+    Option<u64>,
+    i64,
+    u16,
+    u16,
+    #[serde(with = "serde_bytes")] &'a [u8],
+);
+
+#[derive(Serialize)]
+struct AudioPacketWirePayload<'a>(
+    &'a str,
+    &'a str,
+    u64,
+    &'a str,
+    i64,
+    u32,
+    u32,
+    u32,
+    i64,
+    #[serde(with = "serde_bytes")] &'a [u8],
+);
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MuninnMediaSendPayload {
     pub channel_id: &'static str,
@@ -1300,12 +1332,12 @@ pub fn encode_media_wire_record(
         MuninnMediaWireRecord::Video(record) => (
             MUNINN_MEDIA_VIDEO_ACCESS_UNIT_SCHEMA,
             video_record_key(record),
-            encode_record_payload(record)?,
+            encode_video_record_payload(record)?,
         ),
         MuninnMediaWireRecord::Audio(record) => (
             MUNINN_MEDIA_AUDIO_PACKET_SCHEMA,
             audio_record_key(record),
-            encode_record_payload(record)?,
+            encode_audio_record_payload(record)?,
         ),
         MuninnMediaWireRecord::Feedback(record) => (
             MUNINN_MEDIA_RECEIVER_FEEDBACK_SCHEMA,
@@ -1464,6 +1496,40 @@ pub fn decode_media_wire_record(payload: &[u8]) -> Result<MuninnMediaWireRecord>
 
 fn encode_record_payload<T: Serialize>(record: &T) -> Result<Vec<u8>> {
     rmp_serde::to_vec(record).map_err(Into::into)
+}
+
+fn encode_video_record_payload(record: &MuninnMediaVideoAccessUnitRecord) -> Result<Vec<u8>> {
+    encode_record_payload(&VideoAccessUnitWirePayload(
+        &record.stream_id,
+        &record.session_id,
+        record.frame_id,
+        &record.codec,
+        record.pts_ticks,
+        record.duration_ticks,
+        record.timebase_num,
+        record.timebase_den,
+        record.keyframe,
+        record.dependency_frame_id,
+        record.deadline_ticks,
+        record.chunk_index,
+        record.chunk_count,
+        &record.payload,
+    ))
+}
+
+fn encode_audio_record_payload(record: &MuninnMediaAudioPacketRecord) -> Result<Vec<u8>> {
+    encode_record_payload(&AudioPacketWirePayload(
+        &record.stream_id,
+        &record.session_id,
+        record.packet_id,
+        &record.codec,
+        record.pts_ticks,
+        record.duration_ticks,
+        record.timebase_num,
+        record.timebase_den,
+        record.deadline_ticks,
+        &record.payload,
+    ))
 }
 
 fn decode_record_payload<T: DeserializeOwned>(payload: &[u8]) -> Result<T> {

@@ -27,9 +27,9 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::env;
 use std::fs;
-use std::io::{ErrorKind, Read};
 #[cfg(not(windows))]
 use std::io::Write;
+use std::io::{ErrorKind, Read};
 use std::net::{SocketAddr, UdpSocket};
 #[cfg(unix)]
 use std::path::Path;
@@ -55,17 +55,17 @@ const MUNINN_MEDIA_RUDP_CONNECTION_ID: u32 = 0x6d75_0001;
 const MUNINN_OBS_CATALOG_RUDP_CONNECTION_ID: u32 = 0x6d75_0003;
 const MUNINN_MEDIA_SEND_QUEUE_DEADLINE_MS: u64 = 75;
 const MUNINN_RUDP_MEDIA_PROFILE_ID: &str = "muninn.rudp.low_latency_h264_lan.v1";
-const MUNINN_RUDP_MEDIA_VIDEO_BITRATE_KBPS: u32 = 8_000;
-const MUNINN_RUDP_MEDIA_PACKET_BYTES: usize = 480;
+const MUNINN_RUDP_MEDIA_VIDEO_BITRATE_KBPS: u32 = 30_000;
+const MUNINN_RUDP_MEDIA_PACKET_BYTES: usize = 900;
 const MUNINN_RUDP_IPV4_UDP_PAYLOAD_BYTES: usize = 1_472;
 const MUNINN_RUDP_FIXED_HEADER_BYTES: usize = 36;
 const MUNINN_RUDP_MEDIA_MAX_FRAGMENT_BYTES: usize = MUNINN_RUDP_IPV4_UDP_PAYLOAD_BYTES
     - MUNINN_RUDP_FIXED_HEADER_BYTES
     - crate::media_packetizer::MUNINN_MEDIA_RUDP_CHANNEL.len();
 const MUNINN_RUDP_MEDIA_RESEND_DELAY_MS: u64 = 5;
-const MUNINN_RUDP_MEDIA_RELIABLE_EXPIRE_AFTER_MS: u64 = 250;
-const MUNINN_RUDP_MEDIA_RECEIVER_ASSEMBLY_DEADLINE_MS: u64 = 150;
-const MUNINN_RUDP_MEDIA_RECEIVER_GAP_WAIT_MS: u64 = 8;
+const MUNINN_RUDP_MEDIA_RELIABLE_EXPIRE_AFTER_MS: u64 = 600;
+const MUNINN_RUDP_MEDIA_RECEIVER_ASSEMBLY_DEADLINE_MS: u64 = 400;
+const MUNINN_RUDP_MEDIA_RECEIVER_GAP_WAIT_MS: u64 = 16;
 const PS_MOVE_LED_REPORT_LEN: usize = 49;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1868,6 +1868,7 @@ fn publish_runtime_boundary_records(
                 "media_packet_bytes": media_profile.media_packet_bytes,
                 "max_fragment_bytes": media_profile.max_fragment_bytes,
                 "video_b_frames": media_profile.video_b_frames,
+                "video_gop_frames": muninn_rudp_video_gop_frames(options),
                 "video_rate_control": "cbr",
                 "video_rc_lookahead": media_profile.video_rc_lookahead,
                 "sender_queue_deadline_ms": media_profile.sender_queue_deadline_ms,
@@ -2107,6 +2108,13 @@ fn publish_obs_catalog(
         urls,
         states,
         updated_at: timestamp()?,
+        command_rudp_target: options
+            .capture_command_rudp_bind
+            .map(|addr| addr.to_string())
+            .unwrap_or_default(),
+        media_target_host: options.target_host.clone(),
+        media_port: options.port,
+        media_packet_bytes: options.media_packet_bytes as u32,
     };
     node.put("obs", &record)?;
     if let Some(target) = options.obs_catalog_rudp_target {
@@ -2117,7 +2125,10 @@ fn publish_obs_catalog(
     Ok(())
 }
 
-fn publish_obs_catalog_rudp(target: SocketAddr, record: &MuninnObsStreamCatalogRecord) -> Result<()> {
+fn publish_obs_catalog_rudp(
+    target: SocketAddr,
+    record: &MuninnObsStreamCatalogRecord,
+) -> Result<()> {
     publish_rudp_schema_payload(
         target,
         MUNINN_OBS_CATALOG_RUDP_CONNECTION_ID,
@@ -4527,20 +4538,18 @@ fn publish_rudp_schema_payload(
     let socket = UdpSocket::bind(bind_address)
         .with_context(|| format!("binding Muninn RUDP sender at {bind_address}"))?;
     socket.set_read_timeout(Some(Duration::from_millis(100)))?;
-    let mut transport =
-        CultNetRudpSocketTransportConnection::new(CultNetRudpSocketTransportOptions::client(
-            peer_id,
-            socket,
-            target,
-            connection_id,
-        ))?;
+    let mut transport = CultNetRudpSocketTransportConnection::new(
+        CultNetRudpSocketTransportOptions::client(peer_id, socket, target, connection_id),
+    )?;
     transport.connect(Vec::new())?;
     let deadline = Instant::now() + Duration::from_secs(2);
     while !transport.connected() {
         let _ = transport.receive_once()?;
         transport.poll_resends()?;
         if Instant::now() >= deadline {
-            return Err(anyhow!("timed out connecting Muninn RUDP sender to {target}"));
+            return Err(anyhow!(
+                "timed out connecting Muninn RUDP sender to {target}"
+            ));
         }
     }
     transport
@@ -5166,7 +5175,7 @@ fn muninn_rudp_media_profile() -> MuninnRudpMediaProfile {
         profile_id: MUNINN_RUDP_MEDIA_PROFILE_ID,
         video_codec: "h264",
         video_encoder: "h264_nvenc",
-        video_preset: "p1",
+        video_preset: "p4",
         video_tune: "ull",
         video_bitrate_kbps: MUNINN_RUDP_MEDIA_VIDEO_BITRATE_KBPS,
         media_packet_bytes: MUNINN_RUDP_MEDIA_PACKET_BYTES,
@@ -5192,8 +5201,7 @@ fn muninn_rudp_video_vbv_buffer_arg(options: &Options, profile: &MuninnRudpMedia
 }
 
 fn muninn_rudp_video_gop_frames(options: &Options) -> u32 {
-    let _ = options;
-    1
+    (options.framerate.max(1).div_ceil(2)).max(1)
 }
 
 fn loopback_args(options: &Options) -> Vec<String> {
@@ -6030,6 +6038,10 @@ mod tests {
             urls: vec![rudp_endpoint("192.168.1.66", 5204, "muninn.raven.av.rudp")],
             states: vec!["activation-ready".to_string()],
             updated_at: "unix:100".to_string(),
+            command_rudp_target: "192.168.1.84:17873".to_string(),
+            media_target_host: "192.168.1.66".to_string(),
+            media_port: 5204,
+            media_packet_bytes: MUNINN_RUDP_MEDIA_PACKET_BYTES as u32,
         };
 
         publish_obs_catalog_rudp(receiver_addr, &catalog).unwrap();
@@ -6040,8 +6052,15 @@ mod tests {
         assert_eq!(decoded.host_id, "raven");
         assert_eq!(decoded.stream_ids, vec!["muninn.raven.av.rudp"]);
         assert_eq!(decoded.states, vec!["activation-ready"]);
-        assert!(decoded.urls[0].contains("reliable_expire_after_ms=250"));
-        assert!(decoded.urls[0].contains("assembly_deadline_ms=150"));
+        assert_eq!(decoded.command_rudp_target, "192.168.1.84:17873");
+        assert_eq!(decoded.media_target_host, "192.168.1.66");
+        assert_eq!(decoded.media_port, 5204);
+        assert_eq!(
+            decoded.media_packet_bytes,
+            MUNINN_RUDP_MEDIA_PACKET_BYTES as u32
+        );
+        assert!(decoded.urls[0].contains("reliable_expire_after_ms=600"));
+        assert!(decoded.urls[0].contains("assembly_deadline_ms=400"));
     }
 
     #[test]
@@ -6196,7 +6215,7 @@ mod tests {
         assert_eq!(
             plan.targets,
             vec![
-                "rudp://10.77.0.2:5204/muninn.raven.av.rudp?channel=media&format=muninn-typed-media&connection=0x6d750001&profile=muninn.rudp.low_latency_h264_lan.v1&sender_resend_delay_ms=5&reliable_expire_after_ms=250&assembly_deadline_ms=150&gap_wait_ms=8"
+                "rudp://10.77.0.2:5204/muninn.raven.av.rudp?channel=media&format=muninn-typed-media&connection=0x6d750001&profile=muninn.rudp.low_latency_h264_lan.v1&sender_resend_delay_ms=5&reliable_expire_after_ms=600&assembly_deadline_ms=400&gap_wait_ms=16"
             ]
         );
         assert!(!plan.command_line.contains("tee"));
@@ -6253,23 +6272,31 @@ mod tests {
         );
         assert!(
             args.windows(2)
-                .any(|pair| pair[0] == "-b:v" && pair[1] == "8000k")
+                .any(|pair| pair[0] == "-preset" && pair[1] == "p4")
         );
         assert!(
             args.windows(2)
-                .any(|pair| pair[0] == "-maxrate" && pair[1] == "8000k")
+                .any(|pair| pair[0] == "-b:v" && pair[1] == "30000k")
         );
         assert!(
             args.windows(2)
-                .any(|pair| pair[0] == "-bufsize" && pair[1] == "134k")
+                .any(|pair| pair[0] == "-maxrate" && pair[1] == "30000k")
         );
         assert!(
             args.windows(2)
-                .any(|pair| pair[0] == "-g" && pair[1] == "1")
+                .any(|pair| pair[0] == "-bufsize" && pair[1] == "500k")
         );
         assert!(
             args.windows(2)
-                .any(|pair| pair[0] == "-keyint_min" && pair[1] == "1")
+                .any(|pair| pair[0] == "-g" && pair[1] == "30")
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-keyint_min" && pair[1] == "30")
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-forced-idr" && pair[1] == "1")
         );
         assert!(
             args.windows(2)
@@ -6304,16 +6331,35 @@ mod tests {
 
         assert_eq!(
             muninn_rudp_video_vbv_buffer_arg(&thirty_fps, &profile),
-            "267k"
+            "1000k"
         );
         assert_eq!(
             muninn_rudp_video_vbv_buffer_arg(&sixty_fps, &profile),
-            "134k"
+            "500k"
         );
     }
 
     #[test]
-    fn default_rudp_media_packet_size_keeps_typed_video_wire_under_udp_mtu() {
+    fn rudp_video_gop_tracks_half_second_recovery_budget() {
+        let thirty_fps = Options::parse(
+            ["activate", "--media-transport", "rudp", "--framerate", "30"]
+                .into_iter()
+                .map(String::from),
+        )
+        .unwrap();
+        let sixty_fps = Options::parse(
+            ["activate", "--media-transport", "rudp", "--framerate", "60"]
+                .into_iter()
+                .map(String::from),
+        )
+        .unwrap();
+
+        assert_eq!(muninn_rudp_video_gop_frames(&thirty_fps), 15);
+        assert_eq!(muninn_rudp_video_gop_frames(&sixty_fps), 30);
+    }
+
+    #[test]
+    fn default_rudp_media_packet_size_keeps_compact_typed_video_wire_under_udp_mtu() {
         let mut access_unit = Vec::new();
         access_unit.extend_from_slice(&[0, 0, 0, 1, 0x65]);
         access_unit.resize(MUNINN_RUDP_MEDIA_PACKET_BYTES, 0x80);
@@ -7163,13 +7209,13 @@ Device 00:07:04:A8:00:D0 (public)
             media_profile
                 .get("receiver_gap_wait_ms")
                 .and_then(|value| value.as_u64()),
-            Some(8)
+            Some(MUNINN_RUDP_MEDIA_RECEIVER_GAP_WAIT_MS)
         );
         assert_eq!(
             media_profile
                 .get("sender_reliable_expire_after_ms")
                 .and_then(|value| value.as_u64()),
-            Some(75)
+            Some(MUNINN_RUDP_MEDIA_RELIABLE_EXPIRE_AFTER_MS)
         );
         assert_eq!(
             media_profile

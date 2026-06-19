@@ -887,6 +887,14 @@ pub struct MuninnObsStreamCatalogRecord {
     pub states: Vec<String>,
     #[cultcache(key = 6)]
     pub updated_at: String,
+    #[cultcache(key = 7, default)]
+    pub command_rudp_target: String,
+    #[cultcache(key = 8, default)]
+    pub media_target_host: String,
+    #[cultcache(key = 9, default)]
+    pub media_port: u16,
+    #[cultcache(key = 10, default)]
+    pub media_packet_bytes: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, DatabaseEntry)]
