@@ -6555,6 +6555,46 @@ mod tests {
     }
 
     #[test]
+    fn default_rudp_media_packet_size_keeps_chunked_video_wire_under_rudp_fragment_limit() {
+        let mut access_unit = Vec::new();
+        access_unit.extend_from_slice(&[0, 0, 0, 1, 0x65]);
+        access_unit.resize(MUNINN_RUDP_MEDIA_PACKET_BYTES * 64, 0x80);
+
+        let payloads = crate::media_packetizer::video_annex_b_stream_send_payloads(
+            crate::media_packetizer::VideoAnnexBStreamWireOptions {
+                packetize: crate::media_packetizer::VideoAnnexBStreamPacketizeOptions {
+                    stream_id: "muninn.raven.av.rudp",
+                    session_id: "raven:2026-06-19T14-56-23Z:video",
+                    codec: "h264",
+                    first_frame_id: 1_000_000,
+                    first_pts_ticks: 3_000_000_000,
+                    frame_duration_ticks: 1_500,
+                    timebase_num: 1,
+                    timebase_den: 90_000,
+                    deadline_delay_ticks: 1_500,
+                    max_payload_bytes: MUNINN_RUDP_MEDIA_PACKET_BYTES,
+                },
+                stored_at: "2026-06-19T14:56:23Z",
+                source_runtime_id: "raven",
+                source_role: "muninn.rudp.video",
+            },
+            &access_unit,
+        )
+        .unwrap();
+
+        assert!(payloads.len() > 1);
+        let largest = payloads
+            .iter()
+            .map(|payload| payload.payload.len())
+            .max()
+            .unwrap();
+        assert!(
+            largest <= MUNINN_RUDP_MEDIA_MAX_FRAGMENT_BYTES,
+            "largest typed media payload was {largest} bytes"
+        );
+    }
+
+    #[test]
     fn rudp_media_transport_options_follow_low_latency_profile() {
         let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
         let endpoint: SocketAddr = "127.0.0.1:5204".parse().unwrap();
