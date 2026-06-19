@@ -65,7 +65,6 @@ const MUNINN_RUDP_MEDIA_MAX_FRAGMENT_BYTES: usize = MUNINN_RUDP_IPV4_UDP_PAYLOAD
     - MUNINN_RUDP_FIXED_HEADER_BYTES
     - crate::media_packetizer::MUNINN_MEDIA_RUDP_CHANNEL.len();
 const MUNINN_RUDP_MEDIA_RESEND_DELAY_MS: u64 = 5;
-const MUNINN_RUDP_MEDIA_RELIABLE_EXPIRE_AFTER_MS: u64 = 600;
 const MUNINN_RUDP_MEDIA_RECEIVER_ASSEMBLY_DEADLINE_MS: u64 = 800;
 const MUNINN_RUDP_MEDIA_RECEIVER_GAP_WAIT_MS: u64 = 16;
 const MUNINN_RUDP_MEDIA_REPAIR_CACHE_CHUNKS: usize = 16_384;
@@ -5601,9 +5600,7 @@ fn muninn_rudp_media_profile_for_bitrate_and_latency(
         video_rc_lookahead: 0,
         sender_queue_deadline_ms: latency_budget_ms,
         sender_resend_delay_ms: MUNINN_RUDP_MEDIA_RESEND_DELAY_MS,
-        sender_reliable_expire_after_ms: latency_budget_ms
-            .min(MUNINN_RUDP_MEDIA_RELIABLE_EXPIRE_AFTER_MS)
-            .max(1),
+        sender_reliable_expire_after_ms: latency_budget_ms,
         receiver_assembly_deadline_ms: latency_budget_ms,
         receiver_gap_wait_ms: MUNINN_RUDP_MEDIA_RECEIVER_GAP_WAIT_MS,
     }
@@ -6532,7 +6529,7 @@ mod tests {
             MUNINN_RUDP_MEDIA_RECEIVER_ASSEMBLY_DEADLINE_MS as u32
         );
         assert!(decoded.urls[0].contains("delivery=unreliable"));
-        assert!(decoded.urls[0].contains("reliable_expire_after_ms=600"));
+        assert!(decoded.urls[0].contains("reliable_expire_after_ms=800"));
         assert!(decoded.urls[0].contains("assembly_deadline_ms=800"));
     }
 
@@ -6722,7 +6719,7 @@ mod tests {
         assert_eq!(
             plan.targets,
             vec![
-                "rudp://10.77.0.2:5204/muninn.raven.av.rudp?channel=media&format=muninn-typed-media&connection=0x6d750001&profile=muninn.rudp.low_latency_h264_lan.v1&delivery=unreliable&sender_resend_delay_ms=5&reliable_expire_after_ms=600&assembly_deadline_ms=800&gap_wait_ms=16"
+                "rudp://10.77.0.2:5204/muninn.raven.av.rudp?channel=media&format=muninn-typed-media&connection=0x6d750001&profile=muninn.rudp.low_latency_h264_lan.v1&delivery=unreliable&sender_resend_delay_ms=5&reliable_expire_after_ms=800&assembly_deadline_ms=800&gap_wait_ms=16"
             ]
         );
         assert!(!plan.command_line.contains("tee"));
@@ -7108,6 +7105,7 @@ mod tests {
         let profile = muninn_rudp_media_profile_for_options(&options);
 
         assert_eq!(profile.sender_queue_deadline_ms, 1200);
+        assert_eq!(profile.sender_reliable_expire_after_ms, 1200);
         assert_eq!(profile.receiver_assembly_deadline_ms, 1200);
         assert_eq!(rudp_media_deadline_delay_ticks(&profile), 108_000);
         assert_eq!(rudp_audio_deadline_delay_ticks(&options, &profile), 57_600);
@@ -7953,7 +7951,7 @@ Device 00:07:04:A8:00:D0 (public)
             media_profile
                 .get("sender_reliable_expire_after_ms")
                 .and_then(|value| value.as_u64()),
-            Some(MUNINN_RUDP_MEDIA_RELIABLE_EXPIRE_AFTER_MS)
+            Some(MUNINN_RUDP_MEDIA_RECEIVER_ASSEMBLY_DEADLINE_MS)
         );
         assert_eq!(
             media_profile
