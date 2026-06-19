@@ -65,7 +65,7 @@ const MUNINN_RUDP_MEDIA_MAX_FRAGMENT_BYTES: usize = MUNINN_RUDP_IPV4_UDP_PAYLOAD
     - MUNINN_RUDP_FIXED_HEADER_BYTES
     - crate::media_packetizer::MUNINN_MEDIA_RUDP_CHANNEL.len();
 const MUNINN_RUDP_MEDIA_RESEND_DELAY_MS: u64 = 5;
-const MUNINN_RUDP_MEDIA_RECEIVER_ASSEMBLY_DEADLINE_MS: u64 = 800;
+const MUNINN_RUDP_MEDIA_RECEIVER_ASSEMBLY_DEADLINE_MS: u64 = 1_200;
 const MUNINN_RUDP_MEDIA_RECEIVER_GAP_WAIT_MS: u64 = 16;
 const MUNINN_RUDP_MEDIA_REPAIR_CACHE_CHUNKS: usize = 16_384;
 const MUNINN_RUDP_MEDIA_REPAIR_BURST_CHUNKS: usize = 512;
@@ -74,6 +74,7 @@ const MUNINN_RUDP_MEDIA_REPAIR_MIN_CHUNKS_PER_SECOND: usize = 8;
 const MUNINN_RUDP_MEDIA_REPAIR_MAX_CHUNKS_PER_SECOND: usize = 4_096;
 const MUNINN_RUDP_MEDIA_REPAIR_ADD_CHUNKS_PER_SECOND: usize = 256;
 const MUNINN_RUDP_MEDIA_REPAIR_RECOVERY_INTERVAL_MS: u64 = 2_000;
+const MUNINN_RUDP_MEDIA_SOCKET_BUFFER_BYTES: usize = 4 * 1024 * 1024;
 const MUNINN_RUDP_ACTIVE_CATALOG_REPUBLISH_MS: u64 = 2_000;
 const PS_MOVE_LED_REPORT_LEN: usize = 49;
 
@@ -1917,6 +1918,7 @@ fn open_media_rudp_transport(options: &Options) -> Result<CultNetRudpSocketTrans
             )
         })?;
     let socket = UdpSocket::bind("0.0.0.0:0").context("binding Muninn media RUDP client socket")?;
+    configure_media_rudp_socket_buffers(&socket).context("configuring Muninn media RUDP socket buffers")?;
     socket
         .set_nonblocking(true)
         .context("setting Muninn media RUDP client nonblocking")?;
@@ -1938,6 +1940,17 @@ fn open_media_rudp_transport(options: &Options) -> Result<CultNetRudpSocketTrans
         thread::sleep(Duration::from_millis(2));
     }
     Ok(transport)
+}
+
+fn configure_media_rudp_socket_buffers(socket: &UdpSocket) -> Result<()> {
+    let socket = socket2::SockRef::from(socket);
+    socket
+        .set_send_buffer_size(MUNINN_RUDP_MEDIA_SOCKET_BUFFER_BYTES)
+        .context("setting Muninn media RUDP send buffer")?;
+    socket
+        .set_recv_buffer_size(MUNINN_RUDP_MEDIA_SOCKET_BUFFER_BYTES)
+        .context("setting Muninn media RUDP receive buffer")?;
+    Ok(())
 }
 
 fn muninn_media_rudp_options(
@@ -6529,8 +6542,8 @@ mod tests {
             MUNINN_RUDP_MEDIA_RECEIVER_ASSEMBLY_DEADLINE_MS as u32
         );
         assert!(decoded.urls[0].contains("delivery=unreliable"));
-        assert!(decoded.urls[0].contains("reliable_expire_after_ms=800"));
-        assert!(decoded.urls[0].contains("assembly_deadline_ms=800"));
+        assert!(decoded.urls[0].contains("reliable_expire_after_ms=1200"));
+        assert!(decoded.urls[0].contains("assembly_deadline_ms=1200"));
     }
 
     #[test]
@@ -6719,7 +6732,7 @@ mod tests {
         assert_eq!(
             plan.targets,
             vec![
-                "rudp://10.77.0.2:5204/muninn.raven.av.rudp?channel=media&format=muninn-typed-media&connection=0x6d750001&profile=muninn.rudp.low_latency_h264_lan.v1&delivery=unreliable&sender_resend_delay_ms=5&reliable_expire_after_ms=800&assembly_deadline_ms=800&gap_wait_ms=16"
+                "rudp://10.77.0.2:5204/muninn.raven.av.rudp?channel=media&format=muninn-typed-media&connection=0x6d750001&profile=muninn.rudp.low_latency_h264_lan.v1&delivery=unreliable&sender_resend_delay_ms=5&reliable_expire_after_ms=1200&assembly_deadline_ms=1200&gap_wait_ms=16"
             ]
         );
         assert!(!plan.command_line.contains("tee"));
