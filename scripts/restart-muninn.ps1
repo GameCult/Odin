@@ -12,6 +12,8 @@ param(
   [string] $ObsTargetHost = "192.168.1.66",
   [int] $ObsPort = 5204,
   [string] $AudioDevice = "Realtek",
+  [string[]] $VideoSources = @("display:0=Raven display 1", "display:1=Raven display 2"),
+  [string[]] $AudioSources = @("wasapi-loopback:Realtek=Raven Realtek loopback"),
   [string] $IdunnRudpHealth = "192.168.1.66:17870",
   [string] $IdunnDaemon = "muninn",
   [string] $IdunnHealthContract = "muninn.cultnet-rudp-remote-telemetry-health",
@@ -262,7 +264,15 @@ $serveArguments = @(
   "--stream", "muninn.raven.av.rudp",
   "--target-host", $TargetHost,
   "--port", $Port.ToString(),
-  "--media-transport", $MediaTransport,
+  "--media-transport", $MediaTransport
+)
+foreach ($videoSource in $VideoSources) {
+  $serveArguments += @("--video-source", $videoSource)
+}
+foreach ($audioSource in $AudioSources) {
+  $serveArguments += @("--audio-source", $audioSource)
+}
+$serveArguments += @(
   "--audio-device", $AudioDevice,
   "--ffmpeg", $Ffmpeg,
   "--loopback-script", $LoopbackScript,

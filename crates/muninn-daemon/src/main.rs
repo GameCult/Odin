@@ -121,6 +121,8 @@ struct Options {
     framerate: u32,
     ddagrab_output_index: u32,
     audio_device: String,
+    video_sources: Vec<CatalogSource>,
+    audio_sources: Vec<CatalogSource>,
     audio_sample_rate: u32,
     audio_channels: u32,
     ffmpeg_path: String,
@@ -149,6 +151,12 @@ struct Options {
     capture_command_rudp_bind: Option<SocketAddr>,
     capture_command_rudp_target: Option<SocketAddr>,
     obs_catalog_rudp_target: Option<SocketAddr>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CatalogSource {
+    id: String,
+    label: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -834,6 +842,28 @@ fn audio_source_id_for_options(options: &Options) -> String {
 
 fn audio_source_label_for_options(options: &Options) -> String {
     format!("{} loopback ({})", options.host_id, options.audio_device)
+}
+
+fn video_source_catalog(options: &Options) -> Vec<CatalogSource> {
+    if options.video_sources.is_empty() {
+        vec![CatalogSource {
+            id: video_source_id_for_options(options),
+            label: video_source_label_for_options(options),
+        }]
+    } else {
+        options.video_sources.clone()
+    }
+}
+
+fn audio_source_catalog(options: &Options) -> Vec<CatalogSource> {
+    if options.audio_sources.is_empty() {
+        vec![CatalogSource {
+            id: audio_source_id_for_options(options),
+            label: audio_source_label_for_options(options),
+        }]
+    } else {
+        options.audio_sources.clone()
+    }
 }
 
 fn video_source_output_index(source_id: &str) -> Option<u32> {
@@ -2750,6 +2780,8 @@ fn publish_obs_catalog(
     urls: Vec<String>,
     states: Vec<String>,
 ) -> Result<()> {
+    let video_sources = video_source_catalog(options);
+    let audio_sources = audio_source_catalog(options);
     let record = MuninnObsStreamCatalogRecord {
         catalog_id: "muninn.obs.streams".to_string(),
         host_id: options.host_id.clone(),
@@ -2767,10 +2799,22 @@ fn publish_obs_catalog(
         media_packet_bytes: options.media_packet_bytes as u32,
         rudp_video_bitrate_kbps: options.rudp_video_bitrate_kbps,
         rudp_latency_budget_ms: options.rudp_latency_budget_ms,
-        video_source_ids: vec![video_source_id_for_options(options)],
-        video_source_labels: vec![video_source_label_for_options(options)],
-        audio_source_ids: vec![audio_source_id_for_options(options)],
-        audio_source_labels: vec![audio_source_label_for_options(options)],
+        video_source_ids: video_sources
+            .iter()
+            .map(|source| source.id.clone())
+            .collect(),
+        video_source_labels: video_sources
+            .iter()
+            .map(|source| source.label.clone())
+            .collect(),
+        audio_source_ids: audio_sources
+            .iter()
+            .map(|source| source.id.clone())
+            .collect(),
+        audio_source_labels: audio_sources
+            .iter()
+            .map(|source| source.label.clone())
+            .collect(),
     };
     node.put("obs", &record)?;
     if let Some(target) = options.obs_catalog_rudp_target {
@@ -6208,6 +6252,8 @@ impl Options {
             framerate: 30,
             ddagrab_output_index: 0,
             audio_device: "Realtek".to_string(),
+            video_sources: Vec::new(),
+            audio_sources: Vec::new(),
             audio_sample_rate: 48000,
             audio_channels: 2,
             ffmpeg_path: "ffmpeg".to_string(),
@@ -6314,6 +6360,14 @@ impl Options {
                         take_value(&mut args, "--ddagrab-output-index")?.parse()?
                 }
                 "--audio-device" => options.audio_device = take_value(&mut args, "--audio-device")?,
+                "--video-source" => options.video_sources.push(parse_catalog_source(&take_value(
+                    &mut args,
+                    "--video-source",
+                )?)?),
+                "--audio-source" => options.audio_sources.push(parse_catalog_source(&take_value(
+                    &mut args,
+                    "--audio-source",
+                )?)?),
                 "--audio-sample-rate" => {
                     options.audio_sample_rate =
                         take_value(&mut args, "--audio-sample-rate")?.parse()?
@@ -6560,8 +6614,27 @@ fn parse_media_transport(value: &str) -> Result<MediaTransport> {
     }
 }
 
+fn parse_catalog_source(value: &str) -> Result<CatalogSource> {
+    let Some((id, label)) = value.split_once('=') else {
+        return Err(anyhow!(
+            "source catalog entries must be formatted as <source-id>=<display-label>"
+        ));
+    };
+    let id = id.trim();
+    let label = label.trim();
+    if id.is_empty() || label.is_empty() {
+        return Err(anyhow!(
+            "source catalog entries must include a non-empty source id and display label"
+        ));
+    }
+    Ok(CatalogSource {
+        id: id.to_string(),
+        label: label.to_string(),
+    })
+}
+
 fn help_text() -> &'static str {
-    "Usage: muninn [serve|activate|request-stream|request-move-light|move-light-status|move-identity-status|move-source-status|move-state-status|claim-move-host|quest-access-status] [--store <path>] [--activate-store <path>] [--stream-action <start|stop>] [--target-host <host>] [--port <port>] [--obs-target-host <host>] [--obs-port <port>] [--media-transport <srt|rudp>] [--media-packet-bytes <bytes>] [--rudp-video-bitrate-kbps <kbps>] [--rudp-latency-budget-ms <ms>] [--loopback-script <path>] [--ffmpeg <path>] [--capture-command-rudp-bind <addr>] [--capture-command-rudp-target <addr>] [--obs-catalog-rudp-target <addr>] [--move-state <move-id>=<hidraw-path>] [--move-host <bt-addr>] [--move-evidence-stream <stream-id>] [--move-evidence-verse <verse-id>] [--quest-adb] [--quest-serial <serial>] [--quest-input-stream <stream-id>] [--quest-pose-stream <stream-id>] [--quest-video-input-stream <stream-id>] [--idunn-rudp-health <addr>] [--idunn-daemon <id>] [--idunn-health-contract <contract>] [--dry-run] [--health]\n\nMuninn is Odin's portable telemetry Verse assembler. serve publishes cheap typed telemetry affordances, optional Quest USB access surfaces, and the explicitly configured Move runtime; when serve receives --move-state, --move-host, or --move-evidence-stream it may publish source-local Move controller state, typed Move identity records, a CultMesh Move evidence stream, and keep USB-attached PS Moves claimed to that explicit Bluetooth host; serve also consumes typed capture stream commands from --activate-store or --capture-command-rudp-bind and owns the local ffmpeg/loopback activation child lifecycle, and may project the OBS stream catalog to a local OBS plugin over --obs-catalog-rudp-target; activate starts an explicitly requested local stream over SRT or CultNet RUDP as a daemon child; request-stream publishes a typed capture stream command for Muninn serve to execute, either into the activation store or over --capture-command-rudp-target; request-move-light publishes a typed Move light command for Muninn serve to execute; move-light-status reads typed command receipts; move-identity-status reads typed Move identity records; move-source-status prints live Move source discovery; move-state-status reads typed controller-state records; claim-move-host assigns USB-attached PS Moves to a Bluetooth host; quest-access-status reads typed Quest access state. In --health mode, the Idunn RUDP flags publish typed daemon health to Idunn while preserving command-probe exit semantics."
+    "Usage: muninn [serve|activate|request-stream|request-move-light|move-light-status|move-identity-status|move-source-status|move-state-status|claim-move-host|quest-access-status] [--store <path>] [--activate-store <path>] [--stream-action <start|stop>] [--target-host <host>] [--port <port>] [--obs-target-host <host>] [--obs-port <port>] [--media-transport <srt|rudp>] [--media-packet-bytes <bytes>] [--rudp-video-bitrate-kbps <kbps>] [--rudp-latency-budget-ms <ms>] [--video-source <source-id=label>] [--audio-source <source-id=label>] [--loopback-script <path>] [--ffmpeg <path>] [--capture-command-rudp-bind <addr>] [--capture-command-rudp-target <addr>] [--obs-catalog-rudp-target <addr>] [--move-state <move-id>=<hidraw-path>] [--move-host <bt-addr>] [--move-evidence-stream <stream-id>] [--move-evidence-verse <verse-id>] [--quest-adb] [--quest-serial <serial>] [--quest-input-stream <stream-id>] [--quest-pose-stream <stream-id>] [--quest-video-input-stream <stream-id>] [--idunn-rudp-health <addr>] [--idunn-daemon <id>] [--idunn-health-contract <contract>] [--dry-run] [--health]\n\nMuninn is Odin's portable telemetry Verse assembler. serve publishes cheap typed telemetry affordances, optional Quest USB access surfaces, and the explicitly configured Move runtime; when serve receives --move-state, --move-host, or --move-evidence-stream it may publish source-local Move controller state, typed Move identity records, a CultMesh Move evidence stream, and keep USB-attached PS Moves claimed to that explicit Bluetooth host; serve also consumes typed capture stream commands from --activate-store or --capture-command-rudp-bind and owns the local ffmpeg/loopback activation child lifecycle, and may project the OBS stream catalog to a local OBS plugin over --obs-catalog-rudp-target; activate starts an explicitly requested local stream over SRT or CultNet RUDP as a daemon child; request-stream publishes a typed capture stream command for Muninn serve to execute, either into the activation store or over --capture-command-rudp-target; request-move-light publishes a typed Move light command for Muninn serve to execute; move-light-status reads typed command receipts; move-identity-status reads typed Move identity records; move-source-status prints live Move source discovery; move-state-status reads typed controller-state records; claim-move-host assigns USB-attached PS Moves to a Bluetooth host; quest-access-status reads typed Quest access state. In --health mode, the Idunn RUDP flags publish typed daemon health to Idunn while preserving command-probe exit semantics."
 }
 
 fn parse_move_state_source(value: &str) -> Result<MoveStateSource> {
@@ -6646,6 +6719,98 @@ mod tests {
             options.activation_store_path,
             Some(PathBuf::from("C:/Meta/Odin/state/muninn.activate.cc"))
         );
+    }
+
+    #[test]
+    fn parse_accepts_independent_obs_source_catalog_entries() {
+        let options = Options::parse(
+            [
+                "serve",
+                "--video-source",
+                "display:0=Raven display 1",
+                "--video-source",
+                "display:1=Raven display 2",
+                "--audio-source",
+                "wasapi-loopback:Realtek=Raven Realtek loopback",
+                "--audio-source",
+                "wasapi-loopback:Headphones=Raven headphones loopback",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap();
+
+        assert_eq!(
+            video_source_catalog(&options),
+            vec![
+                CatalogSource {
+                    id: "display:0".to_string(),
+                    label: "Raven display 1".to_string(),
+                },
+                CatalogSource {
+                    id: "display:1".to_string(),
+                    label: "Raven display 2".to_string(),
+                }
+            ]
+        );
+        assert_eq!(
+            audio_source_catalog(&options),
+            vec![
+                CatalogSource {
+                    id: "wasapi-loopback:Realtek".to_string(),
+                    label: "Raven Realtek loopback".to_string(),
+                },
+                CatalogSource {
+                    id: "wasapi-loopback:Headphones".to_string(),
+                    label: "Raven headphones loopback".to_string(),
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn obs_source_catalog_falls_back_to_configured_capture_pair() {
+        let options = Options::parse(
+            [
+                "serve",
+                "--host",
+                "raven",
+                "--ddagrab-output-index",
+                "1",
+                "--audio-device",
+                "Realtek",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap();
+
+        assert_eq!(
+            video_source_catalog(&options),
+            vec![CatalogSource {
+                id: "display:1".to_string(),
+                label: "raven display 2".to_string(),
+            }]
+        );
+        assert_eq!(
+            audio_source_catalog(&options),
+            vec![CatalogSource {
+                id: "wasapi-loopback:Realtek".to_string(),
+                label: "raven loopback (Realtek)".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn parse_rejects_blank_obs_source_catalog_entries() {
+        let error = Options::parse(
+            ["serve", "--video-source", "display:0="]
+                .into_iter()
+                .map(String::from),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("non-empty source id"));
     }
 
     #[test]
