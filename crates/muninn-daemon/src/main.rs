@@ -68,11 +68,11 @@ const MUNINN_RUDP_MEDIA_RESEND_DELAY_MS: u64 = 5;
 const MUNINN_RUDP_MEDIA_RECEIVER_ASSEMBLY_DEADLINE_MS: u64 = 800;
 const MUNINN_RUDP_MEDIA_RECEIVER_GAP_WAIT_MS: u64 = 16;
 const MUNINN_RUDP_MEDIA_REPAIR_CACHE_CHUNKS: usize = 16_384;
-const MUNINN_RUDP_MEDIA_REPAIR_BURST_CHUNKS: usize = 32;
-const MUNINN_RUDP_MEDIA_REPAIR_INITIAL_CHUNKS_PER_SECOND: usize = 64;
+const MUNINN_RUDP_MEDIA_REPAIR_BURST_CHUNKS: usize = 512;
+const MUNINN_RUDP_MEDIA_REPAIR_INITIAL_CHUNKS_PER_SECOND: usize = 512;
 const MUNINN_RUDP_MEDIA_REPAIR_MIN_CHUNKS_PER_SECOND: usize = 8;
-const MUNINN_RUDP_MEDIA_REPAIR_MAX_CHUNKS_PER_SECOND: usize = 128;
-const MUNINN_RUDP_MEDIA_REPAIR_ADD_CHUNKS_PER_SECOND: usize = 8;
+const MUNINN_RUDP_MEDIA_REPAIR_MAX_CHUNKS_PER_SECOND: usize = 4_096;
+const MUNINN_RUDP_MEDIA_REPAIR_ADD_CHUNKS_PER_SECOND: usize = 256;
 const MUNINN_RUDP_MEDIA_REPAIR_RECOVERY_INTERVAL_MS: u64 = 2_000;
 const MUNINN_RUDP_ACTIVE_CATALOG_REPUBLISH_MS: u64 = 2_000;
 const PS_MOVE_LED_REPORT_LEN: usize = 49;
@@ -7155,6 +7155,23 @@ mod tests {
         assert_eq!(budget.chunks_per_second(), 32);
         assert_eq!(budget.take(3, start + Duration::from_secs(3), 1), 3);
         assert_eq!(budget.chunks_per_second(), 40);
+    }
+
+    #[test]
+    fn default_rudp_repair_budget_has_lan_stream_headroom() {
+        let mut budget = MuninnRudpRepairBudget::new(
+            MUNINN_RUDP_MEDIA_REPAIR_INITIAL_CHUNKS_PER_SECOND,
+            MUNINN_RUDP_MEDIA_REPAIR_BURST_CHUNKS,
+        );
+        let start = budget.last_refill_at;
+
+        assert_eq!(budget.chunks_per_second(), 512);
+        assert_eq!(budget.take(512, start, 0), 512);
+        assert_eq!(budget.take(4_096, start + Duration::from_secs(1), 0), 512);
+        assert_eq!(budget.take(4_096, start + Duration::from_secs(3), 0), 512);
+        assert_eq!(budget.chunks_per_second(), 768);
+        assert_eq!(budget.take(512, start + Duration::from_secs(4), 1), 384);
+        assert_eq!(budget.chunks_per_second(), 384);
     }
 
     #[test]
