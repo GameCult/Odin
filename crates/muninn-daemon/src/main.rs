@@ -55,7 +55,7 @@ const MUNINN_MEDIA_RUDP_CONNECTION_ID: u32 = 0x6d75_0001;
 const MUNINN_OBS_CATALOG_RUDP_CONNECTION_ID: u32 = 0x6d75_0003;
 const MUNINN_MEDIA_SEND_QUEUE_DEADLINE_MS: u64 = 75;
 const MUNINN_RUDP_MEDIA_PROFILE_ID: &str = "muninn.rudp.low_latency_h264_lan.v1";
-const MUNINN_RUDP_MEDIA_VIDEO_BITRATE_KBPS: u32 = 30_000;
+const MUNINN_RUDP_MEDIA_VIDEO_BITRATE_KBPS: u32 = 16_000;
 const MUNINN_RUDP_MEDIA_PACKET_BYTES: usize = 900;
 const MUNINN_RUDP_IPV4_UDP_PAYLOAD_BYTES: usize = 1_472;
 const MUNINN_RUDP_FIXED_HEADER_BYTES: usize = 36;
@@ -1877,7 +1877,7 @@ fn publish_runtime_boundary_records(
                 "receiver_assembly_deadline_ms": media_profile.receiver_assembly_deadline_ms,
                 "receiver_gap_wait_ms": media_profile.receiver_gap_wait_ms,
                 "late_media_policy": "drop expired queued media; do not repair frames outside the latency budget",
-                "recovery": "receiver feedback may request keyframe; sender restarts low-latency encoder on new keyframe edges"
+                "recovery": "fixed quarter-second IDR budget with receiver feedback pressure telemetry"
             },
             "compatibility_mechanisms": compatibility_mechanisms,
             "cut_line": "Muninn's telemetry store owns provider advertisement, command boundary, transport profile, telemetry surface, and daemon health state. Local CLI activation and health commands are compatibility/ops witnesses only.",
@@ -5175,7 +5175,7 @@ fn muninn_rudp_media_profile() -> MuninnRudpMediaProfile {
         profile_id: MUNINN_RUDP_MEDIA_PROFILE_ID,
         video_codec: "h264",
         video_encoder: "h264_nvenc",
-        video_preset: "p4",
+        video_preset: "p5",
         video_tune: "ull",
         video_bitrate_kbps: MUNINN_RUDP_MEDIA_VIDEO_BITRATE_KBPS,
         media_packet_bytes: MUNINN_RUDP_MEDIA_PACKET_BYTES,
@@ -5201,7 +5201,7 @@ fn muninn_rudp_video_vbv_buffer_arg(options: &Options, profile: &MuninnRudpMedia
 }
 
 fn muninn_rudp_video_gop_frames(options: &Options) -> u32 {
-    (options.framerate.max(1).div_ceil(2)).max(1)
+    (options.framerate.max(1).div_ceil(4)).max(1)
 }
 
 fn loopback_args(options: &Options) -> Vec<String> {
@@ -5279,6 +5279,8 @@ fn rudp_video_ffmpeg_args(options: &Options) -> Vec<String> {
         "-keyint_min".to_string(),
         muninn_rudp_video_gop_frames(options).to_string(),
         "-forced-idr".to_string(),
+        "1".to_string(),
+        "-aud".to_string(),
         "1".to_string(),
         "-fps_mode".to_string(),
         "cfr".to_string(),
@@ -6272,31 +6274,35 @@ mod tests {
         );
         assert!(
             args.windows(2)
-                .any(|pair| pair[0] == "-preset" && pair[1] == "p4")
+                .any(|pair| pair[0] == "-preset" && pair[1] == "p5")
         );
         assert!(
             args.windows(2)
-                .any(|pair| pair[0] == "-b:v" && pair[1] == "30000k")
+                .any(|pair| pair[0] == "-b:v" && pair[1] == "16000k")
         );
         assert!(
             args.windows(2)
-                .any(|pair| pair[0] == "-maxrate" && pair[1] == "30000k")
+                .any(|pair| pair[0] == "-maxrate" && pair[1] == "16000k")
         );
         assert!(
             args.windows(2)
-                .any(|pair| pair[0] == "-bufsize" && pair[1] == "500k")
+                .any(|pair| pair[0] == "-bufsize" && pair[1] == "267k")
         );
         assert!(
             args.windows(2)
-                .any(|pair| pair[0] == "-g" && pair[1] == "30")
+                .any(|pair| pair[0] == "-g" && pair[1] == "15")
         );
         assert!(
             args.windows(2)
-                .any(|pair| pair[0] == "-keyint_min" && pair[1] == "30")
+                .any(|pair| pair[0] == "-keyint_min" && pair[1] == "15")
         );
         assert!(
             args.windows(2)
                 .any(|pair| pair[0] == "-forced-idr" && pair[1] == "1")
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-aud" && pair[1] == "1")
         );
         assert!(
             args.windows(2)
@@ -6331,16 +6337,16 @@ mod tests {
 
         assert_eq!(
             muninn_rudp_video_vbv_buffer_arg(&thirty_fps, &profile),
-            "1000k"
+            "534k"
         );
         assert_eq!(
             muninn_rudp_video_vbv_buffer_arg(&sixty_fps, &profile),
-            "500k"
+            "267k"
         );
     }
 
     #[test]
-    fn rudp_video_gop_tracks_half_second_recovery_budget() {
+    fn rudp_video_gop_tracks_quarter_second_recovery_budget() {
         let thirty_fps = Options::parse(
             ["activate", "--media-transport", "rudp", "--framerate", "30"]
                 .into_iter()
@@ -6354,8 +6360,8 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(muninn_rudp_video_gop_frames(&thirty_fps), 15);
-        assert_eq!(muninn_rudp_video_gop_frames(&sixty_fps), 30);
+        assert_eq!(muninn_rudp_video_gop_frames(&thirty_fps), 8);
+        assert_eq!(muninn_rudp_video_gop_frames(&sixty_fps), 15);
     }
 
     #[test]
