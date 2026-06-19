@@ -71,7 +71,11 @@ const MUNINN_RUDP_MEDIA_RECEIVER_ASSEMBLY_DEADLINE_MS: u64 = 800;
 const MUNINN_RUDP_MEDIA_RECEIVER_GAP_WAIT_MS: u64 = 16;
 const MUNINN_RUDP_MEDIA_REPAIR_CACHE_CHUNKS: usize = 16_384;
 const MUNINN_RUDP_MEDIA_REPAIR_BURST_CHUNKS: usize = 32;
-const MUNINN_RUDP_MEDIA_REPAIR_CHUNKS_PER_SECOND: usize = 64;
+const MUNINN_RUDP_MEDIA_REPAIR_INITIAL_CHUNKS_PER_SECOND: usize = 64;
+const MUNINN_RUDP_MEDIA_REPAIR_MIN_CHUNKS_PER_SECOND: usize = 8;
+const MUNINN_RUDP_MEDIA_REPAIR_MAX_CHUNKS_PER_SECOND: usize = 128;
+const MUNINN_RUDP_MEDIA_REPAIR_ADD_CHUNKS_PER_SECOND: usize = 8;
+const MUNINN_RUDP_MEDIA_REPAIR_RECOVERY_INTERVAL_MS: u64 = 2_000;
 const MUNINN_RUDP_ACTIVE_CATALOG_REPUBLISH_MS: u64 = 2_000;
 const PS_MOVE_LED_REPORT_LEN: usize = 49;
 
@@ -1384,7 +1388,7 @@ fn run_rudp_mux_once(
     let mut handled_keyframe_requests = 0_u64;
     let mut repair_cache = RecentVideoChunkRepairCache::new(MUNINN_RUDP_MEDIA_REPAIR_CACHE_CHUNKS);
     let mut repair_budget = MuninnRudpRepairBudget::new(
-        MUNINN_RUDP_MEDIA_REPAIR_CHUNKS_PER_SECOND,
+        MUNINN_RUDP_MEDIA_REPAIR_INITIAL_CHUNKS_PER_SECOND,
         MUNINN_RUDP_MEDIA_REPAIR_BURST_CHUNKS,
     );
     let result = loop {
@@ -1401,6 +1405,7 @@ fn run_rudp_mux_once(
                         &mut receiver_feedback,
                         &repair_cache,
                         &mut repair_budget,
+                        payloads_dropped,
                     )?;
                     record_receiver_keyframe_pressure(
                         &receiver_feedback,
@@ -1447,6 +1452,7 @@ fn run_rudp_mux_once(
                     &mut receiver_feedback,
                     &repair_cache,
                     &mut repair_budget,
+                    payloads_dropped,
                 )?;
                 record_receiver_keyframe_pressure(
                     &receiver_feedback,
@@ -1483,6 +1489,7 @@ fn run_rudp_mux_once(
                     &mut receiver_feedback,
                     &repair_cache,
                     &mut repair_budget,
+                    payloads_dropped,
                 )?;
                 record_receiver_keyframe_pressure(
                     &receiver_feedback,
@@ -1542,33 +1549,75 @@ struct MuninnRudpReceiverFeedbackStats {
     missing_video_chunks: u64,
     repaired_video_chunks: u64,
     deferred_repair_chunks: u64,
+    repair_chunks_per_second: usize,
     highest_decodable_frame_id: Option<u64>,
 }
 
 #[derive(Debug)]
 struct MuninnRudpRepairBudget {
     chunks_per_second: usize,
+    min_chunks_per_second: usize,
+    max_chunks_per_second: usize,
+    add_chunks_per_second: usize,
+    recovery_interval: Duration,
     max_available_chunks: usize,
     available_chunks: usize,
     last_refill_at: Instant,
+    last_rate_adjust_at: Instant,
+    last_queue_dropped: u64,
 }
 
 impl MuninnRudpRepairBudget {
     fn new(chunks_per_second: usize, max_available_chunks: usize) -> Self {
+        let now = Instant::now();
         let max_available_chunks = max_available_chunks.max(1);
         Self {
             chunks_per_second: chunks_per_second.max(1),
+            min_chunks_per_second: MUNINN_RUDP_MEDIA_REPAIR_MIN_CHUNKS_PER_SECOND,
+            max_chunks_per_second: MUNINN_RUDP_MEDIA_REPAIR_MAX_CHUNKS_PER_SECOND,
+            add_chunks_per_second: MUNINN_RUDP_MEDIA_REPAIR_ADD_CHUNKS_PER_SECOND,
+            recovery_interval: Duration::from_millis(MUNINN_RUDP_MEDIA_REPAIR_RECOVERY_INTERVAL_MS),
             max_available_chunks,
             available_chunks: max_available_chunks,
-            last_refill_at: Instant::now(),
+            last_refill_at: now,
+            last_rate_adjust_at: now,
+            last_queue_dropped: 0,
         }
     }
 
-    fn take(&mut self, requested_chunks: usize, now: Instant) -> usize {
+    fn chunks_per_second(&self) -> usize {
+        self.chunks_per_second
+    }
+
+    fn take(&mut self, requested_chunks: usize, now: Instant, queue_dropped: u64) -> usize {
+        self.adjust_rate(now, queue_dropped, requested_chunks);
         self.refill(now);
         let allowed = requested_chunks.min(self.available_chunks);
         self.available_chunks -= allowed;
         allowed
+    }
+
+    fn adjust_rate(&mut self, now: Instant, queue_dropped: u64, requested_chunks: usize) {
+        if queue_dropped > self.last_queue_dropped {
+            self.chunks_per_second = (self.chunks_per_second / 2).max(self.min_chunks_per_second);
+            self.available_chunks = self.available_chunks.min(self.chunks_per_second);
+            self.last_queue_dropped = queue_dropped;
+            self.last_rate_adjust_at = now;
+            return;
+        }
+        self.last_queue_dropped = queue_dropped;
+        if requested_chunks == 0
+            || now.saturating_duration_since(self.last_rate_adjust_at) < self.recovery_interval
+        {
+            return;
+        }
+        if self.chunks_per_second < self.max_chunks_per_second {
+            self.chunks_per_second = self
+                .chunks_per_second
+                .saturating_add(self.add_chunks_per_second)
+                .min(self.max_chunks_per_second);
+            self.last_rate_adjust_at = now;
+        }
     }
 
     fn refill(&mut self, now: Instant) {
@@ -1744,13 +1793,14 @@ fn rudp_media_progress_detail(
     receiver_feedback: &MuninnRudpReceiverFeedbackStats,
 ) -> String {
     format!(
-        "Muninn RUDP media progress: sent={sent} queue_dropped={queue_dropped} reliable_expired={reliable_expired} receiver_feedback={} receiver_keyframes={} receiver_late_frames={} receiver_missing_chunks={} receiver_repaired_chunks={} receiver_deferred_repairs={} receiver_highest_decodable={}",
+        "Muninn RUDP media progress: sent={sent} queue_dropped={queue_dropped} reliable_expired={reliable_expired} receiver_feedback={} receiver_keyframes={} receiver_late_frames={} receiver_missing_chunks={} receiver_repaired_chunks={} receiver_deferred_repairs={} repair_rate={} receiver_highest_decodable={}",
         receiver_feedback.feedback_records,
         receiver_feedback.requested_keyframes,
         receiver_feedback.late_frames,
         receiver_feedback.missing_video_chunks,
         receiver_feedback.repaired_video_chunks,
         receiver_feedback.deferred_repair_chunks,
+        receiver_feedback.repair_chunks_per_second,
         receiver_feedback
             .highest_decodable_frame_id
             .map(|frame_id| frame_id.to_string())
@@ -1763,13 +1813,16 @@ fn poll_rudp_media_receiver_feedback(
     stats: &mut MuninnRudpReceiverFeedbackStats,
     repair_cache: &RecentVideoChunkRepairCache,
     repair_budget: &mut MuninnRudpRepairBudget,
+    queue_dropped: u64,
 ) -> Result<()> {
     loop {
         match transport.receive_once() {
             Ok(Some(frame)) => {
                 let repair_payloads =
                     record_rudp_media_receiver_feedback(&frame, stats, repair_cache)?;
-                let allowed_repairs = repair_budget.take(repair_payloads.len(), Instant::now());
+                let allowed_repairs =
+                    repair_budget.take(repair_payloads.len(), Instant::now(), queue_dropped);
+                stats.repair_chunks_per_second = repair_budget.chunks_per_second();
                 stats.deferred_repair_chunks = stats
                     .deferred_repair_chunks
                     .saturating_add(repair_payloads.len().saturating_sub(allowed_repairs) as u64);
@@ -6874,30 +6927,40 @@ mod tests {
             missing_video_chunks: 4,
             repaired_video_chunks: 0,
             deferred_repair_chunks: 5,
+            repair_chunks_per_second: 64,
             highest_decodable_frame_id: Some(88),
         };
 
         assert_eq!(
             rudp_media_progress_detail(120, 3, 9, &receiver_feedback),
-            "Muninn RUDP media progress: sent=120 queue_dropped=3 reliable_expired=9 receiver_feedback=2 receiver_keyframes=1 receiver_late_frames=3 receiver_missing_chunks=4 receiver_repaired_chunks=0 receiver_deferred_repairs=5 receiver_highest_decodable=88"
+            "Muninn RUDP media progress: sent=120 queue_dropped=3 reliable_expired=9 receiver_feedback=2 receiver_keyframes=1 receiver_late_frames=3 receiver_missing_chunks=4 receiver_repaired_chunks=0 receiver_deferred_repairs=5 repair_rate=64 receiver_highest_decodable=88"
         );
     }
 
     #[test]
-    fn rudp_repair_budget_paces_repair_chunks() {
+    fn rudp_repair_budget_backs_off_on_media_drops_and_recovers_when_stable() {
         let start = Instant::now();
         let mut budget = MuninnRudpRepairBudget {
-            chunks_per_second: 10,
+            chunks_per_second: 64,
+            min_chunks_per_second: 8,
+            max_chunks_per_second: 128,
+            add_chunks_per_second: 8,
+            recovery_interval: Duration::from_secs(2),
             max_available_chunks: 4,
             available_chunks: 4,
             last_refill_at: start,
+            last_rate_adjust_at: start,
+            last_queue_dropped: 0,
         };
 
-        assert_eq!(budget.take(3, start), 3);
-        assert_eq!(budget.take(3, start), 1);
-        assert_eq!(budget.take(3, start + Duration::from_millis(99)), 0);
-        assert_eq!(budget.take(3, start + Duration::from_millis(100)), 1);
-        assert_eq!(budget.take(10, start + Duration::from_millis(1_000)), 4);
+        assert_eq!(budget.take(4, start, 0), 4);
+        assert_eq!(budget.chunks_per_second(), 64);
+        assert_eq!(budget.take(3, start + Duration::from_millis(10), 1), 0);
+        assert_eq!(budget.chunks_per_second(), 32);
+        assert_eq!(budget.take(3, start + Duration::from_secs(1), 1), 3);
+        assert_eq!(budget.chunks_per_second(), 32);
+        assert_eq!(budget.take(3, start + Duration::from_secs(3), 1), 3);
+        assert_eq!(budget.chunks_per_second(), 40);
     }
 
     #[test]
