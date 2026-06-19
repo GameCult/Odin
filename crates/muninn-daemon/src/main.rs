@@ -56,7 +56,8 @@ const MUNINN_OBS_CATALOG_RUDP_CONNECTION_ID: u32 = 0x6d75_0003;
 const MUNINN_MEDIA_SEND_QUEUE_DEADLINE_MS: u64 = 75;
 const MUNINN_RUDP_MEDIA_PROFILE_ID: &str = "muninn.rudp.low_latency_h264_lan.v1";
 const MUNINN_RUDP_MEDIA_VIDEO_BITRATE_KBPS: u32 = 48_000;
-const MUNINN_RUDP_MEDIA_VBV_FRAME_BUDGETS: u32 = 4;
+const MUNINN_RUDP_MEDIA_VBV_FRAME_BUDGETS: u32 = 1;
+const MUNINN_RUDP_MEDIA_LOW_DELAY_KEY_FRAME_SCALE: u32 = 4;
 const MUNINN_RUDP_MEDIA_PACKET_BYTES: usize = 800;
 const MUNINN_RUDP_IPV4_UDP_PAYLOAD_BYTES: usize = 1_472;
 const MUNINN_RUDP_FIXED_HEADER_BYTES: usize = 36;
@@ -1866,6 +1867,7 @@ fn publish_runtime_boundary_records(
                 "video_bitrate": muninn_rudp_video_bitrate_arg(&media_profile),
                 "video_maxrate": muninn_rudp_video_bitrate_arg(&media_profile),
                 "video_bufsize": muninn_rudp_video_vbv_buffer_arg(options, &media_profile),
+                "video_low_delay_key_frame_scale": MUNINN_RUDP_MEDIA_LOW_DELAY_KEY_FRAME_SCALE,
                 "media_packet_bytes": media_profile.media_packet_bytes,
                 "max_fragment_bytes": media_profile.max_fragment_bytes,
                 "video_b_frames": media_profile.video_b_frames,
@@ -5267,6 +5269,8 @@ fn rudp_video_ffmpeg_args(options: &Options) -> Vec<String> {
         "disabled".to_string(),
         "-strict_gop".to_string(),
         "1".to_string(),
+        "-ldkfs".to_string(),
+        MUNINN_RUDP_MEDIA_LOW_DELAY_KEY_FRAME_SCALE.to_string(),
         "-spatial_aq".to_string(),
         "1".to_string(),
         "-temporal_aq".to_string(),
@@ -6274,6 +6278,8 @@ mod tests {
             args.windows(2)
                 .any(|pair| pair[0] == "-strict_gop" && pair[1] == "1")
         );
+        assert!(args.windows(2).any(|pair| pair[0] == "-ldkfs"
+            && pair[1] == MUNINN_RUDP_MEDIA_LOW_DELAY_KEY_FRAME_SCALE.to_string()));
         assert!(
             args.windows(2)
                 .any(|pair| pair[0] == "-spatial_aq" && pair[1] == "1")
@@ -6308,7 +6314,7 @@ mod tests {
         );
         assert!(
             args.windows(2)
-                .any(|pair| pair[0] == "-bufsize" && pair[1] == "3200k")
+                .any(|pair| pair[0] == "-bufsize" && pair[1] == "800k")
         );
         assert!(
             args.windows(2)
@@ -6359,11 +6365,11 @@ mod tests {
 
         assert_eq!(
             muninn_rudp_video_vbv_buffer_arg(&thirty_fps, &profile),
-            "6400k"
+            "1600k"
         );
         assert_eq!(
             muninn_rudp_video_vbv_buffer_arg(&sixty_fps, &profile),
-            "3200k"
+            "800k"
         );
     }
 
@@ -7231,7 +7237,13 @@ Device 00:07:04:A8:00:D0 (public)
             media_profile
                 .get("video_bufsize")
                 .and_then(|value| value.as_str()),
-            Some("6400k")
+            Some("1600k")
+        );
+        assert_eq!(
+            media_profile
+                .get("video_low_delay_key_frame_scale")
+                .and_then(|value| value.as_u64()),
+            Some(MUNINN_RUDP_MEDIA_LOW_DELAY_KEY_FRAME_SCALE as u64)
         );
         assert_eq!(
             media_profile
