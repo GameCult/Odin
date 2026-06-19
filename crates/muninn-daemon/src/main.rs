@@ -75,6 +75,8 @@ const MUNINN_RUDP_MEDIA_REPAIR_MAX_CHUNKS_PER_SECOND: usize = 4_096;
 const MUNINN_RUDP_MEDIA_REPAIR_ADD_CHUNKS_PER_SECOND: usize = 256;
 const MUNINN_RUDP_MEDIA_REPAIR_RECOVERY_INTERVAL_MS: u64 = 2_000;
 const MUNINN_RUDP_MEDIA_SOCKET_BUFFER_BYTES: usize = 4 * 1024 * 1024;
+const MUNINN_RUDP_MEDIA_SEND_PACE_EVERY_PAYLOADS: usize = 16;
+const MUNINN_RUDP_MEDIA_SEND_PACE_SLEEP_US: u64 = 500;
 const MUNINN_RUDP_ACTIVE_CATALOG_REPUBLISH_MS: u64 = 2_000;
 const PS_MOVE_LED_REPORT_LEN: usize = 49;
 
@@ -167,6 +169,8 @@ struct MuninnRudpMediaProfile {
     sender_queue_deadline_ms: u64,
     sender_resend_delay_ms: u64,
     sender_reliable_expire_after_ms: u64,
+    sender_pace_every_payloads: usize,
+    sender_pace_sleep_us: u64,
     receiver_assembly_deadline_ms: u64,
     receiver_gap_wait_ms: u64,
 }
@@ -1414,6 +1418,10 @@ fn run_rudp_mux_once(
         MUNINN_RUDP_MEDIA_REPAIR_INITIAL_CHUNKS_PER_SECOND,
         MUNINN_RUDP_MEDIA_REPAIR_BURST_CHUNKS,
     );
+    let mut send_pacer = MuninnRudpMediaSendPacer::new(
+        media_profile.sender_pace_every_payloads,
+        Duration::from_micros(media_profile.sender_pace_sleep_us),
+    );
     let result = loop {
         match payload_rx.recv_timeout(Duration::from_millis(5)) {
             Ok(Ok(queued)) => {
@@ -1429,6 +1437,7 @@ fn run_rudp_mux_once(
                         &repair_cache,
                         &mut repair_budget,
                         &media_profile,
+                        &mut send_pacer,
                         payloads_dropped,
                     )?;
                     record_receiver_keyframe_pressure(
@@ -1466,6 +1475,7 @@ fn run_rudp_mux_once(
                     queued.payload.clone(),
                     queued.queued_at,
                     Duration::from_millis(media_profile.sender_queue_deadline_ms),
+                    &mut send_pacer,
                 )? {
                     payloads_dropped += 1;
                     continue;
@@ -1477,6 +1487,7 @@ fn run_rudp_mux_once(
                     &repair_cache,
                     &mut repair_budget,
                     &media_profile,
+                    &mut send_pacer,
                     payloads_dropped,
                 )?;
                 record_receiver_keyframe_pressure(
@@ -1515,6 +1526,7 @@ fn run_rudp_mux_once(
                     &repair_cache,
                     &mut repair_budget,
                     &media_profile,
+                    &mut send_pacer,
                     payloads_dropped,
                 )?;
                 record_receiver_keyframe_pressure(
@@ -1768,10 +1780,14 @@ fn send_rudp_media_payload_with_backpressure(
     payload: MuninnMediaSendPayload,
     queued_at: Instant,
     max_age: Duration,
+    send_pacer: &mut MuninnRudpMediaSendPacer,
 ) -> Result<bool> {
     loop {
         match transport.send(payload.channel_id, payload.payload.clone()) {
-            Ok(()) => return Ok(true),
+            Ok(()) => {
+                send_pacer.observe_sent_payload();
+                return Ok(true);
+            }
             Err(error) if is_would_block_error(&error) => {
                 if media_payload_queue_age_exceeded(queued_at, Instant::now(), max_age) {
                     return Ok(false);
@@ -1783,6 +1799,35 @@ fn send_rudp_media_payload_with_backpressure(
                 return Err(error).context("sending typed Muninn media payload over RUDP media");
             }
         }
+    }
+}
+
+#[derive(Debug)]
+struct MuninnRudpMediaSendPacer {
+    payloads_since_pause: usize,
+    every_payloads: usize,
+    sleep_for: Duration,
+}
+
+impl MuninnRudpMediaSendPacer {
+    fn new(every_payloads: usize, sleep_for: Duration) -> Self {
+        Self {
+            payloads_since_pause: 0,
+            every_payloads: every_payloads.max(1),
+            sleep_for,
+        }
+    }
+
+    fn observe_sent_payload(&mut self) {
+        if self.sleep_for.is_zero() {
+            return;
+        }
+        self.payloads_since_pause = self.payloads_since_pause.saturating_add(1);
+        if self.payloads_since_pause < self.every_payloads {
+            return;
+        }
+        self.payloads_since_pause = 0;
+        thread::sleep(self.sleep_for);
     }
 }
 
@@ -1840,6 +1885,7 @@ fn poll_rudp_media_receiver_feedback(
     repair_cache: &RecentVideoChunkRepairCache,
     repair_budget: &mut MuninnRudpRepairBudget,
     media_profile: &MuninnRudpMediaProfile,
+    send_pacer: &mut MuninnRudpMediaSendPacer,
     queue_dropped: u64,
 ) -> Result<()> {
     loop {
@@ -1859,6 +1905,7 @@ fn poll_rudp_media_receiver_feedback(
                         payload,
                         Instant::now(),
                         Duration::from_millis(media_profile.sender_queue_deadline_ms),
+                        send_pacer,
                     )? {
                         stats.repaired_video_chunks = stats.repaired_video_chunks.saturating_add(1);
                     }
@@ -1918,7 +1965,8 @@ fn open_media_rudp_transport(options: &Options) -> Result<CultNetRudpSocketTrans
             )
         })?;
     let socket = UdpSocket::bind("0.0.0.0:0").context("binding Muninn media RUDP client socket")?;
-    configure_media_rudp_socket_buffers(&socket).context("configuring Muninn media RUDP socket buffers")?;
+    configure_media_rudp_socket_buffers(&socket)
+        .context("configuring Muninn media RUDP socket buffers")?;
     socket
         .set_nonblocking(true)
         .context("setting Muninn media RUDP client nonblocking")?;
@@ -5614,6 +5662,8 @@ fn muninn_rudp_media_profile_for_bitrate_and_latency(
         sender_queue_deadline_ms: latency_budget_ms,
         sender_resend_delay_ms: MUNINN_RUDP_MEDIA_RESEND_DELAY_MS,
         sender_reliable_expire_after_ms: latency_budget_ms,
+        sender_pace_every_payloads: MUNINN_RUDP_MEDIA_SEND_PACE_EVERY_PAYLOADS,
+        sender_pace_sleep_us: MUNINN_RUDP_MEDIA_SEND_PACE_SLEEP_US,
         receiver_assembly_deadline_ms: latency_budget_ms,
         receiver_gap_wait_ms: MUNINN_RUDP_MEDIA_RECEIVER_GAP_WAIT_MS,
     }
@@ -7119,6 +7169,14 @@ mod tests {
 
         assert_eq!(profile.sender_queue_deadline_ms, 1200);
         assert_eq!(profile.sender_reliable_expire_after_ms, 1200);
+        assert_eq!(
+            profile.sender_pace_every_payloads,
+            MUNINN_RUDP_MEDIA_SEND_PACE_EVERY_PAYLOADS
+        );
+        assert_eq!(
+            profile.sender_pace_sleep_us,
+            MUNINN_RUDP_MEDIA_SEND_PACE_SLEEP_US
+        );
         assert_eq!(profile.receiver_assembly_deadline_ms, 1200);
         assert_eq!(rudp_media_deadline_delay_ticks(&profile), 108_000);
         assert_eq!(rudp_audio_deadline_delay_ticks(&options, &profile), 57_600);
