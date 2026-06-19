@@ -12,8 +12,8 @@ param(
   [string] $ObsTargetHost = "192.168.1.66",
   [int] $ObsPort = 5204,
   [string] $AudioDevice = "Realtek",
-  [string[]] $VideoSources = @("display:0=Raven display 1", "display:1=Raven display 2"),
-  [string[]] $AudioSources = @("wasapi-loopback:Realtek=Raven Realtek loopback"),
+  [string[]] $VideoSources = @(),
+  [string[]] $AudioSources = @(),
   [string] $IdunnRudpHealth = "192.168.1.66:17870",
   [string] $IdunnDaemon = "muninn",
   [string] $IdunnHealthContract = "muninn.cultnet-rudp-remote-telemetry-health",
@@ -85,6 +85,7 @@ function New-HiddenNativeLauncherPowerShellContent {
     [Parameter(Mandatory = $true)] [string] $StderrPath,
     [Parameter(Mandatory = $true)] [string] $PidPath,
     [Parameter(Mandatory = $false)] [string] $WorkingDirectory,
+    [Parameter(Mandatory = $false)] [string] $DynamicArgumentsScript,
     [Parameter(Mandatory = $false)] [switch] $WaitForExit
   )
 
@@ -96,6 +97,7 @@ New-Item -ItemType Directory -Force -Path __LOG_ROOT__ | Out-Null
 $launcherLog = __PID_PATH__ + '.launcher.log'
 ('launcher-start ' + [DateTime]::UtcNow.ToString('o')) | Set-Content -Encoding ASCII -LiteralPath $launcherLog
 $arguments = __ARGUMENTS__
+__DYNAMIC_ARGUMENTS_SCRIPT__
 function Quote-NativeArgument([string] $Value) {
   if ($Value -match '[\s"]') {
     return '"' + $Value.Replace('"', '\"') + '"'
@@ -147,6 +149,7 @@ __WAIT_FOR_EXIT_LINE__
     Replace("__STORE_DIR_LINE__", $storeDirLine).
     Replace("__LOG_ROOT__", (ConvertTo-PowerShellStringLiteral $LogRoot)).
     Replace("__ARGUMENTS__", (ConvertTo-PowerShellArrayLiteral $Arguments)).
+    Replace("__DYNAMIC_ARGUMENTS_SCRIPT__", $DynamicArgumentsScript).
     Replace("__FILE_PATH__", (ConvertTo-PowerShellStringLiteral $FilePath)).
     Replace("__WORKING_DIRECTORY_CLAUSE__", $workingDirectoryClause).
     Replace("__STDOUT_PATH__", (ConvertTo-PowerShellStringLiteral $StdoutPath)).
@@ -284,6 +287,59 @@ $serveArguments += @(
   "--idunn-health-contract", $IdunnHealthContract
 )
 
+$serveDynamicArgumentsScript = @'
+$hostArgumentIndex = [Array]::IndexOf($arguments, '--host')
+$hostLabel = if ($hostArgumentIndex -ge 0 -and ($hostArgumentIndex + 1) -lt $arguments.Count) {
+  $arguments[$hostArgumentIndex + 1]
+} else {
+  'host'
+}
+$hasExplicitVideoSources = @($arguments | Where-Object { $_ -eq '--video-source' }).Count -gt 0
+$hasExplicitAudioSources = @($arguments | Where-Object { $_ -eq '--audio-source' }).Count -gt 0
+if (-not $hasExplicitVideoSources) {
+  $displayNames = @(
+    Get-CimInstance Win32_DesktopMonitor -ErrorAction SilentlyContinue |
+      Where-Object { [string]::IsNullOrWhiteSpace($_.Status) -or $_.Status -eq 'OK' } |
+      ForEach-Object {
+        if ([string]::IsNullOrWhiteSpace($_.Name)) {
+          'Display'
+        } else {
+          $_.Name.Trim()
+        }
+      }
+  )
+  if ($displayNames.Count -lt 1) {
+    $displayNames = @('Display')
+  }
+  for ($index = 0; $index -lt $displayNames.Count; $index++) {
+    $monitorName = $displayNames[$index]
+    $label = if ($monitorName -eq 'Display') {
+      '{0} display {1}' -f $hostLabel, ($index + 1)
+    } else {
+      '{0} display {1} ({2})' -f $hostLabel, ($index + 1), $monitorName
+    }
+    $arguments += @('--video-source', ('display:{0}={1}' -f $index, $label))
+  }
+}
+if (-not $hasExplicitAudioSources) {
+  $audioNames = @(
+    Get-CimInstance Win32_SoundDevice -ErrorAction SilentlyContinue |
+      ForEach-Object { $_.Name } |
+      Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+      Sort-Object -Unique
+  )
+  if ($audioNames.Count -lt 1) {
+    $audioDeviceIndex = [Array]::IndexOf($arguments, '--audio-device')
+    if ($audioDeviceIndex -ge 0 -and ($audioDeviceIndex + 1) -lt $arguments.Count) {
+      $audioNames = @($arguments[$audioDeviceIndex + 1])
+    }
+  }
+  foreach ($audioName in $audioNames) {
+    $arguments += @('--audio-source', ('wasapi-loopback:{0}={1} loopback ({0})' -f $audioName.Trim(), $hostLabel))
+  }
+}
+'@
+
 $activateArguments = @(
   "request-stream",
   "--store", $StorePath,
@@ -354,6 +410,7 @@ $servePsContent = New-HiddenNativeLauncherPowerShellContent `
   -StdoutPath (Join-Path $LogRoot "muninn-serve.out.log") `
   -StderrPath (Join-Path $LogRoot "muninn-serve.err.log") `
   -PidPath (Join-Path $LogRoot "muninn-serve.pid") `
+  -DynamicArgumentsScript $serveDynamicArgumentsScript `
   -WaitForExit
 
 $activatePsContent = New-HiddenNativeLauncherPowerShellContent `
