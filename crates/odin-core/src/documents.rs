@@ -745,6 +745,10 @@ pub struct MuninnCaptureStreamCommandRecord {
     pub detail: String,
     #[cultcache(key = 13)]
     pub updated_at: String,
+    #[cultcache(key = 14, default)]
+    pub rudp_video_bitrate_kbps: u32,
+    #[cultcache(key = 15, default)]
+    pub rudp_latency_budget_ms: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
@@ -895,6 +899,10 @@ pub struct MuninnObsStreamCatalogRecord {
     pub media_port: u16,
     #[cultcache(key = 10, default)]
     pub media_packet_bytes: u32,
+    #[cultcache(key = 11, default)]
+    pub rudp_video_bitrate_kbps: u32,
+    #[cultcache(key = 12, default)]
+    pub rudp_latency_budget_ms: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, DatabaseEntry)]

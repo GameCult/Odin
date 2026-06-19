@@ -110,6 +110,8 @@ struct Options {
     obs_port: u16,
     media_transport: MediaTransport,
     media_packet_bytes: usize,
+    rudp_video_bitrate_kbps: u32,
+    rudp_latency_budget_ms: u32,
     width: u32,
     height: u32,
     framerate: u32,
@@ -631,6 +633,24 @@ fn capture_stream_commands_start_equivalent(
         && active.obs_port == command.obs_port
         && active.media_transport == command.media_transport
         && active.media_packet_bytes == command.media_packet_bytes
+        && command_rudp_video_bitrate_kbps(active) == command_rudp_video_bitrate_kbps(command)
+        && command_rudp_latency_budget_ms(active) == command_rudp_latency_budget_ms(command)
+}
+
+fn command_rudp_video_bitrate_kbps(command: &MuninnCaptureStreamCommandRecord) -> u32 {
+    if command.rudp_video_bitrate_kbps == 0 {
+        MUNINN_RUDP_MEDIA_VIDEO_BITRATE_KBPS
+    } else {
+        command.rudp_video_bitrate_kbps
+    }
+}
+
+fn command_rudp_latency_budget_ms(command: &MuninnCaptureStreamCommandRecord) -> u32 {
+    if command.rudp_latency_budget_ms == 0 {
+        MUNINN_RUDP_MEDIA_RECEIVER_ASSEMBLY_DEADLINE_MS as u32
+    } else {
+        command.rudp_latency_budget_ms
+    }
 }
 
 fn stop_capture_stream_command(
@@ -705,6 +725,10 @@ fn spawn_capture_stream_activation(
         command.media_transport.clone(),
         "--media-packet-bytes".to_string(),
         command.media_packet_bytes.to_string(),
+        "--rudp-video-bitrate-kbps".to_string(),
+        command_rudp_video_bitrate_kbps(command).to_string(),
+        "--rudp-latency-budget-ms".to_string(),
+        command_rudp_latency_budget_ms(command).to_string(),
     ];
     if let Some(obs_target_host) = command.obs_target_host.as_ref() {
         args.extend([
@@ -1341,7 +1365,7 @@ fn run_rudp_mux_once(
     )?;
     let mut last_stream_publish_at = Instant::now();
 
-    let media_profile = muninn_rudp_media_profile();
+    let media_profile = muninn_rudp_media_profile_for_options(options);
     let (payload_tx, payload_rx) = mpsc::channel::<Result<QueuedMuninnMediaSendPayload>>();
     let video_sender = video_rudp_payload_reader(
         payload_tx.clone(),
@@ -1881,7 +1905,7 @@ fn record_rudp_media_receiver_feedback(
 }
 
 fn open_media_rudp_transport(options: &Options) -> Result<CultNetRudpSocketTransportConnection> {
-    let media_profile = muninn_rudp_media_profile();
+    let media_profile = muninn_rudp_media_profile_for_options(options);
     let endpoint: SocketAddr = format!("{}:{}", options.target_host, options.port)
         .parse()
         .with_context(|| {
@@ -2109,7 +2133,7 @@ fn publish_runtime_boundary_records(
     } else {
         vec![activation_command.clone()]
     };
-    let media_profile = muninn_rudp_media_profile();
+    let media_profile = muninn_rudp_media_profile_for_options(options);
     let command_boundary = MuninnCommandBoundaryCompatRecord {
         value: json!({
             "schema": "muninn.command_boundary.v1",
@@ -2438,6 +2462,8 @@ fn publish_obs_catalog(
         media_target_host: options.target_host.clone(),
         media_port: options.port,
         media_packet_bytes: options.media_packet_bytes as u32,
+        rudp_video_bitrate_kbps: options.rudp_video_bitrate_kbps,
+        rudp_latency_budget_ms: options.rudp_latency_budget_ms,
     };
     node.put("obs", &record)?;
     if let Some(target) = options.obs_catalog_rudp_target {
@@ -5357,6 +5383,8 @@ fn build_capture_stream_command(options: &Options) -> Result<MuninnCaptureStream
         requested_by: "muninn.request-stream".to_string(),
         detail: "operator requested a daemon-owned capture stream lifecycle change".to_string(),
         updated_at: now,
+        rudp_video_bitrate_kbps: options.rudp_video_bitrate_kbps,
+        rudp_latency_budget_ms: options.rudp_latency_budget_ms,
     })
 }
 
@@ -5468,11 +5496,7 @@ fn build_targets(options: &Options) -> Vec<String> {
             targets
         }
         MediaTransport::Rudp => {
-            vec![rudp_endpoint(
-                &options.target_host,
-                options.port,
-                &options.stream_id,
-            )]
+            vec![rudp_endpoint_for_options(options)]
         }
     }
 }
@@ -5483,6 +5507,25 @@ fn srt_endpoint(host: &str, port: u16) -> String {
 
 fn rudp_endpoint(host: &str, port: u16, stream_id: &str) -> String {
     let profile = muninn_rudp_media_profile();
+    rudp_endpoint_for_profile(host, port, stream_id, &profile)
+}
+
+fn rudp_endpoint_for_options(options: &Options) -> String {
+    let profile = muninn_rudp_media_profile_for_options(options);
+    rudp_endpoint_for_profile(
+        &options.target_host,
+        options.port,
+        &options.stream_id,
+        &profile,
+    )
+}
+
+fn rudp_endpoint_for_profile(
+    host: &str,
+    port: u16,
+    stream_id: &str,
+    profile: &MuninnRudpMediaProfile,
+) -> String {
     format!(
         "rudp://{host}:{port}/{stream_id}?channel=media&format=muninn-typed-media&connection=0x{MUNINN_MEDIA_RUDP_CONNECTION_ID:08x}&profile={}&delivery=unreliable&sender_resend_delay_ms={}&reliable_expire_after_ms={}&assembly_deadline_ms={}&gap_wait_ms={}",
         profile.profile_id,
@@ -5494,21 +5537,45 @@ fn rudp_endpoint(host: &str, port: u16, stream_id: &str) -> String {
 }
 
 fn muninn_rudp_media_profile() -> MuninnRudpMediaProfile {
+    muninn_rudp_media_profile_for_bitrate(MUNINN_RUDP_MEDIA_VIDEO_BITRATE_KBPS)
+}
+
+fn muninn_rudp_media_profile_for_options(options: &Options) -> MuninnRudpMediaProfile {
+    muninn_rudp_media_profile_for_bitrate_and_latency(
+        options.rudp_video_bitrate_kbps,
+        options.rudp_latency_budget_ms,
+    )
+}
+
+fn muninn_rudp_media_profile_for_bitrate(video_bitrate_kbps: u32) -> MuninnRudpMediaProfile {
+    muninn_rudp_media_profile_for_bitrate_and_latency(
+        video_bitrate_kbps,
+        MUNINN_RUDP_MEDIA_RECEIVER_ASSEMBLY_DEADLINE_MS as u32,
+    )
+}
+
+fn muninn_rudp_media_profile_for_bitrate_and_latency(
+    video_bitrate_kbps: u32,
+    latency_budget_ms: u32,
+) -> MuninnRudpMediaProfile {
+    let latency_budget_ms = u64::from(latency_budget_ms.max(1));
     MuninnRudpMediaProfile {
         profile_id: MUNINN_RUDP_MEDIA_PROFILE_ID,
         video_codec: "h264",
         video_encoder: "h264_nvenc",
         video_preset: "p5",
         video_tune: "ull",
-        video_bitrate_kbps: MUNINN_RUDP_MEDIA_VIDEO_BITRATE_KBPS,
+        video_bitrate_kbps: video_bitrate_kbps.max(1),
         media_packet_bytes: MUNINN_RUDP_MEDIA_PACKET_BYTES,
         max_fragment_bytes: MUNINN_RUDP_MEDIA_MAX_FRAGMENT_BYTES,
         video_b_frames: 0,
         video_rc_lookahead: 0,
         sender_queue_deadline_ms: MUNINN_MEDIA_SEND_QUEUE_DEADLINE_MS,
         sender_resend_delay_ms: MUNINN_RUDP_MEDIA_RESEND_DELAY_MS,
-        sender_reliable_expire_after_ms: MUNINN_RUDP_MEDIA_RELIABLE_EXPIRE_AFTER_MS,
-        receiver_assembly_deadline_ms: MUNINN_RUDP_MEDIA_RECEIVER_ASSEMBLY_DEADLINE_MS,
+        sender_reliable_expire_after_ms: latency_budget_ms
+            .min(MUNINN_RUDP_MEDIA_RELIABLE_EXPIRE_AFTER_MS)
+            .max(1),
+        receiver_assembly_deadline_ms: latency_budget_ms,
         receiver_gap_wait_ms: MUNINN_RUDP_MEDIA_RECEIVER_GAP_WAIT_MS,
     }
 }
@@ -5549,7 +5616,7 @@ fn loopback_args(options: &Options) -> Vec<String> {
 }
 
 fn rudp_video_ffmpeg_args(options: &Options) -> Vec<String> {
-    let profile = muninn_rudp_media_profile();
+    let profile = muninn_rudp_media_profile_for_options(options);
     vec![
         "-hide_banner".to_string(),
         "-loglevel".to_string(),
@@ -5825,6 +5892,8 @@ impl Options {
             obs_port: 5204,
             media_transport: MediaTransport::Srt,
             media_packet_bytes: MUNINN_RUDP_MEDIA_PACKET_BYTES,
+            rudp_video_bitrate_kbps: MUNINN_RUDP_MEDIA_VIDEO_BITRATE_KBPS,
+            rudp_latency_budget_ms: MUNINN_RUDP_MEDIA_RECEIVER_ASSEMBLY_DEADLINE_MS as u32,
             width: 1920,
             height: 1080,
             framerate: 30,
@@ -5903,6 +5972,28 @@ impl Options {
                 "--media-packet-bytes" => {
                     options.media_packet_bytes =
                         take_value(&mut args, "--media-packet-bytes")?.parse()?
+                }
+                "--rudp-video-bitrate-kbps" => {
+                    let bitrate = take_value(&mut args, "--rudp-video-bitrate-kbps")?
+                        .parse()
+                        .context("--rudp-video-bitrate-kbps must be a positive integer")?;
+                    if bitrate == 0 {
+                        return Err(anyhow!(
+                            "--rudp-video-bitrate-kbps must be greater than zero"
+                        ));
+                    }
+                    options.rudp_video_bitrate_kbps = bitrate;
+                }
+                "--rudp-latency-budget-ms" => {
+                    let latency_budget = take_value(&mut args, "--rudp-latency-budget-ms")?
+                        .parse()
+                        .context("--rudp-latency-budget-ms must be a positive integer")?;
+                    if latency_budget == 0 {
+                        return Err(anyhow!(
+                            "--rudp-latency-budget-ms must be greater than zero"
+                        ));
+                    }
+                    options.rudp_latency_budget_ms = latency_budget;
                 }
                 "--width" => options.width = take_value(&mut args, "--width")?.parse()?,
                 "--height" => options.height = take_value(&mut args, "--height")?.parse()?,
@@ -6161,7 +6252,7 @@ fn parse_media_transport(value: &str) -> Result<MediaTransport> {
 }
 
 fn help_text() -> &'static str {
-    "Usage: muninn [serve|activate|request-stream|request-move-light|move-light-status|move-identity-status|move-source-status|move-state-status|claim-move-host|quest-access-status] [--store <path>] [--activate-store <path>] [--stream-action <start|stop>] [--target-host <host>] [--port <port>] [--obs-target-host <host>] [--obs-port <port>] [--media-transport <srt|rudp>] [--media-packet-bytes <bytes>] [--loopback-script <path>] [--ffmpeg <path>] [--capture-command-rudp-bind <addr>] [--capture-command-rudp-target <addr>] [--obs-catalog-rudp-target <addr>] [--move-state <move-id>=<hidraw-path>] [--move-host <bt-addr>] [--move-evidence-stream <stream-id>] [--move-evidence-verse <verse-id>] [--quest-adb] [--quest-serial <serial>] [--quest-input-stream <stream-id>] [--quest-pose-stream <stream-id>] [--quest-video-input-stream <stream-id>] [--idunn-rudp-health <addr>] [--idunn-daemon <id>] [--idunn-health-contract <contract>] [--dry-run] [--health]\n\nMuninn is Odin's portable telemetry Verse assembler. serve publishes cheap typed telemetry affordances, optional Quest USB access surfaces, and the explicitly configured Move runtime; when serve receives --move-state, --move-host, or --move-evidence-stream it may publish source-local Move controller state, typed Move identity records, a CultMesh Move evidence stream, and keep USB-attached PS Moves claimed to that explicit Bluetooth host; serve also consumes typed capture stream commands from --activate-store or --capture-command-rudp-bind and owns the local ffmpeg/loopback activation child lifecycle, and may project the OBS stream catalog to a local OBS plugin over --obs-catalog-rudp-target; activate starts an explicitly requested local stream over SRT or CultNet RUDP as a daemon child; request-stream publishes a typed capture stream command for Muninn serve to execute, either into the activation store or over --capture-command-rudp-target; request-move-light publishes a typed Move light command for Muninn serve to execute; move-light-status reads typed command receipts; move-identity-status reads typed Move identity records; move-source-status prints live Move source discovery; move-state-status reads typed controller-state records; claim-move-host assigns USB-attached PS Moves to a Bluetooth host; quest-access-status reads typed Quest access state. In --health mode, the Idunn RUDP flags publish typed daemon health to Idunn while preserving command-probe exit semantics."
+    "Usage: muninn [serve|activate|request-stream|request-move-light|move-light-status|move-identity-status|move-source-status|move-state-status|claim-move-host|quest-access-status] [--store <path>] [--activate-store <path>] [--stream-action <start|stop>] [--target-host <host>] [--port <port>] [--obs-target-host <host>] [--obs-port <port>] [--media-transport <srt|rudp>] [--media-packet-bytes <bytes>] [--rudp-video-bitrate-kbps <kbps>] [--rudp-latency-budget-ms <ms>] [--loopback-script <path>] [--ffmpeg <path>] [--capture-command-rudp-bind <addr>] [--capture-command-rudp-target <addr>] [--obs-catalog-rudp-target <addr>] [--move-state <move-id>=<hidraw-path>] [--move-host <bt-addr>] [--move-evidence-stream <stream-id>] [--move-evidence-verse <verse-id>] [--quest-adb] [--quest-serial <serial>] [--quest-input-stream <stream-id>] [--quest-pose-stream <stream-id>] [--quest-video-input-stream <stream-id>] [--idunn-rudp-health <addr>] [--idunn-daemon <id>] [--idunn-health-contract <contract>] [--dry-run] [--health]\n\nMuninn is Odin's portable telemetry Verse assembler. serve publishes cheap typed telemetry affordances, optional Quest USB access surfaces, and the explicitly configured Move runtime; when serve receives --move-state, --move-host, or --move-evidence-stream it may publish source-local Move controller state, typed Move identity records, a CultMesh Move evidence stream, and keep USB-attached PS Moves claimed to that explicit Bluetooth host; serve also consumes typed capture stream commands from --activate-store or --capture-command-rudp-bind and owns the local ffmpeg/loopback activation child lifecycle, and may project the OBS stream catalog to a local OBS plugin over --obs-catalog-rudp-target; activate starts an explicitly requested local stream over SRT or CultNet RUDP as a daemon child; request-stream publishes a typed capture stream command for Muninn serve to execute, either into the activation store or over --capture-command-rudp-target; request-move-light publishes a typed Move light command for Muninn serve to execute; move-light-status reads typed command receipts; move-identity-status reads typed Move identity records; move-source-status prints live Move source discovery; move-state-status reads typed controller-state records; claim-move-host assigns USB-attached PS Moves to a Bluetooth host; quest-access-status reads typed Quest access state. In --health mode, the Idunn RUDP flags publish typed daemon health to Idunn while preserving command-probe exit semantics."
 }
 
 fn parse_move_state_source(value: &str) -> Result<MoveStateSource> {
@@ -6221,6 +6312,10 @@ mod tests {
         assert_eq!(options.mode, Mode::Serve);
         assert!(options.interval_seconds.is_none());
         assert!(options.activation_store_path.is_none());
+        assert_eq!(
+            options.rudp_video_bitrate_kbps,
+            MUNINN_RUDP_MEDIA_VIDEO_BITRATE_KBPS
+        );
     }
 
     #[test]
@@ -6380,6 +6475,8 @@ mod tests {
             media_target_host: "192.168.1.66".to_string(),
             media_port: 5204,
             media_packet_bytes: MUNINN_RUDP_MEDIA_PACKET_BYTES as u32,
+            rudp_video_bitrate_kbps: MUNINN_RUDP_MEDIA_VIDEO_BITRATE_KBPS,
+            rudp_latency_budget_ms: MUNINN_RUDP_MEDIA_RECEIVER_ASSEMBLY_DEADLINE_MS as u32,
         };
 
         publish_obs_catalog_rudp(receiver_addr, &catalog).unwrap();
@@ -6396,6 +6493,14 @@ mod tests {
         assert_eq!(
             decoded.media_packet_bytes,
             MUNINN_RUDP_MEDIA_PACKET_BYTES as u32
+        );
+        assert_eq!(
+            decoded.rudp_video_bitrate_kbps,
+            MUNINN_RUDP_MEDIA_VIDEO_BITRATE_KBPS
+        );
+        assert_eq!(
+            decoded.rudp_latency_budget_ms,
+            MUNINN_RUDP_MEDIA_RECEIVER_ASSEMBLY_DEADLINE_MS as u32
         );
         assert!(decoded.urls[0].contains("delivery=unreliable"));
         assert!(decoded.urls[0].contains("reliable_expire_after_ms=600"));
@@ -6704,6 +6809,41 @@ mod tests {
                 .any(|pair| pair[0] == "-an" && pair[1] == "-c:v")
         );
         assert_eq!(args.last().map(String::as_str), Some("pipe:1"));
+    }
+
+    #[test]
+    fn rudp_video_encoder_uses_explicit_bitrate_budget() {
+        let options = Options::parse(
+            [
+                "activate",
+                "--media-transport",
+                "rudp",
+                "--framerate",
+                "30",
+                "--rudp-video-bitrate-kbps",
+                "8000",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap();
+
+        let args = rudp_video_ffmpeg_args(&options);
+        let profile = muninn_rudp_media_profile_for_options(&options);
+
+        assert_eq!(profile.video_bitrate_kbps, 8000);
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-b:v" && pair[1] == "8000k")
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-maxrate" && pair[1] == "8000k")
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-bufsize" && pair[1] == "267k")
+        );
     }
 
     #[test]
@@ -7719,6 +7859,12 @@ Device 00:07:04:A8:00:D0 (public)
         );
         assert_eq!(
             media_profile
+                .get("video_bitrate")
+                .and_then(|value| value.as_str()),
+            Some("16000k")
+        );
+        assert_eq!(
+            media_profile
                 .get("video_bufsize")
                 .and_then(|value| value.as_str()),
             Some("534k")
@@ -7777,6 +7923,55 @@ Device 00:07:04:A8:00:D0 (public)
                 .and_then(|value| value.as_str())
                 .is_some_and(|entry| entry.contains("C:/Meta/Odin/state/muninn.activate.cc"))
         }));
+        let _ = fs::remove_file(store_path);
+    }
+
+    #[test]
+    fn runtime_boundary_reports_explicit_rudp_video_bitrate() {
+        let store_path = std::env::temp_dir().join(format!(
+            "muninn-boundary-bitrate-{}.cc",
+            timestamp_ns().unwrap()
+        ));
+        let options = Options::parse(
+            [
+                "serve",
+                "--store",
+                store_path.to_str().unwrap(),
+                "--host",
+                "raven",
+                "--media-transport",
+                "rudp",
+                "--rudp-video-bitrate-kbps",
+                "8000",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap();
+        let mut node = open_node(&options, "muninn-boundary-bitrate-test").unwrap();
+
+        publish_runtime_boundary_records(&mut node, &options, "idle", &[]).unwrap();
+
+        let transport = node
+            .get_required::<MuninnTransportProfileCompatRecord>("transport-profile:muninn")
+            .unwrap();
+        let media_profile = transport
+            .value
+            .get("media_profile")
+            .and_then(|value| value.as_object())
+            .unwrap();
+        assert_eq!(
+            media_profile
+                .get("video_bitrate")
+                .and_then(|value| value.as_str()),
+            Some("8000k")
+        );
+        assert_eq!(
+            media_profile
+                .get("video_bufsize")
+                .and_then(|value| value.as_str()),
+            Some("267k")
+        );
         let _ = fs::remove_file(store_path);
     }
 
