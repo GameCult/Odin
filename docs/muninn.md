@@ -216,7 +216,7 @@ action and `start-muninn-serve-hidden.vbs` as its argument. It also repairs
 VBS launchers whose bodies call PowerShell entrypoints directly, not `.cmd`
 payloads. The serve VBS launches `start-muninn-serve.ps1` with noninteractive hidden
 PowerShell. The PowerShell launcher starts `muninn.exe` with
-`-WindowStyle Hidden`, passes `--idunn-rudp-health 10.77.0.2:17870`,
+`-WindowStyle Hidden`, passes `--idunn-rudp-health 192.168.1.66:17870`,
 `--idunn-daemon muninn`, and
 `--idunn-health-contract muninn.cultnet-rudp-remote-telemetry-health`, and
 redirects logs under `C:\Meta\Odin\logs\muninn`.

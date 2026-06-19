@@ -302,9 +302,10 @@ lane, Stonks daemon health, Weksa daemon health, VoidBot stack health, and
 Nightwing Gjallar framebuffer composition health as completed substrate cuts.
 Muninn's long-running `serve` bodies now publish
 `idunn.daemon_health` over RUDP themselves; Starfire publishes to local Idunn,
-while Nightwing and Raven publish over WireGuard to `10.77.0.2:17870` using
-their target daemon ids and health contracts. `muninn --health` keeps the same
-path as fallback/manual proof, but it is no longer the live owner. Odin
+while Nightwing publishes over WireGuard to `10.77.0.2:17870` and Raven's live
+launcher currently publishes over LAN to `192.168.1.66:17870` using their
+target daemon ids and health contracts. `muninn --health` keeps the same path
+as fallback/manual proof, but it is no longer the live owner. Odin
 publishes `odin.cultnet-rudp-provider-health` after each provider refresh.
 Stonks publishes `stonks.cultnet-rudp-market-health` after each serialized
 market refresh. Weksa publishes `weksa.cultnet-rudp-provider-health` after each

@@ -5,7 +5,7 @@ param(
   [string] $ActivateStorePath = "C:\Meta\Odin\state\muninn.activate.cc",
   [string] $LogRoot = "C:\Meta\Odin\logs\muninn",
   [int] $MaxStoreAgeSeconds = 180,
-  [string] $IdunnRudpHealth = "10.77.0.2:17870",
+  [string] $IdunnRudpHealth = "192.168.1.66:17870",
   [int] $ConnectTimeoutSeconds = 10,
   [string] $SshUser = "",
   [string] $IdentityFile = ""
