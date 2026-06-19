@@ -93,6 +93,7 @@ enum Mode {
     DryRun,
     RequestStream,
     RequestMoveLight,
+    CaptureStreamStatus,
     MoveLightStatus,
     MoveIdentityStatus,
     MoveSourceStatus,
@@ -108,6 +109,7 @@ struct Options {
     activation_store_path: Option<PathBuf>,
     surface_id: String,
     stream_id: String,
+    stream_filter_explicit: bool,
     stream_action: String,
     host_id: String,
     target_host: String,
@@ -290,6 +292,7 @@ fn main() -> Result<()> {
         Mode::Health => health_check(&options),
         Mode::RequestStream => request_capture_stream(options),
         Mode::RequestMoveLight => request_move_light(options),
+        Mode::CaptureStreamStatus => capture_stream_status(options),
         Mode::MoveLightStatus => move_light_status(options),
         Mode::MoveIdentityStatus => move_identity_status(options),
         Mode::MoveSourceStatus => move_source_status(options),
@@ -5577,6 +5580,77 @@ fn move_light_status(options: Options) -> Result<()> {
     Ok(())
 }
 
+fn capture_stream_status(options: Options) -> Result<()> {
+    let mut status_options = options.clone();
+    if let Some(activation_store_path) = status_options.activation_store_path.as_ref() {
+        status_options.store_path = activation_store_path.clone();
+    }
+    let node = open_node(&status_options, "muninn-capture-stream-status")?;
+    let mut commands = node.cache().get_all::<MuninnCaptureStreamCommandRecord>()?;
+    commands.retain(|command| command.host_id == status_options.host_id);
+    if let Some(command_id) = status_options.command_id.as_deref() {
+        commands.retain(|command| command.command_id == command_id);
+    }
+    if status_options.stream_filter_explicit && !status_options.stream_id.trim().is_empty() {
+        commands.retain(|command| command.stream_id == status_options.stream_id);
+    }
+    commands.sort_by(|left, right| {
+        left.stream_id
+            .cmp(&right.stream_id)
+            .then(left.command_id.cmp(&right.command_id))
+    });
+
+    if commands.is_empty() {
+        println!(
+            "No Muninn capture stream commands found for host {}{}{}.",
+            status_options.host_id,
+            if !status_options.stream_filter_explicit || status_options.stream_id.trim().is_empty() {
+                ""
+            } else {
+                " stream "
+            },
+            if !status_options.stream_filter_explicit || status_options.stream_id.trim().is_empty() {
+                ""
+            } else {
+                status_options.stream_id.as_str()
+            }
+        );
+        return Ok(());
+    }
+
+    for command in commands {
+        let target_display = if command.action == "start" {
+            format!("{}:{}", command.target_host, command.port)
+        } else {
+            "n/a".to_string()
+        };
+        let video_source_display = if command.action == "start" {
+            command_video_source_id(&command).to_string()
+        } else {
+            "n/a".to_string()
+        };
+        let audio_source_display = if command.action == "start" {
+            command_audio_source_id(&command).to_string()
+        } else {
+            "n/a".to_string()
+        };
+        println!(
+            "{} host={} stream={} action={} state={} target={} video_source={} audio_source={} detail={} updated={}",
+            command.command_id,
+            command.host_id,
+            command.stream_id,
+            command.action,
+            command.state,
+            target_display,
+            video_source_display,
+            audio_source_display,
+            command.detail,
+            command.updated_at
+        );
+    }
+    Ok(())
+}
+
 fn move_state_status(options: Options) -> Result<()> {
     let node = open_node(&options, "muninn-move-state-status")?;
     let mut states = node.cache().get_all::<MuninnMoveControllerStateRecord>()?;
@@ -6360,6 +6434,7 @@ impl Options {
             activation_store_path: None,
             surface_id: "muninn.telemetry.local".to_string(),
             stream_id: "muninn.raven.av.srt".to_string(),
+            stream_filter_explicit: false,
             stream_action: "start".to_string(),
             host_id: "raven".to_string(),
             target_host: "10.77.0.2".to_string(),
@@ -6419,6 +6494,7 @@ impl Options {
                 "activate" => options.mode = Mode::Activate,
                 "request-stream" => options.mode = Mode::RequestStream,
                 "request-move-light" => options.mode = Mode::RequestMoveLight,
+                "capture-stream-status" => options.mode = Mode::CaptureStreamStatus,
                 "move-light-status" => options.mode = Mode::MoveLightStatus,
                 "move-identity-status" => options.mode = Mode::MoveIdentityStatus,
                 "move-source-status" => options.mode = Mode::MoveSourceStatus,
@@ -6433,7 +6509,10 @@ impl Options {
                         Some(PathBuf::from(take_value(&mut args, "--activate-store")?))
                 }
                 "--surface" => options.surface_id = take_value(&mut args, "--surface")?,
-                "--stream" => options.stream_id = take_value(&mut args, "--stream")?,
+                "--stream" => {
+                    options.stream_id = take_value(&mut args, "--stream")?;
+                    options.stream_filter_explicit = true;
+                }
                 "--stream-action" => {
                     options.stream_action = take_value(&mut args, "--stream-action")?
                 }
@@ -6766,7 +6845,7 @@ fn parse_catalog_source(value: &str) -> Result<CatalogSource> {
 }
 
 fn help_text() -> &'static str {
-    "Usage: muninn [serve|activate|request-stream|request-move-light|move-light-status|move-identity-status|move-source-status|move-state-status|claim-move-host|quest-access-status] [--store <path>] [--activate-store <path>] [--stream-action <start|stop>] [--target-host <host>] [--port <port>] [--obs-target-host <host>] [--obs-port <port>] [--media-transport <srt|rudp>] [--media-packet-bytes <bytes>] [--rudp-video-bitrate-kbps <kbps>] [--rudp-latency-budget-ms <ms>] [--video-source <source-id=label>] [--audio-source <source-id=label>] [--no-video] [--no-audio] [--loopback-script <path>] [--ffmpeg <path>] [--capture-command-rudp-bind <addr>] [--capture-command-rudp-target <addr>] [--obs-catalog-rudp-target <addr>] [--move-state <move-id>=<hidraw-path>] [--move-host <bt-addr>] [--move-evidence-stream <stream-id>] [--move-evidence-verse <verse-id>] [--quest-adb] [--quest-serial <serial>] [--quest-input-stream <stream-id>] [--quest-pose-stream <stream-id>] [--quest-video-input-stream <stream-id>] [--idunn-rudp-health <addr>] [--idunn-daemon <id>] [--idunn-health-contract <contract>] [--dry-run] [--health]\n\nMuninn is Odin's portable telemetry Verse assembler. serve publishes cheap typed telemetry affordances, optional Quest USB access surfaces, and the explicitly configured Move runtime; when serve receives --move-state, --move-host, or --move-evidence-stream it may publish source-local Move controller state, typed Move identity records, a CultMesh Move evidence stream, and keep USB-attached PS Moves claimed to that explicit Bluetooth host; serve also consumes typed capture stream commands from --activate-store or --capture-command-rudp-bind and owns the local ffmpeg/loopback activation child lifecycle, and may project the OBS stream catalog to a local OBS plugin over --obs-catalog-rudp-target; activate starts an explicitly requested local stream over SRT or CultNet RUDP as a daemon child; request-stream publishes a typed capture stream command for Muninn serve to execute, either into the activation store or over --capture-command-rudp-target; use --no-video or --no-audio to request one leg without the other when the transport is CultNet RUDP; request-move-light publishes a typed Move light command for Muninn serve to execute; move-light-status reads typed command receipts; move-identity-status reads typed Move identity records; move-source-status prints live Move source discovery; move-state-status reads typed controller-state records; claim-move-host assigns USB-attached PS Moves to a Bluetooth host; quest-access-status reads typed Quest access state. In --health mode, the Idunn RUDP flags publish typed daemon health to Idunn while preserving command-probe exit semantics."
+    "Usage: muninn [serve|activate|request-stream|capture-stream-status|request-move-light|move-light-status|move-identity-status|move-source-status|move-state-status|claim-move-host|quest-access-status] [--store <path>] [--activate-store <path>] [--stream-action <start|stop>] [--target-host <host>] [--port <port>] [--obs-target-host <host>] [--obs-port <port>] [--media-transport <srt|rudp>] [--media-packet-bytes <bytes>] [--rudp-video-bitrate-kbps <kbps>] [--rudp-latency-budget-ms <ms>] [--video-source <source-id=label>] [--audio-source <source-id=label>] [--no-video] [--no-audio] [--loopback-script <path>] [--ffmpeg <path>] [--capture-command-rudp-bind <addr>] [--capture-command-rudp-target <addr>] [--obs-catalog-rudp-target <addr>] [--move-state <move-id>=<hidraw-path>] [--move-host <bt-addr>] [--move-evidence-stream <stream-id>] [--move-evidence-verse <verse-id>] [--quest-adb] [--quest-serial <serial>] [--quest-input-stream <stream-id>] [--quest-pose-stream <stream-id>] [--quest-video-input-stream <stream-id>] [--idunn-rudp-health <addr>] [--idunn-daemon <id>] [--idunn-health-contract <contract>] [--dry-run] [--health]\n\nMuninn is Odin's portable telemetry Verse assembler. serve publishes cheap typed telemetry affordances, optional Quest USB access surfaces, and the explicitly configured Move runtime; when serve receives --move-state, --move-host, or --move-evidence-stream it may publish source-local Move controller state, typed Move identity records, a CultMesh Move evidence stream, and keep USB-attached PS Moves claimed to that explicit Bluetooth host; serve also consumes typed capture stream commands from --activate-store or --capture-command-rudp-bind and owns the local ffmpeg/loopback activation child lifecycle, and may project the OBS stream catalog to a local OBS plugin over --obs-catalog-rudp-target; activate starts an explicitly requested local stream over SRT or CultNet RUDP as a daemon child; request-stream publishes a typed capture stream command for Muninn serve to execute, either into the activation store or over --capture-command-rudp-target; capture-stream-status reads typed capture stream command receipts; use --no-video or --no-audio to request one leg without the other when the transport is CultNet RUDP; request-move-light publishes a typed Move light command for Muninn serve to execute; move-light-status reads typed command receipts; move-identity-status reads typed Move identity records; move-source-status prints live Move source discovery; move-state-status reads typed controller-state records; claim-move-host assigns USB-attached PS Moves to a Bluetooth host; quest-access-status reads typed Quest access state. In --health mode, the Idunn RUDP flags publish typed daemon health to Idunn while preserving command-probe exit semantics."
 }
 
 fn parse_move_state_source(value: &str) -> Result<MoveStateSource> {
@@ -8247,6 +8326,51 @@ mod tests {
         assert_eq!(options.mode, Mode::MoveLightStatus);
         assert_eq!(options.host_id, "nightwing");
         assert_eq!(options.command_id.as_deref(), Some("cmd-1"));
+    }
+
+    #[test]
+    fn capture_stream_status_accepts_stream_and_command_filters() {
+        let options = Options::parse(
+            [
+                "capture-stream-status",
+                "--host",
+                "raven",
+                "--stream",
+                "muninn.probe.video.rudp",
+                "--command",
+                "cmd-1",
+                "--activate-store",
+                "C:/Meta/Odin/state/muninn.activate.cc",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap();
+
+        assert_eq!(options.mode, Mode::CaptureStreamStatus);
+        assert_eq!(options.host_id, "raven");
+        assert_eq!(options.stream_id, "muninn.probe.video.rudp");
+        assert!(options.stream_filter_explicit);
+        assert_eq!(options.command_id.as_deref(), Some("cmd-1"));
+        assert_eq!(
+            options.activation_store_path,
+            Some(PathBuf::from("C:/Meta/Odin/state/muninn.activate.cc"))
+        );
+    }
+
+    #[test]
+    fn capture_stream_status_does_not_filter_on_default_stream_id() {
+        let options = Options::parse(
+            ["capture-stream-status", "--host", "raven"]
+                .into_iter()
+                .map(String::from),
+        )
+        .unwrap();
+
+        assert_eq!(options.mode, Mode::CaptureStreamStatus);
+        assert_eq!(options.host_id, "raven");
+        assert_eq!(options.stream_id, "muninn.raven.av.srt");
+        assert!(!options.stream_filter_explicit);
     }
 
     #[test]
