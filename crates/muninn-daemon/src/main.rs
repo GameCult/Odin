@@ -53,6 +53,7 @@ const IDUNN_HEALTH_RUDP_CONNECTION_ID: u32 = 0x1d0d_0001;
 const MUNINN_COMMAND_RUDP_CONNECTION_ID: u32 = 0x6d75_0002;
 const MUNINN_MEDIA_RUDP_CONNECTION_ID: u32 = 0x6d75_0001;
 const MUNINN_OBS_CATALOG_RUDP_CONNECTION_ID: u32 = 0x6d75_0003;
+const MUNINN_AUDIO_RUDP_CONNECTION_ID: u32 = 0x6d75_0004;
 const MUNINN_RUDP_MEDIA_PROFILE_ID: &str = "muninn.rudp.low_latency_h264_lan.v1";
 const MUNINN_RUDP_MEDIA_VIDEO_BITRATE_KBPS: u32 = 12_000;
 const MUNINN_RUDP_MEDIA_VBV_FRAME_BUDGETS: u32 = 1;
@@ -652,6 +653,8 @@ fn capture_stream_commands_start_equivalent(
         && active.media_packet_bytes == command.media_packet_bytes
         && command_rudp_video_bitrate_kbps(active) == command_rudp_video_bitrate_kbps(command)
         && command_rudp_latency_budget_ms(active) == command_rudp_latency_budget_ms(command)
+        && command_video_source_id(active) == command_video_source_id(command)
+        && command_audio_source_id(active) == command_audio_source_id(command)
 }
 
 fn command_rudp_video_bitrate_kbps(command: &MuninnCaptureStreamCommandRecord) -> u32 {
@@ -667,6 +670,22 @@ fn command_rudp_latency_budget_ms(command: &MuninnCaptureStreamCommandRecord) ->
         MUNINN_RUDP_MEDIA_RECEIVER_ASSEMBLY_DEADLINE_MS as u32
     } else {
         command.rudp_latency_budget_ms
+    }
+}
+
+fn command_video_source_id(command: &MuninnCaptureStreamCommandRecord) -> &str {
+    if command.video_source_id.is_empty() {
+        "display:0"
+    } else {
+        command.video_source_id.as_str()
+    }
+}
+
+fn command_audio_source_id(command: &MuninnCaptureStreamCommandRecord) -> &str {
+    if command.audio_source_id.is_empty() {
+        "wasapi-loopback:Realtek"
+    } else {
+        command.audio_source_id.as_str()
     }
 }
 
@@ -747,6 +766,17 @@ fn spawn_capture_stream_activation(
         "--rudp-latency-budget-ms".to_string(),
         command_rudp_latency_budget_ms(command).to_string(),
     ];
+    let output_index = video_source_output_index(command_video_source_id(command))
+        .unwrap_or(options.ddagrab_output_index);
+    args.extend([
+        "--ddagrab-output-index".to_string(),
+        output_index.to_string(),
+    ]);
+    if let Some(audio_device) = audio_source_device(command_audio_source_id(command)) {
+        args.extend(["--audio-device".to_string(), audio_device]);
+    } else {
+        args.extend(["--audio-device".to_string(), options.audio_device.clone()]);
+    }
     if let Some(obs_target_host) = command.obs_target_host.as_ref() {
         args.extend([
             "--obs-target-host".to_string(),
@@ -758,8 +788,6 @@ fn spawn_capture_stream_activation(
         args.push("--no-obs-target".to_string());
     }
     args.extend([
-        "--audio-device".to_string(),
-        options.audio_device.clone(),
         "--audio-sample-rate".to_string(),
         options.audio_sample_rate.to_string(),
         "--audio-channels".to_string(),
@@ -786,6 +814,39 @@ fn spawn_capture_stream_activation(
         })?)
         .spawn()
         .context("spawning daemon-owned Muninn capture activation child")
+}
+
+fn video_source_id_for_options(options: &Options) -> String {
+    format!("display:{}", options.ddagrab_output_index)
+}
+
+fn video_source_label_for_options(options: &Options) -> String {
+    format!(
+        "{} display {}",
+        options.host_id,
+        options.ddagrab_output_index + 1
+    )
+}
+
+fn audio_source_id_for_options(options: &Options) -> String {
+    format!("wasapi-loopback:{}", options.audio_device)
+}
+
+fn audio_source_label_for_options(options: &Options) -> String {
+    format!("{} loopback ({})", options.host_id, options.audio_device)
+}
+
+fn video_source_output_index(source_id: &str) -> Option<u32> {
+    source_id
+        .strip_prefix("display:")
+        .and_then(|value| value.parse::<u32>().ok())
+}
+
+fn audio_source_device(source_id: &str) -> Option<String> {
+    source_id
+        .strip_prefix("wasapi-loopback:")
+        .map(|value| value.to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn safe_log_component(value: &str) -> String {
@@ -1369,7 +1430,15 @@ fn run_rudp_mux_once(
         Ok(())
     });
 
-    let mut transport = open_media_rudp_transport(options)?;
+    let media_profile = muninn_rudp_media_profile_for_options(options);
+    let mut video_transport =
+        open_media_rudp_transport(options, MUNINN_MEDIA_RUDP_CONNECTION_ID, None, "video")?;
+    let mut audio_transport = open_media_rudp_transport(
+        options,
+        MUNINN_AUDIO_RUDP_CONNECTION_ID,
+        Some(media_profile.receiver_assembly_deadline_ms),
+        "audio",
+    )?;
     publish_stream(
         node,
         options,
@@ -1382,7 +1451,6 @@ fn run_rudp_mux_once(
     )?;
     let mut last_stream_publish_at = Instant::now();
 
-    let media_profile = muninn_rudp_media_profile_for_options(options);
     let (payload_tx, payload_rx) = mpsc::channel::<Result<QueuedMuninnMediaSendPayload>>();
     let video_sender = video_rudp_payload_reader(
         payload_tx.clone(),
@@ -1433,157 +1501,183 @@ fn run_rudp_mux_once(
         MUNINN_RUDP_MEDIA_REPAIR_INITIAL_CHUNKS_PER_SECOND,
         MUNINN_RUDP_MEDIA_REPAIR_BURST_CHUNKS,
     );
-    let mut send_pacer = MuninnRudpMediaSendPacer::new(
+    let mut video_send_pacer = MuninnRudpMediaSendPacer::new(
         media_profile.sender_pace_every_payloads,
         Duration::from_micros(media_profile.sender_pace_sleep_us),
     );
+    let mut audio_send_pacer = MuninnRudpMediaSendPacer::new(0, Duration::ZERO);
+    let mut pending_payloads = PendingMuninnMediaSendQueues::default();
+    let mut payload_channel_disconnected = false;
     let result = loop {
-        match payload_rx.recv_timeout(Duration::from_millis(5)) {
-            Ok(Ok(queued)) => {
-                if media_payload_queue_age_exceeded(
-                    queued.queued_at,
-                    Instant::now(),
-                    Duration::from_millis(media_profile.sender_queue_deadline_ms),
-                ) {
-                    payloads_queue_expired += 1;
-                    let payloads_dropped = payloads_queue_expired + payloads_send_expired;
-                    poll_rudp_media_receiver_feedback(
-                        &mut transport,
-                        &mut receiver_feedback,
-                        &repair_cache,
-                        &mut repair_budget,
-                        &media_profile,
-                        &mut send_pacer,
-                        payloads_dropped,
-                    )?;
-                    record_receiver_keyframe_pressure(
-                        &receiver_feedback,
-                        &mut handled_keyframe_requests,
-                    );
-                    poll_rudp_resends_with_backpressure(&mut transport)?;
-                    republish_running_stream_if_due(
-                        node,
-                        options,
-                        plan,
-                        supervisor_pid,
-                        video_ffmpeg_pid,
-                        restart_count,
-                        &mut last_stream_publish_at,
-                    )?;
-                    if payloads_dropped == 1 || payloads_dropped % 300 == 0 {
-                        let expired = transport.stats().reliable_packets_expired;
-                        eprintln!(
-                            "{}",
-                            rudp_media_progress_detail(
-                                payloads_sent,
-                                payloads_dropped,
-                                payloads_queue_expired,
-                                payloads_send_expired,
-                                expired,
-                                &receiver_feedback
-                            )
-                        );
-                    }
-                    continue;
-                }
+        if pending_payloads.is_empty() && !payload_channel_disconnected {
+            payload_channel_disconnected = receive_pending_media_payloads(
+                &payload_rx,
+                &mut pending_payloads,
+                Duration::from_millis(5),
+            )?;
+        } else if !payload_channel_disconnected {
+            payload_channel_disconnected =
+                drain_available_media_payloads(&payload_rx, &mut pending_payloads)?;
+        }
 
-                let payload_len = queued.payload.payload.len();
-                if !send_rudp_media_payload_with_backpressure(
-                    &mut transport,
+        if let Some(queued) = pending_payloads.pop_next() {
+            if media_payload_queue_age_exceeded(
+                queued.queued_at,
+                Instant::now(),
+                Duration::from_millis(media_profile.sender_queue_deadline_ms),
+            ) {
+                payloads_queue_expired += 1;
+                let payloads_dropped = payloads_queue_expired + payloads_send_expired;
+                poll_rudp_media_receiver_feedback(
+                    &mut video_transport,
+                    &mut receiver_feedback,
+                    &repair_cache,
+                    &mut repair_budget,
+                    &media_profile,
+                    &mut video_send_pacer,
+                    payloads_dropped,
+                )?;
+                record_receiver_keyframe_pressure(
+                    &receiver_feedback,
+                    &mut handled_keyframe_requests,
+                );
+                poll_rudp_resends_with_backpressure(&mut video_transport)?;
+                poll_rudp_resends_with_backpressure(&mut audio_transport)?;
+                republish_running_stream_if_due(
+                    node,
+                    options,
+                    plan,
+                    supervisor_pid,
+                    video_ffmpeg_pid,
+                    restart_count,
+                    &mut last_stream_publish_at,
+                )?;
+                if payloads_dropped == 1 || payloads_dropped % 300 == 0 {
+                    let expired = reliable_packets_expired(&video_transport, &audio_transport);
+                    eprintln!(
+                        "{}",
+                        rudp_media_progress_detail(
+                            payloads_sent,
+                            payloads_dropped,
+                            payloads_queue_expired,
+                            payloads_send_expired,
+                            expired,
+                            &receiver_feedback
+                        )
+                    );
+                }
+                continue;
+            }
+
+            let payload_len = queued.payload.payload.len();
+            let sent = match queued.kind {
+                QueuedMuninnMediaKind::Video => send_rudp_media_payload_with_backpressure(
+                    &mut video_transport,
                     queued.payload.clone(),
                     queued.queued_at,
                     Duration::from_millis(media_profile.sender_queue_deadline_ms),
-                    &mut send_pacer,
-                )? {
-                    payloads_send_expired += 1;
-                    continue;
-                }
-                let payloads_dropped = payloads_queue_expired + payloads_send_expired;
+                    &mut video_send_pacer,
+                )?,
+                QueuedMuninnMediaKind::Audio => send_rudp_media_payload_with_backpressure(
+                    &mut audio_transport,
+                    queued.payload.clone(),
+                    queued.queued_at,
+                    Duration::from_millis(media_profile.sender_queue_deadline_ms),
+                    &mut audio_send_pacer,
+                )?,
+            };
+            if !sent {
+                payloads_send_expired += 1;
+                continue;
+            }
+            let payloads_dropped = payloads_queue_expired + payloads_send_expired;
+            if queued.kind == QueuedMuninnMediaKind::Video {
                 repair_cache.remember(&queued.payload)?;
-                poll_rudp_media_receiver_feedback(
-                    &mut transport,
-                    &mut receiver_feedback,
-                    &repair_cache,
-                    &mut repair_budget,
-                    &media_profile,
-                    &mut send_pacer,
-                    payloads_dropped,
-                )?;
-                record_receiver_keyframe_pressure(
-                    &receiver_feedback,
-                    &mut handled_keyframe_requests,
-                );
-                poll_rudp_resends_with_backpressure(&mut transport)?;
-                republish_running_stream_if_due(
-                    node,
-                    options,
-                    plan,
-                    supervisor_pid,
-                    video_ffmpeg_pid,
-                    restart_count,
-                    &mut last_stream_publish_at,
-                )?;
-                payloads_sent += 1;
-                if payloads_sent == 1 || payloads_sent % 900 == 0 {
-                    let expired = transport.stats().reliable_packets_expired;
-                    eprintln!(
-                        "{}; latest payload was {payload_len} bytes.",
-                        rudp_media_progress_detail(
-                            payloads_sent,
-                            payloads_dropped,
-                            payloads_queue_expired,
-                            payloads_send_expired,
-                            expired,
-                            &receiver_feedback
-                        )
-                    );
-                }
             }
-            Ok(Err(error)) => break Err(error),
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                let payloads_dropped = payloads_queue_expired + payloads_send_expired;
-                poll_rudp_media_receiver_feedback(
-                    &mut transport,
-                    &mut receiver_feedback,
-                    &repair_cache,
-                    &mut repair_budget,
-                    &media_profile,
-                    &mut send_pacer,
-                    payloads_dropped,
-                )?;
-                record_receiver_keyframe_pressure(
-                    &receiver_feedback,
-                    &mut handled_keyframe_requests,
-                );
-                poll_rudp_resends_with_backpressure(&mut transport)?;
-                republish_running_stream_if_due(
-                    node,
-                    options,
-                    plan,
-                    supervisor_pid,
-                    video_ffmpeg_pid,
-                    restart_count,
-                    &mut last_stream_publish_at,
-                )?;
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                let expired = transport.stats().reliable_packets_expired;
-                let payloads_dropped = payloads_queue_expired + payloads_send_expired;
-                break Ok(RudpMuxRestart {
-                    detail: format!(
-                        "encoder stdout ended; {}",
-                        rudp_media_progress_detail(
-                            payloads_sent,
-                            payloads_dropped,
-                            payloads_queue_expired,
-                            payloads_send_expired,
-                            expired,
-                            &receiver_feedback
-                        )
+            poll_rudp_media_receiver_feedback(
+                &mut video_transport,
+                &mut receiver_feedback,
+                &repair_cache,
+                &mut repair_budget,
+                &media_profile,
+                &mut video_send_pacer,
+                payloads_dropped,
+            )?;
+            record_receiver_keyframe_pressure(&receiver_feedback, &mut handled_keyframe_requests);
+            poll_rudp_resends_with_backpressure(&mut video_transport)?;
+            poll_rudp_resends_with_backpressure(&mut audio_transport)?;
+            republish_running_stream_if_due(
+                node,
+                options,
+                plan,
+                supervisor_pid,
+                video_ffmpeg_pid,
+                restart_count,
+                &mut last_stream_publish_at,
+            )?;
+            payloads_sent += 1;
+            if payloads_sent == 1 || payloads_sent % 900 == 0 {
+                let expired = reliable_packets_expired(&video_transport, &audio_transport);
+                eprintln!(
+                    "{}; pending_audio={} pending_video={}; latest {:?} payload was {payload_len} bytes.",
+                    rudp_media_progress_detail(
+                        payloads_sent,
+                        payloads_dropped,
+                        payloads_queue_expired,
+                        payloads_send_expired,
+                        expired,
+                        &receiver_feedback
                     ),
-                    delay: default_rudp_mux_restart_delay(restart_count),
-                });
+                    pending_payloads.audio_len(),
+                    pending_payloads.video_len(),
+                    queued.kind
+                );
             }
+            continue;
+        }
+
+        if payload_channel_disconnected {
+            let expired = reliable_packets_expired(&video_transport, &audio_transport);
+            let payloads_dropped = payloads_queue_expired + payloads_send_expired;
+            break Ok(RudpMuxRestart {
+                detail: format!(
+                    "encoder stdout ended; {}",
+                    rudp_media_progress_detail(
+                        payloads_sent,
+                        payloads_dropped,
+                        payloads_queue_expired,
+                        payloads_send_expired,
+                        expired,
+                        &receiver_feedback
+                    )
+                ),
+                delay: default_rudp_mux_restart_delay(restart_count),
+            });
+        }
+
+        {
+            let payloads_dropped = payloads_queue_expired + payloads_send_expired;
+            poll_rudp_media_receiver_feedback(
+                &mut video_transport,
+                &mut receiver_feedback,
+                &repair_cache,
+                &mut repair_budget,
+                &media_profile,
+                &mut video_send_pacer,
+                payloads_dropped,
+            )?;
+            record_receiver_keyframe_pressure(&receiver_feedback, &mut handled_keyframe_requests);
+            poll_rudp_resends_with_backpressure(&mut video_transport)?;
+            poll_rudp_resends_with_backpressure(&mut audio_transport)?;
+            republish_running_stream_if_due(
+                node,
+                options,
+                plan,
+                supervisor_pid,
+                video_ffmpeg_pid,
+                restart_count,
+                &mut last_stream_publish_at,
+            )?;
         }
     };
 
@@ -1602,6 +1696,44 @@ fn run_rudp_mux_once(
 struct QueuedMuninnMediaSendPayload {
     payload: MuninnMediaSendPayload,
     queued_at: Instant,
+    kind: QueuedMuninnMediaKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QueuedMuninnMediaKind {
+    Video,
+    Audio,
+}
+
+#[derive(Default)]
+struct PendingMuninnMediaSendQueues {
+    audio: VecDeque<QueuedMuninnMediaSendPayload>,
+    video: VecDeque<QueuedMuninnMediaSendPayload>,
+}
+
+impl PendingMuninnMediaSendQueues {
+    fn push(&mut self, payload: QueuedMuninnMediaSendPayload) {
+        match payload.kind {
+            QueuedMuninnMediaKind::Audio => self.audio.push_back(payload),
+            QueuedMuninnMediaKind::Video => self.video.push_back(payload),
+        }
+    }
+
+    fn pop_next(&mut self) -> Option<QueuedMuninnMediaSendPayload> {
+        self.audio.pop_front().or_else(|| self.video.pop_front())
+    }
+
+    fn is_empty(&self) -> bool {
+        self.audio.is_empty() && self.video.is_empty()
+    }
+
+    fn audio_len(&self) -> usize {
+        self.audio.len()
+    }
+
+    fn video_len(&self) -> usize {
+        self.video.len()
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1778,12 +1910,44 @@ fn video_repair_cache_key_from_payload(payload: &MuninnMediaSendPayload) -> Resu
 fn queue_muninn_media_payload(
     tx: &mpsc::Sender<Result<QueuedMuninnMediaSendPayload>>,
     payload: MuninnMediaSendPayload,
+    kind: QueuedMuninnMediaKind,
 ) -> Result<()> {
     tx.send(Ok(QueuedMuninnMediaSendPayload {
         payload,
         queued_at: Instant::now(),
+        kind,
     }))
     .context("queueing typed Muninn media payload")
+}
+
+fn receive_pending_media_payloads(
+    rx: &mpsc::Receiver<Result<QueuedMuninnMediaSendPayload>>,
+    pending: &mut PendingMuninnMediaSendQueues,
+    timeout: Duration,
+) -> Result<bool> {
+    match rx.recv_timeout(timeout) {
+        Ok(Ok(payload)) => {
+            pending.push(payload);
+            drain_available_media_payloads(rx, pending)
+        }
+        Ok(Err(error)) => Err(error),
+        Err(mpsc::RecvTimeoutError::Timeout) => Ok(false),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Ok(true),
+    }
+}
+
+fn drain_available_media_payloads(
+    rx: &mpsc::Receiver<Result<QueuedMuninnMediaSendPayload>>,
+    pending: &mut PendingMuninnMediaSendQueues,
+) -> Result<bool> {
+    loop {
+        match rx.try_recv() {
+            Ok(Ok(payload)) => pending.push(payload),
+            Ok(Err(error)) => return Err(error),
+            Err(mpsc::TryRecvError::Empty) => return Ok(false),
+            Err(mpsc::TryRecvError::Disconnected) => return Ok(true),
+        }
+    }
 }
 
 fn media_payload_queue_age_exceeded(queued_at: Instant, now: Instant, max_age: Duration) -> bool {
@@ -1989,7 +2153,12 @@ fn record_rudp_media_receiver_feedback(
     Ok(repair_payloads)
 }
 
-fn open_media_rudp_transport(options: &Options) -> Result<CultNetRudpSocketTransportConnection> {
+fn open_media_rudp_transport(
+    options: &Options,
+    connection_id: u32,
+    reliable_expire_after_ms: Option<u64>,
+    role: &str,
+) -> Result<CultNetRudpSocketTransportConnection> {
     let media_profile = muninn_rudp_media_profile_for_options(options);
     let endpoint: SocketAddr = format!("{}:{}", options.target_host, options.port)
         .parse()
@@ -2009,6 +2178,8 @@ fn open_media_rudp_transport(options: &Options) -> Result<CultNetRudpSocketTrans
         socket,
         endpoint,
         &media_profile,
+        connection_id,
+        reliable_expire_after_ms,
     ))?;
     transport.connect(options.stream_id.as_bytes().to_vec())?;
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -2017,7 +2188,7 @@ fn open_media_rudp_transport(options: &Options) -> Result<CultNetRudpSocketTrans
         transport.poll_resends()?;
         if Instant::now() >= deadline {
             return Err(anyhow!(
-                "timed out connecting Muninn media RUDP stream to {endpoint}"
+                "timed out connecting Muninn {role} RUDP stream to {endpoint}"
             ));
         }
         thread::sleep(Duration::from_millis(2));
@@ -2040,17 +2211,25 @@ fn muninn_media_rudp_options(
     socket: UdpSocket,
     endpoint: SocketAddr,
     media_profile: &MuninnRudpMediaProfile,
+    connection_id: u32,
+    reliable_expire_after_ms: Option<u64>,
 ) -> CultNetRudpSocketTransportOptions {
-    let mut options = CultNetRudpSocketTransportOptions::client(
-        "muninn-media",
-        socket,
-        endpoint,
-        MUNINN_MEDIA_RUDP_CONNECTION_ID,
-    );
+    let mut options =
+        CultNetRudpSocketTransportOptions::client("muninn-media", socket, endpoint, connection_id);
     options.resend_delay_ms = media_profile.sender_resend_delay_ms;
     options.max_fragment_bytes = Some(media_profile.max_fragment_bytes as u32);
-    options.media_reliable_expire_after_ms = None;
+    options.media_reliable_expire_after_ms = reliable_expire_after_ms;
     options
+}
+
+fn reliable_packets_expired(
+    video_transport: &CultNetRudpSocketTransportConnection,
+    audio_transport: &CultNetRudpSocketTransportConnection,
+) -> u64 {
+    video_transport
+        .stats()
+        .reliable_packets_expired
+        .saturating_add(audio_transport.stats().reliable_packets_expired)
 }
 
 fn video_rudp_payload_reader<R>(
@@ -2099,13 +2278,13 @@ where
             .context("reading encoded Annex B video from ffmpeg stdout")?;
         if read == 0 {
             for payload in sender.finish(&timestamp()?)? {
-                queue_muninn_media_payload(tx, payload)
+                queue_muninn_media_payload(tx, payload, QueuedMuninnMediaKind::Video)
                     .context("queueing final typed video media payload")?;
             }
             return Ok(());
         }
         for payload in sender.push(&timestamp()?, &buffer[..read])? {
-            queue_muninn_media_payload(tx, payload)
+            queue_muninn_media_payload(tx, payload, QueuedMuninnMediaKind::Video)
                 .context("queueing typed video media payload")?;
         }
     }
@@ -2127,13 +2306,13 @@ where
             .context("reading encoded ADTS audio from ffmpeg stdout")?;
         if read == 0 {
             for payload in sender.finish(&timestamp()?)? {
-                queue_muninn_media_payload(tx, payload)
+                queue_muninn_media_payload(tx, payload, QueuedMuninnMediaKind::Audio)
                     .context("queueing final typed audio media payload")?;
             }
             return Ok(());
         }
         for payload in sender.push(&timestamp()?, &buffer[..read])? {
-            queue_muninn_media_payload(tx, payload)
+            queue_muninn_media_payload(tx, payload, QueuedMuninnMediaKind::Audio)
                 .context("queueing typed audio media payload")?;
         }
     }
@@ -2588,6 +2767,10 @@ fn publish_obs_catalog(
         media_packet_bytes: options.media_packet_bytes as u32,
         rudp_video_bitrate_kbps: options.rudp_video_bitrate_kbps,
         rudp_latency_budget_ms: options.rudp_latency_budget_ms,
+        video_source_ids: vec![video_source_id_for_options(options)],
+        video_source_labels: vec![video_source_label_for_options(options)],
+        audio_source_ids: vec![audio_source_id_for_options(options)],
+        audio_source_labels: vec![audio_source_label_for_options(options)],
     };
     node.put("obs", &record)?;
     if let Some(target) = options.obs_catalog_rudp_target {
@@ -5509,6 +5692,8 @@ fn build_capture_stream_command(options: &Options) -> Result<MuninnCaptureStream
         updated_at: now,
         rudp_video_bitrate_kbps: options.rudp_video_bitrate_kbps,
         rudp_latency_budget_ms: options.rudp_latency_budget_ms,
+        video_source_id: video_source_id_for_options(options),
+        audio_source_id: audio_source_id_for_options(options),
     })
 }
 
@@ -5651,7 +5836,7 @@ fn rudp_endpoint_for_profile(
     profile: &MuninnRudpMediaProfile,
 ) -> String {
     format!(
-        "rudp://{host}:{port}/{stream_id}?channel=media&format=muninn-typed-media&connection=0x{MUNINN_MEDIA_RUDP_CONNECTION_ID:08x}&profile={}&delivery=unreliable&sender_resend_delay_ms={}&reliable_expire_after_ms={}&assembly_deadline_ms={}&gap_wait_ms={}",
+        "rudp://{host}:{port}/{stream_id}?channel=media&format=muninn-typed-media&connection=0x{MUNINN_MEDIA_RUDP_CONNECTION_ID:08x}&audio_connection=0x{MUNINN_AUDIO_RUDP_CONNECTION_ID:08x}&profile={}&delivery=unreliable&sender_resend_delay_ms={}&reliable_expire_after_ms={}&assembly_deadline_ms={}&gap_wait_ms={}",
         profile.profile_id,
         profile.sender_resend_delay_ms,
         profile.sender_reliable_expire_after_ms,
@@ -6601,6 +6786,10 @@ mod tests {
             media_packet_bytes: MUNINN_RUDP_MEDIA_PACKET_BYTES as u32,
             rudp_video_bitrate_kbps: MUNINN_RUDP_MEDIA_VIDEO_BITRATE_KBPS,
             rudp_latency_budget_ms: MUNINN_RUDP_MEDIA_RECEIVER_ASSEMBLY_DEADLINE_MS as u32,
+            video_source_ids: vec!["display:0".to_string()],
+            video_source_labels: vec!["raven display 1".to_string()],
+            audio_source_ids: vec!["wasapi-loopback:Realtek".to_string()],
+            audio_source_labels: vec!["raven loopback (Realtek)".to_string()],
         };
 
         publish_obs_catalog_rudp(receiver_addr, &catalog).unwrap();
@@ -6627,8 +6816,11 @@ mod tests {
             MUNINN_RUDP_MEDIA_RECEIVER_ASSEMBLY_DEADLINE_MS as u32
         );
         assert!(decoded.urls[0].contains("delivery=unreliable"));
+        assert!(decoded.urls[0].contains("audio_connection=0x6d750004"));
         assert!(decoded.urls[0].contains("reliable_expire_after_ms=2000"));
         assert!(decoded.urls[0].contains("assembly_deadline_ms=2000"));
+        assert_eq!(decoded.video_source_ids, vec!["display:0"]);
+        assert_eq!(decoded.audio_source_ids, vec!["wasapi-loopback:Realtek"]);
     }
 
     #[test]
@@ -6817,7 +7009,7 @@ mod tests {
         assert_eq!(
             plan.targets,
             vec![
-                "rudp://10.77.0.2:5204/muninn.raven.av.rudp?channel=media&format=muninn-typed-media&connection=0x6d750001&profile=muninn.rudp.low_latency_h264_lan.v1&delivery=unreliable&sender_resend_delay_ms=5&reliable_expire_after_ms=2000&assembly_deadline_ms=2000&gap_wait_ms=16"
+                "rudp://10.77.0.2:5204/muninn.raven.av.rudp?channel=media&format=muninn-typed-media&connection=0x6d750001&audio_connection=0x6d750004&profile=muninn.rudp.low_latency_h264_lan.v1&delivery=unreliable&sender_resend_delay_ms=5&reliable_expire_after_ms=2000&assembly_deadline_ms=2000&gap_wait_ms=16"
             ]
         );
         assert!(!plan.command_line.contains("tee"));
@@ -7103,7 +7295,13 @@ mod tests {
         let endpoint: SocketAddr = "127.0.0.1:5204".parse().unwrap();
         let profile = muninn_rudp_media_profile();
 
-        let options = muninn_media_rudp_options(socket, endpoint, &profile);
+        let options = muninn_media_rudp_options(
+            socket,
+            endpoint,
+            &profile,
+            MUNINN_MEDIA_RUDP_CONNECTION_ID,
+            None,
+        );
 
         assert_eq!(options.runtime_id, "muninn-media");
         assert_eq!(options.remote_addr, Some(endpoint));
@@ -7115,13 +7313,15 @@ mod tests {
         );
         assert_eq!(options.media_reliable_expire_after_ms, None);
         let transport = CultNetRudpSocketTransportConnection::new(options).unwrap();
-        let media_channel = transport
+        let channels = transport
             .profile
             .transports
             .first()
             .unwrap()
             .channels
-            .iter()
+            .iter();
+        let media_channel = channels
+            .clone()
             .find(|channel| channel.channel_id == "media")
             .unwrap();
         assert_eq!(
@@ -7129,6 +7329,27 @@ mod tests {
             cultnet_rs::CultNetTransportDelivery::Unreliable
         );
         assert_eq!(media_channel.reliable_expire_after_ms, None);
+    }
+
+    #[test]
+    fn rudp_audio_transport_uses_separate_reliable_media_connection() {
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let endpoint: SocketAddr = "127.0.0.1:5204".parse().unwrap();
+        let profile = muninn_rudp_media_profile();
+
+        let options = muninn_media_rudp_options(
+            socket,
+            endpoint,
+            &profile,
+            MUNINN_AUDIO_RUDP_CONNECTION_ID,
+            Some(MUNINN_RUDP_MEDIA_RECEIVER_ASSEMBLY_DEADLINE_MS),
+        );
+
+        assert_eq!(options.connection_id, MUNINN_AUDIO_RUDP_CONNECTION_ID);
+        assert_eq!(
+            options.media_reliable_expire_after_ms,
+            Some(MUNINN_RUDP_MEDIA_RECEIVER_ASSEMBLY_DEADLINE_MS)
+        );
     }
 
     #[test]
@@ -7180,6 +7401,39 @@ mod tests {
             queued_at + deadline + Duration::from_millis(1),
             deadline
         ));
+    }
+
+    #[test]
+    fn rudp_media_sender_prioritizes_pending_audio_over_video() {
+        let queued_at = Instant::now();
+        let mut pending = PendingMuninnMediaSendQueues::default();
+        pending.push(QueuedMuninnMediaSendPayload {
+            payload: MuninnMediaSendPayload {
+                channel_id: crate::media_packetizer::MUNINN_MEDIA_RUDP_CHANNEL,
+                payload: vec![0x76],
+            },
+            queued_at,
+            kind: QueuedMuninnMediaKind::Video,
+        });
+        pending.push(QueuedMuninnMediaSendPayload {
+            payload: MuninnMediaSendPayload {
+                channel_id: crate::media_packetizer::MUNINN_MEDIA_RUDP_CHANNEL,
+                payload: vec![0x61],
+            },
+            queued_at,
+            kind: QueuedMuninnMediaKind::Audio,
+        });
+
+        let first = pending.pop_next().expect("audio payload should be queued");
+        let second = pending
+            .pop_next()
+            .expect("video payload should remain queued");
+
+        assert_eq!(first.kind, QueuedMuninnMediaKind::Audio);
+        assert_eq!(first.payload.payload, vec![0x61]);
+        assert_eq!(second.kind, QueuedMuninnMediaKind::Video);
+        assert_eq!(second.payload.payload, vec![0x76]);
+        assert!(pending.is_empty());
     }
 
     #[test]
