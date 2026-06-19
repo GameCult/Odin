@@ -53,9 +53,9 @@ const IDUNN_HEALTH_RUDP_CONNECTION_ID: u32 = 0x1d0d_0001;
 const MUNINN_COMMAND_RUDP_CONNECTION_ID: u32 = 0x6d75_0002;
 const MUNINN_MEDIA_RUDP_CONNECTION_ID: u32 = 0x6d75_0001;
 const MUNINN_OBS_CATALOG_RUDP_CONNECTION_ID: u32 = 0x6d75_0003;
-const MUNINN_MEDIA_SEND_QUEUE_DEADLINE_MS: u64 = 75;
+const MUNINN_MEDIA_SEND_QUEUE_DEADLINE_MS: u64 = 400;
 const MUNINN_RUDP_MEDIA_PROFILE_ID: &str = "muninn.rudp.low_latency_h264_lan.v1";
-const MUNINN_RUDP_MEDIA_VIDEO_BITRATE_KBPS: u32 = 48_000;
+const MUNINN_RUDP_MEDIA_VIDEO_BITRATE_KBPS: u32 = 16_000;
 const MUNINN_RUDP_MEDIA_VBV_FRAME_BUDGETS: u32 = 1;
 const MUNINN_RUDP_MEDIA_LOW_DELAY_KEY_FRAME_SCALE: u32 = 4;
 const MUNINN_RUDP_MEDIA_VIDEO_DPB_SIZE: u32 = 1;
@@ -70,7 +70,7 @@ const MUNINN_RUDP_MEDIA_RELIABLE_EXPIRE_AFTER_MS: u64 = 600;
 const MUNINN_RUDP_MEDIA_RECEIVER_ASSEMBLY_DEADLINE_MS: u64 = 800;
 const MUNINN_RUDP_MEDIA_RECEIVER_GAP_WAIT_MS: u64 = 16;
 const MUNINN_RUDP_MEDIA_REPAIR_CACHE_CHUNKS: usize = 16_384;
-const MUNINN_RUDP_MEDIA_REPAIR_BURST_CHUNKS: usize = 96;
+const MUNINN_RUDP_MEDIA_REPAIR_BURST_CHUNKS: usize = 32;
 const MUNINN_RUDP_ACTIVE_CATALOG_REPUBLISH_MS: u64 = 2_000;
 const PS_MOVE_LED_REPORT_LEN: usize = 49;
 
@@ -6555,15 +6555,15 @@ mod tests {
         );
         assert!(
             args.windows(2)
-                .any(|pair| pair[0] == "-b:v" && pair[1] == "48000k")
+                .any(|pair| pair[0] == "-b:v" && pair[1] == "16000k")
         );
         assert!(
             args.windows(2)
-                .any(|pair| pair[0] == "-maxrate" && pair[1] == "48000k")
+                .any(|pair| pair[0] == "-maxrate" && pair[1] == "16000k")
         );
         assert!(
             args.windows(2)
-                .any(|pair| pair[0] == "-bufsize" && pair[1] == "800k")
+                .any(|pair| pair[0] == "-bufsize" && pair[1] == "267k")
         );
         assert!(
             args.windows(2)
@@ -6614,11 +6614,11 @@ mod tests {
 
         assert_eq!(
             muninn_rudp_video_vbv_buffer_arg(&thirty_fps, &profile),
-            "1600k"
+            "534k"
         );
         assert_eq!(
             muninn_rudp_video_vbv_buffer_arg(&sixty_fps, &profile),
-            "800k"
+            "267k"
         );
     }
 
@@ -7583,7 +7583,7 @@ Device 00:07:04:A8:00:D0 (public)
             media_profile
                 .get("video_bufsize")
                 .and_then(|value| value.as_str()),
-            Some("1600k")
+            Some("534k")
         );
         assert_eq!(
             media_profile
