@@ -35,6 +35,7 @@ pub const MUNINN_TELEMETRY_SURFACE_SCHEMA: &str = "muninn.telemetry_surface.v1";
 pub const MUNINN_CAPTURE_STREAM_SCHEMA: &str = "muninn.capture_stream.v1";
 pub const MUNINN_CAPTURE_STREAM_COMMAND_SCHEMA: &str = "muninn.capture_stream_command.v1";
 pub const MUNINN_MEDIA_VIDEO_ACCESS_UNIT_SCHEMA: &str = "muninn.media_video_access_unit.v1";
+pub const MUNINN_MEDIA_VIDEO_PARITY_SHARD_SCHEMA: &str = "muninn.media_video_parity_shard.v1";
 pub const MUNINN_MEDIA_AUDIO_PACKET_SCHEMA: &str = "muninn.media_audio_packet.v1";
 pub const MUNINN_MEDIA_RECEIVER_FEEDBACK_SCHEMA: &str = "muninn.media_receiver_feedback.v1";
 pub const MUNINN_OBS_STREAM_CATALOG_SCHEMA: &str = "muninn.obs_stream_catalog.v1";
@@ -789,6 +790,46 @@ pub struct MuninnMediaVideoAccessUnitRecord {
 
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
 #[cultcache(
+    type = "muninn.media_video_parity_shard",
+    schema = "muninn.media_video_parity_shard.v1"
+)]
+pub struct MuninnMediaVideoParityShardRecord {
+    #[cultcache(key = 0)]
+    pub stream_id: String,
+    #[cultcache(key = 1)]
+    pub session_id: String,
+    #[cultcache(key = 2)]
+    pub frame_id: u64,
+    #[cultcache(key = 3)]
+    pub codec: String,
+    #[cultcache(key = 4)]
+    pub pts_ticks: i64,
+    #[cultcache(key = 5)]
+    pub duration_ticks: u32,
+    #[cultcache(key = 6)]
+    pub timebase_num: u32,
+    #[cultcache(key = 7)]
+    pub timebase_den: u32,
+    #[cultcache(key = 8)]
+    pub keyframe: bool,
+    #[cultcache(key = 9)]
+    pub dependency_frame_id: Option<u64>,
+    #[cultcache(key = 10)]
+    pub deadline_ticks: i64,
+    #[cultcache(key = 11)]
+    pub chunk_count: u16,
+    #[cultcache(key = 12)]
+    pub parity_index: u16,
+    #[cultcache(key = 13)]
+    pub parity_count: u16,
+    #[cultcache(key = 14)]
+    pub chunk_payload_lengths: Vec<u32>,
+    #[cultcache(key = 15)]
+    pub payload: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(
     type = "muninn.media_audio_packet",
     schema = "muninn.media_audio_packet.v1"
 )]
@@ -1118,6 +1159,7 @@ cultmesh_rs::cultmesh_documents!(OdinDocuments {
     MuninnCaptureStreamRecord => MUNINN_CAPTURE_STREAM_SCHEMA,
     MuninnCaptureStreamCommandRecord => MUNINN_CAPTURE_STREAM_COMMAND_SCHEMA,
     MuninnMediaVideoAccessUnitRecord => MUNINN_MEDIA_VIDEO_ACCESS_UNIT_SCHEMA,
+    MuninnMediaVideoParityShardRecord => MUNINN_MEDIA_VIDEO_PARITY_SHARD_SCHEMA,
     MuninnMediaAudioPacketRecord => MUNINN_MEDIA_AUDIO_PACKET_SCHEMA,
     MuninnMediaReceiverFeedbackRecord => MUNINN_MEDIA_RECEIVER_FEEDBACK_SCHEMA,
     MuninnObsStreamCatalogRecord => MUNINN_OBS_STREAM_CATALOG_SCHEMA,
