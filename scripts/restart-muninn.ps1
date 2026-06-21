@@ -7,20 +7,20 @@ param(
   [string] $LocalLoopbackScript = (Join-Path $PSScriptRoot "wasapi-loopback-capture.ps1"),
   [string] $LoopbackScript = "C:\Meta\Odin\Muninn\scripts\wasapi-loopback-capture.ps1",
   [string] $Ffmpeg = "C:\Users\Madman's Lullaby\AppData\Local\Microsoft\WinGet\Links\ffmpeg.exe",
-  [string] $TargetHost = "192.168.1.66",
+  [string] $TargetHost = "10.77.0.2",
   [int] $Port = 5204,
   [string] $MediaTransport = "rudp",
-  [string] $ObsTargetHost = "192.168.1.66",
+  [string] $ObsTargetHost = "10.77.0.2",
   [int] $ObsPort = 5204,
   [string] $AudioDevice = "Realtek",
   [string[]] $VideoSources = @(),
   [string[]] $AudioSources = @(),
-  [string] $IdunnRudpHealth = "192.168.1.66:17870",
+  [string] $IdunnRudpHealth = "10.77.0.2:17870",
   [string] $IdunnDaemon = "muninn",
   [string] $IdunnHealthContract = "muninn.cultnet-rudp-remote-telemetry-health",
-  [string] $CaptureCommandRudpBind = "0.0.0.0:17873",
-  [string] $CaptureCommandRudpTarget = "127.0.0.1:17873",
-  [string] $ObsCatalogRudpTarget = "192.168.1.66:17874",
+  [string] $CaptureCommandRudpBind = "0.0.0.0:17883",
+  [string] $CaptureCommandRudpTarget = "127.0.0.1:17883",
+  [string] $ObsCatalogRudpTarget = "10.77.0.2:17874",
   [int] $ConnectTimeoutSeconds = 10,
   [int] $ServeStartTimeoutSeconds = 20,
   [string] $SshUser = "",
@@ -78,6 +78,105 @@ function Get-SshTarget {
     return $Target
   }
   return "${SshUser}@${Target}"
+}
+
+function Test-LikelyVirtualDisplayToken {
+  param([Parameter(Mandatory = $true)] [string] $Token)
+
+  $trimmed = $Token.Trim()
+  if ([string]::IsNullOrWhiteSpace($trimmed)) {
+    return $true
+  }
+  return (
+    $trimmed.StartsWith('MSBDD_', [System.StringComparison]::OrdinalIgnoreCase) -or
+    $trimmed.StartsWith('MSNIL', [System.StringComparison]::OrdinalIgnoreCase) -or
+    $trimmed.StartsWith('NOEDID', [System.StringComparison]::OrdinalIgnoreCase) -or
+    $trimmed.StartsWith('UGD', [System.StringComparison]::OrdinalIgnoreCase)
+  )
+}
+
+function Get-GraphicsDriverDisplayTokens {
+  $connectivityRoot = 'HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers\Connectivity'
+  if (-not (Test-Path -LiteralPath $connectivityRoot)) {
+    return @()
+  }
+
+  $bestTokens = @()
+  $bestScore = [int]::MinValue
+  foreach ($key in Get-ChildItem -LiteralPath $connectivityRoot -ErrorAction SilentlyContinue) {
+    $item = Get-ItemProperty -LiteralPath $key.PSPath -ErrorAction SilentlyContinue
+    if ($null -eq $item) {
+      continue
+    }
+    foreach ($property in $item.PSObject.Properties) {
+      if ($property.Name -like 'PS*' -or $property.Value -isnot [string]) {
+        continue
+      }
+      $tokens = @(
+        $property.Value.Split('+') |
+          ForEach-Object { $_.Trim() } |
+          Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+      )
+      if ($tokens.Count -lt 1) {
+        continue
+      }
+      $realCount = @($tokens | Where-Object { -not (Test-LikelyVirtualDisplayToken $_) }).Count
+      $score = ($realCount * 100) + $tokens.Count
+      if ($score -gt $bestScore) {
+        $bestScore = $score
+        $bestTokens = $tokens
+      }
+    }
+  }
+
+  return @($bestTokens | Select-Object -Unique)
+}
+
+function Get-DefaultMuninnVideoSourceLabels {
+  param([Parameter(Mandatory = $true)] [string] $HostLabel)
+
+  $displayNames = @(
+    Get-CimInstance Win32_DesktopMonitor -ErrorAction SilentlyContinue |
+      Where-Object { [string]::IsNullOrWhiteSpace($_.Status) -or $_.Status -eq 'OK' } |
+      ForEach-Object {
+        if ([string]::IsNullOrWhiteSpace($_.Name)) {
+          'Display'
+        } else {
+          $_.Name.Trim()
+        }
+      }
+  )
+
+  $useRegistryFallback = (
+    $displayNames.Count -lt 1 -or
+    ($displayNames.Count -eq 1 -and (
+      $displayNames[0] -match '^\s*WinDisc\s*$' -or
+      $displayNames[0] -match '^\s*Generic PnP Monitor\s*$' -or
+      $displayNames[0] -match '^\s*Display\s*$'
+    ))
+  )
+
+  if ($useRegistryFallback) {
+    $displayTokens = @(Get-GraphicsDriverDisplayTokens)
+    if ($displayTokens.Count -gt 0) {
+      return @(for ($index = 0; $index -lt $displayTokens.Count; $index++) {
+        '{0} display {1}' -f $HostLabel, ($index + 1)
+      })
+    }
+  }
+
+  if ($displayNames.Count -lt 1) {
+    $displayNames = @('Display')
+  }
+
+  return @(for ($index = 0; $index -lt $displayNames.Count; $index++) {
+    $monitorName = $displayNames[$index]
+    if ($monitorName -eq 'Display') {
+      '{0} display {1}' -f $HostLabel, ($index + 1)
+    } else {
+      '{0} display {1} ({2})' -f $HostLabel, ($index + 1), $monitorName
+    }
+  })
 }
 
 function New-HiddenNativeLauncherPowerShellContent {
@@ -293,6 +392,105 @@ $serveArguments += @(
 )
 
 $serveDynamicArgumentsScript = @'
+function Test-LikelyVirtualDisplayToken {
+  param([Parameter(Mandatory = $true)] [string] $Token)
+
+  $trimmed = $Token.Trim()
+  if ([string]::IsNullOrWhiteSpace($trimmed)) {
+    return $true
+  }
+  return (
+    $trimmed.StartsWith('MSBDD_', [System.StringComparison]::OrdinalIgnoreCase) -or
+    $trimmed.StartsWith('MSNIL', [System.StringComparison]::OrdinalIgnoreCase) -or
+    $trimmed.StartsWith('NOEDID', [System.StringComparison]::OrdinalIgnoreCase) -or
+    $trimmed.StartsWith('UGD', [System.StringComparison]::OrdinalIgnoreCase)
+  )
+}
+
+function Get-GraphicsDriverDisplayTokens {
+  $connectivityRoot = 'HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers\Connectivity'
+  if (-not (Test-Path -LiteralPath $connectivityRoot)) {
+    return @()
+  }
+
+  $bestTokens = @()
+  $bestScore = [int]::MinValue
+  foreach ($key in Get-ChildItem -LiteralPath $connectivityRoot -ErrorAction SilentlyContinue) {
+    $item = Get-ItemProperty -LiteralPath $key.PSPath -ErrorAction SilentlyContinue
+    if ($null -eq $item) {
+      continue
+    }
+    foreach ($property in $item.PSObject.Properties) {
+      if ($property.Name -like 'PS*' -or $property.Value -isnot [string]) {
+        continue
+      }
+      $tokens = @(
+        $property.Value.Split('+') |
+          ForEach-Object { $_.Trim() } |
+          Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+      )
+      if ($tokens.Count -lt 1) {
+        continue
+      }
+      $realCount = @($tokens | Where-Object { -not (Test-LikelyVirtualDisplayToken $_) }).Count
+      $score = ($realCount * 100) + $tokens.Count
+      if ($score -gt $bestScore) {
+        $bestScore = $score
+        $bestTokens = $tokens
+      }
+    }
+  }
+
+  return @($bestTokens | Select-Object -Unique)
+}
+
+function Get-DefaultMuninnVideoSourceLabels {
+  param([Parameter(Mandatory = $true)] [string] $HostLabel)
+
+  $displayNames = @(
+    Get-CimInstance Win32_DesktopMonitor -ErrorAction SilentlyContinue |
+      Where-Object { [string]::IsNullOrWhiteSpace($_.Status) -or $_.Status -eq 'OK' } |
+      ForEach-Object {
+        if ([string]::IsNullOrWhiteSpace($_.Name)) {
+          'Display'
+        } else {
+          $_.Name.Trim()
+        }
+      }
+  )
+
+  $useRegistryFallback = (
+    $displayNames.Count -lt 1 -or
+    ($displayNames.Count -eq 1 -and (
+      $displayNames[0] -match '^\s*WinDisc\s*$' -or
+      $displayNames[0] -match '^\s*Generic PnP Monitor\s*$' -or
+      $displayNames[0] -match '^\s*Display\s*$'
+    ))
+  )
+
+  if ($useRegistryFallback) {
+    $displayTokens = @(Get-GraphicsDriverDisplayTokens)
+    if ($displayTokens.Count -gt 0) {
+      return @(for ($index = 0; $index -lt $displayTokens.Count; $index++) {
+        '{0} display {1}' -f $HostLabel, ($index + 1)
+      })
+    }
+  }
+
+  if ($displayNames.Count -lt 1) {
+    $displayNames = @('Display')
+  }
+
+  return @(for ($index = 0; $index -lt $displayNames.Count; $index++) {
+    $monitorName = $displayNames[$index]
+    if ($monitorName -eq 'Display') {
+      '{0} display {1}' -f $HostLabel, ($index + 1)
+    } else {
+      '{0} display {1} ({2})' -f $HostLabel, ($index + 1), $monitorName
+    }
+  })
+}
+
 $hostArgumentIndex = [Array]::IndexOf($arguments, '--host')
 $hostLabel = if ($hostArgumentIndex -ge 0 -and ($hostArgumentIndex + 1) -lt $arguments.Count) {
   $arguments[$hostArgumentIndex + 1]
@@ -439,28 +637,9 @@ namespace Muninn {
 "@
 }
 if (-not $hasExplicitVideoSources) {
-  $displayNames = @(
-    Get-CimInstance Win32_DesktopMonitor -ErrorAction SilentlyContinue |
-      Where-Object { [string]::IsNullOrWhiteSpace($_.Status) -or $_.Status -eq 'OK' } |
-      ForEach-Object {
-        if ([string]::IsNullOrWhiteSpace($_.Name)) {
-          'Display'
-        } else {
-          $_.Name.Trim()
-        }
-      }
-  )
-  if ($displayNames.Count -lt 1) {
-    $displayNames = @('Display')
-  }
-  for ($index = 0; $index -lt $displayNames.Count; $index++) {
-    $monitorName = $displayNames[$index]
-    $label = if ($monitorName -eq 'Display') {
-      '{0} display {1}' -f $hostLabel, ($index + 1)
-    } else {
-      '{0} display {1} ({2})' -f $hostLabel, ($index + 1), $monitorName
-    }
-    $arguments += @('--video-source', ('display:{0}={1}' -f $index, $label))
+  $videoSourceLabels = @(Get-DefaultMuninnVideoSourceLabels -HostLabel $hostLabel)
+  for ($index = 0; $index -lt $videoSourceLabels.Count; $index++) {
+    $arguments += @('--video-source', ('display:{0}={1}' -f $index, $videoSourceLabels[$index]))
   }
 }
 if (-not $hasExplicitAudioSources) {
@@ -630,8 +809,9 @@ Get-CimInstance Win32_Process |
 
 New-Item -ItemType Directory -Force -Path "$LogRoot" | Out-Null
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent "$StorePath") | Out-Null
+`$captureCommandUdpPort = ([string] "$CaptureCommandRudpBind").Split(':')[-1]
 & netsh.exe advfirewall firewall delete rule name="GameCult Muninn Capture Command RUDP" | Out-Null 2>`$null
-& netsh.exe advfirewall firewall add rule name="GameCult Muninn Capture Command RUDP" dir=in action=allow protocol=UDP localport=17873 | Out-Null
+& netsh.exe advfirewall firewall add rule name="GameCult Muninn Capture Command RUDP" dir=in action=allow protocol=UDP localport=`$captureCommandUdpPort | Out-Null
 
 function Register-HiddenVbsTask {
   param(
