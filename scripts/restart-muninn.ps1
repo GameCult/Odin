@@ -4,6 +4,7 @@ param(
   [string] $StorePath = "C:\Meta\Odin\state\muninn.telemetry.cc",
   [string] $ActivateStorePath = "C:\Meta\Odin\state\muninn.activate.cc",
   [string] $LogRoot = "C:\Meta\Odin\logs\muninn",
+  [string] $LocalLoopbackScript = (Join-Path $PSScriptRoot "wasapi-loopback-capture.ps1"),
   [string] $LoopbackScript = "C:\Meta\Odin\Muninn\scripts\wasapi-loopback-capture.ps1",
   [string] $Ffmpeg = "C:\Users\Madman's Lullaby\AppData\Local\Microsoft\WinGet\Links\ffmpeg.exe",
   [string] $TargetHost = "192.168.1.66",
@@ -27,6 +28,10 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+if (-not (Test-Path -LiteralPath $LocalLoopbackScript)) {
+  throw "Local Muninn loopback script not found at $LocalLoopbackScript"
+}
 
 function Set-AsciiFile {
   param(
@@ -296,15 +301,16 @@ $hostLabel = if ($hostArgumentIndex -ge 0 -and ($hostArgumentIndex + 1) -lt $arg
 }
 $hasExplicitVideoSources = @($arguments | Where-Object { $_ -eq '--video-source' }).Count -gt 0
 $hasExplicitAudioSources = @($arguments | Where-Object { $_ -eq '--audio-source' }).Count -gt 0
-if (-not ('Muninn.RenderEndpointDiscovery' -as [type])) {
+if (-not ('Muninn.AudioEndpointDiscovery' -as [type])) {
   Add-Type -TypeDefinition @"
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 
 namespace Muninn {
-    public static class RenderEndpointDiscovery {
+    public static class AudioEndpointDiscovery {
         const int eRender = 0;
+        const int eCapture = 1;
         const uint DEVICE_STATE_ACTIVE = 0x00000001;
         static readonly PROPERTYKEY DeviceFriendlyNameKey = new PROPERTYKEY(
             new Guid("A45C254E-DF1C-4EFD-8020-67D146A850E0"),
@@ -382,11 +388,11 @@ namespace Muninn {
         [DllImport("ole32.dll")]
         static extern int PropVariantClear(ref PROPVARIANT variant);
 
-        public static string[] FriendlyNames() {
+        public static string[] FriendlyNames(int dataFlow) {
             var names = new List<string>();
             IMMDeviceEnumerator enumerator = (IMMDeviceEnumerator)(new MMDeviceEnumerator());
             IMMDeviceCollection devices;
-            Marshal.ThrowExceptionForHR(enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE, out devices));
+            Marshal.ThrowExceptionForHR(enumerator.EnumAudioEndpoints(dataFlow, DEVICE_STATE_ACTIVE, out devices));
             try {
                 uint count;
                 Marshal.ThrowExceptionForHR(devices.GetCount(out count));
@@ -458,15 +464,19 @@ if (-not $hasExplicitVideoSources) {
   }
 }
 if (-not $hasExplicitAudioSources) {
-  $audioNames = @([Muninn.RenderEndpointDiscovery]::FriendlyNames() | Sort-Object -Unique)
-  if ($audioNames.Count -lt 1) {
+  $loopbackNames = @([Muninn.AudioEndpointDiscovery]::FriendlyNames(0) | Sort-Object -Unique)
+  $inputNames = @([Muninn.AudioEndpointDiscovery]::FriendlyNames(1) | Sort-Object -Unique)
+  if ($loopbackNames.Count -lt 1 -and $inputNames.Count -lt 1) {
     $audioDeviceIndex = [Array]::IndexOf($arguments, '--audio-device')
     if ($audioDeviceIndex -ge 0 -and ($audioDeviceIndex + 1) -lt $arguments.Count) {
-      $audioNames = @($arguments[$audioDeviceIndex + 1])
+      $loopbackNames = @($arguments[$audioDeviceIndex + 1])
     }
   }
-  foreach ($audioName in $audioNames) {
+  foreach ($audioName in $loopbackNames) {
     $arguments += @('--audio-source', ('wasapi-loopback:{0}={1} loopback ({0})' -f $audioName.Trim(), $hostLabel))
+  }
+  foreach ($audioName in $inputNames) {
+    $arguments += @('--audio-source', ('wasapi-input:{0}={1} input ({0})' -f $audioName.Trim(), $hostLabel))
   }
 }
 '@
@@ -738,6 +748,7 @@ foreach (`$pattern in @(
 "@
 
   $uploadSpecs = @(
+    @{ LocalPath = $LocalLoopbackScript; RemotePath = ($LoopbackScript -replace "\\", "/") },
     @{ LocalPath = $localServePs; RemotePath = ($servePsPath -replace "\\", "/") },
     @{ LocalPath = $localServeVbs; RemotePath = ($serveVbsPath -replace "\\", "/") },
     @{ LocalPath = $localServeCmd; RemotePath = ($serveCmdPath -replace "\\", "/") },

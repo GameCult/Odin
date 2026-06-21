@@ -128,6 +128,7 @@ struct Options {
     capture_video: bool,
     capture_audio: bool,
     audio_device: String,
+    audio_source_id_override: Option<String>,
     video_sources: Vec<CatalogSource>,
     audio_sources: Vec<CatalogSource>,
     audio_sample_rate: u32,
@@ -164,6 +165,18 @@ struct Options {
 struct CatalogSource {
     id: String,
     label: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AudioSourceKind {
+    Loopback,
+    Input,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AudioSourceSpec {
+    kind: AudioSourceKind,
+    device: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -415,11 +428,11 @@ fn tick_capture_stream_commands(
         if command.host_id != options.host_id {
             continue;
         }
-        if latest_command_by_stream
-            .get(&command.stream_id)
-            .is_some_and(|command_id| command_id != &command.command_id)
-        {
-            continue;
+        if let Some(latest_command_id) = latest_command_by_stream.get(&command.stream_id) {
+            if latest_command_id != &command.command_id {
+                supersede_capture_stream_command(&mut node, command, latest_command_id)?;
+                continue;
+            }
         }
         match (command.action.as_str(), command.state.as_str()) {
             ("start", "pending") => {
@@ -443,6 +456,31 @@ fn tick_capture_stream_commands(
         .iter()
         .map(|session| session.stream_id.clone())
         .collect())
+}
+
+fn supersede_capture_stream_command(
+    node: &mut cultmesh_rs::CultMeshNode,
+    command: MuninnCaptureStreamCommandRecord,
+    latest_command_id: &str,
+) -> Result<()> {
+    if capture_stream_command_is_terminal(&command.state) {
+        return Ok(());
+    }
+    let command_id = command.command_id.clone();
+    node.put(
+        &command_id,
+        &MuninnCaptureStreamCommandRecord {
+            state: "completed".to_string(),
+            detail: format!("Superseded by newer command {latest_command_id}."),
+            updated_at: timestamp()?,
+            ..command
+        },
+    )?;
+    Ok(())
+}
+
+fn capture_stream_command_is_terminal(state: &str) -> bool {
+    matches!(state, "completed" | "failed")
 }
 
 fn reap_capture_stream_children(
@@ -615,9 +653,11 @@ fn start_capture_stream_command(
                     session.command_id
                 ),
                 updated_at: timestamp()?,
-                ..command
+                ..command.clone()
             };
             node.put(&running.command_id, &running)?;
+            session.command_id = running.command_id.clone();
+            session.command = running;
             return Ok(());
         }
     }
@@ -801,11 +841,10 @@ fn spawn_capture_stream_activation(
         args.push("--no-video".to_string());
     }
     if command_requests_audio(command) {
-        if let Some(audio_device) = audio_source_device(command_audio_source_id(command)) {
-            args.extend(["--audio-device".to_string(), audio_device]);
-        } else {
-            args.extend(["--audio-device".to_string(), options.audio_device.clone()]);
-        }
+        args.extend([
+            "--audio-source-id".to_string(),
+            command_audio_source_id(command).to_string(),
+        ]);
     } else {
         args.push("--no-audio".to_string());
     }
@@ -866,6 +905,11 @@ fn video_source_label_for_options(options: &Options) -> String {
 
 fn audio_source_id_for_options(options: &Options) -> String {
     if options.capture_audio {
+        if let Some(source_id) = options.audio_source_id_override.as_ref() {
+            if parse_audio_source_spec(source_id).is_some() {
+                return source_id.clone();
+            }
+        }
         format!("wasapi-loopback:{}", options.audio_device)
     } else {
         MUNINN_DISABLED_AUDIO_SOURCE_ID.to_string()
@@ -873,7 +917,13 @@ fn audio_source_id_for_options(options: &Options) -> String {
 }
 
 fn audio_source_label_for_options(options: &Options) -> String {
-    format!("{} loopback ({})", options.host_id, options.audio_device)
+    let spec = audio_source_spec_for_options(options);
+    match spec.kind {
+        AudioSourceKind::Loopback => {
+            format!("{} loopback ({})", options.host_id, spec.device)
+        }
+        AudioSourceKind::Input => format!("{} input ({})", options.host_id, spec.device),
+    }
 }
 
 fn video_source_catalog(options: &Options) -> Vec<CatalogSource> {
@@ -904,11 +954,34 @@ fn video_source_output_index(source_id: &str) -> Option<u32> {
         .and_then(|value| value.parse::<u32>().ok())
 }
 
-fn audio_source_device(source_id: &str) -> Option<String> {
-    source_id
-        .strip_prefix("wasapi-loopback:")
-        .map(|value| value.to_string())
-        .filter(|value| !value.is_empty())
+fn parse_audio_source_spec(source_id: &str) -> Option<AudioSourceSpec> {
+    let (kind, device) = if let Some(value) = source_id.strip_prefix("wasapi-loopback:") {
+        (AudioSourceKind::Loopback, value)
+    } else if let Some(value) = source_id.strip_prefix("wasapi-input:") {
+        (AudioSourceKind::Input, value)
+    } else {
+        return None;
+    };
+    let device = device.trim();
+    if device.is_empty() {
+        return None;
+    }
+    Some(AudioSourceSpec {
+        kind,
+        device: device.to_string(),
+    })
+}
+
+fn audio_source_spec_for_options(options: &Options) -> AudioSourceSpec {
+    if let Some(source_id) = options.audio_source_id_override.as_ref() {
+        if let Some(spec) = parse_audio_source_spec(source_id) {
+            return spec;
+        }
+    }
+    AudioSourceSpec {
+        kind: AudioSourceKind::Loopback,
+        device: options.audio_device.clone(),
+    }
 }
 
 fn safe_log_component(value: &str) -> String {
@@ -5605,12 +5678,14 @@ fn capture_stream_status(options: Options) -> Result<()> {
         println!(
             "No Muninn capture stream commands found for host {}{}{}.",
             status_options.host_id,
-            if !status_options.stream_filter_explicit || status_options.stream_id.trim().is_empty() {
+            if !status_options.stream_filter_explicit || status_options.stream_id.trim().is_empty()
+            {
                 ""
             } else {
                 " stream "
             },
-            if !status_options.stream_filter_explicit || status_options.stream_id.trim().is_empty() {
+            if !status_options.stream_filter_explicit || status_options.stream_id.trim().is_empty()
+            {
                 ""
             } else {
                 status_options.stream_id.as_str()
@@ -6149,6 +6224,7 @@ fn muninn_rudp_video_gop_frames(options: &Options) -> u32 {
 }
 
 fn loopback_args(options: &Options) -> Vec<String> {
+    let audio_source = audio_source_spec_for_options(options);
     vec![
         "-NoProfile".to_string(),
         "-ExecutionPolicy".to_string(),
@@ -6162,7 +6238,17 @@ fn loopback_args(options: &Options) -> Vec<String> {
         "-Channels".to_string(),
         options.audio_channels.to_string(),
         "-Device".to_string(),
-        options.audio_device.clone(),
+        audio_source.device,
+        "-DataFlow".to_string(),
+        match audio_source.kind {
+            AudioSourceKind::Loopback => "Render".to_string(),
+            AudioSourceKind::Input => "Capture".to_string(),
+        },
+        "-Loopback:$".to_string()
+            + match audio_source.kind {
+                AudioSourceKind::Loopback => "true",
+                AudioSourceKind::Input => "false",
+            },
     ]
 }
 
@@ -6453,6 +6539,7 @@ impl Options {
             capture_video: true,
             capture_audio: true,
             audio_device: "Realtek".to_string(),
+            audio_source_id_override: None,
             video_sources: Vec::new(),
             audio_sources: Vec::new(),
             audio_sample_rate: 48000,
@@ -6567,6 +6654,10 @@ impl Options {
                 "--no-video" => options.capture_video = false,
                 "--no-audio" => options.capture_audio = false,
                 "--audio-device" => options.audio_device = take_value(&mut args, "--audio-device")?,
+                "--audio-source-id" => {
+                    options.audio_source_id_override =
+                        Some(take_value(&mut args, "--audio-source-id")?)
+                }
                 "--video-source" => options.video_sources.push(parse_catalog_source(&take_value(
                     &mut args,
                     "--video-source",
@@ -6846,7 +6937,7 @@ fn parse_catalog_source(value: &str) -> Result<CatalogSource> {
 }
 
 fn help_text() -> &'static str {
-    "Usage: muninn [serve|activate|request-stream|capture-stream-status|request-move-light|move-light-status|move-identity-status|move-source-status|move-state-status|claim-move-host|quest-access-status] [--store <path>] [--activate-store <path>] [--stream-action <start|stop>] [--target-host <host>] [--port <port>] [--obs-target-host <host>] [--obs-port <port>] [--media-transport <srt|rudp>] [--media-packet-bytes <bytes>] [--rudp-video-bitrate-kbps <kbps>] [--rudp-latency-budget-ms <ms>] [--video-source <source-id=label>] [--audio-source <source-id=label>] [--no-video] [--no-audio] [--loopback-script <path>] [--ffmpeg <path>] [--capture-command-rudp-bind <addr>] [--capture-command-rudp-target <addr>] [--obs-catalog-rudp-target <addr>] [--move-state <move-id>=<hidraw-path>] [--move-host <bt-addr>] [--move-evidence-stream <stream-id>] [--move-evidence-verse <verse-id>] [--quest-adb] [--quest-serial <serial>] [--quest-input-stream <stream-id>] [--quest-pose-stream <stream-id>] [--quest-video-input-stream <stream-id>] [--idunn-rudp-health <addr>] [--idunn-daemon <id>] [--idunn-health-contract <contract>] [--dry-run] [--health]\n\nMuninn is Odin's portable telemetry Verse assembler. serve publishes cheap typed telemetry affordances, optional Quest USB access surfaces, and the explicitly configured Move runtime; when serve receives --move-state, --move-host, or --move-evidence-stream it may publish source-local Move controller state, typed Move identity records, a CultMesh Move evidence stream, and keep USB-attached PS Moves claimed to that explicit Bluetooth host; serve also consumes typed capture stream commands from --activate-store or --capture-command-rudp-bind and owns the local ffmpeg/loopback activation child lifecycle, and may project the OBS stream catalog to a local OBS plugin over --obs-catalog-rudp-target; activate starts an explicitly requested local stream over SRT or CultNet RUDP as a daemon child; request-stream publishes a typed capture stream command for Muninn serve to execute, either into the activation store or over --capture-command-rudp-target; capture-stream-status reads typed capture stream command receipts; use --no-video or --no-audio to request one leg without the other when the transport is CultNet RUDP; request-move-light publishes a typed Move light command for Muninn serve to execute; move-light-status reads typed command receipts; move-identity-status reads typed Move identity records; move-source-status prints live Move source discovery; move-state-status reads typed controller-state records; claim-move-host assigns USB-attached PS Moves to a Bluetooth host; quest-access-status reads typed Quest access state. In --health mode, the Idunn RUDP flags publish typed daemon health to Idunn while preserving command-probe exit semantics."
+    "Usage: muninn [serve|activate|request-stream|capture-stream-status|request-move-light|move-light-status|move-identity-status|move-source-status|move-state-status|claim-move-host|quest-access-status] [--store <path>] [--activate-store <path>] [--stream-action <start|stop>] [--target-host <host>] [--port <port>] [--obs-target-host <host>] [--obs-port <port>] [--media-transport <srt|rudp>] [--media-packet-bytes <bytes>] [--rudp-video-bitrate-kbps <kbps>] [--rudp-latency-budget-ms <ms>] [--video-source <source-id=label>] [--audio-source <source-id=label>] [--audio-source-id <source-id>] [--no-video] [--no-audio] [--loopback-script <path>] [--ffmpeg <path>] [--capture-command-rudp-bind <addr>] [--capture-command-rudp-target <addr>] [--obs-catalog-rudp-target <addr>] [--move-state <move-id>=<hidraw-path>] [--move-host <bt-addr>] [--move-evidence-stream <stream-id>] [--move-evidence-verse <verse-id>] [--quest-adb] [--quest-serial <serial>] [--quest-input-stream <stream-id>] [--quest-pose-stream <stream-id>] [--quest-video-input-stream <stream-id>] [--idunn-rudp-health <addr>] [--idunn-daemon <id>] [--idunn-health-contract <contract>] [--dry-run] [--health]\n\nMuninn is Odin's portable telemetry Verse assembler. serve publishes cheap typed telemetry affordances, optional Quest USB access surfaces, and the explicitly configured Move runtime; when serve receives --move-state, --move-host, or --move-evidence-stream it may publish source-local Move controller state, typed Move identity records, a CultMesh Move evidence stream, and keep USB-attached PS Moves claimed to that explicit Bluetooth host; serve also consumes typed capture stream commands from --activate-store or --capture-command-rudp-bind and owns the local ffmpeg/loopback activation child lifecycle, and may project the OBS stream catalog to a local OBS plugin over --obs-catalog-rudp-target; activate starts an explicitly requested local stream over SRT or CultNet RUDP as a daemon child; request-stream publishes a typed capture stream command for Muninn serve to execute, either into the activation store or over --capture-command-rudp-target; capture-stream-status reads typed capture stream command receipts; use --no-video or --no-audio to request one leg without the other when the transport is CultNet RUDP; request-move-light publishes a typed Move light command for Muninn serve to execute; move-light-status reads typed command receipts; move-identity-status reads typed Move identity records; move-source-status prints live Move source discovery; move-state-status reads typed controller-state records; claim-move-host assigns USB-attached PS Moves to a Bluetooth host; quest-access-status reads typed Quest access state. In --health mode, the Idunn RUDP flags publish typed daemon health to Idunn while preserving command-probe exit semantics."
 }
 
 fn parse_move_state_source(value: &str) -> Result<MoveStateSource> {
@@ -6949,6 +7040,8 @@ mod tests {
                 "wasapi-loopback:Realtek=Raven Realtek loopback",
                 "--audio-source",
                 "wasapi-loopback:Headphones=Raven headphones loopback",
+                "--audio-source",
+                "wasapi-input:Microphone=Raven microphone input",
             ]
             .into_iter()
             .map(String::from),
@@ -6978,8 +7071,30 @@ mod tests {
                 CatalogSource {
                     id: "wasapi-loopback:Headphones".to_string(),
                     label: "Raven headphones loopback".to_string(),
+                },
+                CatalogSource {
+                    id: "wasapi-input:Microphone".to_string(),
+                    label: "Raven microphone input".to_string(),
                 }
             ]
+        );
+    }
+
+    #[test]
+    fn parse_audio_source_spec_accepts_loopback_and_input_sources() {
+        assert_eq!(
+            parse_audio_source_spec("wasapi-loopback:Realtek"),
+            Some(AudioSourceSpec {
+                kind: AudioSourceKind::Loopback,
+                device: "Realtek".to_string(),
+            })
+        );
+        assert_eq!(
+            parse_audio_source_spec("wasapi-input:Microphone"),
+            Some(AudioSourceSpec {
+                kind: AudioSourceKind::Input,
+                device: "Microphone".to_string(),
+            })
         );
     }
 
@@ -7065,6 +7180,25 @@ mod tests {
             audio_source_id_for_options(&audio_only),
             "wasapi-loopback:Realtek".to_string()
         );
+    }
+
+    #[test]
+    fn loopback_args_switch_to_capture_mode_for_input_sources() {
+        let options = Options::parse(
+            [
+                "activate",
+                "--audio-source-id",
+                "wasapi-input:Microphone (USB Audio)",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap();
+
+        let args = loopback_args(&options);
+        assert!(args.contains(&"Capture".to_string()));
+        assert!(args.contains(&"-Loopback:$false".to_string()));
+        assert!(args.contains(&"Microphone (USB Audio)".to_string()));
     }
 
     #[test]
@@ -7417,7 +7551,8 @@ mod tests {
         combined.command_id = "combined".to_string();
 
         assert!(!capture_stream_commands_start_equivalent(
-            &video_only, &combined
+            &video_only,
+            &combined
         ));
         assert_eq!(
             command_audio_source_id(&video_only),
@@ -8390,6 +8525,78 @@ mod tests {
         assert_eq!(options.host_id, "raven");
         assert_eq!(options.stream_id, "muninn.raven.av.srt");
         assert!(!options.stream_filter_explicit);
+    }
+
+    #[test]
+    fn tick_capture_stream_commands_supersedes_older_nonterminal_receipts() {
+        let store_path = std::env::temp_dir().join(format!(
+            "muninn-capture-command-supersede-{}.cc",
+            timestamp_ns().unwrap()
+        ));
+        let options = Options::parse(
+            [
+                "serve",
+                "--host",
+                "raven",
+                "--store",
+                store_path.to_str().unwrap(),
+                "--activate-store",
+                store_path.to_str().unwrap(),
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap();
+        let mut older = build_capture_stream_command(
+            &Options::parse(
+                [
+                    "request-stream",
+                    "--host",
+                    "raven",
+                    "--stream",
+                    "muninn.probe.video.rudp",
+                ]
+                .into_iter()
+                .map(String::from),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        older.command_id = "older-command".to_string();
+        older.updated_at = "unix-1000".to_string();
+        older.state = "pending".to_string();
+
+        let mut newer = older.clone();
+        newer.command_id = "newer-command".to_string();
+        newer.updated_at = "unix-2000".to_string();
+        newer.state = "completed".to_string();
+        newer.detail = "already handled elsewhere".to_string();
+
+        let mut node = open_node(&options, "muninn-capture-command-supersede-test").unwrap();
+        node.put(&older.command_id, &older).unwrap();
+        node.put(&newer.command_id, &newer).unwrap();
+        drop(node);
+
+        let active = &mut Vec::new();
+        let active_stream_ids = tick_capture_stream_commands(&options, active).unwrap();
+
+        assert!(active_stream_ids.is_empty());
+
+        let node = open_node(&options, "muninn-capture-command-supersede-status").unwrap();
+        let superseded = node
+            .get_required::<MuninnCaptureStreamCommandRecord>("older-command")
+            .unwrap();
+        let latest = node
+            .get_required::<MuninnCaptureStreamCommandRecord>("newer-command")
+            .unwrap();
+        assert_eq!(superseded.state, "completed");
+        assert_eq!(
+            superseded.detail,
+            "Superseded by newer command newer-command."
+        );
+        assert_eq!(latest.state, "completed");
+        assert_eq!(latest.detail, "already handled elsewhere");
+        let _ = fs::remove_file(store_path);
     }
 
     #[test]
