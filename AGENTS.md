@@ -246,6 +246,7 @@ Self-preservation is not a goal. The agent's previous work is allowed to be wron
 ## Infrastructure
 
 - If the task touches GameCult infrastructure, servers, deployment, SSH access, or operational history, check `E:\Projects\gamecult-ops` first for inventory, runbooks, and prior decisions before improvising.
+- Treat Raven, Starfire, and Nightwing as interactive human workstations, not disposable daemon boxes. Never reboot, shut down, log off, or otherwise force host-wide disruption on those machines without explicit live user approval for that exact action.
 - For GameCult code, indexed repositories, Aetheria lore, archived Discord discussion, or owner notifications, use the global `voidbot` MCP server first. Prefer `search_sources`, `get_source_context`, `list_indexed_repos`, `search_history`, and `get_message_context` over crawling repos with `rg` and reading files one by one when the MCP can answer the question.
 - Treat raw filesystem scanning in GameCult repos as the fallback path for exact patch work, missing-index cases, or when the MCP results are clearly insufficient. Do not start with the file-by-file cave spelunking routine when semantic retrieval will do.
 - For Windows remote administration over SSH, assume PowerShell quoting is fragile. Prefer simple `cmd /c ...` calls or encoded PowerShell scripts over deeply nested quoted one-liners.
