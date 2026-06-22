@@ -417,18 +417,13 @@ fn tick_capture_stream_commands(
     let mut node = open_node(&activation_options, "muninn-activation-controller")?;
     let mut commands = node.cache().get_all::<MuninnCaptureStreamCommandRecord>()?;
     commands.sort_by(|left, right| left.updated_at.cmp(&right.updated_at));
-    let mut latest_command_by_stream = HashMap::new();
-    for command in commands
-        .iter()
-        .filter(|command| command.host_id == options.host_id)
-    {
-        latest_command_by_stream.insert(command.stream_id.clone(), command.command_id.clone());
-    }
+    let latest_command_by_stream = latest_capture_stream_command_ids(&commands, &options.host_id);
     for command in commands {
         if command.host_id != options.host_id {
             continue;
         }
-        if let Some(latest_command_id) = latest_command_by_stream.get(&command.stream_id) {
+        let command_stream_key = canonical_muninn_stream_id(&command.stream_id);
+        if let Some(latest_command_id) = latest_command_by_stream.get(&command_stream_key) {
             if latest_command_id != &command.command_id {
                 supersede_capture_stream_command(&mut node, command, latest_command_id)?;
                 continue;
@@ -456,6 +451,20 @@ fn tick_capture_stream_commands(
         .iter()
         .map(|session| session.stream_id.clone())
         .collect())
+}
+
+fn latest_capture_stream_command_ids(
+    commands: &[MuninnCaptureStreamCommandRecord],
+    host_id: &str,
+) -> HashMap<String, String> {
+    let mut latest_command_by_stream = HashMap::new();
+    for command in commands.iter().filter(|command| command.host_id == host_id) {
+        latest_command_by_stream.insert(
+            canonical_muninn_stream_id(&command.stream_id),
+            command.command_id.clone(),
+        );
+    }
+    latest_command_by_stream
 }
 
 fn supersede_capture_stream_command(
@@ -635,9 +644,10 @@ fn start_capture_stream_command(
     active: &mut Vec<ActiveCaptureStreamCommand>,
     command: MuninnCaptureStreamCommandRecord,
 ) -> Result<()> {
+    let command_stream_key = canonical_muninn_stream_id(&command.stream_id);
     if let Some(session) = active
         .iter_mut()
-        .find(|session| session.stream_id == command.stream_id)
+        .find(|session| session.stream_id == command_stream_key)
     {
         if capture_stream_commands_start_equivalent(&session.command, &command) {
             eprintln!(
@@ -663,12 +673,12 @@ fn start_capture_stream_command(
     }
 
     for session in active.iter_mut() {
-        if session.stream_id == command.stream_id {
+        if session.stream_id == command_stream_key {
             terminate_child_tree(&mut session.child);
             let _ = session.child.wait();
         }
     }
-    active.retain(|session| session.stream_id != command.stream_id);
+    active.retain(|session| session.stream_id != command_stream_key);
 
     eprintln!(
         "Muninn serve spawning capture stream {} bitrate_kbps={} latency_budget_ms={}.",
@@ -686,7 +696,7 @@ fn start_capture_stream_command(
     node.put(&running.command_id, &running)?;
     active.push(ActiveCaptureStreamCommand {
         command_id: command.command_id.clone(),
-        stream_id: command.stream_id.clone(),
+        stream_id: command_stream_key,
         command,
         child,
     });
@@ -698,7 +708,8 @@ fn capture_stream_commands_start_equivalent(
     command: &MuninnCaptureStreamCommandRecord,
 ) -> bool {
     active.host_id == command.host_id
-        && active.stream_id == command.stream_id
+        && canonical_muninn_stream_id(&active.stream_id)
+            == canonical_muninn_stream_id(&command.stream_id)
         && active.action == "start"
         && command.action == "start"
         && active.target_host == command.target_host
@@ -727,6 +738,20 @@ fn command_rudp_latency_budget_ms(command: &MuninnCaptureStreamCommandRecord) ->
     } else {
         command.rudp_latency_budget_ms
     }
+}
+
+fn canonical_muninn_stream_id(stream_id: &str) -> String {
+    for suffix in [".rudp", ".srt"] {
+        if let Some(prefix) = stream_id.strip_suffix(suffix) {
+            return prefix.to_string();
+        }
+    }
+    if let Some((prefix, suffix)) = stream_id.rsplit_once(':') {
+        if !suffix.is_empty() && suffix.chars().all(|ch| ch.is_ascii_digit()) {
+            return prefix.to_string();
+        }
+    }
+    stream_id.to_string()
 }
 
 fn command_video_source_id(command: &MuninnCaptureStreamCommandRecord) -> &str {
@@ -759,9 +784,10 @@ fn stop_capture_stream_command(
     command: MuninnCaptureStreamCommandRecord,
 ) -> Result<()> {
     let mut stopped = false;
+    let command_stream_key = canonical_muninn_stream_id(&command.stream_id);
     let mut index = 0;
     while index < active.len() {
-        if active[index].stream_id == command.stream_id {
+        if active[index].stream_id == command_stream_key {
             terminate_child_tree(&mut active[index].child);
             let _ = active[index].child.wait();
             active.remove(index);
@@ -2579,9 +2605,7 @@ fn publish_surface(
     state: &str,
     active_streams: &[String],
 ) -> Result<()> {
-    if active_streams.is_empty() {
-        publish_obs_catalog_idle(node, options)?;
-    }
+    publish_obs_catalog_idle(node, options)?;
     let record = MuninnTelemetrySurfaceRecord {
         surface_id: options.surface_id.clone(),
         host_id: options.host_id.clone(),
@@ -2900,7 +2924,6 @@ fn publish_stream(
     restart_count: u32,
     detail: &str,
 ) -> Result<()> {
-    publish_obs_catalog_active(node, options, plan, state)?;
     let record = MuninnCaptureStreamRecord {
         stream_id: options.stream_id.clone(),
         host_id: options.host_id.clone(),
@@ -2945,29 +2968,6 @@ fn publish_obs_catalog_idle(node: &mut cultmesh_rs::CultMeshNode, options: &Opti
         labels.push(source);
         urls.push(String::new());
         states.push("affordance".to_string());
-    }
-    publish_obs_catalog(node, options, stream_ids, labels, urls, states)
-}
-
-fn publish_obs_catalog_active(
-    node: &mut cultmesh_rs::CultMeshNode,
-    options: &Options,
-    plan: &MuxPlan,
-    state: &str,
-) -> Result<()> {
-    let mut stream_ids = Vec::new();
-    let mut labels = Vec::new();
-    let mut urls = Vec::new();
-    let mut states = Vec::new();
-    for (index, target) in plan.targets.iter().enumerate() {
-        stream_ids.push(if plan.targets.len() == 1 {
-            options.stream_id.clone()
-        } else {
-            format!("{}:{}", options.stream_id, index)
-        });
-        labels.push(format!("{} A/V target {}", options.host_id, index + 1));
-        urls.push(target.clone());
-        states.push(state.to_string());
     }
     publish_obs_catalog(node, options, stream_ids, labels, urls, states)
 }
@@ -6244,12 +6244,13 @@ fn loopback_args(options: &Options) -> Vec<String> {
             AudioSourceKind::Loopback => "Render".to_string(),
             AudioSourceKind::Input => "Capture".to_string(),
         },
-        "-Loopback:$".to_string()
-            + match audio_source.kind {
-                AudioSourceKind::Loopback => "true",
-                AudioSourceKind::Input => "false",
-            },
     ]
+    .into_iter()
+    .chain(match audio_source.kind {
+        AudioSourceKind::Loopback => vec!["-Loopback".to_string()],
+        AudioSourceKind::Input => Vec::new(),
+    })
+    .collect()
 }
 
 fn rudp_video_ffmpeg_args(options: &Options) -> Vec<String> {
@@ -7197,7 +7198,7 @@ mod tests {
 
         let args = loopback_args(&options);
         assert!(args.contains(&"Capture".to_string()));
-        assert!(args.contains(&"-Loopback:$false".to_string()));
+        assert!(!args.contains(&"-Loopback".to_string()));
         assert!(args.contains(&"Microphone (USB Audio)".to_string()));
     }
 
@@ -7560,6 +7561,106 @@ mod tests {
         );
         assert!(command_requests_video(&video_only));
         assert!(!command_requests_audio(&video_only));
+    }
+
+    #[test]
+    fn repeated_capture_stream_start_is_equivalent_across_transport_specific_stream_ids() {
+        let mut active = build_capture_stream_command(
+            &Options::parse(
+                [
+                    "request-stream",
+                    "--host",
+                    "raven",
+                    "--stream",
+                    "muninn.raven.av.srt",
+                    "--target-host",
+                    "10.77.0.2",
+                    "--port",
+                    "5204",
+                    "--media-transport",
+                    "rudp",
+                    "--audio-source-id",
+                    "wasapi-loopback:Speakers (Realtek(R) Audio)",
+                ]
+                .into_iter()
+                .map(String::from),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        active.command_id = "active-command".to_string();
+        active.state = "running".to_string();
+
+        let mut retry = build_capture_stream_command(
+            &Options::parse(
+                [
+                    "request-stream",
+                    "--host",
+                    "raven",
+                    "--stream",
+                    "muninn.raven.av.rudp",
+                    "--target-host",
+                    "10.77.0.2",
+                    "--port",
+                    "5204",
+                    "--media-transport",
+                    "rudp",
+                    "--audio-source-id",
+                    "wasapi-loopback:Speakers (Realtek(R) Audio)",
+                ]
+                .into_iter()
+                .map(String::from),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        retry.command_id = "retry-command".to_string();
+
+        assert_eq!(
+            canonical_muninn_stream_id(&active.stream_id),
+            canonical_muninn_stream_id(&retry.stream_id)
+        );
+        assert!(capture_stream_commands_start_equivalent(&active, &retry));
+    }
+
+    #[test]
+    fn latest_capture_stream_command_ids_canonicalizes_transport_specific_variants() {
+        let mut older = build_capture_stream_command(
+            &Options::parse(
+                [
+                    "request-stream",
+                    "--host",
+                    "raven",
+                    "--stream",
+                    "muninn.raven.av.srt",
+                    "--target-host",
+                    "10.77.0.2",
+                    "--port",
+                    "5204",
+                    "--media-transport",
+                    "rudp",
+                ]
+                .into_iter()
+                .map(String::from),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        older.command_id = "older-command".to_string();
+        older.updated_at = "unix-1000".to_string();
+
+        let mut newer = older.clone();
+        newer.stream_id = "muninn.raven.av.rudp".to_string();
+        newer.command_id = "newer-command".to_string();
+        newer.updated_at = "unix-2000".to_string();
+
+        let latest = latest_capture_stream_command_ids(&[older, newer], "raven");
+
+        assert_eq!(latest.len(), 1);
+        assert_eq!(
+            latest.get("muninn.raven.av").map(String::as_str),
+            Some("newer-command")
+        );
     }
 
     #[test]
