@@ -39,17 +39,27 @@ function createStateBuilder({ cachePath, gamecultTextDocumentStorePath, interfac
   async function buildState() {
     version += 1;
     const observedAt = new Date().toISOString();
-    const [docker, adb, hosts, yggdrasilServices, nightwingServices, nightwingGpu, discoveredInterfaces, providerAdvertisements, observations] = await Promise.all([
+    const [
+      docker,
+      adb,
+      hosts,
+      yggdrasilServices,
+      nightwingServices,
+      nightwingGpu,
+      discovery,
+      observations,
+    ] = await Promise.all([
       dockerSnapshot(),
       adbSnapshot(),
       hostChecks(),
       remoteServices("ygg", ["nginx", "streampixels-web", "streampixels-service", "heimdall", "repixelizer-gui", "bifrost"]),
       remoteServices("nightwing", ["ssh", "nightwing-eve-dashboard", "nightwing-eve-browser-reference", "gjallar", "docker"]),
       remoteGpu("nightwing"),
-      interfaceDiscovery.discoverInterfaces(),
-      interfaceDiscovery.discoverProviderAdvertisements(),
+      interfaceDiscovery.discoverAll(),
       observationSnapshot(observationLogPath, observationFreshSeconds),
     ]);
+    const discoveredInterfaces = discovery.interfaces;
+    const providerAdvertisements = discovery.providerAdvertisements;
     const interfaceById = new Map(discoveredInterfaces.map((entry) => [entry.providerId, entry]));
     const interfaces = [...interfaceById.values()];
     const marqueeText = await buildMarqueeText({ interfaces, textDocumentStorePath: gamecultTextDocumentStorePath, stonksBurstSize, stonksStateUrl });
