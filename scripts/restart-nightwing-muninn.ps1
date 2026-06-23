@@ -4,7 +4,8 @@ param(
   [string] $StorePath = "/home/metacrat/.local/state/gamecult/muninn/muninn.telemetry.cc",
   [string] $LogRoot = "/home/metacrat/.local/state/gamecult/muninn",
   [string[]] $MoveState = @(),
-  [string] $MoveHost = "5C:93:A2:9C:A8:A8",
+  [switch] $DiscoverMoveState,
+  [switch] $ClaimUsbMoves,
   [string] $MoveEvidenceStream = "muninn:nightwing:move-evidence",
   [int] $IntervalSeconds = 15,
   [string] $IdunnRudpHealth = "10.77.0.2:17870",
@@ -59,22 +60,30 @@ function Invoke-UploadedShell {
 }
 
 $moveStateSpecs = @($MoveState | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-if ($moveStateSpecs.Count -eq 0) {
+if ($ClaimUsbMoves.IsPresent -and -not $DiscoverMoveState.IsPresent -and $moveStateSpecs.Count -eq 0) {
+  throw "-ClaimUsbMoves requires -DiscoverMoveState or at least one explicit -MoveState value."
+}
+if ($DiscoverMoveState.IsPresent) {
   $claimScript = Join-Path $PSScriptRoot "claim-nightwing-usb-moves.ps1"
-  & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $claimScript -SshTarget $SshTarget
-  if ($LASTEXITCODE -ne 0) {
-    exit $LASTEXITCODE
+  if ($ClaimUsbMoves.IsPresent) {
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $claimScript -SshTarget $SshTarget
   }
   $sourceScript = Join-Path $PSScriptRoot "get-nightwing-move-state-sources.ps1"
   $moveStateSpecs = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $sourceScript -SshTarget $SshTarget)
-  if ($LASTEXITCODE -ne 0) {
-    exit $LASTEXITCODE
+  if ($moveStateSpecs.Count -eq 0) {
+    throw "Nightwing Move runtime was explicitly requested, but no live Move state sources were discovered."
   }
 }
 
 $moveStateSetLines = ($moveStateSpecs | ForEach-Object {
   "set -- ""`$@"" --move-state $(Quote-ShSingle $_)"
 }) -join "`n"
+$moveRuntimeSetLines = @()
+if ($moveStateSpecs.Count -gt 0) {
+  $moveRuntimeSetLines += $moveStateSetLines
+  $moveRuntimeSetLines += "set -- ""`$@"" --move-evidence-stream $(Quote-ShSingle $MoveEvidenceStream)"
+}
+$moveRuntimeSetBlock = ($moveRuntimeSetLines -join "`n")
 
 $remoteScript = @"
 set -eu
@@ -93,11 +102,9 @@ done
 set -- serve \
   --store '$StorePath' \
   --log-root '$LogRoot' \
-  --host nightwing \
-  --move-host '$MoveHost'
-$moveStateSetLines
+  --host nightwing
+$moveRuntimeSetBlock
 set -- "`$@" \
-  --move-evidence-stream '$MoveEvidenceStream' \
   --interval-seconds '$IntervalSeconds' \
   --idunn-rudp-health '$IdunnRudpHealth' \
   --idunn-daemon '$IdunnDaemon' \

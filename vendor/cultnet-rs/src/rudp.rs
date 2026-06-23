@@ -1008,15 +1008,30 @@ impl CultNetRudpSocketTransportConnection {
         wire.truncate(received);
         self.stats.bytes_received += received as u64;
 
+        let packet = match decode_rudp_packet(&wire) {
+            Ok(packet) => packet,
+            Err(_) => return Ok(None),
+        };
+
         if let Some(expected) = self.remote_addr {
             if expected != remote_addr {
-                return Ok(None);
+                if self.mode == CultNetRudpSocketMode::Server
+                    && !self.session.connected()
+                    && packet.packet_type == CultNetRudpPacketType::Connect
+                {
+                    self.remote_addr = Some(remote_addr);
+                } else {
+                    return Ok(None);
+                }
             }
         } else {
+            if self.mode == CultNetRudpSocketMode::Server
+                && packet.packet_type != CultNetRudpPacketType::Connect
+            {
+                return Ok(None);
+            }
             self.remote_addr = Some(remote_addr);
         }
-
-        let packet = decode_rudp_packet(&wire)?;
         if self.mode == CultNetRudpSocketMode::Server
             && packet.packet_type == CultNetRudpPacketType::Connect
         {

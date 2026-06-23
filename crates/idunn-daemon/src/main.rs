@@ -417,23 +417,17 @@ fn evaluate_target_health(
     desired: &IdunnDesiredDaemonRecord,
     now: &str,
 ) -> Result<(String, IdunnDaemonHealthRecord)> {
-    if let Some(health) = read_fresh_daemon_published_health(
-        options,
-        store_lock,
-        desired,
-        &timestamp()?,
-    )? {
+    if let Some(health) =
+        read_fresh_daemon_published_health(options, store_lock, desired, &timestamp()?)?
+    {
         return Ok((desired.daemon_id.clone(), health));
     }
 
     let probe = probe_health(target, options.command_timeout_seconds, now);
 
-    if let Some(health) = read_fresh_daemon_published_health(
-        options,
-        store_lock,
-        desired,
-        &timestamp()?,
-    )? {
+    if let Some(health) =
+        read_fresh_daemon_published_health(options, store_lock, desired, &timestamp()?)?
+    {
         return Ok((desired.daemon_id.clone(), health));
     }
 
@@ -876,7 +870,6 @@ fn handle_rudp_health_datagram(
             connection_id: IDUNN_HEALTH_RUDP_CONNECTION_ID,
             initial_sequence: 1,
             resend_delay_ms: 100,
-            media_reliable_expire_after_ms: None,
             max_pending_reliable_packets: None,
         });
         let accept = session.accept_connect(&packet, now, Vec::new())?;
@@ -897,7 +890,6 @@ fn handle_rudp_health_datagram(
             connection_id: IDUNN_HEALTH_RUDP_CONNECTION_ID,
             initial_sequence: 1,
             resend_delay_ms: 100,
-            media_reliable_expire_after_ms: None,
             max_pending_reliable_packets: None,
         })
     });
@@ -1559,7 +1551,7 @@ fn daemon_surgery_plan(target: &DaemonTarget, updated_at: &str) -> IdunnDaemonSu
                 "Muninn publishes telemetry, provider advertisement, command_boundary, transport_profile, explicit activation routing, and daemon health over CultNet/RUDP/CultCache; Raven Task Scheduler owns only background launch of hidden WScript/PowerShell launchers and never visible .cmd trampoline execution or ambient Move runtime inference."
                     .to_string();
             cut_line =
-                "Keep Raven's hidden task launch invariant structural by verifying that scheduled-task actions and hidden VBS launchers never route through cmdPath trampolines, that activation commands stay pointed at C:\\Meta\\Odin\\state\\muninn.activate.cc, and that plain serve cannot infer Move runtime authority from platform defaults; Odin and Idunn should consume C:\\Meta\\Odin\\state\\muninn.telemetry.cc as the daemon-owned witness while health-muninn.cmd remains fallback evidence only."
+                "Keep Raven's hidden task launch invariant structural by verifying that scheduled-task actions and hidden VBS launchers never route through cmdPath trampolines, that activation commands stay pointed at C:\\Meta\\Odin\\state\\muninn.activate.cc, and that plain serve cannot infer Move runtime authority from platform defaults; Odin and Idunn should consume C:\\Meta\\Odin\\state\\muninn.telemetry.cc as the daemon-owned witness through health-muninn.ps1 while health-muninn.cmd remains a manual compatibility entrypoint only."
                     .to_string();
             steps = vec![
                 "Keep scripts/repair-raven-muninn-task-actions.ps1 using sftp plus a tiny remote runner so Windows command-line length does not block future hidden-task repair.".to_string(),
@@ -1585,13 +1577,13 @@ fn daemon_surgery_plan(target: &DaemonTarget, updated_at: &str) -> IdunnDaemonSu
                     "Starfire Muninn now runs as a long-lived local serve process with --quest-adb, --idunn-rudp-health 127.0.0.1:17870, daemon id starfire-muninn, and contract muninn.cultnet-rudp-local-telemetry-and-quest-access. Live Idunn accepts that daemon-published health from 127.0.0.1, the daemon-owned telemetry store at C:\\Meta\\Odin\\state\\starfire.muninn.telemetry.cc now carries provider advertisement, command_boundary, transport_profile, Quest access, and telemetry surface records, and restart-starfire-muninn.ps1 now archives a corrupt CultCache store before relaunch instead of leaving the daemon dead on decode faults."
                         .to_string();
                 cut_line =
-                    "Keep health-starfire-muninn.cmd as fallback evidence only; Odin and Idunn should consume C:\\Meta\\Odin\\state\\starfire.muninn.telemetry.cc as the daemon-owned witness while Quest availability remains telemetry state."
+                    "Keep health-starfire-muninn.ps1 consuming C:\\Meta\\Odin\\state\\starfire.muninn.telemetry.cc as the daemon-owned witness while Quest availability remains telemetry state; health-starfire-muninn.cmd stays a manual compatibility entrypoint only."
                         .to_string();
                 steps = vec![
                     "Keep the Starfire Muninn serve process command line carrying --idunn-rudp-health 127.0.0.1:17870, --idunn-daemon starfire-muninn, and --idunn-health-contract muninn.cultnet-rudp-local-telemetry-and-quest-access.".to_string(),
                     "Keep restart-starfire-muninn.ps1 clearing stale .lock files and archiving corrupt starfire.muninn.telemetry.cc before relaunch.".to_string(),
                     "Keep the daemon-owned telemetry store at C:\\Meta\\Odin\\state\\starfire.muninn.telemetry.cc publishing provider advertisement, command_boundary, transport_profile, Quest access, and telemetry surface records.".to_string(),
-                    "Keep health-starfire-muninn.cmd as a compatibility witness for Quest telemetry and process shape, not daemon truth.".to_string(),
+                    "Keep health-starfire-muninn.ps1 as the witness-first health body for Quest telemetry and process shape; health-starfire-muninn.cmd is only a manual compatibility entrypoint.".to_string(),
                 ];
             } else {
                 status = "partial-rudp-health-and-provider-store-live";
@@ -1599,14 +1591,14 @@ fn daemon_surgery_plan(target: &DaemonTarget, updated_at: &str) -> IdunnDaemonSu
                     "Nightwing Muninn now runs as a long-lived serve process with explicit Move HID input, --idunn-rudp-health 10.77.0.2:17870, daemon id nightwing-muninn, and contract muninn.cultnet-rudp-remote-telemetry-and-move-hid. Live Idunn accepts that daemon-published health from 10.77.0.3, the daemon-owned telemetry store at /home/metacrat/.local/state/gamecult/muninn/muninn.telemetry.cc now carries provider advertisement, command_boundary, transport_profile, Move HID evidence, and telemetry surface records, and restart-nightwing-muninn.ps1 now only claims or discovers Move runtime authority when -DiscoverMoveState, -ClaimUsbMoves, or explicit -MoveState values are present."
                         .to_string();
                 cut_line =
-                    "Keep health-nightwing-muninn.cmd as fallback evidence only; Odin and Idunn should consume /home/metacrat/.local/state/gamecult/muninn/muninn.telemetry.cc as the daemon-owned witness while the serve process owns muninn.cultnet-rudp-remote-telemetry-and-move-hid publication."
+                    "Keep health-nightwing-muninn.ps1 consuming /home/metacrat/.local/state/gamecult/muninn/muninn.telemetry.cc as the daemon-owned witness while the serve process owns muninn.cultnet-rudp-remote-telemetry-and-move-hid publication; health-nightwing-muninn.cmd stays a manual compatibility entrypoint only."
                         .to_string();
                 steps = vec![
                     "Keep the Nightwing Muninn serve process command line carrying --idunn-rudp-health 10.77.0.2:17870, --idunn-daemon nightwing-muninn, and --idunn-health-contract muninn.cultnet-rudp-remote-telemetry-and-move-hid.".to_string(),
                     "Keep the daemon-owned telemetry store at /home/metacrat/.local/state/gamecult/muninn/muninn.telemetry.cc publishing provider advertisement, command_boundary, transport_profile, Move HID evidence, and telemetry surface records.".to_string(),
                     "Keep restart-nightwing-muninn.ps1 launching the long-running serve body instead of one-shot health publication.".to_string(),
                     "Keep restart-nightwing-muninn.ps1 requiring explicit -DiscoverMoveState/-ClaimUsbMoves or explicit -MoveState values before it adds Move evidence/runtime arguments.".to_string(),
-                    "Keep health-nightwing-muninn.cmd as a compatibility witness for Move HID freshness, not daemon truth.".to_string(),
+                    "Keep health-nightwing-muninn.ps1 as the witness-first health body for Move HID freshness; health-nightwing-muninn.cmd is only a manual compatibility entrypoint.".to_string(),
                 ];
             }
         }
@@ -1643,14 +1635,15 @@ fn daemon_surgery_plan(target: &DaemonTarget, updated_at: &str) -> IdunnDaemonSu
                     "Nightwing Eve dashboard publishes nightwing.cultnet-rudp-eve-dashboard-health over CultNet/RUDP from the Mimir.EveDashboard systemd process, with retained dashboard state in /var/lib/gamecult/eve-dashboard/cultmesh/eve-dashboard.ccmp and a daemon-owned boundary store at /var/lib/gamecult/eve-dashboard/cultcache/eve-dashboard.service.cc."
                         .to_string();
                 cut_line =
-                    "HTTP/WebSocket stay client lowerings only. health-nightwing-eve-dashboard.ps1 now inspects the dashboard CultMesh/CultCache witnesses directly, the .cmd wrapper is a compatibility entrypoint only, and the remaining debt is teaching Nightwing projections and Odin to consume the typed witnesses without any service probe reclaiming daemon truth."
+                    "HTTP/WebSocket stay client lowerings only. health-nightwing-eve-dashboard.ps1 now inspects the dashboard CultMesh/CultCache witnesses directly, restart-nightwing-eve-dashboard.ps1 owns the systemd restart actuator, the .cmd wrappers are manual compatibility entrypoints only, and the remaining debt is teaching Nightwing projections and Odin to consume the typed witnesses without any service probe reclaiming daemon truth."
                         .to_string();
                 steps = vec![
                     "Keep live nightwing.cultnet-rudp-eve-dashboard-health publication running from the Mimir.EveDashboard systemd process.".to_string(),
                     "Keep the live CultMesh state witness at /var/lib/gamecult/eve-dashboard/cultmesh/eve-dashboard.ccmp publishing retained dashboard state.".to_string(),
                     "Keep the daemon-owned boundary store at /var/lib/gamecult/eve-dashboard/cultcache/eve-dashboard.service.cc publishing provider manifest, command_boundary, transport_profile, and daemon-health summary records.".to_string(),
                     "Teach Odin and Nightwing projections to prefer the dashboard CultMesh/CultCache witnesses over service compatibility probes.".to_string(),
-                    "Keep health-nightwing-eve-dashboard.cmd as a compatibility wrapper over witness-first PowerShell checks with no daemon-truth of its own.".to_string(),
+                    "Keep health-nightwing-eve-dashboard.ps1 as the witness-first health body and restart-nightwing-eve-dashboard.ps1 as the systemd restart body.".to_string(),
+                    "Keep health-nightwing-eve-dashboard.cmd and restart-nightwing-eve-dashboard.cmd as manual compatibility wrappers over those PowerShell bodies only.".to_string(),
                 ];
             } else {
                 status = "partial-rudp-health-and-provider-store-live";
@@ -1658,13 +1651,14 @@ fn daemon_surgery_plan(target: &DaemonTarget, updated_at: &str) -> IdunnDaemonSu
                     "Nightwing Eve browser reference publishes nightwing.cultnet-rudp-browser-reference-health over CultNet/RUDP from the Mimir.EveBrowserReference service process, and the runtime now writes a daemon-owned boundary store at /var/lib/gamecult/eve-browser-reference/cultcache/eve-browser-reference.service.cc."
                         .to_string();
                 cut_line =
-                    "HTTP stays a browser lowering only. health-nightwing-eve-browser-reference.ps1 now inspects the browser reference CultCache witness directly, the .cmd wrapper is a compatibility entrypoint only, and the remaining debt is teaching Nightwing projections and Odin to consume the typed witness without any service probe reclaiming daemon truth."
+                    "HTTP stays a browser lowering only. health-nightwing-eve-browser-reference.ps1 now inspects the browser reference CultCache witness directly, restart-nightwing-eve-browser-reference.ps1 owns the systemd restart actuator, the .cmd wrappers are manual compatibility entrypoints only, and the remaining debt is teaching Nightwing projections and Odin to consume the typed witness without any service probe reclaiming daemon truth."
                         .to_string();
                 steps = vec![
                     "Keep live nightwing.cultnet-rudp-browser-reference-health publication running from the Mimir.EveBrowserReference service process.".to_string(),
                     "Keep the daemon-owned boundary store at /var/lib/gamecult/eve-browser-reference/cultcache/eve-browser-reference.service.cc publishing manifest, static-surface, command_boundary, transport_profile, and daemon-health summary records.".to_string(),
                     "Teach Odin and Nightwing projections to prefer the browser reference CultCache witness over service compatibility probes.".to_string(),
-                    "Keep health-nightwing-eve-browser-reference.cmd as a compatibility wrapper over witness-first PowerShell checks with no daemon-truth of its own.".to_string(),
+                    "Keep health-nightwing-eve-browser-reference.ps1 as the witness-first health body and restart-nightwing-eve-browser-reference.ps1 as the systemd restart body.".to_string(),
+                    "Keep health-nightwing-eve-browser-reference.cmd and restart-nightwing-eve-browser-reference.cmd as manual compatibility wrappers over those PowerShell bodies only.".to_string(),
                 ];
             }
         }
@@ -1846,9 +1840,9 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                     "muninn.cultnet-rudp-local-telemetry-and-quest-access",
                     "failed",
                 ),
-                health_command: Some(script("health-starfire-muninn.cmd")),
+                health_command: Some(script("health-starfire-muninn.ps1")),
                 deploy_command: None,
-                restart_command: Some(script("restart-starfire-muninn.cmd")),
+                restart_command: Some(script("restart-starfire-muninn.ps1")),
                 release: None,
                 enabled: true,
                 interval_seconds: 30,
@@ -1861,9 +1855,9 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                     "muninn.cultnet-rudp-remote-telemetry-health",
                     "failed",
                 ),
-                health_command: Some(script("health-muninn.cmd")),
+                health_command: Some(script("health-muninn.ps1")),
                 deploy_command: None,
-                restart_command: Some(script("restart-muninn.cmd")),
+                restart_command: Some(script("restart-muninn.ps1")),
                 release: None,
                 enabled: true,
                 interval_seconds: 30,
@@ -1981,9 +1975,9 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                     "muninn.cultnet-rudp-remote-telemetry-and-move-hid",
                     "failed",
                 ),
-                health_command: Some(script("health-nightwing-muninn.cmd")),
+                health_command: Some(script("health-nightwing-muninn.ps1")),
                 deploy_command: None,
-                restart_command: Some(script("restart-nightwing-muninn.cmd")),
+                restart_command: Some(script("restart-nightwing-muninn.ps1")),
                 release: None,
                 enabled: true,
                 interval_seconds: 30,
@@ -1996,9 +1990,9 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                     "nightwing.cultnet-rudp-eve-dashboard-health",
                     "failed",
                 ),
-                health_command: Some(script("health-nightwing-eve-dashboard.cmd")),
+                health_command: Some(script("health-nightwing-eve-dashboard.ps1")),
                 deploy_command: None,
-                restart_command: Some(script("restart-nightwing-eve-dashboard.cmd")),
+                restart_command: Some(script("restart-nightwing-eve-dashboard.ps1")),
                 release: None,
                 enabled: true,
                 interval_seconds: 30,
@@ -2011,9 +2005,9 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                     "nightwing.cultnet-rudp-browser-reference-health",
                     "failed",
                 ),
-                health_command: Some(script("health-nightwing-eve-browser-reference.cmd")),
+                health_command: Some(script("health-nightwing-eve-browser-reference.ps1")),
                 deploy_command: None,
-                restart_command: Some(script("restart-nightwing-eve-browser-reference.cmd")),
+                restart_command: Some(script("restart-nightwing-eve-browser-reference.ps1")),
                 release: None,
                 enabled: true,
                 interval_seconds: 30,
@@ -2665,9 +2659,9 @@ mod tests {
                 "muninn.cultnet-rudp-local-telemetry-and-quest-access",
                 "degraded",
             ),
-            health_command: Some("health-starfire-muninn.cmd".to_string()),
+            health_command: Some("health-starfire-muninn.ps1".to_string()),
             deploy_command: None,
-            restart_command: Some("restart-starfire-muninn.cmd".to_string()),
+            restart_command: Some("restart-starfire-muninn.ps1".to_string()),
             release: None,
             enabled: true,
             interval_seconds: 30,
@@ -2680,9 +2674,9 @@ mod tests {
                 "muninn.cultnet-rudp-remote-telemetry-and-move-hid",
                 "failed",
             ),
-            health_command: Some("health-nightwing-muninn.cmd".to_string()),
+            health_command: Some("health-nightwing-muninn.ps1".to_string()),
             deploy_command: None,
-            restart_command: Some("restart-nightwing-muninn.cmd".to_string()),
+            restart_command: Some("restart-nightwing-muninn.ps1".to_string()),
             release: None,
             enabled: true,
             interval_seconds: 30,
@@ -2695,9 +2689,9 @@ mod tests {
                 "muninn.cultnet-rudp-remote-telemetry-health",
                 "failed",
             ),
-            health_command: Some("health-muninn.cmd".to_string()),
+            health_command: Some("health-muninn.ps1".to_string()),
             deploy_command: None,
-            restart_command: Some("restart-muninn.cmd".to_string()),
+            restart_command: Some("restart-muninn.ps1".to_string()),
             release: None,
             enabled: true,
             interval_seconds: 30,
@@ -2785,9 +2779,9 @@ mod tests {
                 "nightwing.cultnet-rudp-eve-dashboard-health",
                 "failed",
             ),
-            health_command: Some("health-nightwing-eve-dashboard.cmd".to_string()),
+            health_command: Some("health-nightwing-eve-dashboard.ps1".to_string()),
             deploy_command: None,
-            restart_command: Some("restart-nightwing-eve-dashboard.cmd".to_string()),
+            restart_command: Some("restart-nightwing-eve-dashboard.ps1".to_string()),
             release: None,
             enabled: true,
             interval_seconds: 30,
@@ -2800,9 +2794,9 @@ mod tests {
                 "nightwing.cultnet-rudp-browser-reference-health",
                 "failed",
             ),
-            health_command: Some("health-nightwing-eve-browser-reference.cmd".to_string()),
+            health_command: Some("health-nightwing-eve-browser-reference.ps1".to_string()),
             deploy_command: None,
-            restart_command: Some("restart-nightwing-eve-browser-reference.cmd".to_string()),
+            restart_command: Some("restart-nightwing-eve-browser-reference.ps1".to_string()),
             release: None,
             enabled: true,
             interval_seconds: 30,
@@ -2994,12 +2988,13 @@ mod tests {
                 .current_mechanism
                 .contains("C:\\Meta\\Odin\\state\\muninn.activate.cc")
         );
+        assert!(raven_plan.current_mechanism.contains("platform defaults"));
+        assert!(raven_plan.cut_line.contains("health-muninn.ps1"));
         assert!(
             raven_plan
-                .current_mechanism
-                .contains("platform defaults")
+                .cut_line
+                .contains("manual compatibility entrypoint only")
         );
-        assert!(raven_plan.cut_line.contains("fallback evidence only"));
         assert!(raven_plan.steps.iter().any(
             |step| step.contains("GameCult-Muninn-VideoProof") && step.contains("wscript.exe")
         ));
@@ -3037,7 +3032,16 @@ mod tests {
                 .current_mechanism
                 .contains("C:\\Meta\\Odin\\state\\starfire.muninn.telemetry.cc")
         );
-        assert!(starfire_plan.cut_line.contains("fallback evidence only"));
+        assert!(
+            starfire_plan
+                .cut_line
+                .contains("health-starfire-muninn.ps1")
+        );
+        assert!(
+            starfire_plan
+                .cut_line
+                .contains("manual compatibility entrypoint only")
+        );
         assert!(starfire_plan.steps.iter().any(
             |step| step.contains("starfire.muninn.telemetry.cc") && step.contains(".lock")
         ));
@@ -3059,7 +3063,16 @@ mod tests {
                 .current_mechanism
                 .contains("-DiscoverMoveState, -ClaimUsbMoves, or explicit -MoveState values")
         );
-        assert!(nightwing_plan.cut_line.contains("fallback evidence only"));
+        assert!(
+            nightwing_plan
+                .cut_line
+                .contains("health-nightwing-muninn.ps1")
+        );
+        assert!(
+            nightwing_plan
+                .cut_line
+                .contains("manual compatibility entrypoint only")
+        );
         assert!(nightwing_plan.steps.iter().any(|step| {
             step.contains("/home/metacrat/.local/state/gamecult/muninn/muninn.telemetry.cc")
                 && step.contains("provider advertisement")
@@ -3082,11 +3095,18 @@ mod tests {
             "partial-rudp-health-and-provider-store-live"
         );
         assert!(weksa_plan.current_mechanism.contains("command_boundary"));
-        assert!(weksa_plan.current_mechanism.contains("weksa.mimo_voicedesign_command.v0"));
-        assert!(weksa_plan.cut_line.contains("no HTTP endpoint may retake command authority"));
+        assert!(
+            weksa_plan
+                .current_mechanism
+                .contains("weksa.mimo_voicedesign_command.v0")
+        );
+        assert!(
+            weksa_plan
+                .cut_line
+                .contains("no HTTP endpoint may retake command authority")
+        );
         assert!(weksa_plan.steps.iter().any(|step| {
-            step.contains("speech_provider.mimo.voicedesign")
-                && step.contains("CultNet/RUDP")
+            step.contains("speech_provider.mimo.voicedesign") && step.contains("CultNet/RUDP")
         }));
 
         let voidbot_plan = daemon_surgery_plan(&voidbot, "unix:100");
@@ -3498,7 +3518,11 @@ mod tests {
             profile.current_transport,
             "daemon-published-rudp-health + daemon-owned-cultcache-provider-store + daemon-owned-rudp-command-ingress"
         );
-        assert!(profile.cut_line.contains("weksa.mimo_voicedesign_command.v0"));
+        assert!(
+            profile
+                .cut_line
+                .contains("weksa.mimo_voicedesign_command.v0")
+        );
     }
 
     #[test]
@@ -3657,9 +3681,9 @@ mod tests {
                 "muninn.cultnet-rudp-remote-telemetry-health",
                 "failed",
             ),
-            health_command: Some("health-muninn.cmd".to_string()),
+            health_command: Some("health-muninn.ps1".to_string()),
             deploy_command: None,
-            restart_command: Some("restart-muninn.cmd".to_string()),
+            restart_command: Some("restart-muninn.ps1".to_string()),
             release: None,
             enabled: true,
             interval_seconds: 30,
@@ -3672,9 +3696,9 @@ mod tests {
                 "muninn.cultnet-rudp-local-telemetry-and-quest-access",
                 "failed",
             ),
-            health_command: Some("health-starfire-muninn.cmd".to_string()),
+            health_command: Some("health-starfire-muninn.ps1".to_string()),
             deploy_command: None,
-            restart_command: Some("restart-starfire-muninn.cmd".to_string()),
+            restart_command: Some("restart-starfire-muninn.ps1".to_string()),
             release: None,
             enabled: true,
             interval_seconds: 30,
@@ -3687,9 +3711,9 @@ mod tests {
                 "muninn.cultnet-rudp-remote-telemetry-and-move-hid",
                 "failed",
             ),
-            health_command: Some("health-nightwing-muninn.cmd".to_string()),
+            health_command: Some("health-nightwing-muninn.ps1".to_string()),
             deploy_command: None,
-            restart_command: Some("restart-nightwing-muninn.cmd".to_string()),
+            restart_command: Some("restart-nightwing-muninn.ps1".to_string()),
             release: None,
             enabled: true,
             interval_seconds: 30,

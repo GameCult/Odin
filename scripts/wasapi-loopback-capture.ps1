@@ -6,7 +6,7 @@ param(
     [int]$Channels = 2,
     [ValidateSet("Render", "Capture")]
     [string]$DataFlow = "Render",
-    [bool]$Loopback = $true,
+    [switch]$Loopback,
     [ValidateSet("Console", "Multimedia", "Communications")]
     [string]$Role = "Console"
 )
@@ -238,11 +238,6 @@ namespace Mimir {
                             uint packetFrames;
                             Check(captureClient.GetNextPacketSize(out packetFrames), "GetNextPacketSize");
                             if (packetFrames == 0) {
-                                if (silence.Length < idleBytes) {
-                                    silence = new byte[idleBytes];
-                                }
-                                output.Write(silence, 0, idleBytes);
-                                output.Flush();
                                 Thread.Sleep(5);
                                 continue;
                             }

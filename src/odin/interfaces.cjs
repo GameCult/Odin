@@ -65,6 +65,7 @@ function createInterfaceDiscovery({
       muninnCaptureStreamDefinition,
       muninnCommandBoundaryDefinition,
       muninnMoveControllerStateDefinition,
+      muninnMoveIdentityDefinition,
       muninnMoveLightCommandDefinition,
       muninnMoveMarkerCandidateDefinition,
       muninnObsStreamCatalogDefinition,
@@ -87,7 +88,7 @@ function createInterfaceDiscovery({
       weksaTransportProfileDefinition,
       voidbotSwarmSnapshotDefinition,
     } = documents;
-    if (!CultMesh || !interfaceBindingDefinition || !idunnDaemonHealthDefinition || !muninnCaptureStreamDefinition || !muninnCommandBoundaryDefinition || !muninnMoveControllerStateDefinition || !muninnMoveLightCommandDefinition || !muninnMoveMarkerCandidateDefinition || !muninnObsStreamCatalogDefinition || !muninnQuestAccessDefinition || !muninnTelemetrySurfaceDefinition || !muninnTransportProfileDefinition || !operatorStateDefinition || !stonksCommandBoundaryDefinition || !stonksMarketSnapshotDefinition || !stonksRequestEventDefinition || !stonksTransportProfileDefinition || !streamPixelsCommandBoundaryDefinition || !streamPixelsTransportProfileDefinition || !surfaceDefinition || !viliCommandBoundaryDefinition || !viliTransportProfileDefinition || !weksaCommandBoundaryDefinition || !weksaOperatorStateDefinition || !weksaTransportProfileDefinition || !voidbotSwarmSnapshotDefinition || !providerAdvertisementDefinition) {
+    if (!CultMesh || !interfaceBindingDefinition || !idunnDaemonHealthDefinition || !muninnCaptureStreamDefinition || !muninnCommandBoundaryDefinition || !muninnMoveControllerStateDefinition || !muninnMoveIdentityDefinition || !muninnMoveLightCommandDefinition || !muninnMoveMarkerCandidateDefinition || !muninnObsStreamCatalogDefinition || !muninnQuestAccessDefinition || !muninnTelemetrySurfaceDefinition || !muninnTransportProfileDefinition || !operatorStateDefinition || !stonksCommandBoundaryDefinition || !stonksMarketSnapshotDefinition || !stonksRequestEventDefinition || !stonksTransportProfileDefinition || !streamPixelsCommandBoundaryDefinition || !streamPixelsTransportProfileDefinition || !surfaceDefinition || !viliCommandBoundaryDefinition || !viliTransportProfileDefinition || !weksaCommandBoundaryDefinition || !weksaOperatorStateDefinition || !weksaTransportProfileDefinition || !voidbotSwarmSnapshotDefinition || !providerAdvertisementDefinition) {
       return [];
     }
 
@@ -119,6 +120,7 @@ function createInterfaceDiscovery({
             muninnCaptureStreamDefinition,
             muninnCommandBoundaryDefinition,
             muninnMoveControllerStateDefinition,
+            muninnMoveIdentityDefinition,
             muninnMoveLightCommandDefinition,
             muninnMoveMarkerCandidateDefinition,
             muninnObsStreamCatalogDefinition,
@@ -192,6 +194,8 @@ function createInterfaceDiscovery({
             resolvedStore.sourceId,
           ));
         }
+      } finally {
+        resolvedStore?.cleanup?.();
       }
     }
 
@@ -206,6 +210,7 @@ function createInterfaceDiscovery({
       muninnCaptureStreamDefinition,
       muninnCommandBoundaryDefinition,
       muninnMoveControllerStateDefinition,
+      muninnMoveIdentityDefinition,
       muninnMoveLightCommandDefinition,
       muninnMoveMarkerCandidateDefinition,
       muninnObsStreamCatalogDefinition,
@@ -228,7 +233,7 @@ function createInterfaceDiscovery({
       weksaTransportProfileDefinition,
       voidbotSwarmSnapshotDefinition,
     } = documents;
-    if (!CultMesh || !interfaceBindingDefinition || !idunnDaemonHealthDefinition || !muninnCaptureStreamDefinition || !muninnCommandBoundaryDefinition || !muninnMoveControllerStateDefinition || !muninnMoveLightCommandDefinition || !muninnMoveMarkerCandidateDefinition || !muninnObsStreamCatalogDefinition || !muninnQuestAccessDefinition || !muninnTelemetrySurfaceDefinition || !muninnTransportProfileDefinition || !operatorStateDefinition || !stonksCommandBoundaryDefinition || !stonksMarketSnapshotDefinition || !stonksRequestEventDefinition || !stonksTransportProfileDefinition || !streamPixelsCommandBoundaryDefinition || !streamPixelsTransportProfileDefinition || !surfaceDefinition || !viliCommandBoundaryDefinition || !viliTransportProfileDefinition || !weksaCommandBoundaryDefinition || !weksaOperatorStateDefinition || !weksaTransportProfileDefinition || !voidbotSwarmSnapshotDefinition || !providerAdvertisementDefinition) {
+    if (!CultMesh || !interfaceBindingDefinition || !idunnDaemonHealthDefinition || !muninnCaptureStreamDefinition || !muninnCommandBoundaryDefinition || !muninnMoveControllerStateDefinition || !muninnMoveIdentityDefinition || !muninnMoveLightCommandDefinition || !muninnMoveMarkerCandidateDefinition || !muninnObsStreamCatalogDefinition || !muninnQuestAccessDefinition || !muninnTelemetrySurfaceDefinition || !muninnTransportProfileDefinition || !operatorStateDefinition || !stonksCommandBoundaryDefinition || !stonksMarketSnapshotDefinition || !stonksRequestEventDefinition || !stonksTransportProfileDefinition || !streamPixelsCommandBoundaryDefinition || !streamPixelsTransportProfileDefinition || !surfaceDefinition || !viliCommandBoundaryDefinition || !viliTransportProfileDefinition || !weksaCommandBoundaryDefinition || !weksaOperatorStateDefinition || !weksaTransportProfileDefinition || !voidbotSwarmSnapshotDefinition || !providerAdvertisementDefinition) {
       return [];
     }
     const interfaces = [];
@@ -259,6 +264,7 @@ function createInterfaceDiscovery({
             muninnCaptureStreamDefinition,
             muninnCommandBoundaryDefinition,
             muninnMoveControllerStateDefinition,
+            muninnMoveIdentityDefinition,
             muninnMoveLightCommandDefinition,
             muninnMoveMarkerCandidateDefinition,
             muninnObsStreamCatalogDefinition,
@@ -280,11 +286,13 @@ function createInterfaceDiscovery({
           if (!advertisement?.providerId) {
             continue;
           }
-          const state = unwrapDocumentRecord(node.get(
+          const state = providerSurfaceState(
+            node,
+            advertisement,
             surfaceDefinition,
-            advertisement.surfaceId || advertisement.surface_id || advertisement.providerId,
-          ));
-          if (!state?.surface) {
+            muninnTelemetrySurfaceDefinition,
+          );
+          if (!state?.surface?.root) {
             continue;
           }
           interfaces.push(cultMeshProviderInterface({
@@ -349,6 +357,8 @@ function createInterfaceDiscovery({
           }
         }
         interfaces.push(dashboardUnavailable(`cultmesh:${storeSpec}`, `cultmesh:${storeSpec}`, error.message));
+      } finally {
+        resolvedStore?.cleanup?.();
       }
     }
     return interfaces;
@@ -409,6 +419,45 @@ function cultMeshProviderInterface({
     transportProfile,
     surface,
   };
+}
+
+function providerSurfaceState(node, advertisement, surfaceDefinition, muninnTelemetrySurfaceDefinition) {
+  const surfaceKey = advertisement.surfaceId || advertisement.surface_id || advertisement.providerId;
+  const surfaceState = unwrapDocumentRecord(node.get?.(surfaceDefinition, surfaceKey));
+  if (surfaceState?.surface?.root) {
+    return {
+      providerId: surfaceState.providerId || advertisement.providerId || advertisement.provider?.id || "unknown-provider",
+      title: surfaceState.title || advertisement.title || advertisement.provider?.title || advertisement.providerId || "unknown-provider",
+      version: Number(surfaceState.version || 0),
+      updatedAt: surfaceState.updatedAt || advertisement.updatedAt || new Date().toISOString(),
+      surface: surfaceState.surface,
+    };
+  }
+
+  const telemetryState = providerTelemetrySurfaceState(node, advertisement, muninnTelemetrySurfaceDefinition);
+  if (telemetryState) {
+    return telemetryState;
+  }
+  return null;
+}
+
+function providerTelemetrySurfaceState(node, advertisement, muninnTelemetrySurfaceDefinition) {
+  if (!muninnTelemetrySurfaceDefinition) {
+    return null;
+  }
+  const keys = [
+    advertisement.surfaceId,
+    advertisement.surface_id,
+    "latest",
+  ].filter(Boolean);
+  for (const key of keys) {
+    const record = unwrapDocumentRecord(node.get?.(muninnTelemetrySurfaceDefinition, key));
+    const telemetryState = muninnTelemetryStateFromRecord(record, advertisement);
+    if (telemetryState) {
+      return telemetryState;
+    }
+  }
+  return null;
 }
 
 function providerRecord(node, definitions, advertisement) {
@@ -503,7 +552,7 @@ function inspectCultMeshInterfacesFromStore(storePath, sourceId) {
       .filter(Boolean)
       .map((provider) => [provider.id, provider]),
   );
-  return records
+  const surfaceInterfaces = records
     .filter((record) => record.schemaName === "gamecult.eve.surface_state")
     .map((record) => buildInspectedInterfaceFromSurfaceRecord(
       record,
@@ -512,6 +561,16 @@ function inspectCultMeshInterfacesFromStore(storePath, sourceId) {
       records,
     ))
     .filter(Boolean);
+  const telemetryInterfaces = records
+    .filter((record) => record.schemaName === "muninn.telemetry_surface")
+    .map((record) => buildInspectedInterfaceFromTelemetryRecord(
+      record,
+      providersById,
+      sourceId,
+      records,
+    ))
+    .filter(Boolean);
+  return [...surfaceInterfaces, ...telemetryInterfaces];
 }
 
 function buildInspectedInterfaceFromSurfaceRecord(record, providersById, sourceId, records) {
@@ -547,6 +606,163 @@ function buildInspectedInterfaceFromSurfaceRecord(record, providersById, sourceI
     commandBoundary: provider?.commandBoundary || inspectProviderCommandBoundary(state.providerId, records),
     transportProfile: provider?.transportProfile || inspectProviderTransportProfile(state.providerId, records),
     surface: state.surface,
+  };
+}
+
+function buildInspectedInterfaceFromTelemetryRecord(record, providersById, sourceId, records) {
+  const telemetry = normalizeInspectedMuninnTelemetrySurfaceRecord(record?.payloadPreview);
+  if (!telemetry?.hostId) {
+    return null;
+  }
+  const providerId = `muninn.telemetry.${telemetry.hostId}`;
+  const provider = providersById.get(providerId) || null;
+  const state = muninnTelemetryStateFromRecord(telemetry, provider);
+  if (!state?.surface?.root) {
+    return null;
+  }
+  return {
+    providerId: state.providerId,
+    title: state.title,
+    state: "active",
+    detail: `${state.surface.root.kind || "surface"} ${countSurfaceNodes(state.surface)} nodes via Muninn telemetry surface`,
+    version: state.version || 0,
+    updatedAt: state.updatedAt || provider?.updatedAt || new Date().toISOString(),
+    source: `cultmesh:${sourceId}`,
+    manifest: provider ? {
+      providerId: provider.id,
+      title: provider.title,
+      description: provider.description,
+      canonicalService: provider.canonicalService,
+      locatedService: provider.locatedService,
+      cultMeshAddress: provider.cultMeshAddress,
+      endpoints: provider.endpoints,
+      routes: provider.routes,
+    } : null,
+    canonicalService: provider?.canonicalService || null,
+    locatedService: provider?.locatedService || null,
+    cultMeshAddress: provider?.cultMeshAddress || null,
+    endpoints: provider?.endpoints || [],
+    routes: provider?.routes || [],
+    operatorState: null,
+    commandBoundary: provider?.commandBoundary || null,
+    transportProfile: provider?.transportProfile || null,
+    surface: state.surface,
+  };
+}
+
+function muninnTelemetryStateFromRecord(record, advertisement = null) {
+  const telemetry = normalizeMuninnTelemetrySurfaceRecord(record);
+  if (!telemetry?.hostId) {
+    return null;
+  }
+  const providerId = advertisement?.providerId || advertisement?.id || `muninn.telemetry.${telemetry.hostId}`;
+  const title = advertisement?.title || advertisement?.provider?.title || `Muninn ${titleCase(telemetry.hostId)} Telemetry`;
+  const updatedAt = telemetry.updatedAt || advertisement?.updatedAt || new Date().toISOString();
+  const parsedVersion = Date.parse(updatedAt);
+  return {
+    providerId,
+    title,
+    version: Number.isFinite(parsedVersion) ? parsedVersion : 0,
+    updatedAt,
+    surface: buildMuninnTelemetrySurfaceDocument(providerId, title, telemetry),
+  };
+}
+
+function normalizeMuninnTelemetrySurfaceRecord(record) {
+  if (!record) {
+    return null;
+  }
+  if (!Array.isArray(record) && typeof record === "object") {
+    return {
+      surfaceId: record.surface_id || record.surfaceId || null,
+      hostId: record.host_id || record.hostId || null,
+      state: record.state || "unknown",
+      availableSources: Array.isArray(record.available_sources || record.availableSources)
+        ? (record.available_sources || record.availableSources)
+        : [],
+      streamAffordances: Array.isArray(record.stream_affordances || record.streamAffordances)
+        ? (record.stream_affordances || record.streamAffordances)
+        : [],
+      activeStreams: Array.isArray(record.active_streams || record.activeStreams)
+        ? (record.active_streams || record.activeStreams)
+        : [],
+      activationAuthority: record.activation_authority || record.activationAuthority || "",
+      detail: record.detail || "",
+      updatedAt: record.updated_at || record.updatedAt || null,
+    };
+  }
+  return normalizeInspectedMuninnTelemetrySurfaceRecord(record);
+}
+
+function normalizeInspectedMuninnTelemetrySurfaceRecord(preview) {
+  if (Array.isArray(preview) && preview.length === 1 && preview[0] && typeof preview[0] === "object" && !Array.isArray(preview[0])) {
+    return normalizeMuninnTelemetrySurfaceRecord(preview[0]);
+  }
+  if (!Array.isArray(preview) || preview.length < 9) {
+    return null;
+  }
+  return {
+    surfaceId: preview[0] || null,
+    hostId: preview[1] || null,
+    state: preview[2] || "unknown",
+    availableSources: Array.isArray(preview[3]) ? preview[3] : [],
+    streamAffordances: Array.isArray(preview[4]) ? preview[4] : [],
+    activeStreams: Array.isArray(preview[5]) ? preview[5] : [],
+    activationAuthority: preview[6] || "",
+    detail: preview[7] || "",
+    updatedAt: preview[8] || null,
+  };
+}
+
+function buildMuninnTelemetrySurfaceDocument(providerId, title, telemetry) {
+  const sourceSummary = telemetry.availableSources.length ? telemetry.availableSources.join(", ") : "none";
+  const activeSummary = telemetry.activeStreams.length ? telemetry.activeStreams.join(", ") : "none";
+  const affordanceSummary = telemetry.streamAffordances.length ? telemetry.streamAffordances.join(", ") : "none";
+  return {
+    schema: "gamecult.eve.surface.v1",
+    id: telemetry.surfaceId || `${providerId}.surface`,
+    title,
+    root: {
+      id: `${providerId}.root`,
+      kind: "dashboard",
+      props: {
+        title,
+        summary: telemetry.detail || `${telemetry.state} on ${telemetry.hostId}`,
+        status: telemetry.state || "unknown",
+      },
+      children: [
+        {
+          id: `${providerId}.runtime`,
+          kind: "card",
+          props: { title: "Runtime" },
+          children: [
+            textElement(`${providerId}.state`, `state: ${telemetry.state || "unknown"}`),
+            textElement(`${providerId}.host`, `host: ${telemetry.hostId}`),
+            textElement(`${providerId}.authority`, `activation: ${telemetry.activationAuthority || "unknown"}`),
+            textElement(`${providerId}.updated`, `updated: ${telemetry.updatedAt || "unknown"}`),
+          ],
+        },
+        {
+          id: `${providerId}.sources`,
+          kind: "card",
+          props: { title: "Sources" },
+          children: [
+            textElement(`${providerId}.available-sources`, `available: ${sourceSummary}`),
+            textElement(`${providerId}.affordances`, `affordances: ${affordanceSummary}`),
+          ],
+        },
+        {
+          id: `${providerId}.streams`,
+          kind: "card",
+          props: { title: "Streams" },
+          children: [
+            textElement(`${providerId}.active-streams`, `active: ${activeSummary}`),
+            textElement(`${providerId}.detail`, telemetry.detail || "detail: none"),
+          ],
+        },
+      ],
+    },
+    assets: [],
   };
 }
 
@@ -761,6 +977,7 @@ function resolveInterfaceBindingStore(storeSpec) {
     return {
       localPath: storeSpec,
       sourceId: storeSpec,
+      cleanup: () => {},
     };
   }
 
@@ -778,11 +995,13 @@ function resolveInterfaceBindingStore(storeSpec) {
   fs.mkdirSync(cacheRoot, { recursive: true });
   const suffix = path.extname(remotePath) || ".cc";
   const stem = `${stableId(host)}-${stableId(remotePath)}`;
-  const localPath = path.join(cacheRoot, `${stem}${suffix}`);
-  const batchPath = path.join(cacheRoot, `${stem}.sftp`);
+  const transferId = `${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+  const localPath = path.join(cacheRoot, `${stem}-${transferId}${suffix}`);
+  const batchPath = path.join(cacheRoot, `${stem}-${transferId}.sftp`);
+  const stagedRemotePath = stageRemoteStoreForRead(host, remotePath, `${stem}-${transferId}`, suffix);
   fs.writeFileSync(
     batchPath,
-    `get "${remotePath}" "${localPath.replace(/\\/g, "/")}"\n`,
+    `get "${stagedRemotePath}" "${localPath.replace(/\\/g, "/")}"\n`,
     "ascii",
   );
   try {
@@ -799,13 +1018,119 @@ function resolveInterfaceBindingStore(storeSpec) {
       throw new Error((result.stderr || result.stdout || `sftp exited ${result.status}`).trim());
     }
   } finally {
-    fs.rmSync(batchPath, { force: true });
+    cleanupRemoteStagedStore(host, stagedRemotePath);
+    try {
+      fs.rmSync(batchPath, { force: true });
+    } catch {
+      // Best-effort temp cleanup. A later pass can reuse a fresh transfer id.
+    }
   }
 
   return {
     localPath,
     sourceId: storeSpec,
+    cleanup: () => {
+      try {
+        fs.rmSync(localPath, { force: true });
+      } catch {
+        // Best-effort temp cleanup. Live readers may still be releasing handles.
+      }
+    },
   };
+}
+
+function stageRemoteStoreForRead(host, remotePath, stem, suffix) {
+  const stagedRemotePath = isWindowsRemoteStorePath(remotePath)
+    ? `C:/Windows/Temp/odin-interface-${stem}${suffix}`
+    : `/tmp/odin-interface-${stem}${suffix}`;
+  if (isWindowsRemoteStorePath(remotePath)) {
+    const script = [
+      "$ErrorActionPreference = 'Stop'",
+      `$sourcePath = ${quotePowerShellSingle(remotePath)}`,
+      `$stagedPath = ${quotePowerShellSingle(stagedRemotePath)}`,
+      "$lockPath = $sourcePath + '.lock'",
+      "if (-not (Test-Path -LiteralPath $sourcePath)) { throw \"remote store missing at $sourcePath\" }",
+      "New-Item -ItemType Directory -Force -Path (Split-Path -Parent $stagedPath) | Out-Null",
+      "$lockStream = [System.IO.File]::Open($lockPath, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::ReadWrite)",
+      "try {",
+      "  $lockStream.Lock(0, 1)",
+      "  Copy-Item -LiteralPath $sourcePath -Destination $stagedPath -Force",
+      "} finally {",
+      "  try { $lockStream.Unlock(0, 1) } catch {}",
+      "  $lockStream.Dispose()",
+      "}",
+    ].join("\n");
+    runRemoteCommand(
+      host,
+      `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encodePowerShellCommand(script)}`,
+    );
+  } else {
+    const command = [
+      "set -eu",
+      `src=${quotePosixSingle(remotePath)}`,
+      `staged=${quotePosixSingle(stagedRemotePath)}`,
+      'lock="${src}.lock"',
+      'mkdir -p "$(dirname "$staged")"',
+      'if [ -e "$lock" ]; then',
+      '  exec 9<"$lock"',
+      '  flock -s 9',
+      'fi',
+      'cp "$src" "$staged"',
+    ].join("\n");
+    runRemoteCommand(host, `sh -lc ${quotePosixSingle(command)}`);
+  }
+  return stagedRemotePath;
+}
+
+function cleanupRemoteStagedStore(host, stagedRemotePath) {
+  try {
+    if (isWindowsRemoteStorePath(stagedRemotePath)) {
+      const script = [
+        "$ErrorActionPreference = 'SilentlyContinue'",
+        `$stagedPath = ${quotePowerShellSingle(stagedRemotePath)}`,
+        "Remove-Item -LiteralPath $stagedPath -Force -ErrorAction SilentlyContinue",
+      ].join("\n");
+      runRemoteCommand(
+        host,
+        `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encodePowerShellCommand(script)}`,
+      );
+      return;
+    }
+    runRemoteCommand(host, `sh -lc ${quotePosixSingle(`rm -f ${quotePosixSingle(stagedRemotePath)}`)}`);
+  } catch {
+    // Temp snapshot cleanup is opportunistic.
+  }
+}
+
+function runRemoteCommand(host, command) {
+  const result = childProcess.spawnSync(
+    "ssh.exe",
+    ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, command],
+    {
+      encoding: "utf8",
+      timeout: 15000,
+      windowsHide: true,
+    },
+  );
+  if (result.status !== 0) {
+    throw new Error((result.stderr || result.stdout || `ssh exited ${result.status}`).trim());
+  }
+}
+
+function isWindowsRemoteStorePath(remotePath) {
+  return /^[A-Za-z]:\//.test(remotePath);
+}
+
+function encodePowerShellCommand(script) {
+  return Buffer.from(script, "utf16le").toString("base64");
+}
+
+function quotePowerShellSingle(value) {
+  return `'${String(value).replace(/'/g, "''")}'`;
+}
+
+function quotePosixSingle(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`;
 }
 
 function localIpv4Prefixes() {
@@ -1074,6 +1399,14 @@ function textElement(id, text) {
     props: { text: String(text) },
     children: [],
   };
+}
+
+function titleCase(value) {
+  return String(value || "")
+    .split(/[^a-zA-Z0-9]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
 }
 
 module.exports = {

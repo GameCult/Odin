@@ -1,7 +1,7 @@
 mod media_packetizer;
 
 use crate::media_packetizer::{
-    AudioAdtsStreamSendConfig, AudioAdtsStreamSendState, MuninnMediaSendPayload,
+    AudioPcmStreamSendConfig, AudioPcmStreamSendState, MuninnMediaSendPayload,
     MuninnMediaWireRecord, VideoAnnexBStreamSendConfig, VideoAnnexBStreamSendState,
     decode_media_wire_record,
 };
@@ -1696,17 +1696,22 @@ fn run_rudp_mux_once(
         Some(audio_rudp_payload_reader(
             payload_tx.clone(),
             stdout,
-            AudioAdtsStreamSendConfig {
+            AudioPcmStreamSendConfig {
                 stream_id: options.stream_id.clone(),
                 session_id: format!("{}:{timestamp}:audio", options.host_id),
-                codec: "aac-adts".to_string(),
+                codec: "pcm-f32le-interleaved".to_string(),
                 first_packet_id: 0,
                 first_pts_ticks: 0,
-                packet_duration_ticks: 1_024,
+                packet_duration_ticks: 480,
                 timebase_num: 1,
                 timebase_den: options.audio_sample_rate,
                 deadline_delay_ticks: rudp_audio_deadline_delay_ticks(options, &media_profile),
-                max_pending_bytes: options.media_packet_bytes.max(256) * 64,
+                channels: options.audio_channels,
+                bytes_per_sample: 4,
+                max_pending_bytes: 480usize
+                    .saturating_mul(options.audio_channels as usize)
+                    .saturating_mul(4)
+                    .saturating_mul(128),
                 source_runtime_id: options.host_id.clone(),
                 source_role: "muninn.rudp.audio".to_string(),
             },
@@ -2499,7 +2504,7 @@ where
 fn audio_rudp_payload_reader<R>(
     tx: mpsc::Sender<Result<QueuedMuninnMediaSendPayload>>,
     mut reader: R,
-    config: AudioAdtsStreamSendConfig,
+    config: AudioPcmStreamSendConfig,
 ) -> thread::JoinHandle<()>
 where
     R: Read + Send + 'static,
@@ -2542,17 +2547,17 @@ where
 fn read_audio_rudp_payloads<R>(
     tx: &mpsc::Sender<Result<QueuedMuninnMediaSendPayload>>,
     reader: &mut R,
-    config: AudioAdtsStreamSendConfig,
+    config: AudioPcmStreamSendConfig,
 ) -> Result<()>
 where
     R: Read,
 {
-    let mut sender = AudioAdtsStreamSendState::new(config)?;
+    let mut sender = AudioPcmStreamSendState::new(config)?;
     let mut buffer = vec![0_u8; 16 * 1024];
     loop {
         let read = reader
             .read(&mut buffer)
-            .context("reading encoded ADTS audio from ffmpeg stdout")?;
+            .context("reading PCM audio from ffmpeg stdout")?;
         if read == 0 {
             for payload in sender.finish(&timestamp()?)? {
                 queue_muninn_media_payload(tx, payload, QueuedMuninnMediaKind::Audio)
@@ -2606,7 +2611,8 @@ fn publish_surface(
     state: &str,
     active_streams: &[String],
 ) -> Result<()> {
-    publish_obs_catalog_idle(node, options)?;
+    let video_sources = video_source_catalog(options);
+    let audio_sources = audio_source_catalog(options);
     let record = MuninnTelemetrySurfaceRecord {
         surface_id: options.surface_id.clone(),
         host_id: options.host_id.clone(),
@@ -2631,6 +2637,27 @@ fn publish_surface(
             "Muninn has explicit active stream requests.".to_string()
         },
         updated_at: timestamp()?,
+        primary_stream_id: options.stream_id.clone(),
+        primary_stream_label: format!("{} screen and loopback A/V", options.host_id),
+        command_rudp_target: options
+            .capture_command_rudp_bind
+            .map(|addr| addr.to_string())
+            .unwrap_or_default(),
+        media_target_host: options.target_host.clone(),
+        media_port: options.port,
+        media_packet_bytes: options.media_packet_bytes as u32,
+        rudp_video_bitrate_kbps: options.rudp_video_bitrate_kbps,
+        rudp_latency_budget_ms: options.rudp_latency_budget_ms,
+        video_source_ids: video_sources.iter().map(|source| source.id.clone()).collect(),
+        video_source_labels: video_sources
+            .iter()
+            .map(|source| source.label.clone())
+            .collect(),
+        audio_source_ids: audio_sources.iter().map(|source| source.id.clone()).collect(),
+        audio_source_labels: audio_sources
+            .iter()
+            .map(|source| source.label.clone())
+            .collect(),
     };
     node.put("latest", &record)?;
     node.put(&record.surface_id, &record)?;
@@ -6354,16 +6381,12 @@ fn rudp_audio_ffmpeg_args(options: &Options) -> Vec<String> {
         "-i".to_string(),
         "pipe:0".to_string(),
         "-vn".to_string(),
-        "-c:a".to_string(),
-        "aac".to_string(),
-        "-b:a".to_string(),
-        "192k".to_string(),
         "-ar".to_string(),
         options.audio_sample_rate.to_string(),
         "-ac".to_string(),
         options.audio_channels.to_string(),
         "-f".to_string(),
-        "adts".to_string(),
+        "f32le".to_string(),
         "pipe:1".to_string(),
     ]
 }
@@ -8138,7 +8161,7 @@ mod tests {
     }
 
     #[test]
-    fn rudp_audio_encoder_outputs_adts_for_packetizer() {
+    fn rudp_audio_encoder_outputs_pcm_for_packetizer() {
         let options = Options::parse(
             [
                 "activate",
@@ -8158,15 +8181,11 @@ mod tests {
 
         assert!(
             args.windows(2)
-                .any(|pair| pair[0] == "-f" && pair[1] == "adts")
+                .any(|pair| pair[0] == "-f" && pair[1] == "f32le")
         );
         assert!(
             args.windows(2)
-                .any(|pair| pair[0] == "-c:a" && pair[1] == "aac")
-        );
-        assert!(
-            args.windows(2)
-                .any(|pair| pair[0] == "-vn" && pair[1] == "-c:a")
+                .any(|pair| pair[0] == "-vn" && pair[1] == "-ar")
         );
         assert_eq!(args.last().map(String::as_str), Some("pipe:1"));
     }
@@ -9215,7 +9234,7 @@ Device 00:07:04:A8:00:D0 (public)
             media_profile
                 .get("video_bufsize")
                 .and_then(|value| value.as_str()),
-            Some("534k")
+            Some("400k")
         );
         assert_eq!(
             media_profile

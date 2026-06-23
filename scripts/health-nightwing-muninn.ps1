@@ -67,6 +67,21 @@ else
   echo 'Muninn serve process is not running on Nightwing' >&2
   exit 1
 fi
+process_line="`$(pgrep -af '[m]uninn serve .*--host nightwing' | head -n1 || true)"
+if [ -z "`$process_line" ]; then
+  echo 'Nightwing Muninn serve command line is unavailable' >&2
+  exit 1
+fi
+for pattern in \
+  '--idunn-rudp-health $IdunnRudpHealth' \
+  '--idunn-daemon nightwing-muninn' \
+  '--idunn-health-contract muninn.cultnet-rudp-remote-telemetry-and-move-hid'
+do
+  if ! printf '%s\n' "`$process_line" | grep -F -- "`$pattern" >/dev/null 2>&1; then
+    echo "Nightwing Muninn serve command line is missing `$pattern" >&2
+    exit 1
+  fi
+done
 if [ ! -f '$StorePath' ]; then
   echo 'Muninn telemetry store is missing on Nightwing' >&2
   exit 1
@@ -78,13 +93,18 @@ if [ "`$store_age" -gt '$MaxStoreAgeSeconds' ]; then
   echo "Muninn telemetry store is stale on Nightwing (`$store_age s old)" >&2
   exit 1
 fi
-identity_output="`$('$MuninnExe' move-identity-status --store '$StorePath' --host nightwing)"
-if printf '%s\n' "`$identity_output" | grep -Fq 'No Muninn Move identity records found'; then
-  echo 'Muninn Move identity roster is empty on Nightwing' >&2
-  exit 1
+if printf '%s\n' "`$process_line" | grep -F -- '--move-state' >/dev/null 2>&1 || \
+   printf '%s\n' "`$process_line" | grep -F -- '--move-evidence-stream' >/dev/null 2>&1; then
+  identity_output="`$('$MuninnExe' move-identity-status --store '$StorePath' --host nightwing)"
+  if printf '%s\n' "`$identity_output" | grep -Fq 'No Muninn Move identity records found'; then
+    echo 'Muninn Move identity roster is empty on Nightwing' >&2
+    exit 1
+  fi
+  identity_count="`$(printf '%s\n' "`$identity_output" | grep -c 'move-identity move=')"
+  echo "Muninn healthy: nightwing store_age=`${store_age}s move_runtime=explicit move_identities=`${identity_count}"
+else
+  echo "Muninn healthy: nightwing store_age=`${store_age}s move_runtime=disabled"
 fi
-identity_count="`$(printf '%s\n' "`$identity_output" | grep -c 'move-identity move=')"
-echo "Muninn healthy: nightwing store_age=`${store_age}s move_identities=`${identity_count}"
 "@
 
 Invoke-NightwingUploadedShell -SshTarget $SshTarget -RemoteScriptContent $remoteScript -TempPrefix "odin-nightwing-muninn-health"

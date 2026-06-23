@@ -1,8 +1,9 @@
 param(
   [string] $MuninnExe = "C:\Meta\Odin\Muninn\muninn.exe",
   [string] $StorePath = "C:\Meta\Odin\state\starfire.muninn.telemetry.cc",
+  [string] $LogRoot = "C:\Meta\Odin\logs\starfire-muninn",
   [string[]] $MoveState = @(),
-  [int] $IntervalSeconds = 15,
+  [int] $MaxStoreAgeSeconds = 180,
   [string] $IdunnRudpHealth = "127.0.0.1:17870"
 )
 
@@ -23,23 +24,23 @@ $process = Get-CimInstance Win32_Process |
 if ($null -eq $process) {
   throw "Starfire Muninn serve process is not running with Quest access enabled"
 }
-
-$healthArgs = @(
-  "--health",
-  "--store", $StorePath,
-  "--host", "starfire",
-  "--interval-seconds", "$IntervalSeconds"
-)
-foreach ($source in $MoveState) {
-  if (-not [string]::IsNullOrWhiteSpace($source)) {
-    $healthArgs += @("--move-state", $source)
+foreach ($pattern in @(
+  "--idunn-rudp-health $IdunnRudpHealth",
+  "--idunn-daemon starfire-muninn",
+  "--idunn-health-contract muninn.cultnet-rudp-local-telemetry-and-quest-access"
+)) {
+  if ($process.CommandLine -notlike "*$pattern*") {
+    throw "Starfire Muninn serve process is missing expected command-line segment ${pattern}: $($process.CommandLine)"
   }
 }
-
-& $MuninnExe @healthArgs
-if ($LASTEXITCODE -ne 0) {
-  exit $LASTEXITCODE
+if (-not (Test-Path -LiteralPath $StorePath)) {
+  throw "Starfire Muninn telemetry store is missing at $StorePath"
 }
-
-& $MuninnExe quest-access-status --store $StorePath
-exit $LASTEXITCODE
+$storeAgeSeconds = (([DateTime]::UtcNow) - (Get-Item -LiteralPath $StorePath).LastWriteTimeUtc).TotalSeconds
+if ($storeAgeSeconds -gt $MaxStoreAgeSeconds) {
+  throw "Starfire Muninn telemetry store is stale ($([math]::Round($storeAgeSeconds))s old)"
+}
+$pidPath = Join-Path $LogRoot "muninn-serve.pid"
+if (-not (Test-Path -LiteralPath $pidPath)) {
+  throw "Starfire Muninn serve PID file is missing at $pidPath"
+}

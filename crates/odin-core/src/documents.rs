@@ -916,6 +916,30 @@ pub struct MuninnTelemetrySurfaceRecord {
     pub detail: String,
     #[cultcache(key = 8)]
     pub updated_at: String,
+    #[cultcache(key = 9, default)]
+    pub primary_stream_id: String,
+    #[cultcache(key = 10, default)]
+    pub primary_stream_label: String,
+    #[cultcache(key = 11, default)]
+    pub command_rudp_target: String,
+    #[cultcache(key = 12, default)]
+    pub media_target_host: String,
+    #[cultcache(key = 13, default)]
+    pub media_port: u16,
+    #[cultcache(key = 14, default)]
+    pub media_packet_bytes: u32,
+    #[cultcache(key = 15, default)]
+    pub rudp_video_bitrate_kbps: u32,
+    #[cultcache(key = 16, default)]
+    pub rudp_latency_budget_ms: u32,
+    #[cultcache(key = 17, default)]
+    pub video_source_ids: Vec<String>,
+    #[cultcache(key = 18, default)]
+    pub video_source_labels: Vec<String>,
+    #[cultcache(key = 19, default)]
+    pub audio_source_ids: Vec<String>,
+    #[cultcache(key = 20, default)]
+    pub audio_source_labels: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
