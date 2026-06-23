@@ -10,6 +10,7 @@ const { defineOdinDocuments } = require("./odin/documents.cjs");
 const { createInterfaceDiscovery } = require("./odin/interfaces.cjs");
 const { createIdunnRudpHealthPublisher, publishIdunnRudpHealth } = require("./odin/idunn-rudp.cjs");
 const { createLayoutStore } = require("./odin/layout.cjs");
+const { createLiveProviderRegistry } = require("./odin/provider-ingress.cjs");
 const { createStateBuilder } = require("./odin/state.cjs");
 const { broadcastState, createDashboardServer } = require("./odin/websocket.cjs");
 
@@ -24,10 +25,12 @@ if (cultRuntime.error) {
 
 const documents = defineOdinDocuments(cultRuntime.defineDocumentType);
 const layoutStore = createLayoutStore(config.layoutPath);
+const liveProviderRegistry = createLiveProviderRegistry();
 const interfaceDiscovery = createInterfaceDiscovery({
   CultMesh: cultRuntime.CultMesh,
   documents,
   interfaceBindingStores: config.interfaceBindingStores,
+  liveProviderRegistry,
   seedDeckUrls: config.seedDeckUrls,
 });
 const stateBuilder = createStateBuilder({
@@ -70,6 +73,9 @@ async function main() {
           throw new Error("CultMesh runtime is unavailable; Odin cannot serve a CultNet/RUDP snapshot.");
         }
         return (await meshNodePromise).cache;
+      },
+      onDocumentPutRaw: (document) => {
+        liveProviderRegistry.ingestDocument(document, document.remote);
       },
     });
     await cultNetRudpSurfaceServer.start();

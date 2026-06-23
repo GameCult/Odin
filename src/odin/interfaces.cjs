@@ -17,6 +17,7 @@ function createInterfaceDiscovery({
   CultMesh,
   documents,
   interfaceBindingStores,
+  liveProviderRegistry,
   seedDeckUrls,
 }) {
   let discoveredDeckUrls = [...seedDeckUrls];
@@ -39,9 +40,13 @@ function createInterfaceDiscovery({
       [...manifestsByProvider.values()].map(({ provider, deckUrl }) => fetchEveProvider(deckUrl, provider.id, provider)),
     );
     const { interfaces: cultMeshInterfaces, providerAdvertisements } = await discoverCultMeshEntries();
+    const liveAnnouncements = liveProviderRegistry?.snapshot?.() || {
+      interfaces: [],
+      providerAdvertisements: [],
+    };
 
     const interfaces = [...eveInterfaces];
-    for (const entry of cultMeshInterfaces) {
+    for (const entry of [...cultMeshInterfaces, ...liveAnnouncements.interfaces]) {
       const existingIndex = interfaces.findIndex((candidate) => candidate.providerId === entry.providerId);
       if (existingIndex >= 0) {
         interfaces[existingIndex] = entry;
@@ -50,8 +55,17 @@ function createInterfaceDiscovery({
       }
     }
     interfaces.sort((left, right) => left.providerId.localeCompare(right.providerId));
-    providerAdvertisements.sort((left, right) => String(left.id).localeCompare(String(right.id)));
-    return { interfaces, providerAdvertisements };
+    const allProviderAdvertisements = [...providerAdvertisements, ...liveAnnouncements.providerAdvertisements];
+    const providersById = new Map();
+    for (const provider of allProviderAdvertisements) {
+      if (provider?.id) {
+        providersById.set(String(provider.id), provider);
+      }
+    }
+    return {
+      interfaces,
+      providerAdvertisements: [...providersById.values()].sort((left, right) => String(left.id).localeCompare(String(right.id))),
+    };
   }
 
   function cultMeshDocumentsAvailable() {

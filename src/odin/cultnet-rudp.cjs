@@ -161,6 +161,16 @@ function createCultNetRudpSurfaceServer(options) {
       case "cultnet.schema_catalog_request.v0":
         sendSchemaMessage(record, cultNetBuiltinSchemaRegistry.createCatalogResponse(message));
         return;
+      case "cultnet.document_put_raw.v0": {
+        if (typeof options.onDocumentPutRaw === "function") {
+          try {
+            options.onDocumentPutRaw(normalizeRawDocumentPut(message, record.remote));
+          } catch (error) {
+            logError(options, "CultNet/RUDP raw document ingest failed", error);
+          }
+        }
+        return;
+      }
       default:
         sendSchemaMessage(record, {
           schemaVersion: "cultnet.error.v0",
@@ -189,6 +199,26 @@ function createCultNetRudpSurfaceServer(options) {
     bind,
     start,
     close,
+  };
+}
+
+function normalizeRawDocumentPut(message, remote) {
+  const document = message?.document;
+  if (!document?.schemaId || !document?.recordKey) {
+    throw new Error("raw document put is missing schemaId or recordKey");
+  }
+  if (document.payloadEncoding !== "messagepack") {
+    throw new Error(`unsupported raw payload encoding ${document.payloadEncoding}`);
+  }
+  return {
+    schemaId: document.schemaId,
+    recordKey: document.recordKey,
+    storedAt: document.storedAt || new Date().toISOString(),
+    payload: decode(document.payload),
+    sourceRuntimeId: document.sourceRuntimeId || null,
+    sourceRole: document.sourceRole || null,
+    tags: Array.isArray(document.tags) ? document.tags : [],
+    remote,
   };
 }
 
