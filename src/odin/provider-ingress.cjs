@@ -27,19 +27,22 @@ function createLiveProviderRegistry(options = {}) {
     const transportProfiles = new Map();
 
     for (const record of records.values()) {
+      const payload = normalizeCompatPayload(record.payload);
       switch (record.schemaId) {
         case "gamecult.eve.provider_advertisement":
-          if (record.payload?.providerId) {
-            advertisements.set(String(record.payload.providerId), record);
+        case "gamecult.eve.provider_advertisement.v1":
+          if (payload?.providerId) {
+            advertisements.set(String(payload.providerId), { ...record, payload });
           }
           break;
         case "gamecult.eve.surface_state":
-          if (record.payload?.providerId) {
-            surfaces.set(String(record.payload.providerId), record);
+        case "gamecult.eve.surface_state.v0":
+        case "gamecult.eve.surface_state.v1":
+          if (payload?.providerId) {
+            surfaces.set(String(payload.providerId), { ...record, payload });
           }
           break;
         default: {
-          const payload = record.payload || {};
           const providerId = payload.provider_id || payload.providerId;
           if (!providerId) break;
           if (String(record.schemaId).endsWith(".command_boundary")) {
@@ -83,6 +86,13 @@ function createLiveProviderRegistry(options = {}) {
     ingestDocument,
     snapshot,
   };
+}
+
+function normalizeCompatPayload(payload) {
+  if (Array.isArray(payload) && payload.length === 1 && payload[0] && typeof payload[0] === "object" && !Array.isArray(payload[0])) {
+    return payload[0];
+  }
+  return payload || {};
 }
 
 function normalizeProviderAdvertisementRecord(record, commandBoundaries, transportProfiles) {
