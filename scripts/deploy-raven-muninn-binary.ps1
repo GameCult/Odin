@@ -294,12 +294,26 @@ try {
 }
 
 if (-not $SkipRestart) {
-  & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "restart-muninn.ps1") `
-    -RavenHost $RavenHost `
-    -MuninnExe $MuninnExe `
-    -ConnectTimeoutSeconds $ConnectTimeoutSeconds `
-    -SshUser $SshUser `
-    -IdentityFile $IdentityFile
+  $restartArgs = @(
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-File",
+    (Join-Path $PSScriptRoot "restart-muninn.ps1"),
+    "-RavenHost",
+    $RavenHost,
+    "-MuninnExe",
+    $MuninnExe,
+    "-ConnectTimeoutSeconds",
+    $ConnectTimeoutSeconds.ToString()
+  )
+  if (-not [string]::IsNullOrWhiteSpace($SshUser)) {
+    $restartArgs += @("-SshUser", $SshUser)
+  }
+  if (-not [string]::IsNullOrWhiteSpace($IdentityFile)) {
+    $restartArgs += @("-IdentityFile", $IdentityFile)
+  }
+  & powershell.exe @restartArgs
   if ($LASTEXITCODE -ne 0) {
     throw "restart-muninn.ps1 failed with exit code $LASTEXITCODE"
   }

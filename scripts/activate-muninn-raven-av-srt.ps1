@@ -216,23 +216,6 @@ Get-CimInstance Win32_Process |
 New-Item -ItemType Directory -Force -Path "$LogRoot" | Out-Null
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent "$StorePath") | Out-Null
 
-`$taskAction = New-ScheduledTaskAction -Execute "wscript.exe" -Argument "//B //Nologo ""$activateVbsPath"""
-`$taskTrigger = New-ScheduledTaskTrigger -Once -At ([DateTime]::Today.AddHours(23).AddMinutes(59))
-`$taskPrincipal = New-ScheduledTaskPrincipal -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
-`$taskSettings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew
-Register-ScheduledTask -TaskName "GameCult-Muninn-Activate" -Action `$taskAction -Trigger `$taskTrigger -Principal `$taskPrincipal -Settings `$taskSettings -Force | Out-Null
-
-`$task = Get-ScheduledTask -TaskName "GameCult-Muninn-Activate" -ErrorAction Stop
-`$action = @(`$task.Actions)[0]
-if (`$action.Execute -notmatch '(^|\\)wscript\.exe$') {
-  throw "GameCult-Muninn-Activate action executes `$(`$action.Execute), expected wscript.exe"
-}
-if (`$action.Arguments -notlike "*$activateVbsPath*") {
-  throw "GameCult-Muninn-Activate action arguments `$(`$action.Arguments) do not reference $activateVbsPath"
-}
-if (`$action.Arguments -notlike "*//B*" -or `$action.Arguments -notlike "*//Nologo*") {
-  throw "GameCult-Muninn-Activate action arguments `$(`$action.Arguments) do not force background WScript execution"
-}
 `$vbs = Get-Content -LiteralPath "$activateVbsPath" -Raw
 if (`$vbs -match 'cmdPath\s*=') {
   throw "GameCult-Muninn-Activate hidden launcher at $activateVbsPath still routes through a cmdPath trampoline"
@@ -240,8 +223,10 @@ if (`$vbs -match 'cmdPath\s*=') {
 if (`$vbs -notmatch '\.ps1') {
   throw "GameCult-Muninn-Activate hidden launcher at $activateVbsPath does not reference a PowerShell launcher"
 }
-
-Start-ScheduledTask -TaskName "GameCult-Muninn-Activate"
+if (Get-ScheduledTask -TaskName "GameCult-Muninn-Activate" -ErrorAction SilentlyContinue) {
+  Unregister-ScheduledTask -TaskName "GameCult-Muninn-Activate" -Confirm:`$false | Out-Null
+}
+Start-Process -FilePath "wscript.exe" -ArgumentList "//B //Nologo ""$activateVbsPath""" -WindowStyle Hidden | Out-Null
 "@
 
   $uploadSpecs = @(

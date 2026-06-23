@@ -224,6 +224,23 @@ pub struct AudioAdtsStreamSendConfig {
     pub source_role: String,
 }
 
+pub struct AudioPcmStreamSendConfig {
+    pub stream_id: String,
+    pub session_id: String,
+    pub codec: String,
+    pub first_packet_id: u64,
+    pub first_pts_ticks: i64,
+    pub packet_duration_ticks: u32,
+    pub timebase_num: u32,
+    pub timebase_den: u32,
+    pub deadline_delay_ticks: i64,
+    pub channels: u32,
+    pub bytes_per_sample: u32,
+    pub max_pending_bytes: usize,
+    pub source_runtime_id: String,
+    pub source_role: String,
+}
+
 pub struct ReceiverFeedbackOptions<'a> {
     pub stream_id: &'a str,
     pub session_id: &'a str,
@@ -589,6 +606,152 @@ impl AudioAdtsStreamSendState {
         }
 
         self.pending.drain(..frames.consumed_bytes);
+        Ok(payloads)
+    }
+
+    fn advance_packet_clock(&mut self) -> Result<()> {
+        self.next_packet_id = self
+            .next_packet_id
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("audio packet_id overflow"))?;
+        self.next_pts_ticks = self
+            .next_pts_ticks
+            .checked_add(i64::from(self.config.packet_duration_ticks))
+            .ok_or_else(|| anyhow!("audio pts_ticks overflow"))?;
+        Ok(())
+    }
+}
+
+pub struct AudioPcmStreamSendState {
+    config: AudioPcmStreamSendConfig,
+    pending: Vec<u8>,
+    next_packet_id: u64,
+    next_pts_ticks: i64,
+}
+
+impl AudioPcmStreamSendState {
+    pub fn new(config: AudioPcmStreamSendConfig) -> Result<Self> {
+        if config.stream_id.is_empty() {
+            return Err(anyhow!("stream_id must be non-empty"));
+        }
+        if config.session_id.is_empty() {
+            return Err(anyhow!("session_id must be non-empty"));
+        }
+        if config.codec.is_empty() {
+            return Err(anyhow!("codec must be non-empty"));
+        }
+        if config.packet_duration_ticks == 0 {
+            return Err(anyhow!("packet_duration_ticks must be greater than zero"));
+        }
+        if config.timebase_num == 0 || config.timebase_den == 0 {
+            return Err(anyhow!("audio timebase must be non-zero"));
+        }
+        if config.deadline_delay_ticks < 0 {
+            return Err(anyhow!("deadline_delay_ticks must be non-negative"));
+        }
+        if config.channels == 0 {
+            return Err(anyhow!("audio channels must be non-zero"));
+        }
+        if config.bytes_per_sample == 0 {
+            return Err(anyhow!("audio bytes_per_sample must be non-zero"));
+        }
+        if config.max_pending_bytes == 0 {
+            return Err(anyhow!("max_pending_bytes must be greater than zero"));
+        }
+        if config.source_runtime_id.is_empty() {
+            return Err(anyhow!("source_runtime_id must be non-empty"));
+        }
+        if config.source_role.is_empty() {
+            return Err(anyhow!("source_role must be non-empty"));
+        }
+
+        Ok(Self {
+            next_packet_id: config.first_packet_id,
+            next_pts_ticks: config.first_pts_ticks,
+            config,
+            pending: Vec::new(),
+        })
+    }
+
+    pub fn push(&mut self, stored_at: &str, bytes: &[u8]) -> Result<Vec<MuninnMediaSendPayload>> {
+        if !bytes.is_empty() {
+            self.pending.extend_from_slice(bytes);
+        }
+        if self.pending.len() > self.config.max_pending_bytes {
+            return Err(anyhow!(
+                "PCM stream sender pending buffer exceeded {} bytes without a complete packet",
+                self.config.max_pending_bytes
+            ));
+        }
+        self.emit_available(stored_at)
+    }
+
+    pub fn finish(&mut self, stored_at: &str) -> Result<Vec<MuninnMediaSendPayload>> {
+        let payloads = self.emit_available(stored_at)?;
+        if !self.pending.is_empty() {
+            return Err(anyhow!(
+                "PCM stream sender finished with {} trailing bytes",
+                self.pending.len()
+            ));
+        }
+        Ok(payloads)
+    }
+
+    fn emit_available(&mut self, stored_at: &str) -> Result<Vec<MuninnMediaSendPayload>> {
+        if stored_at.is_empty() {
+            return Err(anyhow!("stored_at must be non-empty"));
+        }
+
+        let bytes_per_frame = usize::try_from(self.config.channels)
+            .ok()
+            .and_then(|channels| {
+                usize::try_from(self.config.bytes_per_sample)
+                    .ok()
+                    .map(|bytes_per_sample| channels.saturating_mul(bytes_per_sample))
+            })
+            .ok_or_else(|| anyhow!("PCM stream sender bytes_per_frame overflow"))?;
+        let bytes_per_packet = bytes_per_frame
+            .checked_mul(self.config.packet_duration_ticks as usize)
+            .ok_or_else(|| anyhow!("PCM stream sender bytes_per_packet overflow"))?;
+        if bytes_per_packet == 0 {
+            return Err(anyhow!("PCM stream sender bytes_per_packet must be non-zero"));
+        }
+        let complete_packets = self.pending.len() / bytes_per_packet;
+        if complete_packets == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut payloads = Vec::with_capacity(complete_packets);
+        for packet_index in 0..complete_packets {
+            let start = packet_index * bytes_per_packet;
+            let end = start + bytes_per_packet;
+            let deadline_ticks = self
+                .next_pts_ticks
+                .checked_add(self.config.deadline_delay_ticks)
+                .ok_or_else(|| anyhow!("audio deadline_ticks overflow"))?;
+            payloads.push(audio_packet_send_payload(
+                AudioPacketWireOptions {
+                    packetize: AudioPacketizeOptions {
+                        stream_id: &self.config.stream_id,
+                        session_id: &self.config.session_id,
+                        codec: &self.config.codec,
+                        packet_id: self.next_packet_id,
+                        pts_ticks: self.next_pts_ticks,
+                        duration_ticks: self.config.packet_duration_ticks,
+                        timebase_num: self.config.timebase_num,
+                        timebase_den: self.config.timebase_den,
+                        deadline_ticks,
+                    },
+                    stored_at,
+                    source_runtime_id: &self.config.source_runtime_id,
+                    source_role: &self.config.source_role,
+                },
+                &self.pending[start..end],
+            )?);
+            self.advance_packet_clock()?;
+        }
+
+        self.pending.drain(..complete_packets * bytes_per_packet);
         Ok(payloads)
     }
 
