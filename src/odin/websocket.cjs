@@ -57,26 +57,32 @@ function providerCatalogFromState(state) {
       const props = child.props || {};
       const embeddedRoot = Array.isArray(child.children) ? child.children[0] : null;
       const providerId = String(props.providerId);
+      const existing = providers.get(providerId) || {};
       providers.set(providerId, {
+        ...existing,
         id: providerId,
         title: String(props.title || props.providerId),
-        description: String(props.detail || "Provider-owned Eve/CultUI interface discovered by Odin."),
+        description: String(props.detail || existing.description || "Provider-owned Eve/CultUI interface discovered by Odin."),
         version: String(props.version || 0),
         endpoint: `/eve/deck/${encodeURIComponent(providerId)}`,
-        canonicalService: props.canonicalService || null,
-        locatedService: props.locatedService || null,
-        cultMeshAddress: props.cultMeshAddress || null,
-        endpoints: Array.isArray(props.endpoints) ? props.endpoints : [],
-        routes: Array.isArray(props.routes) ? props.routes : [],
+        canonicalService: props.canonicalService || existing.canonicalService || null,
+        locatedService: props.locatedService || existing.locatedService || null,
+        cultMeshAddress: props.cultMeshAddress || existing.cultMeshAddress || null,
+        endpoints: Array.isArray(props.endpoints) ? props.endpoints : (existing.endpoints || []),
+        routes: Array.isArray(props.routes) ? props.routes : (existing.routes || []),
         transportEndpoint: `/eve/deck/${encodeURIComponent(providerId)}`,
         capabilities: providerCapabilities(embeddedRoot),
-        usesCultMesh: String(props.source || "").startsWith("cultmesh:"),
-        transport: String(props.source || "").startsWith("cultmesh:")
+        usesCultMesh: existing.usesCultMesh ?? String(props.source || "").startsWith("cultmesh:"),
+        transport: existing.transport || (String(props.source || "").startsWith("cultmesh:")
           ? "Odin provider proxy from CultMesh Eve interface binding"
-          : "Odin provider proxy from Eve WebSocket provider",
+          : "Odin provider proxy from Eve WebSocket provider"),
         status: props.status || "unknown",
         updatedAt: props.updatedAt || state.updatedAt,
-        source: props.source || "",
+        source: existing.source || props.source || "",
+        operatorState: existing.operatorState || null,
+        commandBoundary: existing.commandBoundary || null,
+        transportProfile: existing.transportProfile || null,
+        commandSurface: existing.commandSurface || null,
       });
   }
   return [...providers.values()].sort((left, right) => String(left.id).localeCompare(String(right.id)));

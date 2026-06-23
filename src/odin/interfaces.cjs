@@ -1,6 +1,5 @@
 "use strict";
 
-const childProcess = require("child_process");
 const fs = require("fs");
 const { createRequire } = require("module");
 const os = require("os");
@@ -18,15 +17,122 @@ function createInterfaceDiscovery({
   CultMesh,
   documents,
   interfaceBindingStores,
+  liveProviderRegistry,
   seedDeckUrls,
 }) {
   let discoveredDeckUrls = [...seedDeckUrls];
   let lastLanScanAt = 0;
 
   async function discoverInterfaces() {
+    const { interfaces } = await discoverAll();
+    return interfaces;
+  }
+
+  async function discoverProviderAdvertisements() {
+    const { providerAdvertisements } = await discoverAll();
+    return providerAdvertisements;
+  }
+
+  async function discoverAll() {
     await refreshLanDeckDiscovery();
+    const manifestsByProvider = await discoverDeckProviderManifests();
+    const eveInterfaces = await Promise.all(
+      [...manifestsByProvider.values()].map(({ provider, deckUrl }) => fetchEveProvider(deckUrl, provider.id, provider)),
+    );
+    const { interfaces: cultMeshInterfaces, providerAdvertisements } = await discoverCultMeshEntries();
+    const liveAnnouncements = liveProviderRegistry?.snapshot?.() || {
+      interfaces: [],
+      providerAdvertisements: [],
+    };
+
+    const interfaces = [...eveInterfaces];
+    for (const entry of [...cultMeshInterfaces, ...liveAnnouncements.interfaces]) {
+      const existingIndex = interfaces.findIndex((candidate) => candidate.providerId === entry.providerId);
+      if (existingIndex >= 0) {
+        interfaces[existingIndex] = entry;
+      } else {
+        interfaces.push(entry);
+      }
+    }
+    interfaces.sort((left, right) => left.providerId.localeCompare(right.providerId));
+    const allProviderAdvertisements = [...providerAdvertisements, ...liveAnnouncements.providerAdvertisements];
+    const providersById = new Map();
+    for (const provider of allProviderAdvertisements) {
+      if (provider?.id) {
+        providersById.set(String(provider.id), provider);
+      }
+    }
+    return {
+      interfaces,
+      providerAdvertisements: [...providersById.values()].sort((left, right) => String(left.id).localeCompare(String(right.id))),
+    };
+  }
+
+  function cultMeshDocumentsAvailable() {
+    const {
+      interfaceBindingDefinition,
+      idunnDaemonHealthDefinition,
+      muninnCaptureStreamDefinition,
+      muninnCommandBoundaryDefinition,
+      muninnMoveControllerStateDefinition,
+      muninnMoveIdentityDefinition,
+      muninnMoveLightCommandDefinition,
+      muninnMoveMarkerCandidateDefinition,
+      muninnObsStreamCatalogDefinition,
+      muninnQuestAccessDefinition,
+      muninnTelemetrySurfaceDefinition,
+      muninnTransportProfileDefinition,
+      operatorStateDefinition,
+      providerAdvertisementDefinition,
+      stonksCommandBoundaryDefinition,
+      stonksMarketSnapshotDefinition,
+      stonksRequestEventDefinition,
+      stonksTransportProfileDefinition,
+      streamPixelsCommandBoundaryDefinition,
+      streamPixelsTransportProfileDefinition,
+      surfaceDefinition,
+      viliCommandBoundaryDefinition,
+      viliTransportProfileDefinition,
+      weksaCommandBoundaryDefinition,
+      weksaOperatorStateDefinition,
+      weksaTransportProfileDefinition,
+      voidbotSwarmSnapshotDefinition,
+    } = documents;
+    return Boolean(
+      CultMesh &&
+      interfaceBindingDefinition &&
+      idunnDaemonHealthDefinition &&
+      muninnCaptureStreamDefinition &&
+      muninnCommandBoundaryDefinition &&
+      muninnMoveControllerStateDefinition &&
+      muninnMoveIdentityDefinition &&
+      muninnMoveLightCommandDefinition &&
+      muninnMoveMarkerCandidateDefinition &&
+      muninnObsStreamCatalogDefinition &&
+      muninnQuestAccessDefinition &&
+      muninnTelemetrySurfaceDefinition &&
+      muninnTransportProfileDefinition &&
+      operatorStateDefinition &&
+      providerAdvertisementDefinition &&
+      stonksCommandBoundaryDefinition &&
+      stonksMarketSnapshotDefinition &&
+      stonksRequestEventDefinition &&
+      stonksTransportProfileDefinition &&
+      streamPixelsCommandBoundaryDefinition &&
+      streamPixelsTransportProfileDefinition &&
+      surfaceDefinition &&
+      viliCommandBoundaryDefinition &&
+      viliTransportProfileDefinition &&
+      weksaCommandBoundaryDefinition &&
+      weksaOperatorStateDefinition &&
+      weksaTransportProfileDefinition &&
+      voidbotSwarmSnapshotDefinition
+    );
+  }
+
+  async function discoverDeckProviderManifests() {
     const manifestsByProvider = new Map();
-    for (const deckUrl of discoveredDeckUrls) {
+    await Promise.all(discoveredDeckUrls.map(async (deckUrl) => {
       const manifestUrl = deckUrl.replace(/^ws:/, "http:").replace(/\/eve\/deck.*$/, "/eve/deck/providers");
       try {
         const catalog = JSON.parse(await httpGet(manifestUrl, 2500));
@@ -40,25 +146,11 @@ function createInterfaceDiscovery({
       } catch {
         // Discovery is opportunistic. Failed endpoints fall out of the next pass.
       }
-    }
-
-    const interfaces = [];
-    for (const { provider, deckUrl } of manifestsByProvider.values()) {
-      interfaces.push(await fetchEveProvider(deckUrl, provider.id, provider));
-    }
-    for (const entry of await discoverCultMeshInterfaceBindings()) {
-      const existingIndex = interfaces.findIndex((candidate) => candidate.providerId === entry.providerId);
-      if (existingIndex >= 0) {
-        interfaces[existingIndex] = entry;
-      } else {
-        interfaces.push(entry);
-      }
-    }
-    interfaces.sort((left, right) => left.providerId.localeCompare(right.providerId));
-    return interfaces;
+    }));
+    return manifestsByProvider;
   }
 
-  async function discoverProviderAdvertisements() {
+  async function discoverCultMeshEntries() {
     const {
       interfaceBindingDefinition,
       idunnDaemonHealthDefinition,
@@ -88,280 +180,87 @@ function createInterfaceDiscovery({
       weksaTransportProfileDefinition,
       voidbotSwarmSnapshotDefinition,
     } = documents;
-    if (!CultMesh || !interfaceBindingDefinition || !idunnDaemonHealthDefinition || !muninnCaptureStreamDefinition || !muninnCommandBoundaryDefinition || !muninnMoveControllerStateDefinition || !muninnMoveIdentityDefinition || !muninnMoveLightCommandDefinition || !muninnMoveMarkerCandidateDefinition || !muninnObsStreamCatalogDefinition || !muninnQuestAccessDefinition || !muninnTelemetrySurfaceDefinition || !muninnTransportProfileDefinition || !operatorStateDefinition || !stonksCommandBoundaryDefinition || !stonksMarketSnapshotDefinition || !stonksRequestEventDefinition || !stonksTransportProfileDefinition || !streamPixelsCommandBoundaryDefinition || !streamPixelsTransportProfileDefinition || !surfaceDefinition || !viliCommandBoundaryDefinition || !viliTransportProfileDefinition || !weksaCommandBoundaryDefinition || !weksaOperatorStateDefinition || !weksaTransportProfileDefinition || !voidbotSwarmSnapshotDefinition || !providerAdvertisementDefinition) {
-      return [];
+    if (!cultMeshDocumentsAvailable()) {
+      return { interfaces: [], providerAdvertisements: [] };
     }
 
-    const providers = [];
-    for (const storeSpec of interfaceBindingStores) {
+    const nodeDocuments = [
+      voidbotSwarmSnapshotDefinition,
+      stonksRequestEventDefinition,
+      stonksMarketSnapshotDefinition,
+      providerAdvertisementDefinition,
+      interfaceBindingDefinition,
+      surfaceDefinition,
+      stonksCommandBoundaryDefinition,
+      stonksTransportProfileDefinition,
+      streamPixelsCommandBoundaryDefinition,
+      streamPixelsTransportProfileDefinition,
+      idunnDaemonHealthDefinition,
+      muninnCaptureStreamDefinition,
+      muninnCommandBoundaryDefinition,
+      muninnMoveControllerStateDefinition,
+      muninnMoveIdentityDefinition,
+      muninnMoveLightCommandDefinition,
+      muninnMoveMarkerCandidateDefinition,
+      muninnObsStreamCatalogDefinition,
+      muninnQuestAccessDefinition,
+      muninnTelemetrySurfaceDefinition,
+      muninnTransportProfileDefinition,
+      operatorStateDefinition,
+      viliCommandBoundaryDefinition,
+      viliTransportProfileDefinition,
+      weksaOperatorStateDefinition,
+      weksaCommandBoundaryDefinition,
+      weksaTransportProfileDefinition,
+    ];
+
+    const storeEntries = await Promise.all(interfaceBindingStores.map(async (storeSpec) => {
       let resolvedStore = null;
       try {
         resolvedStore = resolveInterfaceBindingStore(storeSpec);
         if (!resolvedStore) {
-          continue;
+          return { interfaces: [], providerAdvertisements: [] };
         }
         const { localPath: storePath, sourceId } = resolvedStore;
         if (!fs.existsSync(storePath)) {
-          continue;
+          return { interfaces: [], providerAdvertisements: [] };
         }
-        const node = await CultMesh.createNode(storePath, {
-          documents: [
-            voidbotSwarmSnapshotDefinition,
-            stonksRequestEventDefinition,
-            stonksMarketSnapshotDefinition,
-            providerAdvertisementDefinition,
-            interfaceBindingDefinition,
-            surfaceDefinition,
-            stonksCommandBoundaryDefinition,
-            stonksTransportProfileDefinition,
-            streamPixelsCommandBoundaryDefinition,
-            streamPixelsTransportProfileDefinition,
-            idunnDaemonHealthDefinition,
-            muninnCaptureStreamDefinition,
-            muninnCommandBoundaryDefinition,
-            muninnMoveControllerStateDefinition,
-            muninnMoveIdentityDefinition,
-            muninnMoveLightCommandDefinition,
-            muninnMoveMarkerCandidateDefinition,
-            muninnObsStreamCatalogDefinition,
-            muninnQuestAccessDefinition,
-            muninnTelemetrySurfaceDefinition,
-            muninnTransportProfileDefinition,
-            operatorStateDefinition,
-            viliCommandBoundaryDefinition,
-            viliTransportProfileDefinition,
-            weksaOperatorStateDefinition,
-            weksaCommandBoundaryDefinition,
-            weksaTransportProfileDefinition,
-          ],
+        const node = await CultMesh.createNode(storePath, { documents: nodeDocuments });
+        return inspectCultMeshStore({
+          documents,
+          interfaceBindingDefinition,
+          muninnTelemetrySurfaceDefinition,
+          node,
+          providerAdvertisementDefinition,
+          sourceId,
+          storePath,
         });
-        const advertisements = typeof node.cache?.getAll === "function"
-          ? node.cache.getAll(providerAdvertisementDefinition).map(unwrapDocumentRecord)
-          : [];
-        for (const advertisement of advertisements) {
-          const providerId = advertisement?.providerId || advertisement?.provider?.id || advertisement?.id;
-          if (!providerId) {
-            continue;
-          }
-          providers.push({
-            id: providerId,
-            title: advertisement.title || advertisement.provider?.title || providerId,
-            description: advertisement.description || "Provider-owned CultMesh advertisement.",
-            version: String(advertisement.version || 0),
-            endpoint: advertisement.cultMeshAddress || advertisement.endpoints?.[0]?.address || advertisement.provider?.endpoint || `cultmesh:${sourceId}`,
-            canonicalService: advertisement.canonicalService || null,
-            locatedService: advertisement.locatedService || null,
-            cultMeshAddress: advertisement.cultMeshAddress || null,
-            endpoints: advertisement.endpoints || [],
-            routes: advertisement.routes || [],
-            transportEndpoint: advertisement.routes?.find((route) => route.transport === "cultnet")?.address
-              || advertisement.routes?.find((route) => route.transport === "compatibility-eve-deck")?.address
-              || advertisement.provider?.endpoint
-              || `cultmesh:${sourceId}`,
-            capabilities: advertisement.provider?.capabilities || advertisement.capabilities || [],
-            operatorState: providerRecord(node, [
-              operatorStateDefinition,
-              weksaOperatorStateDefinition,
-            ], advertisement) || null,
-            commandBoundary: providerRecord(node, [
-              muninnCommandBoundaryDefinition,
-              viliCommandBoundaryDefinition,
-              weksaCommandBoundaryDefinition,
-              stonksCommandBoundaryDefinition,
-              streamPixelsCommandBoundaryDefinition,
-            ], advertisement) || null,
-            transportProfile: providerRecord(node, [
-              muninnTransportProfileDefinition,
-              viliTransportProfileDefinition,
-              weksaTransportProfileDefinition,
-              stonksTransportProfileDefinition,
-              streamPixelsTransportProfileDefinition,
-            ], advertisement) || null,
-            usesCultMesh: true,
-            transport: advertisement.provider?.transport || "CultMesh provider advertisement",
-            status: advertisement.status || "unknown",
-            updatedAt: advertisement.updatedAt || new Date().toISOString(),
-            source: `cultmesh:${sourceId}`,
-            commandSurface: advertisement.commandSurface || null,
-          });
-        }
-      } catch {
-        // Provider advertisements are optional discovery hints; broken stores
-        // are still surfaced through interface discovery when possible.
+      } catch (error) {
+        const interfaces = [];
+        const providerAdvertisements = [];
         if (resolvedStore?.localPath && fs.existsSync(resolvedStore.localPath)) {
-          providers.push(...inspectProviderAdvertisementsFromStore(
+          interfaces.push(...inspectCultMeshInterfacesFromStore(
+            resolvedStore.localPath,
+            resolvedStore.sourceId,
+          ));
+          providerAdvertisements.push(...inspectProviderAdvertisementsFromStore(
             resolvedStore.localPath,
             resolvedStore.sourceId,
           ));
         }
+        if (interfaces.length === 0) {
+          interfaces.push(dashboardUnavailable(`cultmesh:${storeSpec}`, `cultmesh:${storeSpec}`, error.message));
+        }
+        return { interfaces, providerAdvertisements };
       } finally {
         resolvedStore?.cleanup?.();
       }
-    }
+    }));
 
-    providers.sort((left, right) => String(left.id).localeCompare(String(right.id)));
-    return providers;
-  }
-
-  async function discoverCultMeshInterfaceBindings() {
-    const {
-      interfaceBindingDefinition,
-      idunnDaemonHealthDefinition,
-      muninnCaptureStreamDefinition,
-      muninnCommandBoundaryDefinition,
-      muninnMoveControllerStateDefinition,
-      muninnMoveIdentityDefinition,
-      muninnMoveLightCommandDefinition,
-      muninnMoveMarkerCandidateDefinition,
-      muninnObsStreamCatalogDefinition,
-      muninnQuestAccessDefinition,
-      muninnTelemetrySurfaceDefinition,
-      muninnTransportProfileDefinition,
-      operatorStateDefinition,
-      providerAdvertisementDefinition,
-      stonksCommandBoundaryDefinition,
-      stonksMarketSnapshotDefinition,
-      stonksRequestEventDefinition,
-      stonksTransportProfileDefinition,
-      streamPixelsCommandBoundaryDefinition,
-      streamPixelsTransportProfileDefinition,
-      surfaceDefinition,
-      viliCommandBoundaryDefinition,
-      viliTransportProfileDefinition,
-      weksaCommandBoundaryDefinition,
-      weksaOperatorStateDefinition,
-      weksaTransportProfileDefinition,
-      voidbotSwarmSnapshotDefinition,
-    } = documents;
-    if (!CultMesh || !interfaceBindingDefinition || !idunnDaemonHealthDefinition || !muninnCaptureStreamDefinition || !muninnCommandBoundaryDefinition || !muninnMoveControllerStateDefinition || !muninnMoveIdentityDefinition || !muninnMoveLightCommandDefinition || !muninnMoveMarkerCandidateDefinition || !muninnObsStreamCatalogDefinition || !muninnQuestAccessDefinition || !muninnTelemetrySurfaceDefinition || !muninnTransportProfileDefinition || !operatorStateDefinition || !stonksCommandBoundaryDefinition || !stonksMarketSnapshotDefinition || !stonksRequestEventDefinition || !stonksTransportProfileDefinition || !streamPixelsCommandBoundaryDefinition || !streamPixelsTransportProfileDefinition || !surfaceDefinition || !viliCommandBoundaryDefinition || !viliTransportProfileDefinition || !weksaCommandBoundaryDefinition || !weksaOperatorStateDefinition || !weksaTransportProfileDefinition || !voidbotSwarmSnapshotDefinition || !providerAdvertisementDefinition) {
-      return [];
-    }
-    const interfaces = [];
-    for (const storeSpec of interfaceBindingStores) {
-      let resolvedStore = null;
-      try {
-        resolvedStore = resolveInterfaceBindingStore(storeSpec);
-        if (!resolvedStore) {
-          continue;
-        }
-        const { localPath: storePath, sourceId } = resolvedStore;
-        if (!fs.existsSync(storePath)) {
-          continue;
-        }
-        const node = await CultMesh.createNode(storePath, {
-          documents: [
-            voidbotSwarmSnapshotDefinition,
-            stonksRequestEventDefinition,
-            stonksMarketSnapshotDefinition,
-            providerAdvertisementDefinition,
-            interfaceBindingDefinition,
-            surfaceDefinition,
-            stonksCommandBoundaryDefinition,
-            stonksTransportProfileDefinition,
-            streamPixelsCommandBoundaryDefinition,
-            streamPixelsTransportProfileDefinition,
-            idunnDaemonHealthDefinition,
-            muninnCaptureStreamDefinition,
-            muninnCommandBoundaryDefinition,
-            muninnMoveControllerStateDefinition,
-            muninnMoveIdentityDefinition,
-            muninnMoveLightCommandDefinition,
-            muninnMoveMarkerCandidateDefinition,
-            muninnObsStreamCatalogDefinition,
-            muninnQuestAccessDefinition,
-            muninnTelemetrySurfaceDefinition,
-            muninnTransportProfileDefinition,
-            operatorStateDefinition,
-            viliCommandBoundaryDefinition,
-            viliTransportProfileDefinition,
-            weksaOperatorStateDefinition,
-            weksaCommandBoundaryDefinition,
-            weksaTransportProfileDefinition,
-          ],
-        });
-        const advertisements = typeof node.cache?.getAll === "function"
-          ? node.cache.getAll(providerAdvertisementDefinition).map(unwrapDocumentRecord)
-          : [];
-        for (const advertisement of advertisements) {
-          if (!advertisement?.providerId) {
-            continue;
-          }
-          const state = providerSurfaceState(
-            node,
-            advertisement,
-            surfaceDefinition,
-            muninnTelemetrySurfaceDefinition,
-          );
-          if (!state?.surface?.root) {
-            continue;
-          }
-          interfaces.push(cultMeshProviderInterface({
-            advertisement,
-            state,
-            storePath: sourceId,
-            operatorState: providerRecord(node, [
-              operatorStateDefinition,
-              weksaOperatorStateDefinition,
-            ], advertisement) || null,
-            commandBoundary: providerRecord(node, [
-              muninnCommandBoundaryDefinition,
-              viliCommandBoundaryDefinition,
-              weksaCommandBoundaryDefinition,
-              stonksCommandBoundaryDefinition,
-              streamPixelsCommandBoundaryDefinition,
-            ], advertisement) || null,
-            transportProfile: providerRecord(node, [
-              muninnTransportProfileDefinition,
-              viliTransportProfileDefinition,
-              weksaTransportProfileDefinition,
-              stonksTransportProfileDefinition,
-              streamPixelsTransportProfileDefinition,
-            ], advertisement) || null,
-          }));
-        }
-        const bindings = typeof node.cache?.getAll === "function"
-          ? node.cache.getAll(interfaceBindingDefinition).map(unwrapDocumentRecord)
-          : [unwrapDocumentRecord(node.get(interfaceBindingDefinition, "voidbot.swarm"))].filter(Boolean);
-        for (const binding of bindings) {
-          if (!binding?.providerId) {
-            continue;
-          }
-          const state = unwrapDocumentRecord(node.get(surfaceDefinition, binding.providerId));
-          const surface = state?.surface || binding.surface || null;
-          interfaces.push({
-            providerId: binding.providerId,
-            title: binding.title || state?.title || binding.providerId,
-            state: "active",
-            detail: `${surface?.root?.kind || binding.kind || "surface"} ${countSurfaceNodes(surface, state)} nodes via CultMesh`,
-            version: state?.version || 0,
-            updatedAt: state?.updatedAt || binding.updatedAt || new Date().toISOString(),
-            source: `cultmesh:${sourceId}`,
-            manifest: binding.provider || null,
-            canonicalService: binding.provider?.canonicalService || null,
-            locatedService: binding.provider?.locatedService || null,
-            cultMeshAddress: binding.provider?.cultMeshAddress || binding.provider?.endpoint || null,
-            endpoints: binding.provider?.endpoints || [],
-            routes: binding.provider?.routes || [],
-            surface,
-          });
-        }
-      } catch (error) {
-        if (resolvedStore?.localPath && fs.existsSync(resolvedStore.localPath)) {
-          const fallbackInterfaces = inspectCultMeshInterfacesFromStore(
-            resolvedStore.localPath,
-            resolvedStore.sourceId,
-          );
-          if (fallbackInterfaces.length > 0) {
-            interfaces.push(...fallbackInterfaces);
-            continue;
-          }
-        }
-        interfaces.push(dashboardUnavailable(`cultmesh:${storeSpec}`, `cultmesh:${storeSpec}`, error.message));
-      } finally {
-        resolvedStore?.cleanup?.();
-      }
-    }
-    return interfaces;
+    return {
+      interfaces: storeEntries.flatMap((entry) => entry.interfaces),
+      providerAdvertisements: storeEntries.flatMap((entry) => entry.providerAdvertisements),
+    };
   }
 
   async function refreshLanDeckDiscovery() {
@@ -383,6 +282,7 @@ function createInterfaceDiscovery({
   }
 
   return {
+    discoverAll,
     discoverProviderAdvertisements,
     discoverInterfaces,
     getDiscoveredDeckUrls: () => [...discoveredDeckUrls],
@@ -419,6 +319,146 @@ function cultMeshProviderInterface({
     transportProfile,
     surface,
   };
+}
+
+function inspectCultMeshStore({
+  documents,
+  interfaceBindingDefinition,
+  muninnTelemetrySurfaceDefinition,
+  node,
+  providerAdvertisementDefinition,
+  sourceId,
+}) {
+  const {
+    operatorStateDefinition,
+    stonksCommandBoundaryDefinition,
+    stonksTransportProfileDefinition,
+    streamPixelsCommandBoundaryDefinition,
+    streamPixelsTransportProfileDefinition,
+    surfaceDefinition,
+    viliCommandBoundaryDefinition,
+    viliTransportProfileDefinition,
+    weksaCommandBoundaryDefinition,
+    weksaOperatorStateDefinition,
+    weksaTransportProfileDefinition,
+    muninnCommandBoundaryDefinition,
+    muninnTransportProfileDefinition,
+  } = documents;
+
+  const providerAdvertisements = [];
+  const interfaces = [];
+  const advertisements = typeof node.cache?.getAll === "function"
+    ? node.cache.getAll(providerAdvertisementDefinition).map(unwrapDocumentRecord)
+    : [];
+
+  for (const advertisement of advertisements) {
+    const providerId = advertisement?.providerId || advertisement?.provider?.id || advertisement?.id;
+    if (!providerId) {
+      continue;
+    }
+    providerAdvertisements.push({
+      id: providerId,
+      title: advertisement.title || advertisement.provider?.title || providerId,
+      description: advertisement.description || "Provider-owned CultMesh advertisement.",
+      version: String(advertisement.version || 0),
+      endpoint: advertisement.cultMeshAddress || advertisement.endpoints?.[0]?.address || advertisement.provider?.endpoint || `cultmesh:${sourceId}`,
+      canonicalService: advertisement.canonicalService || null,
+      locatedService: advertisement.locatedService || null,
+      cultMeshAddress: advertisement.cultMeshAddress || null,
+      endpoints: advertisement.endpoints || [],
+      routes: advertisement.routes || [],
+      transportEndpoint: advertisement.routes?.find((route) => route.transport === "cultnet")?.address
+        || advertisement.routes?.find((route) => route.transport === "compatibility-eve-deck")?.address
+        || advertisement.provider?.endpoint
+        || `cultmesh:${sourceId}`,
+      capabilities: advertisement.provider?.capabilities || advertisement.capabilities || [],
+      operatorState: providerRecord(node, [
+        operatorStateDefinition,
+        weksaOperatorStateDefinition,
+      ], advertisement) || null,
+      commandBoundary: providerRecord(node, [
+        muninnCommandBoundaryDefinition,
+        viliCommandBoundaryDefinition,
+        weksaCommandBoundaryDefinition,
+        stonksCommandBoundaryDefinition,
+        streamPixelsCommandBoundaryDefinition,
+      ], advertisement) || null,
+      transportProfile: providerRecord(node, [
+        muninnTransportProfileDefinition,
+        viliTransportProfileDefinition,
+        weksaTransportProfileDefinition,
+        stonksTransportProfileDefinition,
+        streamPixelsTransportProfileDefinition,
+      ], advertisement) || null,
+      usesCultMesh: true,
+      transport: advertisement.provider?.transport || "CultMesh provider advertisement",
+      status: advertisement.status || "unknown",
+      updatedAt: advertisement.updatedAt || new Date().toISOString(),
+      source: `cultmesh:${sourceId}`,
+      commandSurface: advertisement.commandSurface || null,
+    });
+
+    const state = providerSurfaceState(
+      node,
+      advertisement,
+      surfaceDefinition,
+      muninnTelemetrySurfaceDefinition,
+    );
+    if (state?.surface?.root) {
+      interfaces.push(cultMeshProviderInterface({
+        advertisement,
+        state,
+        storePath: sourceId,
+        operatorState: providerRecord(node, [
+          operatorStateDefinition,
+          weksaOperatorStateDefinition,
+        ], advertisement) || null,
+        commandBoundary: providerRecord(node, [
+          muninnCommandBoundaryDefinition,
+          viliCommandBoundaryDefinition,
+          weksaCommandBoundaryDefinition,
+          stonksCommandBoundaryDefinition,
+          streamPixelsCommandBoundaryDefinition,
+        ], advertisement) || null,
+        transportProfile: providerRecord(node, [
+          muninnTransportProfileDefinition,
+          viliTransportProfileDefinition,
+          weksaTransportProfileDefinition,
+          stonksTransportProfileDefinition,
+          streamPixelsTransportProfileDefinition,
+        ], advertisement) || null,
+      }));
+    }
+  }
+
+  const bindings = typeof node.cache?.getAll === "function"
+    ? node.cache.getAll(interfaceBindingDefinition).map(unwrapDocumentRecord)
+    : [unwrapDocumentRecord(node.get(interfaceBindingDefinition, "voidbot.swarm"))].filter(Boolean);
+  for (const binding of bindings) {
+    if (!binding?.providerId) {
+      continue;
+    }
+    const state = unwrapDocumentRecord(node.get(surfaceDefinition, binding.providerId));
+    const surface = state?.surface || binding.surface || null;
+    interfaces.push({
+      providerId: binding.providerId,
+      title: binding.title || state?.title || binding.providerId,
+      state: "active",
+      detail: `${surface?.root?.kind || binding.kind || "surface"} ${countSurfaceNodes(surface, state)} nodes via CultMesh`,
+      version: state?.version || 0,
+      updatedAt: state?.updatedAt || binding.updatedAt || new Date().toISOString(),
+      source: `cultmesh:${sourceId}`,
+      manifest: binding.provider || null,
+      canonicalService: binding.provider?.canonicalService || null,
+      locatedService: binding.provider?.locatedService || null,
+      cultMeshAddress: binding.provider?.cultMeshAddress || binding.provider?.endpoint || null,
+      endpoints: binding.provider?.endpoints || [],
+      routes: binding.provider?.routes || [],
+      surface,
+    });
+  }
+
+  return { interfaces, providerAdvertisements };
 }
 
 function providerSurfaceState(node, advertisement, surfaceDefinition, muninnTelemetrySurfaceDefinition) {
@@ -973,164 +1013,15 @@ function resolveInterfaceBindingStore(storeSpec) {
   if (typeof storeSpec !== "string" || !storeSpec.trim()) {
     return null;
   }
-  if (!storeSpec.startsWith("sftp://")) {
-    return {
-      localPath: storeSpec,
-      sourceId: storeSpec,
-      cleanup: () => {},
-    };
-  }
-
-  const url = new URL(storeSpec);
-  const host = url.hostname;
-  let remotePath = decodeURIComponent(url.pathname);
-  if (/^\/[A-Za-z]:\//.test(remotePath)) {
-    remotePath = remotePath.slice(1);
-  }
-  if (!host || !remotePath) {
-    throw new Error(`invalid sftp interface binding store: ${storeSpec}`);
-  }
-
-  const cacheRoot = path.join(os.tmpdir(), "odin-cultmesh-stores");
-  fs.mkdirSync(cacheRoot, { recursive: true });
-  const suffix = path.extname(remotePath) || ".cc";
-  const stem = `${stableId(host)}-${stableId(remotePath)}`;
-  const transferId = `${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
-  const localPath = path.join(cacheRoot, `${stem}-${transferId}${suffix}`);
-  const batchPath = path.join(cacheRoot, `${stem}-${transferId}.sftp`);
-  const stagedRemotePath = stageRemoteStoreForRead(host, remotePath, `${stem}-${transferId}`, suffix);
-  fs.writeFileSync(
-    batchPath,
-    `get "${stagedRemotePath}" "${localPath.replace(/\\/g, "/")}"\n`,
-    "ascii",
-  );
-  try {
-    const result = childProcess.spawnSync(
-      "sftp.exe",
-      ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-b", batchPath, host],
-      {
-        encoding: "utf8",
-        timeout: 15000,
-        windowsHide: true,
-      },
-    );
-    if (result.status !== 0) {
-      throw new Error((result.stderr || result.stdout || `sftp exited ${result.status}`).trim());
-    }
-  } finally {
-    cleanupRemoteStagedStore(host, stagedRemotePath);
-    try {
-      fs.rmSync(batchPath, { force: true });
-    } catch {
-      // Best-effort temp cleanup. A later pass can reuse a fresh transfer id.
-    }
+  if (storeSpec.startsWith("sftp://")) {
+    throw new Error(`remote interface binding stores are no longer supported by Odin discovery: ${storeSpec}`);
   }
 
   return {
-    localPath,
+    localPath: storeSpec,
     sourceId: storeSpec,
-    cleanup: () => {
-      try {
-        fs.rmSync(localPath, { force: true });
-      } catch {
-        // Best-effort temp cleanup. Live readers may still be releasing handles.
-      }
-    },
+    cleanup: () => {},
   };
-}
-
-function stageRemoteStoreForRead(host, remotePath, stem, suffix) {
-  const stagedRemotePath = isWindowsRemoteStorePath(remotePath)
-    ? `C:/Windows/Temp/odin-interface-${stem}${suffix}`
-    : `/tmp/odin-interface-${stem}${suffix}`;
-  if (isWindowsRemoteStorePath(remotePath)) {
-    const script = [
-      "$ErrorActionPreference = 'Stop'",
-      `$sourcePath = ${quotePowerShellSingle(remotePath)}`,
-      `$stagedPath = ${quotePowerShellSingle(stagedRemotePath)}`,
-      "$lockPath = $sourcePath + '.lock'",
-      "if (-not (Test-Path -LiteralPath $sourcePath)) { throw \"remote store missing at $sourcePath\" }",
-      "New-Item -ItemType Directory -Force -Path (Split-Path -Parent $stagedPath) | Out-Null",
-      "$lockStream = [System.IO.File]::Open($lockPath, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::ReadWrite)",
-      "try {",
-      "  $lockStream.Lock(0, 1)",
-      "  Copy-Item -LiteralPath $sourcePath -Destination $stagedPath -Force",
-      "} finally {",
-      "  try { $lockStream.Unlock(0, 1) } catch {}",
-      "  $lockStream.Dispose()",
-      "}",
-    ].join("\n");
-    runRemoteCommand(
-      host,
-      `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encodePowerShellCommand(script)}`,
-    );
-  } else {
-    const command = [
-      "set -eu",
-      `src=${quotePosixSingle(remotePath)}`,
-      `staged=${quotePosixSingle(stagedRemotePath)}`,
-      'lock="${src}.lock"',
-      'mkdir -p "$(dirname "$staged")"',
-      'if [ -e "$lock" ]; then',
-      '  exec 9<"$lock"',
-      '  flock -s 9',
-      'fi',
-      'cp "$src" "$staged"',
-    ].join("\n");
-    runRemoteCommand(host, `sh -lc ${quotePosixSingle(command)}`);
-  }
-  return stagedRemotePath;
-}
-
-function cleanupRemoteStagedStore(host, stagedRemotePath) {
-  try {
-    if (isWindowsRemoteStorePath(stagedRemotePath)) {
-      const script = [
-        "$ErrorActionPreference = 'SilentlyContinue'",
-        `$stagedPath = ${quotePowerShellSingle(stagedRemotePath)}`,
-        "Remove-Item -LiteralPath $stagedPath -Force -ErrorAction SilentlyContinue",
-      ].join("\n");
-      runRemoteCommand(
-        host,
-        `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encodePowerShellCommand(script)}`,
-      );
-      return;
-    }
-    runRemoteCommand(host, `sh -lc ${quotePosixSingle(`rm -f ${quotePosixSingle(stagedRemotePath)}`)}`);
-  } catch {
-    // Temp snapshot cleanup is opportunistic.
-  }
-}
-
-function runRemoteCommand(host, command) {
-  const result = childProcess.spawnSync(
-    "ssh.exe",
-    ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, command],
-    {
-      encoding: "utf8",
-      timeout: 15000,
-      windowsHide: true,
-    },
-  );
-  if (result.status !== 0) {
-    throw new Error((result.stderr || result.stdout || `ssh exited ${result.status}`).trim());
-  }
-}
-
-function isWindowsRemoteStorePath(remotePath) {
-  return /^[A-Za-z]:\//.test(remotePath);
-}
-
-function encodePowerShellCommand(script) {
-  return Buffer.from(script, "utf16le").toString("base64");
-}
-
-function quotePowerShellSingle(value) {
-  return `'${String(value).replace(/'/g, "''")}'`;
-}
-
-function quotePosixSingle(value) {
-  return `'${String(value).replace(/'/g, `'\\''`)}'`;
 }
 
 function localIpv4Prefixes() {

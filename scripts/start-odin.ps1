@@ -58,4 +58,4 @@ if ($proc.HasExited) {
 Write-Host "Odin started as PID $($proc.Id)."
 Write-Host "Health: http://127.0.0.1:$Port/health"
 Write-Host "Eve deck: ws://127.0.0.1:$Port/eve/deck"
-Write-Host "CultNet/RUDP snapshot: $CultNetRudpBind"
+Write-Host "CultMesh/RUDP document catalog: $CultNetRudpBind"

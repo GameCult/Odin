@@ -1,2 +1,2 @@
 @echo off
-curl.exe -fsS http://127.0.0.1:8797/health >NUL
+"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File E:\Projects\Odin\scripts\health-odin.ps1

@@ -96,11 +96,15 @@ The Eve/CultUI deck endpoint is a compatibility bridge:
 ws://127.0.0.1:8797/eve/deck
 ```
 
-The native CultNet/RUDP snapshot endpoint is:
+The native CultMesh/RUDP document catalog endpoint is:
 
 ```text
 127.0.0.1:17871
 ```
+
+That endpoint accepts typed document publication and schema/catalog requests
+through the shared CultMesh runtime. Consumers that need Odin's accepted surface
+can still request the current CultNet snapshot over the same transport.
 
 Legacy browser/deck lowerers can consume the LAN bridge endpoint:
 

@@ -1768,6 +1768,12 @@ fn daemon_surgery_plan(target: &DaemonTarget, updated_at: &str) -> IdunnDaemonSu
 fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
     let repo_root = options.repo_root.display().to_string();
     let script = |name: &str| format!(r"{}\scripts\{}", repo_root, name);
+    let powershell_script = |name: &str| {
+        format!(
+            r#"C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{}\scripts\{}""#,
+            repo_root, name
+        )
+    };
     let project = |name: &str| PathBuf::from(format!(r"E:\Projects\{name}"));
 
     match options.profile.as_str() {
@@ -1777,9 +1783,9 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 verse_id: "starfire.local".to_string(),
                 name: "Odin all-seer".to_string(),
                 health_contract: health_contract("odin.cultnet-rudp-provider-health", "failed"),
-                health_command: Some(script("health-odin.cmd")),
+                health_command: Some(powershell_script("health-odin.ps1")),
                 deploy_command: None,
-                restart_command: Some(script("restart-odin.cmd")),
+                restart_command: Some(powershell_script("restart-odin.ps1")),
                 release: None,
                 enabled: true,
                 interval_seconds: 30,
@@ -2701,9 +2707,15 @@ mod tests {
             verse_id: "starfire.local".to_string(),
             name: "Odin".to_string(),
             health_contract: health_contract("odin.cultnet-rudp-provider-health", "failed"),
-            health_command: Some("health-odin.cmd".to_string()),
+            health_command: Some(
+                r#"C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File "E:\Projects\Odin\scripts\health-odin.ps1""#
+                    .to_string(),
+            ),
             deploy_command: None,
-            restart_command: Some("restart-odin.cmd".to_string()),
+            restart_command: Some(
+                r#"C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File "E:\Projects\Odin\scripts\restart-odin.ps1""#
+                    .to_string(),
+            ),
             release: None,
             enabled: true,
             interval_seconds: 30,
