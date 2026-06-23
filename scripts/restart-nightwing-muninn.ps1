@@ -10,7 +10,8 @@ param(
   [int] $IntervalSeconds = 15,
   [string] $IdunnRudpHealth = "10.77.0.2:17870",
   [string] $IdunnDaemon = "nightwing-muninn",
-  [string] $IdunnHealthContract = "muninn.cultnet-rudp-remote-telemetry-and-move-hid"
+  [string] $IdunnHealthContract = "muninn.cultnet-rudp-remote-telemetry-and-move-hid",
+  [string] $OdinCultMeshRudp = "10.77.0.2:17871"
 )
 
 $ErrorActionPreference = "Stop"
@@ -84,6 +85,10 @@ if ($moveStateSpecs.Count -gt 0) {
   $moveRuntimeSetLines += "set -- ""`$@"" --move-evidence-stream $(Quote-ShSingle $MoveEvidenceStream)"
 }
 $moveRuntimeSetBlock = ($moveRuntimeSetLines -join "`n")
+$odinCultMeshRudpSetBlock = ""
+if (-not [string]::IsNullOrWhiteSpace($OdinCultMeshRudp)) {
+  $odinCultMeshRudpSetBlock = "set -- ""`$@"" --odin-cultmesh-rudp $(Quote-ShSingle $OdinCultMeshRudp)"
+}
 
 $remoteScript = @"
 set -eu
@@ -109,6 +114,7 @@ set -- "`$@" \
   --idunn-rudp-health '$IdunnRudpHealth' \
   --idunn-daemon '$IdunnDaemon' \
   --idunn-health-contract '$IdunnHealthContract'
+$odinCultMeshRudpSetBlock
 nohup '$MuninnExe' "`$@" \
   > '$LogRoot/muninn-serve.out.log' \
   2> '$LogRoot/muninn-serve.err.log' \

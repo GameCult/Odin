@@ -8,7 +8,8 @@ param(
   [switch] $EnableUsbMoveState,
   [string] $IdunnRudpHealth = "127.0.0.1:17870",
   [string] $IdunnDaemon = "starfire-muninn",
-  [string] $IdunnHealthContract = "muninn.cultnet-rudp-local-telemetry-and-quest-access"
+  [string] $IdunnHealthContract = "muninn.cultnet-rudp-local-telemetry-and-quest-access",
+  [string] $OdinCultMeshRudp = "127.0.0.1:17871"
 )
 
 $ErrorActionPreference = "Stop"
@@ -49,6 +50,9 @@ $arguments = @(
   "--idunn-daemon", $IdunnDaemon,
   "--idunn-health-contract", $IdunnHealthContract
 )
+if (-not [string]::IsNullOrWhiteSpace($OdinCultMeshRudp)) {
+  $arguments += @("--odin-cultmesh-rudp", $OdinCultMeshRudp)
+}
 if (-not [string]::IsNullOrWhiteSpace($MoveBluetoothHost)) {
   $arguments += @("--move-host", $MoveBluetoothHost)
 }

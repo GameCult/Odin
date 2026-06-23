@@ -18,6 +18,7 @@ param(
   [string] $IdunnRudpHealth = "10.77.0.2:17870",
   [string] $IdunnDaemon = "muninn",
   [string] $IdunnHealthContract = "muninn.cultnet-rudp-remote-telemetry-health",
+  [string] $OdinCultMeshRudp = "10.77.0.2:17871",
   [string] $CaptureCommandRudpBind = "0.0.0.0:17883",
   [string] $CaptureCommandRudpTarget = "127.0.0.1:17883",
   [string] $ObsCatalogRudpTarget = "10.77.0.2:17874",
@@ -373,6 +374,9 @@ $serveArguments = @(
   "--port", $Port.ToString(),
   "--media-transport", $MediaTransport
 )
+if (-not [string]::IsNullOrWhiteSpace($OdinCultMeshRudp)) {
+  $serveArguments += @("--odin-cultmesh-rudp", $OdinCultMeshRudp)
+}
 foreach ($videoSource in $VideoSources) {
   $serveArguments += @("--video-source", $videoSource)
 }
