@@ -6,6 +6,7 @@ param(
   [string] $LogRoot = "C:\Meta\Odin\logs\muninn",
   [int] $MaxStoreAgeSeconds = 180,
   [string] $IdunnRudpHealth = "10.77.0.2:17870",
+  [string] $CaptureCommandRudpBind = "0.0.0.0:17883",
   [int] $ConnectTimeoutSeconds = 10,
   [string] $SshUser = "",
   [string] $IdentityFile = ""
@@ -97,7 +98,6 @@ if (-not (Test-Path -LiteralPath "$MuninnExe")) {
 `$muninnDir = Split-Path -Parent "$MuninnExe"
 `$taskExpectations = @(
   @{ Name = "GameCult-Muninn"; Launcher = "powershell"; Vbs = Join-Path `$muninnDir "start-muninn-serve-hidden.vbs"; Ps = Join-Path `$muninnDir "start-muninn-serve.ps1" },
-  @{ Name = "GameCult-Muninn-Activate"; Launcher = "wscript"; Vbs = Join-Path `$muninnDir "activate-raven-av-srt-hidden.vbs"; Ps = Join-Path `$muninnDir "activate-raven-av-srt.ps1" },
   @{ Name = "GameCult-Muninn-VideoProof"; Launcher = "wscript"; Vbs = Join-Path `$muninnDir "muninn-raven-video-to-starfire-obs-hidden.vbs"; Ps = Join-Path `$muninnDir "muninn-raven-video-to-starfire-obs.ps1" }
 )
 foreach (`$expectation in `$taskExpectations) {
@@ -172,6 +172,9 @@ foreach (`$expectation in `$taskExpectations) {
     throw "`$(`$expectation.Vbs) does not reference a PowerShell launcher"
   }
 }
+if (Get-ScheduledTask -TaskName "GameCult-Muninn-Activate" -ErrorAction SilentlyContinue) {
+  throw "Obsolete GameCult-Muninn-Activate task is still present on Raven"
+}
 `$servePidPath = Join-Path "$LogRoot" "muninn-serve.pid"
 `$servePid = `$null
 if (Test-Path -LiteralPath `$servePidPath) {
@@ -197,7 +200,7 @@ if (`$null -eq `$process) {
 foreach (`$pattern in @(
   "--host raven",
   "--activate-store $ActivateStorePath",
-  "--capture-command-rudp-bind 0.0.0.0:17883",
+  "--capture-command-rudp-bind $CaptureCommandRudpBind",
   "--idunn-rudp-health $IdunnRudpHealth",
   "--idunn-daemon muninn",
   "--idunn-health-contract muninn.cultnet-rudp-remote-telemetry-health"

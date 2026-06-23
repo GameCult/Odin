@@ -801,6 +801,11 @@ foreach (`$path in @(
   }
 }
 
+`$obsoleteActivateTask = Get-ScheduledTask -TaskName "GameCult-Muninn-Activate" -ErrorAction SilentlyContinue
+if (`$null -ne `$obsoleteActivateTask) {
+  Unregister-ScheduledTask -TaskName "GameCult-Muninn-Activate" -Confirm:`$false | Out-Null
+}
+
 Get-CimInstance Win32_Process |
   Where-Object { `$_.Name -like "muninn*.exe" } |
   ForEach-Object {
@@ -893,11 +898,9 @@ function Assert-HiddenPowerShellTask {
 }
 
 Register-HiddenPowerShellTask -TaskName "GameCult-Muninn" -PsPath "$servePsPath"
-Register-HiddenVbsTask -TaskName "GameCult-Muninn-Activate" -VbsPath "$activateVbsPath"
 Register-HiddenVbsTask -TaskName "GameCult-Muninn-VideoProof" -VbsPath "$videoProofVbsPath"
 
 Assert-HiddenPowerShellTask -TaskName "GameCult-Muninn" -PsPath "$servePsPath"
-Assert-HiddenVbsTask -TaskName "GameCult-Muninn-Activate" -VbsPath "$activateVbsPath" -PsPath "$activatePsPath"
 Assert-HiddenVbsTask -TaskName "GameCult-Muninn-VideoProof" -VbsPath "$videoProofVbsPath" -PsPath "$videoProofPsPath"
 
 Start-ScheduledTask -TaskName "GameCult-Muninn"
@@ -949,13 +952,35 @@ $restartExit = $LASTEXITCODE
 if ($restartExit -eq 0) {
   Start-Sleep -Seconds 2
   $healthScript = Join-Path $PSScriptRoot "health-muninn.ps1"
-  & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $healthScript `
-    -RavenHost $RavenHost `
-    -MuninnExe $MuninnExe `
-    -StorePath $StorePath `
-    -ConnectTimeoutSeconds $ConnectTimeoutSeconds `
-    -MaxStoreAgeSeconds ([Math]::Max(180, $ServeStartTimeoutSeconds + 60)) `
-    -SshUser $SshUser `
-    -IdentityFile $IdentityFile
+  $healthArgs = @(
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-File",
+    $healthScript,
+    "-RavenHost",
+    $RavenHost,
+    "-MuninnExe",
+    $MuninnExe,
+    "-StorePath",
+    $StorePath,
+    "-ActivateStorePath",
+    $ActivateStorePath,
+    "-IdunnRudpHealth",
+    $IdunnRudpHealth,
+    "-CaptureCommandRudpBind",
+    $CaptureCommandRudpBind,
+    "-ConnectTimeoutSeconds",
+    $ConnectTimeoutSeconds.ToString(),
+    "-MaxStoreAgeSeconds",
+    ([Math]::Max(180, $ServeStartTimeoutSeconds + 60)).ToString()
+  )
+  if (-not [string]::IsNullOrWhiteSpace($SshUser)) {
+    $healthArgs += @("-SshUser", $SshUser)
+  }
+  if (-not [string]::IsNullOrWhiteSpace($IdentityFile)) {
+    $healthArgs += @("-IdentityFile", $IdentityFile)
+  }
+  & powershell.exe @healthArgs
 }
 exit $restartExit

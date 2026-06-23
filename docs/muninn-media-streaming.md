@@ -126,6 +126,92 @@ but the ownership shape should not: frame/access-unit identity is load-bearing.
   MPEG-TS byte stream. Keep it only as a named compatibility lowering until the
   OBS receiver can consume typed media frames directly.
 
+## Boring Stream Discovery Contract
+
+The desired operator experience is boring: OBS asks the Verse for Muninns, the
+plugin shows live sources, and a selected source either activates or reports the
+specific owner that refused it. No local plugin fallback may invent Raven
+devices. A fake `display:0` or Realtek loopback row is worse than an empty list
+because it makes stale state look selectable.
+
+Live ownership:
+
+- Owner: Muninn `serve` owns source inventory for the body where the devices
+  exist. It publishes video and audio source ids, labels, command boundary,
+  media profile, and current active sessions.
+- Inputs: local display/audio enumeration, explicit configured source hints,
+  daemon health, and accepted stream commands.
+- Outputs: `muninn.telemetry_surface.v1`, `gamecult.eve.provider_advertisement.v1`,
+  `muninn.command_boundary.v1`, `muninn.transport_profile.v1`, active
+  `muninn.capture_stream.v1` receipts, and the temporary
+  `muninn.obs_stream_catalog.v1` compatibility record.
+- Derived state: the OBS dropdown is a lowering of discovered Muninn state. It
+  is not an inventory owner, activation owner, or health owner.
+- Forbidden writers: OBS defaults, local hard-coded device names, synced stale
+  CultCache mirrors, scheduled-task launchers, and previous activation receipts
+  must not create selectable devices or active streams.
+- Shared paths: initial OBS load, refresh button, periodic refresh, source
+  selection, reconnect, and OBS restart must all read the same live-discovered
+  source list and issue the same typed capture command when activation is
+  needed.
+- Deletion line: the plugin may display `discovery missing`, but it must not
+  synthesize `Display 1` or `Realtek loopback` as if Raven advertised them.
+  Until Odin/Verse discovery is the direct plugin input, the OBS catalog remains
+  a compatibility projection of Muninn-owned live state, not its own truth.
+  Compatibility store fallback is allowed only as availability fallback: the
+  plugin must use the first current store that yields Muninn telemetry and must
+  not merge stale stores into a more attractive fake inventory.
+  A store older than the Muninn health freshness budget is not a discovery
+  source; it is an outage receipt.
+
+This contract also splits the media session truth:
+
+- Video session: selected video source id, encoder profile, bitrate, frame
+  timestamps, access-unit ids, keyframe policy, feedback pressure, and video
+  receiver queue.
+- Audio session: selected audio source id, sample format, packet timestamps,
+  reorder budget, continuity/drop policy, and OBS audio output cadence.
+- Combined OBS source: a convenience lowering that may request one video session
+  and one audio session together. It does not merge their clocks or transport
+  state into one opaque "A/V target".
+
+## Known-Good Checkpoint (2026-06-23)
+
+The current system is in a usable compatibility state worth preserving before
+the next transport experiment.
+
+What is working:
+
+- Raven Muninn runs continuously as the capture owner and accepts stream
+  activation over CultNet RUDP.
+- OBS on Starfire shows the live-discovered Muninn source inventory instead of
+  synthesizing fake devices from stale local defaults.
+- Video and audio sessions activate separately through the combined OBS source
+  lowering and the stream comes up cleanly again after reconnect.
+- The OBS plugin currently receives the temporary live
+  `muninn.obs_stream_catalog.v1` projection over UDP `17874` and uses it as the
+  live discovery source before any CultCache fallback.
+
+Current compatibility details:
+
+- Raven command ingress is currently bound to `0.0.0.0:17884`.
+- Starfire OBS listens for the temporary live OBS catalog on UDP `17874`.
+- The daemon `serve` loop must continue publishing the OBS catalog while idle;
+  otherwise OBS falls back to stale store state and reports `discovery-missing`
+  or shows dead inventory.
+- The current OBS plugin is still a compatibility client. It does not yet host
+  the Rust CultMesh runtime directly and it is not yet consuming Odin/Verse
+  discovery as a first-class Verse client.
+
+Known debt that remains intentionally visible:
+
+- Idunn health publication can still time out independently of the media path.
+  That is operational debt, not proof that Muninn discovery or streaming is
+  down.
+- The OBS catalog is still a temporary projection. The boring end state is live
+  Verse discovery with no plugin-owned catalog receiver and no stale store
+  merge behavior.
+
 ## Codec Direction
 
 Use vendor hardware encode before inventing a codec. NVIDIA's practical answer

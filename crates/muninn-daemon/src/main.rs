@@ -372,6 +372,7 @@ fn serve(options: Options) -> Result<()> {
             };
             publish_surface(&mut node, &options, state, &active_stream_ids)?;
             publish_runtime_boundary_records(&mut node, &options, state, &active_stream_ids)?;
+            publish_obs_catalog_idle(&mut node, &options)?;
         }
         claim_move_host_if_due(&options, &mut last_move_host_claim_attempt_at);
         pickup_bluetooth_moves_if_due(
