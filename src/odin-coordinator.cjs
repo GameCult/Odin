@@ -5,7 +5,7 @@ const fs = require("fs");
 const path = require("path");
 
 const { buildConfig, loadCultRuntime } = require("./odin/config.cjs");
-const { createCultNetRudpSurfaceServer } = require("./odin/cultnet-rudp.cjs");
+const { createCultMeshRudpDocumentServer } = require("./odin/cultnet-rudp.cjs");
 const { defineOdinDocuments } = require("./odin/documents.cjs");
 const { createInterfaceDiscovery } = require("./odin/interfaces.cjs");
 const { createIdunnRudpHealthPublisher, publishIdunnRudpHealth } = require("./odin/idunn-rudp.cjs");
@@ -20,7 +20,7 @@ const idunnRudpHealthPublisher = createIdunnRudpHealthPublisher(config.idunnRudp
 
 const cultRuntime = loadCultRuntime();
 if (cultRuntime.error) {
-  console.error("CultMesh runtime unavailable; durable mesh snapshot disabled:", cultRuntime.error.message);
+  console.error("CultMesh runtime unavailable; durable mesh catalog disabled:", cultRuntime.error.message);
 }
 
 const documents = defineOdinDocuments(cultRuntime.defineDocumentType);
@@ -45,7 +45,7 @@ const stateBuilder = createStateBuilder({
 });
 
 let meshNodePromise = null;
-let cultNetRudpSurfaceServer = null;
+let cultMeshRudpDocumentServer = null;
 let currentState = stateBuilder.buildPendingState("Coordinator starting");
 let lastRefresh = {
   completedAt: null,
@@ -65,12 +65,13 @@ async function main() {
     meshNodePromise = createDurableSurfaceNode();
   }
   if (config.cultnetRudpBind) {
-    cultNetRudpSurfaceServer = createCultNetRudpSurfaceServer({
+    cultMeshRudpDocumentServer = createCultMeshRudpDocumentServer({
+      CultMesh: cultRuntime.CultMesh,
       bind: config.cultnetRudpBind,
       documents,
       getCache: async () => {
         if (!meshNodePromise) {
-          throw new Error("CultMesh runtime is unavailable; Odin cannot serve a CultNet/RUDP snapshot.");
+          throw new Error("CultMesh runtime is unavailable; Odin cannot serve a CultMesh/RUDP document catalog.");
         }
         return (await meshNodePromise).cache;
       },
@@ -78,8 +79,8 @@ async function main() {
         liveProviderRegistry.ingestDocument(document, document.remote);
       },
     });
-    await cultNetRudpSurfaceServer.start();
-    console.log(`CultNet/RUDP snapshot: ${config.cultnetRudpBind}`);
+    await cultMeshRudpDocumentServer.start();
+    console.log(`CultMesh/RUDP document catalog: ${config.cultnetRudpBind}`);
   }
 
   const dashboardServer = createDashboardServer({
