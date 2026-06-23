@@ -1,2 +1,2 @@
 @echo off
-ssh.exe -o BatchMode=yes -o ConnectTimeout=5 nwroot systemctl restart nightwing-eve-browser-reference.service
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File E:\Projects\Odin\scripts\restart-nightwing-eve-browser-reference.ps1

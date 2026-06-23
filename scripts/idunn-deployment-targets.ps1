@@ -8,9 +8,9 @@ $IdunnDeploymentTargets = @(
     Host = "starfire"
     Service = "muninn serve --host starfire"
     Status = "runtime-enforced"
-    Health = "$repoRoot\scripts\health-starfire-muninn.cmd"
+    Health = "$repoRoot\scripts\health-starfire-muninn.ps1"
     Deploy = $null
-    Restart = "$repoRoot\scripts\restart-starfire-muninn.cmd"
+    Restart = "$repoRoot\scripts\restart-starfire-muninn.ps1"
     Reason = "Central Idunn keeps Starfire-local Muninn alive for Quest access and local telemetry surfaces."
   },
   [pscustomobject]@{
@@ -20,9 +20,9 @@ $IdunnDeploymentTargets = @(
     Host = "nightwing"
     Service = "muninn serve --host nightwing"
     Status = "runtime-enforced"
-    Health = "$repoRoot\scripts\health-nightwing-muninn.cmd"
+    Health = "$repoRoot\scripts\health-nightwing-muninn.ps1"
     Deploy = $null
-    Restart = "$repoRoot\scripts\restart-nightwing-muninn.cmd"
+    Restart = "$repoRoot\scripts\restart-nightwing-muninn.ps1"
     Reason = "Central Idunn reaches Nightwing over SSH and keeps the host-local Muninn Move HID daemon alive."
   },
   [pscustomobject]@{
