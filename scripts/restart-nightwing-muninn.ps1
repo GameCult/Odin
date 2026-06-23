@@ -4,6 +4,7 @@ param(
   [string] $StorePath = "/home/metacrat/.local/state/gamecult/muninn/muninn.telemetry.cc",
   [string] $LogRoot = "/home/metacrat/.local/state/gamecult/muninn",
   [string[]] $MoveState = @(),
+  [string] $MoveHost = "5C:93:A2:9C:A8:A8",
   [string] $MoveEvidenceStream = "muninn:nightwing:move-evidence",
   [int] $IntervalSeconds = 15,
   [string] $IdunnRudpHealth = "10.77.0.2:17870",
@@ -17,12 +18,58 @@ function Quote-ShSingle([string] $Value) {
   return "'" + ($Value -replace "'", "'\''") + "'"
 }
 
+function Set-AsciiFile {
+  param(
+    [Parameter(Mandatory = $true)] [string] $Path,
+    [Parameter(Mandatory = $true)] [string] $Content
+  )
+
+  [System.IO.File]::WriteAllText($Path, ($Content -replace "`r?`n", "`n"), [System.Text.Encoding]::ASCII)
+}
+
+function Invoke-UploadedShell {
+  param(
+    [Parameter(Mandatory = $true)] [string] $SshTarget,
+    [Parameter(Mandatory = $true)] [string] $RemoteScriptContent
+  )
+
+  $uploadId = [guid]::NewGuid().ToString("N")
+  $localTempRoot = Join-Path $env:TEMP "odin-nightwing-muninn-restart-$uploadId"
+  $localRemoteScript = Join-Path $localTempRoot "restart-nightwing-muninn-$uploadId.sh"
+  $localSftpBatch = Join-Path $localTempRoot "restart-nightwing-muninn-$uploadId.sftp"
+  $remoteScriptPath = "/tmp/restart-nightwing-muninn-$uploadId.sh"
+
+  try {
+    New-Item -ItemType Directory -Force -Path $localTempRoot | Out-Null
+    Set-AsciiFile -Path $localRemoteScript -Content $RemoteScriptContent
+    Set-AsciiFile -Path $localSftpBatch -Content ('put "{0}" "{1}"' -f $localRemoteScript, $remoteScriptPath)
+
+    & sftp.exe -b $localSftpBatch $SshTarget
+    if ($LASTEXITCODE -ne 0) {
+      exit $LASTEXITCODE
+    }
+
+    & ssh.exe -o BatchMode=yes -o ConnectTimeout=10 $SshTarget "chmod +x '$remoteScriptPath' && bash '$remoteScriptPath'"
+    $remoteExit = $LASTEXITCODE
+    & ssh.exe -o BatchMode=yes -o ConnectTimeout=10 $SshTarget "rm -f '$remoteScriptPath'"
+    exit $remoteExit
+  } finally {
+    Remove-Item -LiteralPath $localTempRoot -Recurse -Force -ErrorAction SilentlyContinue
+  }
+}
+
 $moveStateSpecs = @($MoveState | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
 if ($moveStateSpecs.Count -eq 0) {
   $claimScript = Join-Path $PSScriptRoot "claim-nightwing-usb-moves.ps1"
   & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $claimScript -SshTarget $SshTarget
+  if ($LASTEXITCODE -ne 0) {
+    exit $LASTEXITCODE
+  }
   $sourceScript = Join-Path $PSScriptRoot "get-nightwing-move-state-sources.ps1"
   $moveStateSpecs = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $sourceScript -SshTarget $SshTarget)
+  if ($LASTEXITCODE -ne 0) {
+    exit $LASTEXITCODE
+  }
 }
 
 $moveStateSetLines = ($moveStateSpecs | ForEach-Object {
@@ -46,7 +93,8 @@ done
 set -- serve \
   --store '$StorePath' \
   --log-root '$LogRoot' \
-  --host nightwing
+  --host nightwing \
+  --move-host '$MoveHost'
 $moveStateSetLines
 set -- "`$@" \
   --move-evidence-stream '$MoveEvidenceStream' \
@@ -67,5 +115,4 @@ if ! pgrep -af '[m]uninn serve .*--host nightwing' | grep -F -- '--idunn-rudp-he
 fi
 "@
 
-ssh.exe -o BatchMode=yes -o ConnectTimeout=5 $SshTarget $remoteScript
-exit $LASTEXITCODE
+Invoke-UploadedShell -SshTarget $SshTarget -RemoteScriptContent $remoteScript
