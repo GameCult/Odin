@@ -39,13 +39,9 @@ function buildConfig(argv) {
     path.join(repoRoot, "..", "VoidBot", ".voidbot", "status", "cultmesh", "voidbot-swarm-state.cc"),
     path.join(repoRoot, "..", "Bifrost", ".bifrost", "provider-advertisement.cc"),
     path.join(repoRoot, "..", "weksa", ".weksa", "provider-advertisement-store.cc"),
-    "sftp://raven/E:/Projects/Vili/.vili/vili.service.cc",
     path.join(repoRoot, "..", "Stonks", "scratch", "stonks", "stonks-state.cc"),
     path.join(repoRoot, "..", "StreamPixels", ".streampixels-data", "cultcache", "streampixels.service.cc"),
-    "sftp://raven/C:/Meta/Odin/state/muninn.telemetry.cc",
     "C:\\Meta\\Odin\\state\\starfire.muninn.telemetry.cc",
-    "sftp://nightwing/home/metacrat/.local/state/gamecult/muninn/muninn.telemetry.cc",
-    "sftp://nightwing/var/lib/gamecult/gjallar/cultcache/gjallar.service.cc",
   ].join(",");
   const interfaceBindingStores = String(
     args.interfaceBindingStore ||

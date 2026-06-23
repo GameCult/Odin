@@ -1,6 +1,5 @@
 "use strict";
 
-const childProcess = require("child_process");
 const fs = require("fs");
 const { createRequire } = require("module");
 const os = require("os");
@@ -1000,164 +999,15 @@ function resolveInterfaceBindingStore(storeSpec) {
   if (typeof storeSpec !== "string" || !storeSpec.trim()) {
     return null;
   }
-  if (!storeSpec.startsWith("sftp://")) {
-    return {
-      localPath: storeSpec,
-      sourceId: storeSpec,
-      cleanup: () => {},
-    };
-  }
-
-  const url = new URL(storeSpec);
-  const host = url.hostname;
-  let remotePath = decodeURIComponent(url.pathname);
-  if (/^\/[A-Za-z]:\//.test(remotePath)) {
-    remotePath = remotePath.slice(1);
-  }
-  if (!host || !remotePath) {
-    throw new Error(`invalid sftp interface binding store: ${storeSpec}`);
-  }
-
-  const cacheRoot = path.join(os.tmpdir(), "odin-cultmesh-stores");
-  fs.mkdirSync(cacheRoot, { recursive: true });
-  const suffix = path.extname(remotePath) || ".cc";
-  const stem = `${stableId(host)}-${stableId(remotePath)}`;
-  const transferId = `${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
-  const localPath = path.join(cacheRoot, `${stem}-${transferId}${suffix}`);
-  const batchPath = path.join(cacheRoot, `${stem}-${transferId}.sftp`);
-  const stagedRemotePath = stageRemoteStoreForRead(host, remotePath, `${stem}-${transferId}`, suffix);
-  fs.writeFileSync(
-    batchPath,
-    `get "${stagedRemotePath}" "${localPath.replace(/\\/g, "/")}"\n`,
-    "ascii",
-  );
-  try {
-    const result = childProcess.spawnSync(
-      "sftp.exe",
-      ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-b", batchPath, host],
-      {
-        encoding: "utf8",
-        timeout: 15000,
-        windowsHide: true,
-      },
-    );
-    if (result.status !== 0) {
-      throw new Error((result.stderr || result.stdout || `sftp exited ${result.status}`).trim());
-    }
-  } finally {
-    cleanupRemoteStagedStore(host, stagedRemotePath);
-    try {
-      fs.rmSync(batchPath, { force: true });
-    } catch {
-      // Best-effort temp cleanup. A later pass can reuse a fresh transfer id.
-    }
+  if (storeSpec.startsWith("sftp://")) {
+    throw new Error(`remote interface binding stores are no longer supported by Odin discovery: ${storeSpec}`);
   }
 
   return {
-    localPath,
+    localPath: storeSpec,
     sourceId: storeSpec,
-    cleanup: () => {
-      try {
-        fs.rmSync(localPath, { force: true });
-      } catch {
-        // Best-effort temp cleanup. Live readers may still be releasing handles.
-      }
-    },
+    cleanup: () => {},
   };
-}
-
-function stageRemoteStoreForRead(host, remotePath, stem, suffix) {
-  const stagedRemotePath = isWindowsRemoteStorePath(remotePath)
-    ? `C:/Windows/Temp/odin-interface-${stem}${suffix}`
-    : `/tmp/odin-interface-${stem}${suffix}`;
-  if (isWindowsRemoteStorePath(remotePath)) {
-    const script = [
-      "$ErrorActionPreference = 'Stop'",
-      `$sourcePath = ${quotePowerShellSingle(remotePath)}`,
-      `$stagedPath = ${quotePowerShellSingle(stagedRemotePath)}`,
-      "$lockPath = $sourcePath + '.lock'",
-      "if (-not (Test-Path -LiteralPath $sourcePath)) { throw \"remote store missing at $sourcePath\" }",
-      "New-Item -ItemType Directory -Force -Path (Split-Path -Parent $stagedPath) | Out-Null",
-      "$lockStream = [System.IO.File]::Open($lockPath, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::ReadWrite)",
-      "try {",
-      "  $lockStream.Lock(0, 1)",
-      "  Copy-Item -LiteralPath $sourcePath -Destination $stagedPath -Force",
-      "} finally {",
-      "  try { $lockStream.Unlock(0, 1) } catch {}",
-      "  $lockStream.Dispose()",
-      "}",
-    ].join("\n");
-    runRemoteCommand(
-      host,
-      `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encodePowerShellCommand(script)}`,
-    );
-  } else {
-    const command = [
-      "set -eu",
-      `src=${quotePosixSingle(remotePath)}`,
-      `staged=${quotePosixSingle(stagedRemotePath)}`,
-      'lock="${src}.lock"',
-      'mkdir -p "$(dirname "$staged")"',
-      'if [ -e "$lock" ]; then',
-      '  exec 9<"$lock"',
-      '  flock -s 9',
-      'fi',
-      'cp "$src" "$staged"',
-    ].join("\n");
-    runRemoteCommand(host, `sh -lc ${quotePosixSingle(command)}`);
-  }
-  return stagedRemotePath;
-}
-
-function cleanupRemoteStagedStore(host, stagedRemotePath) {
-  try {
-    if (isWindowsRemoteStorePath(stagedRemotePath)) {
-      const script = [
-        "$ErrorActionPreference = 'SilentlyContinue'",
-        `$stagedPath = ${quotePowerShellSingle(stagedRemotePath)}`,
-        "Remove-Item -LiteralPath $stagedPath -Force -ErrorAction SilentlyContinue",
-      ].join("\n");
-      runRemoteCommand(
-        host,
-        `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encodePowerShellCommand(script)}`,
-      );
-      return;
-    }
-    runRemoteCommand(host, `sh -lc ${quotePosixSingle(`rm -f ${quotePosixSingle(stagedRemotePath)}`)}`);
-  } catch {
-    // Temp snapshot cleanup is opportunistic.
-  }
-}
-
-function runRemoteCommand(host, command) {
-  const result = childProcess.spawnSync(
-    "ssh.exe",
-    ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, command],
-    {
-      encoding: "utf8",
-      timeout: 15000,
-      windowsHide: true,
-    },
-  );
-  if (result.status !== 0) {
-    throw new Error((result.stderr || result.stdout || `ssh exited ${result.status}`).trim());
-  }
-}
-
-function isWindowsRemoteStorePath(remotePath) {
-  return /^[A-Za-z]:\//.test(remotePath);
-}
-
-function encodePowerShellCommand(script) {
-  return Buffer.from(script, "utf16le").toString("base64");
-}
-
-function quotePowerShellSingle(value) {
-  return `'${String(value).replace(/'/g, "''")}'`;
-}
-
-function quotePosixSingle(value) {
-  return `'${String(value).replace(/'/g, `'\\''`)}'`;
 }
 
 function localIpv4Prefixes() {
