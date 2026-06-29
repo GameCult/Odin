@@ -194,7 +194,7 @@ What is working:
 
 Current compatibility details:
 
-- Raven command ingress is currently bound to `0.0.0.0:17884`.
+- Raven command ingress is currently bound to `0.0.0.0:17883`.
 - Starfire OBS listens for the temporary live OBS catalog on UDP `17874`.
 - The daemon `serve` loop must continue publishing the OBS catalog while idle;
   otherwise OBS falls back to stale store state and reports `discovery-missing`

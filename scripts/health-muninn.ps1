@@ -1,14 +1,14 @@
 param(
-  [string] $RavenHost = "raven",
+  [string] $RavenHost = "raven-local",
   [string] $MuninnExe = "C:\Meta\Odin\Muninn\muninn.exe",
   [string] $StorePath = "C:\Meta\Odin\state\muninn.telemetry.cc",
   [string] $ActivateStorePath = "C:\Meta\Odin\state\muninn.activate.cc",
   [string] $LogRoot = "C:\Meta\Odin\logs\muninn",
   [int] $MaxStoreAgeSeconds = 180,
-  [string] $IdunnRudpHealth = "10.77.0.2:17870",
+  [string] $IdunnRudpHealth = "192.168.1.66:17870",
   [string] $CaptureCommandRudpBind = "0.0.0.0:17883",
   [int] $ConnectTimeoutSeconds = 10,
-  [string] $SshUser = "",
+  [string] $SshUser = "madman's lullaby",
   [string] $IdentityFile = ""
 )
 

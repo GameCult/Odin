@@ -303,7 +303,7 @@ Nightwing Gjallar framebuffer composition health as completed substrate cuts.
 Muninn's long-running `serve` bodies now publish
 `idunn.daemon_health` over RUDP themselves; Starfire publishes to local Idunn,
 while Nightwing publishes over WireGuard to `10.77.0.2:17870` and Raven's live
-launcher currently publishes over LAN to `192.168.1.66:17870` using their
+launcher publishes over LAN to `192.168.1.66:17870` using their
 target daemon ids and health contracts. `muninn --health` keeps the same path
 as fallback/manual proof, but it is no longer the live owner. Odin
 publishes `odin.cultnet-rudp-provider-health` after each provider refresh.

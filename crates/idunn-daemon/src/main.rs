@@ -1545,7 +1545,7 @@ fn daemon_surgery_plan(target: &DaemonTarget, updated_at: &str) -> IdunnDaemonSu
             status = "partial-rudp-health-and-provider-store-live";
             owner = "Muninn Rust runtime plus Raven background-only launcher surface";
             current_mechanism =
-                "Raven Muninn now runs from the hidden GameCult-Muninn scheduled task with --idunn-rudp-health 10.77.0.2:17870, daemon id muninn, and contract muninn.cultnet-rudp-remote-telemetry-health on the long-running serve process. Live Idunn accepts that daemon-published health from 10.77.0.4, the daemon-owned telemetry store at C:\\Meta\\Odin\\state\\muninn.telemetry.cc now carries provider advertisement, command_boundary, transport_profile, and telemetry surface records, activation commands now route through the explicit C:\\Meta\\Odin\\state\\muninn.activate.cc store, the serve body no longer auto-claims ambient Move runtime state from platform defaults, and GameCult-Muninn, GameCult-Muninn-Activate, and GameCult-Muninn-VideoProof now execute hidden VBS launchers whose bodies call noninteractive hidden PowerShell entrypoints directly; .cmd wrappers, where present, are manual compatibility entrypoints only."
+                "Raven Muninn now runs from the hidden GameCult-Muninn scheduled task with --idunn-rudp-health 192.168.1.66:17870, daemon id muninn, and contract muninn.cultnet-rudp-remote-telemetry-health on the long-running serve process. Live Idunn accepts that daemon-published health over Raven's LAN route, the daemon-owned telemetry store at C:\\Meta\\Odin\\state\\muninn.telemetry.cc now carries provider advertisement, command_boundary, transport_profile, and telemetry surface records, activation commands now route through the explicit C:\\Meta\\Odin\\state\\muninn.activate.cc store, the serve body no longer auto-claims ambient Move runtime state from platform defaults, and GameCult-Muninn, GameCult-Muninn-Activate, and GameCult-Muninn-VideoProof now execute hidden VBS launchers whose bodies call noninteractive hidden PowerShell entrypoints directly; .cmd wrappers, where present, are manual compatibility entrypoints only."
                     .to_string();
             intended_authority =
                 "Muninn publishes telemetry, provider advertisement, command_boundary, transport_profile, explicit activation routing, and daemon health over CultNet/RUDP/CultCache; Raven Task Scheduler owns only background launch of hidden WScript/PowerShell launchers and never visible .cmd trampoline execution or ambient Move runtime inference."
@@ -1556,7 +1556,7 @@ fn daemon_surgery_plan(target: &DaemonTarget, updated_at: &str) -> IdunnDaemonSu
             steps = vec![
                 "Keep scripts/repair-raven-muninn-task-actions.ps1 using sftp plus a tiny remote runner so Windows command-line length does not block future hidden-task repair.".to_string(),
                 "Keep GameCult-Muninn action executing wscript.exe with start-muninn-serve-hidden.vbs arguments.".to_string(),
-                "Keep the Raven Muninn serve process command line carrying --idunn-rudp-health 10.77.0.2:17870, --idunn-daemon muninn, and --idunn-health-contract muninn.cultnet-rudp-remote-telemetry-health.".to_string(),
+                "Keep the Raven Muninn serve process command line carrying --idunn-rudp-health 192.168.1.66:17870, --idunn-daemon muninn, and --idunn-health-contract muninn.cultnet-rudp-remote-telemetry-health.".to_string(),
                 "Keep the daemon-owned telemetry store at C:\\Meta\\Odin\\state\\muninn.telemetry.cc publishing provider advertisement, command_boundary, transport_profile, and telemetry surface records.".to_string(),
                 "Keep the activation path publishing through C:\\Meta\\Odin\\state\\muninn.activate.cc instead of reusing the telemetry store for activate routing.".to_string(),
                 "Keep plain Muninn serve from auto-claiming PS Move hosts, Move state, or platform-default Move lights unless explicit Move flags request that runtime authority.".to_string(),
@@ -2988,7 +2988,7 @@ mod tests {
             raven_plan.status,
             "partial-rudp-health-and-provider-store-live"
         );
-        assert!(raven_plan.current_mechanism.contains("10.77.0.2:17870"));
+        assert!(raven_plan.current_mechanism.contains("192.168.1.66:17870"));
         assert!(raven_plan.current_mechanism.contains("GameCult-Muninn"));
         assert!(
             raven_plan
@@ -3023,7 +3023,7 @@ mod tests {
             raven_plan
                 .steps
                 .iter()
-                .any(|step| step.contains("--idunn-rudp-health 10.77.0.2:17870")
+                .any(|step| step.contains("--idunn-rudp-health 192.168.1.66:17870")
                     && step.contains("muninn.cultnet-rudp-remote-telemetry-health"))
         );
         assert!(raven_plan.blockers.is_empty());
