@@ -1039,6 +1039,7 @@ function normalizeBodyView(value) {
     radius: value[6],
     isAsteroidBelt: value[7],
     body: value[8],
+    iconAsset: normalizeAssetRef(value[9]),
   };
 }
 
