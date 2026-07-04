@@ -27,7 +27,7 @@ function createLiveProviderRegistry(options = {}) {
     const transportProfiles = new Map();
 
     for (const record of records.values()) {
-      const payload = normalizeCompatPayload(record.payload);
+      const payload = normalizeDocumentPayload(record);
       switch (record.schemaId) {
         case "gamecult.eve.provider_advertisement":
         case "gamecult.eve.provider_advertisement.v1":
@@ -38,8 +38,8 @@ function createLiveProviderRegistry(options = {}) {
         case "gamecult.eve.surface_state":
         case "gamecult.eve.surface_state.v0":
         case "gamecult.eve.surface_state.v1":
-          if (payload?.providerId) {
-            surfaces.set(String(payload.providerId), { ...record, payload });
+          if (surfaceProviderId(payload)) {
+            surfaces.set(String(surfaceProviderId(payload)), { ...record, payload });
           }
           break;
         default: {
@@ -88,11 +88,48 @@ function createLiveProviderRegistry(options = {}) {
   };
 }
 
-function normalizeCompatPayload(payload) {
+function normalizeDocumentPayload(record) {
+  const payload = record?.payload;
+  switch (record?.schemaId) {
+    case "gamecult.eve.surface_state":
+    case "gamecult.eve.surface_state.v0":
+    case "gamecult.eve.surface_state.v1":
+      if (Array.isArray(payload) && payload.length >= 5) {
+        return {
+          provider_id: payload[0],
+          title: payload[1],
+          version: payload[2],
+          updated_at: payload[3],
+          surface: payload[4],
+        };
+      }
+      break;
+    default:
+      break;
+  }
   if (Array.isArray(payload) && payload.length === 1 && payload[0] && typeof payload[0] === "object" && !Array.isArray(payload[0])) {
     return payload[0];
   }
+  if (payload?.value && typeof payload.value === "object" && !Array.isArray(payload.value)) {
+    return payload.value;
+  }
   return payload || {};
+}
+
+function surfaceProviderId(surfaceState) {
+  return surfaceState?.providerId || surfaceState?.provider_id || null;
+}
+
+function surfaceTitle(surfaceState) {
+  return surfaceState?.title || surfaceState?.Title || null;
+}
+
+function surfaceVersion(surfaceState) {
+  return surfaceState?.version || surfaceState?.Version || 0;
+}
+
+function surfaceUpdatedAt(surfaceState) {
+  return surfaceState?.updatedAt || surfaceState?.updated_at || surfaceState?.UpdatedAt || null;
 }
 
 function normalizeProviderAdvertisementRecord(record, commandBoundaries, transportProfiles) {
@@ -101,21 +138,30 @@ function normalizeProviderAdvertisementRecord(record, commandBoundaries, transpo
   if (!providerId) {
     return null;
   }
+  const endpoints = sanitizeProviderEndpoints(advertisement.endpoints);
+  const routes = sanitizeProviderEndpoints(advertisement.routes);
+  const providerEndpoint = advertisement.cultMeshAddress
+    || providerTypedEndpoint(routes)
+    || providerTypedEndpoint(endpoints)
+    || typedProviderEndpoint(advertisement.provider?.endpoint)
+    || `cultmesh:live:${providerId}`;
   return {
     id: providerId,
     title: advertisement.title || advertisement.provider?.title || providerId,
     description: advertisement.description || "Provider-owned CultNet/RUDP advertisement.",
     version: String(advertisement.version || 0),
-    endpoint: advertisement.cultMeshAddress || advertisement.endpoints?.[0]?.address || advertisement.provider?.endpoint || sourceLabel(record.source),
+    endpoint: providerEndpoint,
     canonicalService: advertisement.canonicalService || null,
     locatedService: advertisement.locatedService || null,
     cultMeshAddress: advertisement.cultMeshAddress || null,
-    endpoints: Array.isArray(advertisement.endpoints) ? advertisement.endpoints : [],
-    routes: Array.isArray(advertisement.routes) ? advertisement.routes : [],
-    transportEndpoint: advertisement.routes?.find((route) => route.transport === "cultnet")?.address
-      || advertisement.routes?.find((route) => route.transport === "compatibility-eve-deck")?.address
-      || advertisement.provider?.endpoint
-      || sourceLabel(record.source),
+    endpoints,
+    routes,
+    inputStreams: Array.isArray(advertisement.inputStreams) ? advertisement.inputStreams : [],
+    activeStreams: Array.isArray(advertisement.activeStreams) ? advertisement.activeStreams : [],
+    availableSources: Array.isArray(advertisement.availableSources) ? advertisement.availableSources : [],
+    transportEndpoint: providerTypedEndpoint(routes)
+      || typedProviderEndpoint(advertisement.provider?.endpoint)
+      || providerEndpoint,
     capabilities: advertisement.provider?.capabilities || advertisement.capabilities || [],
     operatorState: null,
     commandBoundary: commandBoundaries.get(String(providerId)) || null,
@@ -129,22 +175,65 @@ function normalizeProviderAdvertisementRecord(record, commandBoundaries, transpo
   };
 }
 
+function typedProviderEndpoint(endpoint) {
+  const value = typeof endpoint === "string" ? endpoint.trim() : "";
+  if (!value) {
+    return null;
+  }
+  return value.startsWith("cultmesh:") ? value : null;
+}
+
+function normalizeProviderEndpoints(endpoints) {
+  if (!Array.isArray(endpoints)) {
+    return [];
+  }
+  return endpoints.map((entry) => {
+    if (entry && typeof entry === "object" && !Array.isArray(entry)) {
+      return entry;
+    }
+    return {
+      transport: "witness",
+      address: String(entry || ""),
+    };
+  });
+}
+
+function sanitizeProviderEndpoints(endpoints) {
+  return normalizeProviderEndpoints(endpoints).filter((entry) => {
+    const transport = String(entry?.transport || "").toLowerCase();
+    const address = String(entry?.address || "").trim();
+    if (address.startsWith("cultmesh:")) {
+      return true;
+    }
+    if (transport.includes("cultmesh") || transport.includes("cultcache")) {
+      return true;
+    }
+    return false;
+  });
+}
+
+function providerTypedEndpoint(endpoints) {
+  return sanitizeProviderEndpoints(endpoints).find((entry) =>
+    String(entry?.address || "").startsWith("cultmesh:")
+  )?.address || null;
+}
+
 function liveProviderInterface(provider, surfaceState, source) {
   const surface = surfaceState.surface || null;
   return {
     providerId: provider.id,
-    title: surfaceState.title || provider.title || provider.id,
+    title: surfaceTitle(surfaceState) || provider.title || provider.id,
     state: "active",
     detail: `${surface?.root?.kind || surface?.root?.type || "surface"} ${countSurfaceNodes(surface, surfaceState)} nodes via live CultNet/RUDP announcement`,
-    version: surfaceState.version || 0,
-    updatedAt: surfaceState.updatedAt || provider.updatedAt || new Date().toISOString(),
+    version: surfaceVersion(surfaceState),
+    updatedAt: surfaceUpdatedAt(surfaceState) || provider.updatedAt || new Date().toISOString(),
     source: sourceLabel(source),
     manifest: provider,
     canonicalService: provider.canonicalService || null,
     locatedService: provider.locatedService || null,
     cultMeshAddress: provider.cultMeshAddress || null,
-    endpoints: provider.endpoints || [],
-    routes: provider.routes || [],
+    endpoints: sanitizeProviderEndpoints(provider.endpoints),
+    routes: sanitizeProviderEndpoints(provider.routes),
     commandBoundary: provider.commandBoundary || null,
     transportProfile: provider.transportProfile || null,
     surface,

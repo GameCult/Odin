@@ -8,13 +8,26 @@ param(
   [switch] $ClaimUsbMoves,
   [string] $MoveEvidenceStream = "muninn:nightwing:move-evidence",
   [int] $IntervalSeconds = 15,
-  [string] $IdunnRudpHealth = "10.77.0.2:17870",
+  [string] $IdunnRudpHealth = $env:IDUNN_RUDP_HEALTH,
   [string] $IdunnDaemon = "nightwing-muninn",
   [string] $IdunnHealthContract = "muninn.cultnet-rudp-remote-telemetry-and-move-hid",
-  [string] $OdinCultMeshRudp = "10.77.0.2:17871"
+  [string] $OdinCultMeshUri = $(if ($env:ODIN_CULTMESH_URI) { $env:ODIN_CULTMESH_URI } else { "cultmesh://odin/rendezvous/provider-catalog" }),
+  [string] $HidControllerRudpBind = "0.0.0.0:17888",
+  [string] $HidControllerRudpAdvertise = $env:MUNINN_HID_CONTROLLER_RUDP_ADVERTISE
 )
 
 $ErrorActionPreference = "Stop"
+
+if ($env:IDUNN_ACTUATOR -ne "1" -or $env:IDUNN_COMMAND_AUTHORITY -ne "idunn-daemon") {
+  throw "restart-nightwing-muninn.ps1 is an Idunn actuator body. Redeploy by poking Idunn; direct service restart is not an owned path."
+}
+
+if ([string]::IsNullOrWhiteSpace($IdunnRudpHealth)) {
+  throw "Idunn RUDP health endpoint must be supplied by -IdunnRudpHealth or IDUNN_RUDP_HEALTH; no Starfire LAN default is allowed."
+}
+if (-not [string]::IsNullOrWhiteSpace($HidControllerRudpBind) -and [string]::IsNullOrWhiteSpace($HidControllerRudpAdvertise)) {
+  throw "HID controller RUDP advertise endpoint must be supplied by -HidControllerRudpAdvertise or MUNINN_HID_CONTROLLER_RUDP_ADVERTISE when HID RUDP bind is enabled; no Nightwing LAN default is allowed."
+}
 
 function Quote-ShSingle([string] $Value) {
   return "'" + ($Value -replace "'", "'\''") + "'"
@@ -85,10 +98,18 @@ if ($moveStateSpecs.Count -gt 0) {
   $moveRuntimeSetLines += "set -- ""`$@"" --move-evidence-stream $(Quote-ShSingle $MoveEvidenceStream)"
 }
 $moveRuntimeSetBlock = ($moveRuntimeSetLines -join "`n")
-$odinCultMeshRudpSetBlock = ""
-if (-not [string]::IsNullOrWhiteSpace($OdinCultMeshRudp)) {
-  $odinCultMeshRudpSetBlock = "set -- ""`$@"" --odin-cultmesh-rudp $(Quote-ShSingle $OdinCultMeshRudp)"
+$odinCultMeshUriSetBlock = ""
+if (-not [string]::IsNullOrWhiteSpace($OdinCultMeshUri)) {
+  $odinCultMeshUriSetBlock = "set -- ""`$@"" --odin-cultmesh-uri $(Quote-ShSingle $OdinCultMeshUri)"
 }
+$hidControllerRudpSetLines = @()
+if (-not [string]::IsNullOrWhiteSpace($HidControllerRudpBind)) {
+  $hidControllerRudpSetLines += "set -- ""`$@"" --hid-controller-rudp-bind $(Quote-ShSingle $HidControllerRudpBind)"
+}
+if (-not [string]::IsNullOrWhiteSpace($HidControllerRudpAdvertise)) {
+  $hidControllerRudpSetLines += "set -- ""`$@"" --hid-controller-rudp-advertise $(Quote-ShSingle $HidControllerRudpAdvertise)"
+}
+$hidControllerRudpSetBlock = ($hidControllerRudpSetLines -join "`n")
 
 $remoteScript = @"
 set -eu
@@ -114,7 +135,8 @@ set -- "`$@" \
   --idunn-rudp-health '$IdunnRudpHealth' \
   --idunn-daemon '$IdunnDaemon' \
   --idunn-health-contract '$IdunnHealthContract'
-$odinCultMeshRudpSetBlock
+$odinCultMeshUriSetBlock
+$hidControllerRudpSetBlock
 nohup '$MuninnExe' "`$@" \
   > '$LogRoot/muninn-serve.out.log' \
   2> '$LogRoot/muninn-serve.err.log' \

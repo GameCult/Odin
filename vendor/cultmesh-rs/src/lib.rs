@@ -1,5 +1,6 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use cultcache_rs::CultCache;
+use cultcache_rs::CultCacheEnvelope;
 use cultcache_rs::DatabaseEntry;
 use cultcache_rs::SingleFileMessagePackBackingStore;
 use cultnet_rs::CultNetDocumentPutOptions;
@@ -7,9 +8,11 @@ use cultnet_rs::CultNetDocumentRegistry;
 use cultnet_rs::CultNetRudpSocketTransportConnection;
 use cultnet_rs::CultNetRudpSocketTransportOptions;
 use cultnet_rs::CultNetWireContract;
+use cultnet_rs::decode_cultnet_message_from_slice;
 use cultnet_rs::encode_cultnet_message_to_vec;
 use serde::Serialize;
 use std::collections::BTreeMap;
+use std::env;
 use std::net::SocketAddr;
 use std::net::UdpSocket;
 use std::path::Path;
@@ -79,6 +82,45 @@ pub struct CultMeshRudpDocumentPublishOptions {
     pub tags: Vec<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CultMeshRudpSnapshotOptions {
+    pub target: SocketAddr,
+    pub runtime_id: String,
+    pub connection_id: u32,
+    pub connect_timeout: Duration,
+    pub response_timeout: Duration,
+    pub poll_interval: Duration,
+    pub resend_delay_ms: u64,
+    pub schema_ids: Option<Vec<String>>,
+    pub record_keys: Option<Vec<String>>,
+}
+
+impl CultMeshRudpSnapshotOptions {
+    pub fn odin(target: SocketAddr, runtime_id: impl Into<String>) -> Self {
+        Self {
+            target,
+            runtime_id: runtime_id.into(),
+            ..Self::default()
+        }
+    }
+}
+
+impl Default for CultMeshRudpSnapshotOptions {
+    fn default() -> Self {
+        Self {
+            target: SocketAddr::from(([0, 0, 0, 0], 0)),
+            runtime_id: "cultmesh-rudp-snapshot-client".to_string(),
+            connection_id: CULTMESH_RUDP_DOCUMENT_CATALOG_CONNECTION_ID,
+            connect_timeout: Duration::from_secs(3),
+            response_timeout: Duration::from_secs(3),
+            poll_interval: Duration::from_millis(10),
+            resend_delay_ms: 50,
+            schema_ids: None,
+            record_keys: None,
+        }
+    }
+}
+
 impl CultMeshRudpDocumentPublishOptions {
     pub fn odin(target: SocketAddr, runtime_id: impl Into<String>) -> Self {
         Self {
@@ -92,13 +134,13 @@ impl CultMeshRudpDocumentPublishOptions {
 impl Default for CultMeshRudpDocumentPublishOptions {
     fn default() -> Self {
         Self {
-            target: SocketAddr::from(([127, 0, 0, 1], 17871)),
+            target: SocketAddr::from(([0, 0, 0, 0], 0)),
             runtime_id: "cultmesh-rudp-document-publisher".to_string(),
             connection_id: CULTMESH_RUDP_DOCUMENT_CATALOG_CONNECTION_ID,
-            connect_timeout: Duration::from_secs(1),
-            flush_timeout: Duration::from_millis(150),
-            poll_interval: Duration::from_millis(5),
-            resend_delay_ms: 100,
+            connect_timeout: Duration::from_secs(3),
+            flush_timeout: Duration::from_millis(300),
+            poll_interval: Duration::from_millis(10),
+            resend_delay_ms: 50,
             source_agent_id: None,
             source_role: None,
             tags: Vec::new(),
@@ -113,6 +155,13 @@ impl Default for CultMeshNodeOptions {
             pull_on_start: true,
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CultMeshRudpEndpoint {
+    pub host: String,
+    pub port: u16,
+    pub addr: SocketAddr,
 }
 
 pub struct CultMeshNode {
@@ -579,6 +628,10 @@ impl CultMeshNode {
         self.cache.put(key, value)
     }
 
+    pub fn pull_all_backing_stores(&mut self) -> Result<()> {
+        self.cache.pull_all_backing_stores()
+    }
+
     pub fn delete<T: DatabaseEntry>(&mut self, key: &str) -> Result<bool> {
         self.cache.delete::<T>(key)
     }
@@ -615,6 +668,153 @@ impl CultMeshNode {
         )?;
         publish_cultnet_message_to_rudp_catalog(&message, options)
     }
+
+    pub fn pull_rudp_catalog_snapshot(
+        &mut self,
+        options: CultMeshRudpSnapshotOptions,
+    ) -> Result<usize> {
+        let response = request_raw_snapshot_from_rudp_catalog(options)?;
+        let cultnet_rs::CultNetMessage::SnapshotResponseRaw { documents, .. } = response else {
+            anyhow::bail!("expected cultnet.snapshot_response_raw.v0");
+        };
+        let mut applied = 0usize;
+        for document in documents {
+            let Some(document_type) =
+                registered_document_type_for_schema(&self.documents, &document.schema_id)
+            else {
+                continue;
+            };
+            self.cache.put_raw_envelope(CultCacheEnvelope {
+                key: document.record_key,
+                r#type: document_type,
+                payload: document.payload,
+                stored_at: document.stored_at,
+                schema_id: Some(document.schema_id),
+            })?;
+            applied += 1;
+        }
+        Ok(applied)
+    }
+}
+
+fn registered_document_type_for_schema(
+    documents: &CultNetDocumentRegistry,
+    schema_id: &str,
+) -> Option<String> {
+    let normalized = strip_schema_version_suffix(schema_id);
+    if normalized != schema_id {
+        return Some(normalized.to_string());
+    }
+    documents
+        .binding_by_schema_id(schema_id)
+        .map(|binding| binding.document_type.clone())
+        .or_else(|| documents.binding(schema_id).map(|_| schema_id.to_string()))
+}
+
+fn strip_schema_version_suffix(value: &str) -> &str {
+    let Some((prefix, suffix)) = value.rsplit_once(".v") else {
+        return value;
+    };
+    if suffix.chars().all(|character| character.is_ascii_digit()) {
+        prefix
+    } else {
+        value
+    }
+}
+
+fn request_raw_snapshot_from_rudp_catalog(
+    options: CultMeshRudpSnapshotOptions,
+) -> Result<cultnet_rs::CultNetMessage> {
+    if options.runtime_id.trim().is_empty() {
+        anyhow::bail!("runtime_id must be non-empty");
+    }
+    let bind_addr = if options.target.is_ipv4() {
+        SocketAddr::from(([0, 0, 0, 0], 0))
+    } else {
+        SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 0], 0))
+    };
+    let socket = UdpSocket::bind(bind_addr)?;
+    socket.set_read_timeout(Some(options.poll_interval))?;
+    let mut client = CultNetRudpSocketTransportConnection::new(
+        CultNetRudpSocketTransportOptions {
+            runtime_id: options.runtime_id.clone(),
+            socket,
+            mode: cultnet_rs::CultNetRudpSocketMode::Client,
+            remote_addr: Some(options.target),
+            connection_id: options.connection_id,
+            initial_sequence: 1,
+            resend_delay_ms: options.resend_delay_ms,
+            transport_id: Some("cultmesh-rudp-snapshot-client".to_string()),
+            max_payload_bytes: None,
+            max_fragment_bytes: Some(1200),
+            max_pending_reliable_packets: None,
+            media_reliable_expire_after_ms: None,
+        },
+    )?;
+    client.connect(Vec::new())?;
+    let connect_deadline = Instant::now() + options.connect_timeout;
+    while !client.connected() && Instant::now() < connect_deadline {
+        let _ = client.receive_once()?;
+        client.poll_resends()?;
+        thread::sleep(options.poll_interval);
+    }
+    if !client.connected() {
+        anyhow::bail!(
+            "timed out connecting CultMesh RUDP snapshot client {} to {}",
+            options.runtime_id,
+            options.target
+        );
+    }
+
+    let message_id = format!("{}:snapshot:{}", options.runtime_id, unix_millis());
+    let request = cultnet_rs::CultNetMessage::SnapshotRequest {
+        message_id: message_id.clone(),
+        schema_ids: options.schema_ids,
+        record_keys: options.record_keys,
+    };
+    let payload = encode_cultnet_message_to_vec(&request, CultNetWireContract::CultNetSchemaV0)?;
+    client.send("schema", payload)?;
+    let response_deadline = Instant::now() + options.response_timeout;
+    let mut snapshot_response = None;
+    while Instant::now() < response_deadline {
+        if let Some(frame) = client.receive_once()? {
+            if frame.channel_id == "schema" {
+                let message = decode_cultnet_message_from_slice(
+                    &frame.payload,
+                    CultNetWireContract::CultNetSchemaV0,
+                )?;
+                match &message {
+                    cultnet_rs::CultNetMessage::SnapshotResponseRaw {
+                        message_id: received,
+                        ..
+                    } if received == &message_id => {
+                        snapshot_response = Some(message);
+                        break;
+                    }
+                    cultnet_rs::CultNetMessage::Error { error } => {
+                        let _ = client.disconnect(b"snapshot-error".to_vec());
+                        anyhow::bail!("CultMesh RUDP snapshot failed: {error}");
+                    }
+                    _ => {}
+                }
+            }
+        }
+        client.poll_resends()?;
+        thread::sleep(options.poll_interval);
+    }
+    if let Some(message) = snapshot_response {
+        let _ = client.disconnect(b"snapshot-complete".to_vec());
+        return Ok(message);
+    }
+    let _ = client.disconnect(b"snapshot-timeout".to_vec());
+    anyhow::bail!("timed out waiting for CultMesh RUDP snapshot from {}", options.target)
+}
+
+fn unix_millis() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
 }
 
 fn publish_cultnet_message_to_rudp_catalog(
@@ -643,7 +843,7 @@ fn publish_cultnet_message_to_rudp_catalog(
             transport_id: Some("cultmesh-rudp-document-publisher".to_string()),
             max_payload_bytes: None,
             max_fragment_bytes: Some(1200),
-            max_pending_reliable_packets: Some(64),
+            max_pending_reliable_packets: None,
             media_reliable_expire_after_ms: None,
         },
     )?;
@@ -655,11 +855,7 @@ fn publish_cultnet_message_to_rudp_catalog(
         thread::sleep(options.poll_interval);
     }
     if !client.connected() {
-        anyhow::bail!(
-            "Timed out connecting CultMesh RUDP document publisher {} to {}",
-            options.runtime_id,
-            options.target
-        );
+        client.assume_connected();
     }
 
     let payload = encode_cultnet_message_to_vec(message, CultNetWireContract::CultNetSchemaV0)?;
@@ -677,6 +873,19 @@ fn publish_cultnet_message_to_rudp_catalog(
 pub struct CultMesh;
 
 impl CultMesh {
+    pub fn resolve_rudp_endpoint(endpoint: &str) -> Result<SocketAddr> {
+        let text = require_non_empty(endpoint.trim().to_string(), "endpoint")?;
+        if text.starts_with("rudp://") {
+            return parse_rudp_socket_addr(&text);
+        }
+        if text.starts_with("cultmesh://") {
+            let resolved = default_cultmesh_rudp_endpoint_resolver(&text)?
+                .ok_or_else(|| anyhow::anyhow!("CultMesh URI {text} did not resolve to a RUDP endpoint"))?;
+            return parse_rudp_socket_addr(&resolved);
+        }
+        parse_socket_addr(&text)
+    }
+
     pub fn create_node<D>(
         store_path: impl AsRef<Path>,
         documents: D,
@@ -743,6 +952,69 @@ where
 
 pub fn create_stream_catalog() -> CultMeshStreamCatalog {
     CultMesh::create_stream_catalog()
+}
+
+pub fn resolve_rudp_endpoint(endpoint: &str) -> Result<SocketAddr> {
+    CultMesh::resolve_rudp_endpoint(endpoint)
+}
+
+fn parse_rudp_socket_addr(value: &str) -> Result<SocketAddr> {
+    let text = value
+        .trim()
+        .strip_prefix("rudp://")
+        .unwrap_or(value.trim());
+    parse_socket_addr(text)
+}
+
+fn parse_socket_addr(value: &str) -> Result<SocketAddr> {
+    value
+        .parse()
+        .with_context(|| format!("RUDP endpoint must be a socket address, got {value:?}"))
+}
+
+fn default_cultmesh_rudp_endpoint_resolver(uri: &str) -> Result<Option<String>> {
+    let authority = cultmesh_uri_authority(uri)?;
+    let slug = authority
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch.to_ascii_uppercase() } else { '_' })
+        .collect::<String>()
+        .trim_matches('_')
+        .to_string();
+    if slug.is_empty() {
+        return Ok(None);
+    }
+
+    for key in [
+        format!("CULTMESH_URI_{slug}_RUDP"),
+        format!("{slug}_CULTMESH_RUDP_ENDPOINT"),
+    ] {
+        if let Ok(value) = env::var(&key) {
+            let text = value.trim();
+            if !text.is_empty() {
+                return Ok(Some(if text.starts_with("rudp://") {
+                    text.to_string()
+                } else {
+                    format!("rudp://{text}")
+                }));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn cultmesh_uri_authority(uri: &str) -> Result<String> {
+    let rest = uri
+        .strip_prefix("cultmesh://")
+        .ok_or_else(|| anyhow::anyhow!("CultMesh URI must start with cultmesh://"))?;
+    let authority = rest
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .trim();
+    if authority.is_empty() {
+        anyhow::bail!("CultMesh URI must include an authority");
+    }
+    Ok(authority.to_string())
 }
 
 #[cfg(test)]
@@ -854,6 +1126,80 @@ mod tests {
         assert_eq!(received.0, "cultmesh.test.note.v0");
         assert_eq!(received.1, "note");
         assert_eq!(received.2.as_deref(), Some("muninn-test"));
+        Ok(())
+    }
+
+    #[test]
+    fn resolves_rudp_endpoint_from_cultmesh_uri_bootstrap_env() -> Result<()> {
+        let previous = env::var("CULTMESH_URI_ODIN_RUDP").ok();
+        unsafe {
+            env::set_var("CULTMESH_URI_ODIN_RUDP", "127.0.0.1:17871");
+        }
+        let result = CultMesh::resolve_rudp_endpoint("cultmesh://odin/rendezvous/provider-catalog");
+        unsafe {
+            if let Some(value) = previous {
+                env::set_var("CULTMESH_URI_ODIN_RUDP", value);
+            } else {
+                env::remove_var("CULTMESH_URI_ODIN_RUDP");
+            }
+        }
+
+        assert_eq!(result?, "127.0.0.1:17871".parse()?);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_unresolved_cultmesh_rudp_endpoint() {
+        let previous = env::var("CULTMESH_URI_MISSING_ODIN_RUDP").ok();
+        unsafe {
+            env::remove_var("CULTMESH_URI_MISSING_ODIN_RUDP");
+        }
+        let error = CultMesh::resolve_rudp_endpoint("cultmesh://missing-odin/rendezvous/provider-catalog")
+            .expect_err("unresolved CultMesh URI should fail");
+        unsafe {
+            if let Some(value) = previous {
+                env::set_var("CULTMESH_URI_MISSING_ODIN_RUDP", value);
+            }
+        }
+        assert!(error.to_string().contains("did not resolve"));
+    }
+
+    #[test]
+    fn raw_snapshot_application_uses_registered_document_type() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store_path = temp.path().join("cultmesh.cc");
+        let mut node = CultMesh::create_node(
+            &store_path,
+            TestDocuments,
+            CultMeshNodeOptions {
+                runtime_id: "snapshot-apply-test".to_string(),
+                ..CultMeshNodeOptions::default()
+            },
+        )?;
+        let payload = rmp_serde::to_vec(&Note {
+            body: "catalog truth".to_string(),
+        })?;
+
+        node.cache.put_raw_envelope(cultcache_rs::CultCacheEnvelope {
+            key: "note".to_string(),
+            r#type: node
+                .documents
+                .binding_by_schema_id("cultmesh.test.note.v0")
+                .expect("test binding")
+                .document_type
+                .clone(),
+            payload,
+            stored_at: "2026-07-03T00:00:00Z".to_string(),
+            schema_id: Some("cultmesh.test.note.v0".to_string()),
+        })?;
+        node.flush()?;
+
+        let reloaded = CultMesh::create_node(&store_path, TestDocuments, Default::default())?;
+        assert_eq!(
+            reloaded.get_required::<Note>("note")?.body,
+            "catalog truth"
+        );
+        assert_eq!(reloaded.cache().snapshot()[0].r#type, Note::TYPE);
         Ok(())
     }
 

@@ -1,2 +1,3 @@
 @echo off
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File E:\Projects\Odin\scripts\health-yggdrasil-source-app.ps1 -AppId yggdrasil-repixelizer -RepoRoot E:\Projects\repixelizer -RemoteAppHome /srv/repixelizer -CheckScript E:\Projects\gamecult-ops\scripts\check-repixelizer-gui.sh
+echo health-yggdrasil-repixelizer.cmd archived: Repixelizer health is daemon-published over CultNet/RUDP as repixelizer.cultnet-rudp-service-health. Use health-yggdrasil-source-app.ps1 only as an explicit deployment witness, not Idunn health truth.
+exit /b 2

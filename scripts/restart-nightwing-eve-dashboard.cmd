@@ -1,2 +1,3 @@
 @echo off
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File E:\Projects\Odin\scripts\restart-nightwing-eve-dashboard.ps1
+echo restart-nightwing-eve-dashboard.cmd archived: Mimir.EveDashboard's HTTP/WebSocket broker is cut. Rebuild a typed CultMesh/Odin dashboard publisher before restoring Idunn lifecycle authority. 1>&2
+exit /b 2

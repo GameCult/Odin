@@ -6,10 +6,14 @@ param(
   [string[]] $MoveState = @(),
   [int] $IntervalSeconds = 15,
   [int] $MaxStoreAgeSeconds = 180,
-  [string] $IdunnRudpHealth = "10.77.0.2:17870"
+  [string] $IdunnRudpHealth = $env:IDUNN_RUDP_HEALTH
 )
 
 $ErrorActionPreference = "Stop"
+
+if ([string]::IsNullOrWhiteSpace($IdunnRudpHealth)) {
+  throw "Idunn RUDP health endpoint must be supplied by -IdunnRudpHealth or IDUNN_RUDP_HEALTH; no WireGuard endpoint default is allowed."
+}
 
 function Set-AsciiFile {
   param(

@@ -16,4 +16,5 @@ serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 pretty_assertions = "1.4.1"
+rmp-serde = "1"
 tempfile = "3"

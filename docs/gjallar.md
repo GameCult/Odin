@@ -16,9 +16,9 @@ body they are being lowered into.
 - Owner: Gjallar owns Nightwing dashboard composition, tiling, marquee lowering,
   visual density, framebuffer presentation, and character-level refresh
   behavior.
-- Inputs: Odin's Eve/CultUI deck endpoint, provider ids, provider-owned surface
-  graphs, Odin's canonical marquee tape, display constraints, font choices, and
-  operator runtime flags.
+- Inputs: Odin's accepted CultMesh/CultNet snapshot, provider ids,
+  provider-owned surface graphs, Odin's canonical marquee tape, display
+  constraints, font choices, and operator runtime flags.
 - Outputs: the visible Nightwing framebuffer and compact Gjallar frame/status
   telemetry.
 - Derived state: panel packing, visual weight, tile position, gutter cells,
@@ -38,11 +38,8 @@ body they are being lowered into.
 
 - `E:\Projects\Gjallar` is Gjallar's executable C# runtime repo.
 - `Gjallar.csproj` builds the Nightwing framebuffer compositor.
-- Gjallar currently consumes Odin's provider catalog over the compatibility
-  HTTP/WebSocket deck bridge, defaulting to `ws://192.168.1.66:8797/eve/deck`
-  with no fixed provider id. The target input path is a native CultNet
-  subscription over `cultnet.transport.rudp.v0`; the WebSocket bridge is not
-  daemon-owned truth.
+- Gjallar consumes Odin's accepted provider/interface state through the CultNet
+  RUDP snapshot input. Browser-deck routes are not Gjallar input truth.
 - The old Rust `crates/gjallar-daemon` and `gjallar.overview` records were cut
   because they created an intermediate composition owner that did nothing Odin
   and Gjallar's live renderer could not explain directly.

@@ -1,0 +1,1 @@
+throw "start-starfire-sleipnir.ps1 archived: Sleipnir lifecycle is Idunn-owned and service discovery is Odin/CultMesh-owned. Add a typed Idunn daemon target and redeploy by poking Idunn; do not start Sleipnir through a direct local launcher."

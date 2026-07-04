@@ -459,6 +459,40 @@ impl CultCache {
         Ok(parsed)
     }
 
+    pub fn put_raw_envelope(&mut self, entry: CultCacheEnvelope) -> Result<()> {
+        if !self.definitions.contains_key(&entry.r#type) {
+            return Err(anyhow!(
+                "No entry type registered for CultCache envelope type {:?}",
+                entry.r#type
+            ));
+        }
+        if entry.key.trim().is_empty() {
+            return Err(anyhow!(
+                "CultCache envelope keys for type {:?} must be non-empty",
+                entry.r#type
+            ));
+        }
+        if entry.stored_at.trim().is_empty() {
+            return Err(anyhow!(
+                "CultCache envelope stored_at for type {:?} must be non-empty",
+                entry.r#type
+            ));
+        }
+        let route = self.resolve_route_indices(&entry.r#type);
+        let Some(primary_index) = route.first().copied() else {
+            return Err(anyhow!(
+                "No backing store is registered for entry type {:?}",
+                entry.r#type
+            ));
+        };
+        self.stores[primary_index].store.push(&entry)?;
+        for mirror_index in route.iter().skip(1).copied() {
+            self.stores[mirror_index].store.push(&entry)?;
+        }
+        self.entries.insert(entry_id(&entry), entry);
+        Ok(())
+    }
+
     pub fn update<T, F>(&mut self, key: &str, updater: F) -> Result<T>
     where
         T: DatabaseEntry,
@@ -542,22 +576,23 @@ fn now_utc_second() -> String {
 }
 
 fn encode_store_snapshot(entries: &[CultCacheEnvelope]) -> PersistedStoreSnapshot {
-    let mut schema_names = BTreeSet::<String>::new();
+    let mut schema_names = BTreeMap::<String, String>::new();
     for entry in entries {
         schema_names.insert(
             entry
                 .schema_id
                 .clone()
                 .unwrap_or_else(|| entry.r#type.clone()),
+            entry.r#type.clone(),
         );
     }
 
     let catalog = schema_names
         .into_iter()
-        .map(|schema_id| {
+        .map(|(schema_id, document_type)| {
             PersistedSchemaCatalogEntry(
                 schema_id.clone(),
-                schema_id.clone(),
+                document_type,
                 format!("{schema_id}.v1"),
                 schema_id.clone(),
                 format!(

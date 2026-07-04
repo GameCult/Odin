@@ -6,13 +6,17 @@ function defineOdinDocuments(defineDocumentType) {
   if (!defineDocumentType) {
     return {
       interfaceBindingDefinition: null,
+      idunnCommandBoundaryDefinition: null,
       idunnDaemonHealthDefinition: null,
+      idunnTransportProfileDefinition: null,
+      interfaceLayoutDefinition: null,
       muninnCaptureStreamCommandDefinition: null,
       muninnCaptureStreamDefinition: null,
       muninnCommandBoundaryDefinition: null,
       muninnMediaAudioPacketDefinition: null,
       muninnMediaReceiverFeedbackDefinition: null,
       muninnMediaVideoAccessUnitDefinition: null,
+      muninnHidControllerStateDefinition: null,
       muninnMoveControllerStateDefinition: null,
       muninnMoveIdentityDefinition: null,
       muninnMoveLightCommandDefinition: null,
@@ -21,8 +25,14 @@ function defineOdinDocuments(defineDocumentType) {
       muninnQuestAccessDefinition: null,
       muninnTelemetrySurfaceDefinition: null,
       muninnTransportProfileDefinition: null,
+      SleipnirInputMappingDefinition: null,
+      aetheriaAssetManifestDefinition: null,
+      aetheriaGravityViewportDefinition: null,
+      aetheriaObjectsViewportDefinition: null,
+      aetheriaRenderSplatsViewportDefinition: null,
       operatorStateDefinition: null,
       providerAdvertisementDefinition: null,
+      voidbotProviderCatalogDefinition: null,
       stonksCommandBoundaryDefinition: null,
       stonksMarketSnapshotDefinition: null,
       stonksRequestEventDefinition: null,
@@ -73,6 +83,20 @@ function defineOdinDocuments(defineDocumentType) {
     name: (value) => value?.providerId || value?.provider?.id || "provider",
     schema: parseObjectDocument("Eve provider advertisement"),
   });
+  const interfaceLayoutDefinition = defineDocumentType({
+    type: "odin.interface_layout",
+    schemaName: "odin.interface_layout",
+    schemaId: "odin.interface_layout.v1",
+    schemaVersion: "odin.interface_layout.v1",
+    global: false,
+    name: (value) => value?.layoutId || value?.providerId || "odin.providers",
+    schema: parseObjectDocument("Odin interface layout"),
+    members: [
+      { slot: 0, memberName: "layoutId", typeName: "string", isName: true },
+      { slot: 1, memberName: "updatedAt", typeName: "string" },
+      { slot: 2, memberName: "tiles", typeName: "object" },
+    ],
+  });
   const idunnDaemonHealthDefinition = defineDocumentType({
     type: "idunn.daemon_health",
     schemaName: "idunn.daemon_health",
@@ -81,6 +105,24 @@ function defineOdinDocuments(defineDocumentType) {
     global: false,
     name: (value) => value?.daemonId || value?.daemon_id || "daemon",
     schema: parseObjectDocument("Idunn daemon health"),
+  });
+  const idunnCommandBoundaryDefinition = defineDocumentType({
+    type: "idunn.command_boundary",
+    schemaName: "idunn.command_boundary",
+    schemaId: "idunn.command_boundary.v1",
+    schemaVersion: "idunn.command_boundary.v1",
+    global: false,
+    name: (value) => value?.boundary_id || value?.boundaryId || value?.daemon_id || value?.daemonId || "daemon",
+    schema: parseObjectDocument("Idunn command boundary"),
+  });
+  const idunnTransportProfileDefinition = defineDocumentType({
+    type: "idunn.daemon_transport_profile",
+    schemaName: "idunn.daemon_transport_profile",
+    schemaId: "idunn.daemon_transport_profile.v1",
+    schemaVersion: "idunn.daemon_transport_profile.v1",
+    global: false,
+    name: (value) => value?.profile_id || value?.profileId || value?.daemon_id || value?.daemonId || "daemon",
+    schema: parseObjectDocument("Idunn daemon transport profile"),
   });
   const muninnCaptureStreamDefinition = defineDocumentType({
     type: "muninn.capture_stream",
@@ -161,6 +203,15 @@ function defineOdinDocuments(defineDocumentType) {
     name: (value) => value?.stream_id || value?.streamId || value?.move_id || value?.moveId || "move-controller-state",
     schema: parseObjectDocument("Muninn Move controller state"),
   });
+  const muninnHidControllerStateDefinition = defineDocumentType({
+    type: "muninn.hid_controller_state",
+    schemaName: "muninn.hid_controller_state",
+    schemaId: "muninn.hid_controller_state.v1",
+    schemaVersion: "muninn.hid_controller_state.v1",
+    global: false,
+    name: (value) => value?.stream_id || value?.streamId || value?.device_id || value?.deviceId || "hid-controller-state",
+    schema: parseObjectDocument("Muninn HID controller state"),
+  });
   const muninnMoveIdentityDefinition = defineDocumentType({
     type: "muninn.move_identity",
     schemaName: "muninn.move_identity",
@@ -223,6 +274,51 @@ function defineOdinDocuments(defineDocumentType) {
     global: false,
     name: (value) => value?.profile_id || value?.profileId || value?.daemon_id || value?.daemonId || "muninn",
     schema: parseObjectDocument("Muninn transport profile"),
+  });
+  const SleipnirInputMappingDefinition = defineDocumentType({
+    type: "sleipnir.input_mapping",
+    schemaName: "sleipnir.input_mapping",
+    schemaId: "sleipnir.input_mapping.v1",
+    schemaVersion: "sleipnir.input_mapping.v1",
+    global: false,
+    name: (value) => value?.providerId || value?.provider_id || "sleipnir",
+    schema: parseObjectDocument("Sleipnir input mapping"),
+  });
+  const aetheriaAssetManifestDefinition = defineDocumentType({
+    type: "gamecult.aetheria.asset_manifest",
+    schemaName: "gamecult.aetheria.asset_manifest",
+    schemaId: "gamecult.aetheria.asset_manifest.v1",
+    schemaVersion: "gamecult.aetheria.asset_manifest.v1",
+    global: false,
+    name: (value) => value?.runId || value?.run_id || "aetheria-assets",
+    schema: parseObjectDocument("Aetheria asset manifest"),
+  });
+  const aetheriaGravityViewportDefinition = defineDocumentType({
+    type: "gamecult.aetheria.gravity_viewport",
+    schemaName: "gamecult.aetheria.gravity_viewport",
+    schemaId: "gamecult.aetheria.gravity_viewport.v1",
+    schemaVersion: "gamecult.aetheria.gravity_viewport.v1",
+    global: false,
+    name: (value) => value?.viewportId || value?.viewport_id || "aetheria-gravity",
+    schema: parseObjectDocument("Aetheria gravity viewport"),
+  });
+  const aetheriaObjectsViewportDefinition = defineDocumentType({
+    type: "gamecult.aetheria.objects_viewport",
+    schemaName: "gamecult.aetheria.objects_viewport",
+    schemaId: "gamecult.aetheria.objects_viewport.v1",
+    schemaVersion: "gamecult.aetheria.objects_viewport.v1",
+    global: false,
+    name: (value) => value?.viewportId || value?.viewport_id || "aetheria-objects",
+    schema: parseObjectDocument("Aetheria objects viewport"),
+  });
+  const aetheriaRenderSplatsViewportDefinition = defineDocumentType({
+    type: "gamecult.aetheria.render_splats_viewport",
+    schemaName: "gamecult.aetheria.render_splats_viewport",
+    schemaId: "gamecult.aetheria.render_splats_viewport.v1",
+    schemaVersion: "gamecult.aetheria.render_splats_viewport.v1",
+    global: false,
+    name: (value) => value?.viewportId || value?.viewport_id || "aetheria-render-splats",
+    schema: parseObjectDocument("Aetheria render splats viewport"),
   });
   const operatorStateDefinition = defineDocumentType({
     type: "gamecult.vili.operator_state",
@@ -339,16 +435,28 @@ function defineOdinDocuments(defineDocumentType) {
     global: true,
     schema: parseObjectDocument("VoidBot swarm snapshot"),
   });
+  const voidbotProviderCatalogDefinition = defineDocumentType({
+    type: "voidbot.provider_advertisement_catalog",
+    schemaName: "voidbot.provider_advertisement_catalog",
+    schemaId: "voidbot.provider_advertisement_catalog.v0",
+    schemaVersion: "voidbot.provider_advertisement_catalog.v0",
+    global: true,
+    schema: parseObjectDocument("VoidBot provider advertisement catalog"),
+  });
 
   return {
     interfaceBindingDefinition,
+    interfaceLayoutDefinition,
+    idunnCommandBoundaryDefinition,
     idunnDaemonHealthDefinition,
+    idunnTransportProfileDefinition,
     muninnCaptureStreamCommandDefinition,
     muninnCaptureStreamDefinition,
     muninnCommandBoundaryDefinition,
     muninnMediaAudioPacketDefinition,
     muninnMediaReceiverFeedbackDefinition,
     muninnMediaVideoAccessUnitDefinition,
+    muninnHidControllerStateDefinition,
     muninnMoveControllerStateDefinition,
     muninnMoveIdentityDefinition,
     muninnMoveLightCommandDefinition,
@@ -357,6 +465,11 @@ function defineOdinDocuments(defineDocumentType) {
     muninnQuestAccessDefinition,
     muninnTelemetrySurfaceDefinition,
     muninnTransportProfileDefinition,
+    SleipnirInputMappingDefinition,
+    aetheriaAssetManifestDefinition,
+    aetheriaGravityViewportDefinition,
+    aetheriaObjectsViewportDefinition,
+    aetheriaRenderSplatsViewportDefinition,
     operatorStateDefinition,
     providerAdvertisementDefinition,
     stonksCommandBoundaryDefinition,
@@ -371,6 +484,7 @@ function defineOdinDocuments(defineDocumentType) {
     weksaCommandBoundaryDefinition,
     weksaOperatorStateDefinition,
     weksaTransportProfileDefinition,
+    voidbotProviderCatalogDefinition,
     voidbotSwarmSnapshotDefinition,
   };
 }

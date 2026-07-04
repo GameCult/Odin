@@ -14,38 +14,26 @@ Module._initPaths();
 
 function buildConfig(argv) {
   const args = parseArgs(argv);
-  const port = Number(args.port || 8797);
-  const host = args.host || "0.0.0.0";
   const cultnetRudpBind = args["cultnet-rudp-bind"] ? String(args["cultnet-rudp-bind"]) : "";
   const intervalMs = Number(args.intervalMs || 5000);
   const stateDir = args.stateDir || path.join(repoRoot, "scratch", "odin");
   const cachePath = args.cachePath || path.join(stateDir, "odin.ccmp");
   const layoutPath = args.layoutPath || path.join(stateDir, "interface-layout.json");
-  const seedDeckUrls = String(args.eveDeckUrl || "ws://127.0.0.1:8795/eve/deck,ws://127.0.0.1:8796/eve/deck,ws://127.0.0.1:8799/eve/deck,ws://127.0.0.1:8802/eve/deck,ws://192.168.1.75:8795/eve/deck,ws://10.77.0.4:8824/eve/deck")
-    .split(",")
-    .map((entry) => entry.trim())
-    .filter(Boolean);
-  const observationLogPath = args.observationLogPath || path.join(repoRoot, "..", "Mimir", "artifacts", "runtime", "periwinkle-cultmesh-sensors.out.log");
-  const observationFreshSeconds = Number(args.observationFreshSeconds || 120);
+  const writeDebugSurfaceJson = Boolean(args.writeDebugSurfaceJson || args["write-debug-surface-json"] || process.env.ODIN_WRITE_DEBUG_SURFACE_JSON === "1");
+  if (args.observationLogPath || args.observationFreshSeconds) {
+    throw new Error("Odin no longer tails Mimir observation logs. Publish observation records through CultMesh/Odin provider discovery instead.");
+  }
   const gamecultTextDocumentStorePath = args.gamecultTextDocumentStorePath || path.join(repoRoot, "..", "VoidBot", ".voidbot", "private", "gamecult-text-documents.cc");
-  const stonksStateUrl = args.stonksStateUrl || "http://127.0.0.1:8802/market/state";
   const stonksBurstSize = Math.max(1, Number(args.stonksBurstSize || 8));
   const idunnRudpHealth = args["idunn-rudp-health"] ? {
     endpoint: String(args["idunn-rudp-health"]),
     daemonId: String(args["idunn-daemon"] || "odin"),
     healthContract: String(args["idunn-health-contract"] || "odin.cultnet-rudp-provider-health"),
   } : null;
-  const defaultInterfaceBindingStores = [
-    path.join(repoRoot, "..", "VoidBot", ".voidbot", "status", "cultmesh", "voidbot-swarm-state.cc"),
-    path.join(repoRoot, "..", "Bifrost", ".bifrost", "provider-advertisement.cc"),
-    path.join(repoRoot, "..", "weksa", ".weksa", "provider-advertisement-store.cc"),
-    path.join(repoRoot, "..", "Stonks", "scratch", "stonks", "stonks-state.cc"),
-    path.join(repoRoot, "..", "StreamPixels", ".streampixels-data", "cultcache", "streampixels.service.cc"),
-    "C:\\Meta\\Odin\\state\\starfire.muninn.telemetry.cc",
-  ].join(",");
   const interfaceBindingStores = String(
     args.interfaceBindingStore ||
-    defaultInterfaceBindingStores,
+    process.env.ODIN_INTERFACE_BINDING_STORES ||
+    "",
   )
     .split(",")
     .map((entry) => entry.trim())
@@ -56,20 +44,15 @@ function buildConfig(argv) {
     cachePath,
     cultnetRudpBind,
     gamecultTextDocumentStorePath,
-    host,
     interfaceBindingStores,
     idunnRudpHealth,
     intervalMs,
     layoutPath,
-    observationFreshSeconds,
-    observationLogPath,
-    port,
     repoRoot,
-    seedDeckUrls,
     stateDir,
     stonksBurstSize,
-    stonksStateUrl,
     surfaceKey: "surface:gamecult.network.status",
+    writeDebugSurfaceJson,
   };
 }
 

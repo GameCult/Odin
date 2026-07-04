@@ -7,7 +7,6 @@ const {
   defineDocumentRegistry,
   defineDocumentType,
 } = require("cultcache-ts");
-const { httpGet } = require("./utils.cjs");
 
 const textDocumentSetDefinition = defineDocumentType({
   type: "gamecult.text_document_set",
@@ -22,42 +21,22 @@ const textDocumentSetDefinition = defineDocumentType({
   },
 });
 
-async function buildMarqueeText({ interfaces, textDocumentStorePath, stonksBurstSize = 8, stonksStateUrl }) {
+async function buildMarqueeText({ interfaces, textDocumentStorePath, stonksBurstSize = 8 }) {
   const [securities, stanzas] = await Promise.all([
-    stonksSegments({ interfaces, stonksStateUrl }),
+    Promise.resolve(stonksSegments({ interfaces })),
     poetryStanzas(textDocumentStorePath),
   ]);
   return stanzaBurstTape(stanzas, securities, stonksBurstSize).join(" / ");
 }
 
-async function stonksSegments({ interfaces, stonksStateUrl }) {
-  const fromInterface = stonksSegmentsFromInterfaces(interfaces);
-  if (fromInterface.length) return fromInterface;
-  return stonksSegmentsFromSnapshot(stonksStateUrl);
+function stonksSegments({ interfaces }) {
+  return stonksSegmentsFromInterfaces(interfaces);
 }
 
 function stonksSegmentsFromInterfaces(interfaces) {
   const stonks = interfaces.find((entry) => String(entry.providerId || "").toLowerCase() === "stonks.market");
   const explicit = String(stonks?.surface?.root?.props?.marqueeText || "").trim();
   return splitSegments(explicit).slice(0, 16);
-}
-
-async function stonksSegmentsFromSnapshot(stonksStateUrl) {
-  if (!stonksStateUrl) return [];
-  try {
-    const snapshot = JSON.parse(await httpGet(stonksStateUrl, 1200));
-    const quotes = [...array(snapshot.crypto), ...array(snapshot.equities)]
-      .slice(0, 16)
-      .map(quoteText)
-      .filter(Boolean);
-    const warnings = [
-      snapshot?.sources?.equities?.ok === false ? "EQUITIES SOURCE ERROR" : "",
-      snapshot?.sources?.crypto?.ok === false ? "CRYPTO SOURCE ERROR" : "",
-    ].filter(Boolean);
-    return [...quotes, ...warnings];
-  } catch {
-    return [];
-  }
 }
 
 async function poetryStanzas(textDocumentStorePath) {
@@ -116,29 +95,6 @@ function splitSegments(text) {
     .split(/\s+\/\s+/)
     .map((segment) => segment.replace(/\s+/g, " ").trim())
     .filter(Boolean);
-}
-
-function quoteText(item) {
-  if (!item?.symbol) return "";
-  const price = item.price == null ? "N/D" : `$${formatNumber(item.price)}`;
-  const change = item.change24h == null ? "" : ` ${item.change24h >= 0 ? "+" : ""}${Number(item.change24h).toFixed(2)}%`;
-  const volume = item.volume24h ?? item.volume;
-  const volumeText = volume == null ? "" : ` vol ${formatCompact(volume)}`;
-  return `${item.symbol} ${price}${change}${volumeText}`;
-}
-
-function formatNumber(value) {
-  const number = Number(value);
-  if (!Number.isFinite(number)) return "N/D";
-  if (Math.abs(number) >= 1000) return number.toFixed(0);
-  if (Math.abs(number) >= 1) return number.toFixed(2);
-  return number.toFixed(4);
-}
-
-function formatCompact(value) {
-  const number = Number(value);
-  if (!Number.isFinite(number)) return "N/D";
-  return Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(number);
 }
 
 function isStanzaMarker(line) {

@@ -7,23 +7,25 @@ use crate::media_packetizer::{
 };
 use anyhow::{Context, Result, anyhow};
 use cultmesh_rs::{
-    CultMesh, CultMeshNodeOptions, CultMeshSharedMemoryFrameRing, CultMeshStreamBodyTransport,
-    CultMeshRudpDocumentPublishOptions, CultMeshStreamCatalog, CultMeshStreamClock,
-    CultMeshStreamDescriptor, CultMeshStreamKind,
+    CultMesh, CultMeshNodeOptions, CultMeshRudpDocumentPublishOptions, CultMeshRudpSnapshotOptions,
+    CultMeshSharedMemoryFrameRing, CultMeshStreamBodyTransport, CultMeshStreamCatalog,
+    CultMeshStreamClock, CultMeshStreamDescriptor, CultMeshStreamKind,
 };
 use cultnet_rs::{
     CultNetMessage, CultNetRawDocumentRecord, CultNetRawPayloadEncoding,
     CultNetRudpSocketTransportConnection, CultNetRudpSocketTransportOptions, CultNetTransportFrame,
-    CultNetWireContract, decode_cultnet_message_from_slice, encode_cultnet_message_to_vec,
+    CultNetWireContract, encode_cultnet_message_to_vec,
 };
 use odin_core::{
-    EveProviderAdvertisementCompatRecord, IdunnDaemonHealthRecord,
-    MuninnCaptureStreamCommandRecord, MuninnCaptureStreamRecord, MuninnCommandBoundaryCompatRecord,
+    EVE_PROVIDER_ADVERTISEMENT_SCHEMA, EveProviderAdvertisementRecord, IdunnDaemonHealthRecord,
+    MUNINN_CAPTURE_STREAM_COMMAND_SCHEMA, MuninnCaptureStreamCommandRecord, MuninnCaptureStreamRecord,
+    MuninnCommandBoundaryCompatRecord, MuninnHidControllerStateRecord,
     MuninnMediaReceiverFeedbackRecord, MuninnMoveControllerStateRecord, MuninnMoveIdentityRecord,
     MuninnMoveLightCommandRecord, MuninnObsStreamCatalogRecord, MuninnQuestAccessRecord,
     MuninnTelemetrySurfaceRecord, MuninnTransportProfileCompatRecord, OdinDocuments,
+    OdinEndpointQuery, discover_provider_endpoints,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{HashMap, VecDeque};
 use std::env;
@@ -48,13 +50,15 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
+#[cfg(windows)]
+use windows_sys::Win32::UI::Input::XboxController::{XINPUT_GAMEPAD, XINPUT_STATE, XInputGetState};
 
 const CULTNET_RUDP_PROTOCOL_ID: &str = "cultnet.transport.rudp.v0";
+const MUNINN_MEDIA_RUDP_SCHEMA: &str = "muninn.media.rudp.v1";
 const IDUNN_HEALTH_RUDP_CONNECTION_ID: u32 = 0x1d0d_0001;
-const MUNINN_COMMAND_RUDP_CONNECTION_ID: u32 = 0x6d75_0002;
 const MUNINN_MEDIA_RUDP_CONNECTION_ID: u32 = 0x6d75_0001;
-const MUNINN_OBS_CATALOG_RUDP_CONNECTION_ID: u32 = 0x6d75_0003;
 const MUNINN_AUDIO_RUDP_CONNECTION_ID: u32 = 0x6d75_0004;
+const MUNINN_HID_CONTROLLER_RUDP_CONNECTION_ID: u32 = 0x6d75_0005;
 const MUNINN_RUDP_MEDIA_PROFILE_ID: &str = "muninn.rudp.low_latency_h264_lan.v1";
 const MUNINN_RUDP_MEDIA_VIDEO_BITRATE_KBPS: u32 = 12_000;
 const MUNINN_RUDP_MEDIA_VBV_FRAME_BUDGETS: u32 = 1;
@@ -86,6 +90,21 @@ const PS_MOVE_LED_REPORT_LEN: usize = 49;
 const MUNINN_DISABLED_VIDEO_SOURCE_ID: &str = "video:none";
 const MUNINN_DISABLED_AUDIO_SOURCE_ID: &str = "audio:none";
 const MUNINN_DEFAULT_ACTIVATION_STORE_PATH: &str = "C:/Meta/Odin/state/muninn.activate.cc";
+const WINDOWS_XINPUT_SOURCE_PREFIX: &str = "xinput://";
+const XINPUT_GAMEPAD_DPAD_UP_MASK: u16 = 0x0001;
+const XINPUT_GAMEPAD_DPAD_DOWN_MASK: u16 = 0x0002;
+const XINPUT_GAMEPAD_DPAD_LEFT_MASK: u16 = 0x0004;
+const XINPUT_GAMEPAD_DPAD_RIGHT_MASK: u16 = 0x0008;
+const XINPUT_GAMEPAD_START_MASK: u16 = 0x0010;
+const XINPUT_GAMEPAD_BACK_MASK: u16 = 0x0020;
+const XINPUT_GAMEPAD_LEFT_THUMB_MASK: u16 = 0x0040;
+const XINPUT_GAMEPAD_RIGHT_THUMB_MASK: u16 = 0x0080;
+const XINPUT_GAMEPAD_LEFT_SHOULDER_MASK: u16 = 0x0100;
+const XINPUT_GAMEPAD_RIGHT_SHOULDER_MASK: u16 = 0x0200;
+const XINPUT_GAMEPAD_A_MASK: u16 = 0x1000;
+const XINPUT_GAMEPAD_B_MASK: u16 = 0x2000;
+const XINPUT_GAMEPAD_X_MASK: u16 = 0x4000;
+const XINPUT_GAMEPAD_Y_MASK: u16 = 0x8000;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Mode {
@@ -157,10 +176,11 @@ struct Options {
     quest_pose_stream_id: Option<String>,
     quest_video_input_stream_id: Option<String>,
     idunn_rudp_health: Option<IdunnRudpHealthOptions>,
-    odin_cultmesh_rudp: Option<SocketAddr>,
-    capture_command_rudp_bind: Option<SocketAddr>,
-    capture_command_rudp_target: Option<SocketAddr>,
-    obs_catalog_rudp_target: Option<SocketAddr>,
+    odin_cultmesh_uri: Option<String>,
+    hid_controller_rudp_target: Option<SocketAddr>,
+    hid_controller_rudp_bind: Option<SocketAddr>,
+    hid_controller_rudp_advertise: Option<String>,
+    hid_controller_receipt_retention_seconds: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -183,7 +203,6 @@ struct AudioSourceSpec {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum MediaTransport {
-    Srt,
     Rudp,
 }
 
@@ -277,34 +296,11 @@ struct JoystickEvent {
     value: i16,
 }
 
-trait ProcessSpawner {
-    fn spawn_mux(&self, plan: &MuxPlan) -> Result<Child>;
-}
-
-struct CmdSpawner;
-
-impl ProcessSpawner for CmdSpawner {
-    fn spawn_mux(&self, plan: &MuxPlan) -> Result<Child> {
-        Command::new("powershell.exe")
-            .arg("-NoProfile")
-            .arg("-NonInteractive")
-            .arg("-ExecutionPolicy")
-            .arg("Bypass")
-            .arg("-File")
-            .arg(&plan.command_file)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .with_context(|| format!("starting mux command {}", plan.command_file.display()))
-    }
-}
-
 fn main() -> Result<()> {
     let options = Options::parse(env::args().skip(1))?;
     match options.mode {
         Mode::Serve => serve(options),
-        Mode::Activate => activate(options, CmdSpawner),
+        Mode::Activate => activate(options),
         Mode::Health => health_check(&options),
         Mode::RequestStream => request_capture_stream(options),
         Mode::RequestMoveLight => request_move_light(options),
@@ -316,6 +312,7 @@ fn main() -> Result<()> {
         Mode::ClaimMoveHost => claim_move_host(options),
         Mode::QuestAccessStatus => quest_access_status(options),
         Mode::DryRun => {
+            require_media_target_uri(&options)?;
             let plan = build_mux_plan(&options, "dry-run".to_string());
             println!("{}", plan.command_line);
             Ok(())
@@ -329,6 +326,7 @@ fn serve(options: Options) -> Result<()> {
     let mut active_move_lights = Vec::new();
     let mut last_default_move_light_write_at = None;
     let mut last_idunn_health_publish_attempt_at = None;
+    let mut hid_controller_stream = create_hid_controller_stream(&options)?;
     let mut odin_respects_paid = false;
     let mut last_move_host_claim_attempt_at = None;
     let mut last_move_bluetooth_pickup_attempt_at = None;
@@ -336,7 +334,7 @@ fn serve(options: Options) -> Result<()> {
     let mut active_move_states =
         active_move_state_sources(serve_move_state_sources(&options, move_runtime_enabled));
     let mut active_capture_streams = Vec::new();
-    start_capture_command_rudp_ingress(&options)?;
+    start_hid_controller_rudp_ingress(&options)?;
 
     loop {
         let live_move_sources = serve_move_state_sources(&options, move_runtime_enabled);
@@ -366,6 +364,7 @@ fn serve(options: Options) -> Result<()> {
                 &mut active_move_states,
                 &mut HidMoveControllerStateReader,
                 move_evidence_stream.as_mut(),
+                hid_controller_stream.as_mut(),
             )?;
             publish_quest_access_if_requested(&mut node, &options)?;
             let state = if active_stream_ids.is_empty() {
@@ -374,13 +373,17 @@ fn serve(options: Options) -> Result<()> {
                 "streaming"
             };
             publish_surface(&mut node, &options, state, &active_stream_ids)?;
-            publish_runtime_boundary_records(&mut node, &options, state, &active_stream_ids)?;
+            publish_runtime_boundary_records(
+                &mut node,
+                &options,
+                state,
+                &active_stream_ids,
+                &live_move_sources,
+            )?;
             if !odin_respects_paid {
                 odin_respects_paid = true;
                 if let Err(error) = publish_odin_startup_respect(&node, &options) {
-                    eprintln!(
-                        "Muninn could not publish startup respect to Odin: {error:#}"
-                    );
+                    eprintln!("Muninn could not publish startup respect to Odin: {error:#}");
                 }
             }
             publish_obs_catalog_idle(&mut node, &options)?;
@@ -418,15 +421,14 @@ fn tick_capture_stream_commands(
     active: &mut Vec<ActiveCaptureStreamCommand>,
 ) -> Result<Vec<String>> {
     reap_capture_stream_children(options, active)?;
-    let Some(activation_store_path) = options.activation_store_path.as_ref() else {
-        return Ok(active
-            .iter()
-            .map(|session| session.stream_id.clone())
-            .collect());
-    };
     let mut activation_options = options.clone();
-    activation_options.store_path = activation_store_path.clone();
+    activation_options.store_path = options
+        .activation_store_path
+        .as_ref()
+        .cloned()
+        .unwrap_or_else(|| options.store_path.clone());
     let mut node = open_node(&activation_options, "muninn-activation-controller")?;
+    pull_odin_capture_command_snapshot(&mut node, options);
     let mut commands = node.cache().get_all::<MuninnCaptureStreamCommandRecord>()?;
     commands.sort_by(|left, right| left.updated_at.cmp(&right.updated_at));
     let latest_command_by_stream = latest_capture_stream_command_ids(&commands, &options.host_id);
@@ -463,6 +465,35 @@ fn tick_capture_stream_commands(
         .iter()
         .map(|session| session.stream_id.clone())
         .collect())
+}
+
+fn pull_odin_capture_command_snapshot(node: &mut cultmesh_rs::CultMeshNode, options: &Options) {
+    let Some(target) = resolve_odin_cultmesh_uri(options) else {
+        return;
+    };
+    let _ = node.pull_rudp_catalog_snapshot(CultMeshRudpSnapshotOptions {
+        target,
+        runtime_id: format!("muninn-{}-capture-command-client", options.host_id),
+        schema_ids: Some(vec![MUNINN_CAPTURE_STREAM_COMMAND_SCHEMA.to_string()]),
+        connect_timeout: Duration::from_millis(150),
+        response_timeout: Duration::from_millis(150),
+        resend_delay_ms: 15,
+        ..CultMeshRudpSnapshotOptions::default()
+    });
+}
+
+fn resolve_odin_cultmesh_uri(options: &Options) -> Option<SocketAddr> {
+    let uri = options.odin_cultmesh_uri.as_deref()?.trim();
+    if uri.is_empty() {
+        return None;
+    }
+    match CultMesh::resolve_rudp_endpoint(uri) {
+        Ok(target) => Some(target),
+        Err(error) => {
+            eprintln!("Muninn could not resolve Odin CultMesh URI {uri}: {error:#}");
+            None
+        }
+    }
 }
 
 fn latest_capture_stream_command_ids(
@@ -545,111 +576,6 @@ fn reap_capture_stream_children(
     Ok(())
 }
 
-fn start_capture_command_rudp_ingress(options: &Options) -> Result<()> {
-    let Some(bind_address) = options.capture_command_rudp_bind else {
-        return Ok(());
-    };
-    let Some(command_store_path) = options
-        .activation_store_path
-        .as_ref()
-        .or(Some(&options.store_path))
-        .cloned()
-    else {
-        return Ok(());
-    };
-
-    let socket = UdpSocket::bind(bind_address).with_context(|| {
-        format!("binding Muninn capture command RUDP ingress at {bind_address}")
-    })?;
-    socket.set_read_timeout(Some(Duration::from_millis(100)))?;
-    let runtime_options = options.clone();
-    thread::spawn(move || {
-        if let Err(error) =
-            run_capture_command_rudp_ingress(socket, runtime_options, command_store_path)
-        {
-            eprintln!("Muninn capture command RUDP ingress stopped: {error:#}");
-        }
-    });
-    Ok(())
-}
-
-fn run_capture_command_rudp_ingress(
-    socket: UdpSocket,
-    options: Options,
-    command_store_path: PathBuf,
-) -> Result<()> {
-    let local_addr = socket.local_addr()?;
-    println!("Muninn capture command RUDP ingress listening at {local_addr}.");
-    let mut command_options = options.clone();
-    command_options.store_path = command_store_path;
-    ensure_state_dirs(&command_options)?;
-
-    loop {
-        let mut transport =
-            CultNetRudpSocketTransportConnection::new(CultNetRudpSocketTransportOptions::server(
-                "muninn-capture-command-ingress",
-                socket
-                    .try_clone()
-                    .context("cloning Muninn capture command RUDP socket")?,
-                MUNINN_COMMAND_RUDP_CONNECTION_ID,
-            ))?;
-        loop {
-            if let Some(frame) = transport.receive_once()? {
-                transport.poll_resends()?;
-                if frame.channel_id != "schema" {
-                    continue;
-                }
-                match capture_command_from_rudp_frame(&frame.payload) {
-                    Ok(command) => {
-                        let mut node = open_node(&command_options, "muninn-capture-command-rudp")?;
-                        node.put(&command.command_id, &command)?;
-                        println!(
-                            "Muninn accepted RUDP capture command {} {} {} for {}.",
-                            command.command_id, command.action, command.stream_id, command.host_id
-                        );
-                    }
-                    Err(error) => {
-                        eprintln!("Muninn rejected RUDP capture command frame: {error:#}");
-                    }
-                }
-                break;
-            } else {
-                transport.poll_resends()?;
-                if transport.connected() && transport.check_timeout(2_000) {
-                    break;
-                }
-            }
-        }
-    }
-}
-
-fn capture_command_from_rudp_frame(payload: &[u8]) -> Result<MuninnCaptureStreamCommandRecord> {
-    let message = decode_cultnet_message_from_slice(payload, CultNetWireContract::CultNetSchemaV0)
-        .context("decoding Muninn capture command CultNet message")?;
-    let CultNetMessage::DocumentPutRaw { document, .. } = message else {
-        return Err(anyhow!("expected cultnet.document_put_raw.v0"));
-    };
-    if document.schema_id != "muninn.capture_stream_command" {
-        return Err(anyhow!(
-            "expected muninn.capture_stream_command schema, received {}",
-            document.schema_id
-        ));
-    }
-    if document.payload_encoding != CultNetRawPayloadEncoding::Messagepack {
-        return Err(anyhow!("expected MessagePack raw payload encoding"));
-    }
-    let command: MuninnCaptureStreamCommandRecord = rmp_serde::from_slice(&document.payload)
-        .context("decoding Muninn capture command payload")?;
-    if document.record_key != command.command_id {
-        return Err(anyhow!(
-            "record key {} does not match command_id {}",
-            document.record_key,
-            command.command_id
-        ));
-    }
-    Ok(command)
-}
-
 fn start_capture_stream_command(
     options: &Options,
     node: &mut cultmesh_rs::CultMeshNode,
@@ -726,8 +652,6 @@ fn capture_stream_commands_start_equivalent(
         && command.action == "start"
         && active.target_host == command.target_host
         && active.port == command.port
-        && active.obs_target_host == command.obs_target_host
-        && active.obs_port == command.obs_port
         && active.media_transport == command.media_transport
         && active.media_packet_bytes == command.media_packet_bytes
         && command_rudp_video_bitrate_kbps(active) == command_rudp_video_bitrate_kbps(command)
@@ -753,7 +677,7 @@ fn command_rudp_latency_budget_ms(command: &MuninnCaptureStreamCommandRecord) ->
 }
 
 fn canonical_muninn_stream_id(stream_id: &str) -> String {
-    for suffix in [".rudp", ".srt"] {
+    for suffix in [".rudp"] {
         if let Some(prefix) = stream_id.strip_suffix(suffix) {
             return prefix.to_string();
         }
@@ -886,16 +810,6 @@ fn spawn_capture_stream_activation(
     } else {
         args.push("--no-audio".to_string());
     }
-    if let Some(obs_target_host) = command.obs_target_host.as_ref() {
-        args.extend([
-            "--obs-target-host".to_string(),
-            obs_target_host.clone(),
-            "--obs-port".to_string(),
-            command.obs_port.to_string(),
-        ]);
-    } else {
-        args.push("--no-obs-target".to_string());
-    }
     args.extend([
         "--audio-sample-rate".to_string(),
         options.audio_sample_rate.to_string(),
@@ -908,9 +822,6 @@ fn spawn_capture_stream_activation(
         "--log-root".to_string(),
         options.log_root.display().to_string(),
     ]);
-    if let Some(target) = options.obs_catalog_rudp_target {
-        args.extend(["--obs-catalog-rudp-target".to_string(), target.to_string()]);
-    }
     Command::new(exe)
         .args(args)
         .stdin(Stdio::null())
@@ -1374,80 +1285,9 @@ struct ActiveMoveEvidenceStream {
     frame_counter: u64,
 }
 
-fn activate(options: Options, spawner: impl ProcessSpawner) -> Result<()> {
-    if options.media_transport == MediaTransport::Rudp {
-        return activate_rudp(options);
-    }
-    if !options.capture_video || !options.capture_audio {
-        return Err(anyhow!(
-            "partial Muninn activation is currently supported only for CultNet RUDP media"
-        ));
-    }
-
-    ensure_state_dirs(&options)?;
-    let mut node = open_node(&options, "muninn-activation")?;
-    let plan = build_mux_plan(&options, timestamp()?);
-    write_command_file(&plan)?;
-
-    let supervisor_pid = std::process::id();
-    let mut restart_count = 0;
-
-    loop {
-        publish_surface(
-            &mut node,
-            &options,
-            "active",
-            std::slice::from_ref(&options.stream_id),
-        )?;
-        publish_runtime_boundary_records(
-            &mut node,
-            &options,
-            "active",
-            std::slice::from_ref(&options.stream_id),
-        )?;
-
-        let mut child = match spawner.spawn_mux(&plan) {
-            Ok(child) => child,
-            Err(error) => {
-                publish_stream(
-                    &mut node,
-                    &options,
-                    &plan,
-                    "failed",
-                    supervisor_pid,
-                    None,
-                    restart_count,
-                    &format!("could not start mux: {error:#}"),
-                )?;
-                return Err(error);
-            }
-        };
-
-        publish_stream(
-            &mut node,
-            &options,
-            &plan,
-            "running",
-            supervisor_pid,
-            Some(child.id()),
-            restart_count,
-            "requested stream is active",
-        )?;
-
-        let status = child.wait().context("waiting for mux process")?;
-        restart_count += 1;
-        publish_stream(
-            &mut node,
-            &options,
-            &plan,
-            "restarting",
-            supervisor_pid,
-            None,
-            restart_count,
-            &format!("mux exited with {status}"),
-        )?;
-        thread::sleep(Duration::from_secs((2 + restart_count).min(30) as u64));
-    }
+fn activate(options: Options) -> Result<()> {
+    require_media_target_uri(&options)?;
+    activate_rudp(options)
 }
 
 fn activate_rudp(options: Options) -> Result<()> {
@@ -1471,6 +1311,7 @@ fn activate_rudp(options: Options) -> Result<()> {
             &options,
             "active",
             std::slice::from_ref(&options.stream_id),
+            &[],
         )?;
 
         match run_rudp_mux_once(&options, &plan, &mut node, supervisor_pid, restart_count) {
@@ -1656,10 +1497,16 @@ fn run_rudp_mux_once(
     };
 
     let media_profile = muninn_rudp_media_profile_for_options(options);
-    let mut video_transport =
-        open_media_rudp_transport(options, MUNINN_MEDIA_RUDP_CONNECTION_ID, None, "video")?;
+    let mut video_transport = open_media_rudp_transport(
+        options,
+        node,
+        MUNINN_MEDIA_RUDP_CONNECTION_ID,
+        None,
+        "video",
+    )?;
     let mut audio_transport = open_media_rudp_transport(
         options,
+        node,
         MUNINN_AUDIO_RUDP_CONNECTION_ID,
         Some(media_profile.receiver_assembly_deadline_ms),
         "audio",
@@ -2420,19 +2267,13 @@ fn record_rudp_media_receiver_feedback(
 
 fn open_media_rudp_transport(
     options: &Options,
+    node: &mut cultmesh_rs::CultMeshNode,
     connection_id: u32,
     reliable_expire_after_ms: Option<u64>,
     role: &str,
 ) -> Result<CultNetRudpSocketTransportConnection> {
     let media_profile = muninn_rudp_media_profile_for_options(options);
-    let endpoint: SocketAddr = format!("{}:{}", options.target_host, options.port)
-        .parse()
-        .with_context(|| {
-            format!(
-                "parsing RUDP media endpoint {}:{}",
-                options.target_host, options.port
-            )
-        })?;
+    let endpoint = resolve_media_rudp_endpoint(options, node)?;
     let socket = UdpSocket::bind("0.0.0.0:0").context("binding Muninn media RUDP client socket")?;
     configure_media_rudp_socket_buffers(&socket)
         .context("configuring Muninn media RUDP socket buffers")?;
@@ -2459,6 +2300,68 @@ fn open_media_rudp_transport(
         thread::sleep(Duration::from_millis(2));
     }
     Ok(transport)
+}
+
+fn resolve_media_rudp_endpoint(
+    options: &Options,
+    node: &mut cultmesh_rs::CultMeshNode,
+) -> Result<SocketAddr> {
+    require_media_target_uri(options)?;
+    pull_odin_media_catalog_snapshot(node, options);
+    let endpoint = discover_provider_endpoints(
+        node,
+        OdinEndpointQuery {
+            schema: Some(MUNINN_MEDIA_RUDP_SCHEMA),
+            transport_contains: Some("rudp"),
+            host_hint: Some(&options.target_host),
+            device_filter: Some(&options.stream_id),
+        },
+    )
+    .into_iter()
+    .next()
+    .or_else(|| {
+        discover_provider_endpoints(
+            node,
+            OdinEndpointQuery {
+                schema: Some(MUNINN_MEDIA_RUDP_SCHEMA),
+                transport_contains: Some("rudp"),
+                host_hint: Some(&options.target_host),
+                device_filter: None,
+            },
+        )
+        .into_iter()
+        .next()
+    })
+    .ok_or_else(|| {
+        anyhow!(
+            "Odin provider catalog did not advertise a {} endpoint for {}",
+            MUNINN_MEDIA_RUDP_SCHEMA,
+            options.target_host
+        )
+    })?;
+    endpoint.address.parse().with_context(|| {
+        format!(
+            "parsing Odin-discovered Muninn media RUDP endpoint {} for {}",
+            endpoint.address, options.target_host
+        )
+    })
+}
+
+fn pull_odin_media_catalog_snapshot(node: &mut cultmesh_rs::CultMeshNode, options: &Options) {
+    let Some(target) = resolve_odin_cultmesh_uri(options) else {
+        return;
+    };
+    if let Err(error) = node.pull_rudp_catalog_snapshot(CultMeshRudpSnapshotOptions {
+        target,
+        runtime_id: format!("muninn-{}-media-target-catalog-client", options.host_id),
+        schema_ids: Some(vec![EVE_PROVIDER_ADVERTISEMENT_SCHEMA.to_string()]),
+        connect_timeout: Duration::from_millis(150),
+        response_timeout: Duration::from_millis(150),
+        resend_delay_ms: 15,
+        ..CultMeshRudpSnapshotOptions::default()
+    }) {
+        eprintln!("Muninn Odin media target catalog pull failed from {target}: {error:#}");
+    }
 }
 
 fn configure_media_rudp_socket_buffers(socket: &UdpSocket) -> Result<()> {
@@ -2650,21 +2553,24 @@ fn publish_surface(
         updated_at: timestamp()?,
         primary_stream_id: options.stream_id.clone(),
         primary_stream_label: format!("{} screen and loopback A/V", options.host_id),
-        command_rudp_target: options
-            .capture_command_rudp_bind
-            .map(|addr| addr.to_string())
-            .unwrap_or_default(),
+        command_rudp_target: String::new(),
         media_target_host: options.target_host.clone(),
         media_port: options.port,
         media_packet_bytes: options.media_packet_bytes as u32,
         rudp_video_bitrate_kbps: options.rudp_video_bitrate_kbps,
         rudp_latency_budget_ms: options.rudp_latency_budget_ms,
-        video_source_ids: video_sources.iter().map(|source| source.id.clone()).collect(),
+        video_source_ids: video_sources
+            .iter()
+            .map(|source| source.id.clone())
+            .collect(),
         video_source_labels: video_sources
             .iter()
             .map(|source| source.label.clone())
             .collect(),
-        audio_source_ids: audio_sources.iter().map(|source| source.id.clone()).collect(),
+        audio_source_ids: audio_sources
+            .iter()
+            .map(|source| source.id.clone())
+            .collect(),
         audio_source_labels: audio_sources
             .iter()
             .map(|source| source.label.clone())
@@ -2680,6 +2586,7 @@ fn publish_runtime_boundary_records(
     options: &Options,
     state: &str,
     active_streams: &[String],
+    live_move_sources: &[MoveStateSource],
 ) -> Result<()> {
     let provider_id = muninn_provider_id(options);
     let daemon_id = muninn_daemon_id(options);
@@ -2694,33 +2601,109 @@ fn publish_runtime_boundary_records(
         .activation_store_path
         .as_deref()
         .unwrap_or(&options.store_path);
-    let activation_command = format!(
-        "muninn request-stream --store {} --activate-store {} --host {} --stream {}",
-        store_path,
-        activation_store_path.display(),
-        options.host_id,
-        options.stream_id
-    );
-    let health_command = format!(
-        "muninn --health --store {} --host {}",
-        options.store_path.display(),
-        options.host_id
-    );
-    let current_transport = if options.idunn_rudp_health.is_some() {
-        "daemon-published-rudp-health + daemon-owned-cultcache-telemetry-store + compatibility.local-cli fallback"
+    let activation_command = if options.target_host.trim().is_empty() {
+        None
     } else {
-        "daemon-owned-cultcache-telemetry-store + compatibility.local-cli fallback"
+        let command = format!(
+            "muninn request-stream --store {} --activate-store {} --host {} --stream {} --target-host {} --port {} --media-transport {}",
+            store_path,
+            activation_store_path.display(),
+            options.host_id,
+            options.stream_id,
+            options.target_host,
+            options.port,
+            media_transport_cli(&options.media_transport)
+        );
+        Some(command)
+    };
+    let command_lowerings = activation_command
+        .as_ref()
+        .map(|command| json!([command]))
+        .unwrap_or_else(|| json!([]));
+    let current_transport = if options.idunn_rudp_health.is_some() {
+        "daemon-published-rudp-health + daemon-owned-cultcache-telemetry-store"
+    } else {
+        "daemon-owned-cultcache-telemetry-store + missing-rudp-health-publication"
     };
     let transport_state = if options.idunn_rudp_health.is_some() {
         "rudp-health-and-provider-store-live"
     } else {
         "cultcache-provider-store-only"
     };
-    let compatibility_mechanisms = if options.idunn_rudp_health.is_some() {
-        vec![health_command.clone(), activation_command.clone()]
-    } else {
-        vec![activation_command.clone()]
-    };
+    let hid_controller_endpoint = options.hid_controller_rudp_bind.map(|bind| {
+        options
+            .hid_controller_rudp_advertise
+            .clone()
+            .unwrap_or_else(|| bind.to_string())
+    });
+    let hid_controller_devices_snake = live_move_sources
+        .iter()
+        .map(|source| {
+            json!({
+                "device_id": source.move_id,
+                "device_kind": hid_controller_kind_from_source(source),
+                "source_path": source.hidraw_path
+            })
+        })
+        .collect::<Vec<_>>();
+    let hid_controller_devices_camel = live_move_sources
+        .iter()
+        .map(|source| {
+            json!({
+                "deviceId": source.move_id,
+                "deviceKind": hid_controller_kind_from_source(source),
+                "sourcePath": source.hidraw_path
+            })
+        })
+        .collect::<Vec<_>>();
+    let input_stream_id = format!("muninn:{}:hid-controller-state", options.host_id);
+    let transport_input_streams = hid_controller_endpoint
+        .as_ref()
+        .map(|endpoint| {
+            json!([
+                {
+                    "stream_id": input_stream_id,
+                    "schema": "muninn.hid_controller_state.v1",
+                    "transport": CULTNET_RUDP_PROTOCOL_ID,
+                    "address": endpoint,
+                    "connection_id": MUNINN_HID_CONTROLLER_RUDP_CONNECTION_ID,
+                    "channel_id": "latest",
+                    "producer": "Muninn IO daemon",
+                    "devices": hid_controller_devices_snake
+                }
+            ])
+        })
+        .unwrap_or_else(|| json!([]));
+    let provider_input_streams = hid_controller_endpoint
+        .as_ref()
+        .map(|endpoint| {
+            json!([
+                {
+                    "streamId": input_stream_id,
+                    "schema": "muninn.hid_controller_state.v1",
+                    "transport": CULTNET_RUDP_PROTOCOL_ID,
+                    "address": endpoint,
+                    "connectionId": MUNINN_HID_CONTROLLER_RUDP_CONNECTION_ID,
+                    "channel": "latest",
+                    "devices": hid_controller_devices_camel
+                }
+            ])
+        })
+        .unwrap_or_else(|| json!([]));
+    let mut provider_endpoints = vec![json!({
+        "transport": "cultcache-store",
+        "address": options.store_path.display().to_string()
+    })];
+    if let Some(endpoint) = hid_controller_endpoint.as_ref() {
+        provider_endpoints.push(json!({
+            "transport": CULTNET_RUDP_PROTOCOL_ID,
+            "role": "muninn.hid_controller_state",
+            "schema": "muninn.hid_controller_state.v1",
+            "address": endpoint,
+            "connectionId": MUNINN_HID_CONTROLLER_RUDP_CONNECTION_ID,
+            "channel": "latest"
+        }));
+    }
     let media_profile = muninn_rudp_media_profile_for_options(options);
     let command_boundary = MuninnCommandBoundaryCompatRecord {
         value: json!({
@@ -2734,7 +2717,7 @@ fn publish_runtime_boundary_records(
             "updated_at": updated_at,
             "state_store": store_path,
             "log_root": log_root,
-            "lifecycle_authority": "idunn.local-command",
+            "lifecycle_authority": "idunn-supervisor-command",
             "health_publication": options.idunn_rudp_health.as_ref().map(|idunn| json!({
                 "contract": idunn.health_contract,
                 "transport": CULTNET_RUDP_PROTOCOL_ID,
@@ -2744,7 +2727,7 @@ fn publish_runtime_boundary_records(
             })).unwrap_or_else(|| json!({
                 "contract": serde_json::Value::Null,
                 "transport": "unconfigured",
-                "publication_source": "compatibility-command-only",
+                "publication_source": "missing-daemon-publication",
                 "state_owner": "Muninn local store"
             })),
             "commands": [
@@ -2753,6 +2736,7 @@ fn publish_runtime_boundary_records(
                     "ingress": "cultmesh-document",
                     "schema": "muninn.capture_stream_command.v1",
                     "invocation": activation_command,
+                    "state": if activation_command.is_some() { "configured" } else { "missing-media-target" },
                     "owns": [
                         "explicit capture stream activation",
                         "ffmpeg/loopback process launch",
@@ -2814,12 +2798,14 @@ fn publish_runtime_boundary_records(
                 "late_media_policy": "drop expired queued media; do not repair frames outside the latency budget",
                 "recovery": "fixed quarter-second IDR budget with receiver feedback pressure telemetry"
             },
-            "compatibility_mechanisms": compatibility_mechanisms,
-            "cut_line": "Muninn's telemetry store owns provider advertisement, command boundary, transport profile, telemetry surface, and daemon health state. Local CLI activation and health commands are compatibility/ops witnesses only.",
+            "input_streams": transport_input_streams,
+            "debug_lowerings": [],
+            "command_lowerings": command_lowerings,
+            "cut_line": "Muninn's telemetry store owns provider advertisement, command boundary, transport profile, telemetry surface, and daemon health state. Local CLI activation is a command lowering; health is published by the serve process over CultNet/RUDP.",
             "updated_at": updated_at,
         }),
     };
-    let provider_advertisement = EveProviderAdvertisementCompatRecord {
+    let provider_advertisement = EveProviderAdvertisementRecord {
         value: json!({
             "schema": "gamecult.eve.provider_advertisement.v1",
             "providerId": provider_id,
@@ -2840,20 +2826,12 @@ fn publish_runtime_boundary_records(
             "availableSources": available_sources,
             "activeStreams": active_streams,
             "capabilities": muninn_capabilities(options),
-            "endpoints": [
-                {
-                    "transport": "cultcache-store",
-                    "address": options.store_path.display().to_string()
-                }
-            ],
+            "endpoints": provider_endpoints,
+            "inputStreams": provider_input_streams,
             "routes": [
                 {
                     "transport": "cultcache-store",
                     "address": options.store_path.display().to_string()
-                },
-                {
-                    "transport": "compatibility-local-cli",
-                    "address": activation_command
                 }
             ],
             "commandSurface": {
@@ -2868,15 +2846,12 @@ fn publish_runtime_boundary_records(
     Ok(())
 }
 
-fn publish_odin_startup_respect(
-    node: &cultmesh_rs::CultMeshNode,
-    options: &Options,
-) -> Result<()> {
-    let Some(target) = options.odin_cultmesh_rudp else {
+fn publish_odin_startup_respect(node: &cultmesh_rs::CultMeshNode, options: &Options) -> Result<()> {
+    let Some(target) = resolve_odin_cultmesh_uri(options) else {
         return Ok(());
     };
     let provider_id = muninn_provider_id(options);
-    let provider = node.get_required::<EveProviderAdvertisementCompatRecord>(&provider_id)?;
+    let provider = node.get_required::<EveProviderAdvertisementRecord>(&provider_id)?;
     node.publish_document_to_rudp_catalog(
         &provider_id,
         &provider,
@@ -3054,10 +3029,7 @@ fn publish_obs_catalog(
         urls,
         states,
         updated_at: timestamp()?,
-        command_rudp_target: options
-            .capture_command_rudp_bind
-            .map(|addr| addr.to_string())
-            .unwrap_or_default(),
+        command_rudp_target: String::new(),
         media_target_host: options.target_host.clone(),
         media_port: options.port,
         media_packet_bytes: options.media_packet_bytes as u32,
@@ -3081,25 +3053,7 @@ fn publish_obs_catalog(
             .collect(),
     };
     node.put("obs", &record)?;
-    if let Some(target) = options.obs_catalog_rudp_target {
-        if let Err(error) = publish_obs_catalog_rudp(target, &record) {
-            eprintln!("Muninn could not publish OBS stream catalog to {target}: {error:#}");
-        }
-    }
     Ok(())
-}
-
-fn publish_obs_catalog_rudp(
-    target: SocketAddr,
-    record: &MuninnObsStreamCatalogRecord,
-) -> Result<()> {
-    publish_rudp_schema_payload(
-        target,
-        MUNINN_OBS_CATALOG_RUDP_CONNECTION_ID,
-        "muninn-obs-catalog",
-        "muninn.obs_stream_catalog",
-        rmp_serde::to_vec(record).context("encoding Muninn OBS stream catalog")?,
-    )
 }
 
 fn create_move_evidence_stream(options: &Options) -> Result<Option<ActiveMoveEvidenceStream>> {
@@ -3304,6 +3258,7 @@ fn publish_move_controller_states(
     active: &mut [ActiveMoveStateSource],
     reader: &mut impl MoveControllerStateReader,
     move_evidence_stream: Option<&mut ActiveMoveEvidenceStream>,
+    mut hid_controller_stream: Option<&mut ActiveHidControllerStream>,
 ) -> Result<()> {
     let mut published_records = Vec::new();
     for state in active {
@@ -3335,16 +3290,78 @@ fn publish_move_controller_states(
                 }
             }
             state.sequence = state.sequence.saturating_add(1);
+            let observed_at = timestamp()?;
+            let source_timestamp_ns = timestamp_ns()?;
+            let hid_record = build_hid_controller_state_record_from_joystick(
+                options,
+                &state.source,
+                state.sequence,
+                state.joystick_axes,
+                state.joystick_buttons,
+                source_timestamp_ns,
+                observed_at.clone(),
+            );
+            put_hid_controller_state_receipt(node, options, &hid_record)?;
+            publish_hid_controller_state_to_stream(
+                hid_controller_stream.as_deref_mut(),
+                &hid_record,
+            );
+            publish_hid_controller_state_to_odin(node, &hid_record);
             build_move_controller_state_record_from_joystick(
                 options,
                 &state.source,
                 state.sequence,
                 state.joystick_axes,
                 state.joystick_buttons,
-                timestamp_ns()?,
-                timestamp()?,
+                source_timestamp_ns,
+                observed_at,
             )
+        } else if is_xinput_source_path(&state.source.hidraw_path) {
+            let index = match xinput_index_from_source_path(&state.source.hidraw_path) {
+                Some(index) => index,
+                None => {
+                    eprintln!(
+                        "Muninn skipped XInput source {} at {}: invalid xinput source path",
+                        state.source.move_id, state.source.hidraw_path
+                    );
+                    continue;
+                }
+            };
+            let gamepad = match platform_xinput_gamepad(index) {
+                Ok(Some(gamepad)) => gamepad,
+                Ok(None) => continue,
+                Err(error) => {
+                    eprintln!(
+                        "Muninn skipped XInput source {} at {}: {error:#}",
+                        state.source.move_id, state.source.hidraw_path
+                    );
+                    continue;
+                }
+            };
+            state.sequence = state.sequence.saturating_add(1);
+            let observed_at = timestamp()?;
+            let hid_record = build_hid_controller_state_record_from_xinput_gamepad(
+                options,
+                &state.source,
+                state.sequence,
+                &gamepad,
+                timestamp_ns()?,
+                observed_at,
+            );
+            put_hid_controller_state_receipt(node, options, &hid_record)?;
+            publish_hid_controller_state_to_stream(
+                hid_controller_stream.as_deref_mut(),
+                &hid_record,
+            );
+            publish_hid_controller_state_to_odin(node, &hid_record);
+            continue;
         } else {
+            #[cfg(windows)]
+            if options.hid_controller_rudp_bind.is_some()
+                && is_windows_ps_move_source(&state.source.hidraw_path)
+            {
+                continue;
+            }
             let report = match reader.read_report(&state.source.hidraw_path) {
                 Ok(report) => report,
                 Err(error) => {
@@ -3359,20 +3376,33 @@ fn publish_move_controller_states(
                 continue;
             };
             state.sequence = state.sequence.saturating_add(1);
+            let observed_at = timestamp()?;
+            let source_timestamp_ns = timestamp_ns()?;
+            let hid_record = build_hid_controller_state_record_from_report(
+                options,
+                &state.source,
+                state.sequence,
+                &report,
+                source_timestamp_ns,
+                observed_at.clone(),
+            );
+            trace_hid_controller_record("report", &hid_record, &report);
+            put_hid_controller_state_receipt(node, options, &hid_record)?;
+            publish_hid_controller_state_to_stream(
+                hid_controller_stream.as_deref_mut(),
+                &hid_record,
+            );
+            publish_hid_controller_state_to_odin(node, &hid_record);
             build_move_controller_state_record(
                 options,
                 &state.source,
                 state.sequence,
                 &report,
-                timestamp_ns()?,
-                timestamp()?,
+                source_timestamp_ns,
+                observed_at,
             )
         };
-        node.put(&record.stream_id, &record)?;
-        node.put(
-            &format!("{}:{}", record.stream_id, record.sequence),
-            &record,
-        )?;
+        put_move_controller_state_receipt(node, options, &record)?;
         published_records.push(record);
     }
     if let Some(stream) = move_evidence_stream {
@@ -3381,8 +3411,858 @@ fn publish_move_controller_states(
     Ok(())
 }
 
+fn put_hid_controller_state_receipt(
+    node: &mut cultmesh_rs::CultMeshNode,
+    options: &Options,
+    record: &MuninnHidControllerStateRecord,
+) -> Result<()> {
+    node.put(&record.stream_id, record)?;
+    node.put(
+        &sequence_receipt_key(&record.stream_id, record.sequence),
+        record,
+    )?;
+    prune_hid_controller_state_receipt(node, options, &record.stream_id, record.sequence)
+}
+
+fn put_move_controller_state_receipt(
+    node: &mut cultmesh_rs::CultMeshNode,
+    options: &Options,
+    record: &MuninnMoveControllerStateRecord,
+) -> Result<()> {
+    node.put(&record.stream_id, record)?;
+    node.put(
+        &sequence_receipt_key(&record.stream_id, record.sequence),
+        record,
+    )?;
+    prune_move_controller_state_receipt(node, options, &record.stream_id, record.sequence)
+}
+
+fn prune_hid_controller_state_receipt(
+    node: &mut cultmesh_rs::CultMeshNode,
+    options: &Options,
+    stream_id: &str,
+    current_sequence: u64,
+) -> Result<()> {
+    let Some(first_retained_sequence) = first_retained_receipt_sequence(options, current_sequence)
+    else {
+        return Ok(());
+    };
+    for key in stale_sequence_receipt_keys(node, stream_id, first_retained_sequence) {
+        let _ = node.delete::<MuninnHidControllerStateRecord>(&key)?;
+    }
+    Ok(())
+}
+
+fn prune_move_controller_state_receipt(
+    node: &mut cultmesh_rs::CultMeshNode,
+    options: &Options,
+    stream_id: &str,
+    current_sequence: u64,
+) -> Result<()> {
+    let Some(first_retained_sequence) = first_retained_receipt_sequence(options, current_sequence)
+    else {
+        return Ok(());
+    };
+    for key in stale_sequence_receipt_keys(node, stream_id, first_retained_sequence) {
+        let _ = node.delete::<MuninnMoveControllerStateRecord>(&key)?;
+    }
+    Ok(())
+}
+
+fn first_retained_receipt_sequence(options: &Options, current_sequence: u64) -> Option<u64> {
+    let interval_seconds = options.interval_seconds.unwrap_or(15).max(1);
+    let retained_sequences = (options.hid_controller_receipt_retention_seconds / interval_seconds)
+        .saturating_add(2)
+        .max(1);
+    current_sequence.checked_sub(retained_sequences)
+}
+
+fn stale_sequence_receipt_keys(
+    node: &cultmesh_rs::CultMeshNode,
+    stream_id: &str,
+    first_retained_sequence: u64,
+) -> Vec<String> {
+    node.cache()
+        .snapshot()
+        .into_iter()
+        .filter_map(|envelope| {
+            let sequence = sequence_from_receipt_key(stream_id, &envelope.key)?;
+            (sequence < first_retained_sequence).then_some(envelope.key)
+        })
+        .collect()
+}
+
+fn sequence_from_receipt_key(stream_id: &str, key: &str) -> Option<u64> {
+    let suffix = key.strip_prefix(stream_id)?.strip_prefix(':')?;
+    suffix.parse().ok()
+}
+
+fn sequence_receipt_key(stream_id: &str, sequence: u64) -> String {
+    format!("{stream_id}:{sequence}")
+}
+
 fn is_joystick_path(path: &str) -> bool {
     path.contains("/dev/input/js") || path.contains("-joystick")
+}
+
+fn is_xinput_source_path(path: &str) -> bool {
+    path.to_ascii_lowercase()
+        .starts_with(WINDOWS_XINPUT_SOURCE_PREFIX)
+}
+
+fn xinput_index_from_source_path(path: &str) -> Option<u32> {
+    path.to_ascii_lowercase()
+        .strip_prefix(WINDOWS_XINPUT_SOURCE_PREFIX)?
+        .parse::<u32>()
+        .ok()
+        .filter(|index| *index < 4)
+}
+
+struct ActiveHidControllerStream {
+    target: SocketAddr,
+    transport: CultNetRudpSocketTransportConnection,
+    last_connect_attempt_at: Option<Instant>,
+    connected_logged: bool,
+    sent_frames: u64,
+    last_wait_log_at: Option<Instant>,
+    last_sent_at: Option<Instant>,
+    last_stale_log_at: Option<Instant>,
+}
+
+struct ActiveHidControllerRudpSource {
+    source: MoveStateSource,
+    sequence: u64,
+    joystick_axes: [i16; 16],
+    joystick_buttons: [bool; 32],
+    latest_report: Option<LatestHidReport>,
+    last_emitted_axes: Option<Vec<f32>>,
+    last_emitted_buttons: Option<Vec<String>>,
+    last_emitted_at: Option<Instant>,
+    #[cfg(windows)]
+    report_rx: Option<mpsc::Receiver<LatestHidReport>>,
+    last_read_error_log_at: Option<Instant>,
+}
+
+#[derive(Clone, Debug)]
+struct LatestHidReport {
+    bytes: Vec<u8>,
+    source_timestamp_ns: i64,
+    observed_at: String,
+}
+
+const HID_CONTROLLER_RUDP_HEARTBEAT_AFTER: Duration = Duration::from_millis(50);
+const HID_CONTROLLER_RUDP_AXIS_EPSILON: f32 = 0.01;
+const HID_CONTROLLER_RUDP_MAX_FRAGMENT_BYTES: u32 = 1_200;
+const HID_CONTROLLER_RUDP_MAX_REPORT_DRAIN: usize = 256;
+
+#[derive(Clone, Debug, Deserialize)]
+struct HidControllerRudpSubscription {
+    #[serde(rename = "deviceFilter")]
+    device_filter: Option<String>,
+    #[serde(rename = "streamId")]
+    stream_id: Option<String>,
+}
+
+fn start_hid_controller_rudp_ingress(options: &Options) -> Result<()> {
+    let Some(bind_address) = options.hid_controller_rudp_bind else {
+        return Ok(());
+    };
+    if live_move_state_sources(options).is_empty() {
+        return Ok(());
+    }
+    let socket = UdpSocket::bind(bind_address)
+        .with_context(|| format!("binding Muninn HID controller RUDP stream at {bind_address}"))?;
+    socket
+        .set_read_timeout(Some(Duration::from_millis(1)))
+        .with_context(|| format!("setting Muninn HID controller RUDP timeout at {bind_address}"))?;
+    let runtime_options = options.clone();
+    thread::spawn(move || {
+        if let Err(error) = run_hid_controller_rudp_ingress(socket, runtime_options) {
+            eprintln!("Muninn HID controller RUDP stream stopped: {error:#}");
+        }
+    });
+    Ok(())
+}
+
+fn run_hid_controller_rudp_ingress(socket: UdpSocket, options: Options) -> Result<()> {
+    let local_addr = socket.local_addr()?;
+    println!("Muninn HID controller RUDP stream listening at {local_addr}.");
+    let mut transport =
+        CultNetRudpSocketTransportConnection::new(CultNetRudpSocketTransportOptions {
+            runtime_id: "muninn-hid-controller-rudp".to_string(),
+            socket,
+            mode: cultnet_rs::CultNetRudpSocketMode::Server,
+            remote_addr: None,
+            connection_id: MUNINN_HID_CONTROLLER_RUDP_CONNECTION_ID,
+            initial_sequence: 1,
+            resend_delay_ms: 5,
+            transport_id: Some("muninn-hid-controller-rudp".to_string()),
+            max_payload_bytes: None,
+            max_fragment_bytes: Some(HID_CONTROLLER_RUDP_MAX_FRAGMENT_BYTES),
+            max_pending_reliable_packets: Some(256),
+            media_reliable_expire_after_ms: Some(25),
+        })?;
+    let mut sources = live_move_state_sources(&options)
+        .into_iter()
+        .map(|source| ActiveHidControllerRudpSource {
+            #[cfg(windows)]
+            report_rx: start_windows_hid_report_reader_if_supported(&source.hidraw_path),
+            source,
+            sequence: 0,
+            joystick_axes: [0; 16],
+            joystick_buttons: [false; 32],
+            latest_report: None,
+            last_emitted_axes: None,
+            last_emitted_buttons: None,
+            last_emitted_at: None,
+            last_read_error_log_at: None,
+        })
+        .collect::<Vec<_>>();
+    let mut reader = HidMoveControllerStateReader;
+    let mut sent_frames = 0u64;
+    let mut last_sent_at = None::<Instant>;
+    let mut last_stale_log_at = None::<Instant>;
+    let mut selected_device_filter = None::<String>;
+    let mut selected_stream_id = None::<String>;
+    let mut last_waiting_for_subscription_log_at = None::<Instant>;
+    loop {
+        for _ in 0..16 {
+            match transport.receive_once() {
+                Ok(Some(frame)) if frame.channel_id == "hid.subscribe" => {
+                    match serde_json::from_slice::<HidControllerRudpSubscription>(&frame.payload) {
+                        Ok(subscription) => {
+                            let next_device_filter = subscription
+                                .device_filter
+                                .filter(|filter| !filter.trim().is_empty());
+                            let next_stream_id = subscription
+                                .stream_id
+                                .filter(|stream_id| !stream_id.trim().is_empty());
+                            if selected_device_filter != next_device_filter
+                                || selected_stream_id != next_stream_id
+                            {
+                                eprintln!(
+                                    "Muninn HID controller RUDP subscription device_filter={:?} stream_id={:?}",
+                                    next_device_filter, next_stream_id
+                                );
+                            }
+                            selected_device_filter = next_device_filter;
+                            selected_stream_id = next_stream_id;
+                        }
+                        Err(error) => {
+                            eprintln!(
+                                "Muninn ignored invalid HID controller RUDP subscription: {error:#}"
+                            );
+                        }
+                    }
+                }
+                Ok(Some(_)) => {}
+                Ok(None) => break,
+                Err(error) => {
+                    eprintln!("Muninn HID controller RUDP receive warning: {error:#}");
+                    break;
+                }
+            }
+        }
+        if transport.connected() && selected_device_filter.is_none() && selected_stream_id.is_none()
+        {
+            let should_log = last_waiting_for_subscription_log_at
+                .is_none_or(|logged_at| logged_at.elapsed() >= Duration::from_secs(5));
+            if should_log {
+                eprintln!(
+                    "Muninn HID controller RUDP has a consumer but no selected HID subscription; not broadcasting inputs"
+                );
+                last_waiting_for_subscription_log_at = Some(Instant::now());
+            }
+            thread::sleep(Duration::from_millis(8));
+            continue;
+        }
+        for source in &mut sources {
+            if !hid_controller_source_matches_subscription(
+                &options,
+                &source.source,
+                selected_device_filter.as_deref(),
+                selected_stream_id.as_deref(),
+            ) {
+                continue;
+            }
+            let Some(record) = read_hid_controller_state_for_stream(&options, source, &mut reader)
+            else {
+                continue;
+            };
+            if !hid_controller_record_matches_subscription(
+                &record,
+                selected_device_filter.as_deref(),
+                selected_stream_id.as_deref(),
+            ) {
+                continue;
+            }
+            if transport.connected() {
+                let payload = serde_json::to_vec(&sanitize_hid_controller_record(record.clone()))
+                    .context("encoding Muninn HID controller stream record")?;
+                if let Err(error) = transport.send("latest", payload) {
+                    eprintln!("Muninn HID controller RUDP send warning: {error:#}");
+                    break;
+                }
+                sent_frames = sent_frames.saturating_add(1);
+                last_sent_at = Some(Instant::now());
+                last_stale_log_at = None;
+                if sent_frames % 600 == 0 {
+                    eprintln!(
+                        "Muninn HID controller RUDP served frame #{} device={} seq={}",
+                        sent_frames,
+                        record.device_id,
+                        record.sequence
+                    );
+                }
+            }
+        }
+        if let Err(error) = transport.poll_resends() {
+            eprintln!("Muninn HID controller RUDP resend warning: {error:#}");
+        }
+        if transport.connected()
+            && last_sent_at.is_some_and(|sent_at| sent_at.elapsed() >= Duration::from_secs(2))
+        {
+            let should_log = last_stale_log_at
+                .is_none_or(|logged_at| logged_at.elapsed() >= Duration::from_secs(5));
+            if should_log {
+                eprintln!(
+                    "Muninn HID controller RUDP has an active consumer but has sent no frames for {:?}",
+                    last_sent_at.map(|sent_at| sent_at.elapsed())
+                );
+                last_stale_log_at = Some(Instant::now());
+            }
+        }
+        thread::sleep(Duration::from_millis(8));
+    }
+}
+
+fn hid_controller_source_matches_subscription(
+    options: &Options,
+    source: &MoveStateSource,
+    device_filter: Option<&str>,
+    stream_id: Option<&str>,
+) -> bool {
+    let source_stream_id = format!("{}:{}:hid-controller-state", options.host_id, source.move_id);
+    let stream_matches = stream_id.is_none_or(|stream_id| source_stream_id == stream_id);
+    let device_matches = device_filter.is_none_or(|filter| {
+        source.move_id == filter
+            || source_stream_id == filter
+            || source.hidraw_path.contains(filter)
+            || hid_controller_kind_from_source(source) == filter
+    });
+    stream_matches && device_matches
+}
+
+fn hid_controller_record_matches_subscription(
+    record: &MuninnHidControllerStateRecord,
+    device_filter: Option<&str>,
+    stream_id: Option<&str>,
+) -> bool {
+    let stream_matches = stream_id.is_none_or(|stream_id| record.stream_id == stream_id);
+    let device_matches = device_filter.is_none_or(|filter| {
+        record.device_id == filter
+            || record.stream_id == filter
+            || record.source_path.contains(filter)
+            || record.device_kind == filter
+    });
+    stream_matches && device_matches
+}
+
+fn read_hid_controller_state_for_stream(
+    options: &Options,
+    active: &mut ActiveHidControllerRudpSource,
+    reader: &mut impl MoveControllerStateReader,
+) -> Option<MuninnHidControllerStateRecord> {
+    let source = &active.source;
+    if is_joystick_path(&source.hidraw_path) {
+        let events = match reader.read_joystick_events(&source.hidraw_path) {
+            Ok(events) => {
+                active.last_read_error_log_at = None;
+                events
+            }
+            Err(error) => {
+                let should_log = active
+                    .last_read_error_log_at
+                    .is_none_or(|logged_at| logged_at.elapsed() >= Duration::from_secs(5));
+                if should_log {
+                    eprintln!(
+                        "Muninn skipped HID controller stream source {} at {}: {error:#}",
+                        source.move_id, source.hidraw_path
+                    );
+                    active.last_read_error_log_at = Some(Instant::now());
+                }
+                return None;
+            }
+        };
+        for event in events {
+            match event.event_type & 0x7f {
+                0x01 => {
+                    if let Some(button) = active.joystick_buttons.get_mut(event.number as usize) {
+                        *button = event.value != 0;
+                    }
+                }
+                0x02 => {
+                    if let Some(axis) = active.joystick_axes.get_mut(event.number as usize) {
+                        *axis = event.value;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let record = build_hid_controller_state_record_from_joystick(
+            options,
+            source,
+            active.sequence.saturating_add(1),
+            active.joystick_axes,
+            active.joystick_buttons,
+            timestamp_ns().ok()?,
+            timestamp().ok()?,
+        );
+        return emit_hid_controller_record_if_due(active, record);
+    }
+    if !is_xinput_source_path(&source.hidraw_path) {
+        #[cfg(windows)]
+        if let Some(rx) = active.report_rx.as_ref() {
+            let mut saw_report = false;
+            let mut drained_reports = 0usize;
+            for _ in 0..HID_CONTROLLER_RUDP_MAX_REPORT_DRAIN {
+                let Ok(report) = rx.try_recv() else {
+                    break;
+                };
+                active.latest_report = Some(report);
+                saw_report = true;
+                drained_reports += 1;
+            }
+            if drained_reports == HID_CONTROLLER_RUDP_MAX_REPORT_DRAIN {
+                eprintln!(
+                    "Muninn Windows HID reader drained {drained_reports} queued reports for {}; keeping latest",
+                    source.move_id
+                );
+            }
+            if saw_report {
+                active.last_read_error_log_at = None;
+            } else if active.latest_report.is_none()
+                || !hid_controller_stream_heartbeat_due(active)
+            {
+                return None;
+            }
+            let report = active.latest_report.as_ref()?;
+            let record = build_hid_controller_state_record_from_report(
+                options,
+                source,
+                active.sequence.saturating_add(1),
+                &report.bytes,
+                report.source_timestamp_ns,
+                report.observed_at.clone(),
+            );
+            trace_hid_controller_record("rudp-report", &record, &report.bytes);
+            return emit_hid_controller_record_if_due(active, record);
+        }
+        let report = {
+            match reader.read_report(&source.hidraw_path) {
+                Ok(Some(report)) => report,
+                Ok(None) => return None,
+                Err(error) => {
+                    let should_log = active
+                        .last_read_error_log_at
+                        .is_none_or(|logged_at| logged_at.elapsed() >= Duration::from_secs(5));
+                    if should_log {
+                        eprintln!(
+                            "Muninn skipped HID controller stream source {} at {}: {error:#}",
+                            source.move_id, source.hidraw_path
+                        );
+                        active.last_read_error_log_at = Some(Instant::now());
+                    }
+                    return None;
+                }
+            }
+        };
+        let record = build_hid_controller_state_record_from_report(
+            options,
+            source,
+            active.sequence.saturating_add(1),
+            &report,
+            timestamp_ns().ok()?,
+            timestamp().ok()?,
+        );
+        trace_hid_controller_record("rudp-report", &record, &report);
+        return emit_hid_controller_record_if_due(active, record);
+    }
+    let Some(index) = xinput_index_from_source_path(&source.hidraw_path) else {
+        return None;
+    };
+    let gamepad = match platform_xinput_gamepad(index) {
+        Ok(Some(gamepad)) => {
+            active.last_read_error_log_at = None;
+            gamepad
+        }
+        Ok(None) => return None,
+        Err(error) => {
+            let should_log = active
+                .last_read_error_log_at
+                .is_none_or(|logged_at| logged_at.elapsed() >= Duration::from_secs(5));
+            if should_log {
+                eprintln!(
+                    "Muninn skipped HID controller stream source {} at {}: {error:#}",
+                    source.move_id, source.hidraw_path
+                );
+                active.last_read_error_log_at = Some(Instant::now());
+            }
+            return None;
+        }
+    };
+    let record = build_hid_controller_state_record_from_xinput_gamepad(
+        options,
+        source,
+        active.sequence.saturating_add(1),
+        &gamepad,
+        timestamp_ns().ok()?,
+        timestamp().ok()?,
+    );
+    emit_hid_controller_record_if_due(active, record)
+}
+
+fn emit_hid_controller_record_if_due(
+    active: &mut ActiveHidControllerRudpSource,
+    mut record: MuninnHidControllerStateRecord,
+) -> Option<MuninnHidControllerStateRecord> {
+    let axes_changed = active
+        .last_emitted_axes
+        .as_ref()
+        .is_none_or(|previous| hid_controller_axes_changed(previous, &record.axes));
+    let buttons_changed = active
+        .last_emitted_buttons
+        .as_ref()
+        .is_none_or(|previous| previous != &record.buttons);
+    let heartbeat_due = active
+        .last_emitted_at
+        .is_none_or(|last| last.elapsed() >= HID_CONTROLLER_RUDP_HEARTBEAT_AFTER);
+    if !(axes_changed || buttons_changed || heartbeat_due) {
+        return None;
+    }
+    active.sequence = active.sequence.saturating_add(1);
+    record.sequence = active.sequence;
+    active.last_emitted_axes = Some(record.axes.clone());
+    active.last_emitted_buttons = Some(record.buttons.clone());
+    active.last_emitted_at = Some(Instant::now());
+    Some(record)
+}
+
+fn hid_controller_stream_heartbeat_due(active: &ActiveHidControllerRudpSource) -> bool {
+    active
+        .last_emitted_at
+        .is_none_or(|last| last.elapsed() >= HID_CONTROLLER_RUDP_HEARTBEAT_AFTER)
+}
+
+fn hid_controller_axes_changed(previous: &[f32], current: &[f32]) -> bool {
+    previous.len() != current.len()
+        || previous
+            .iter()
+            .zip(current.iter())
+            .any(|(previous, current)| (previous - current).abs() > HID_CONTROLLER_RUDP_AXIS_EPSILON)
+}
+
+fn build_hid_controller_state_record_from_report(
+    options: &Options,
+    source: &MoveStateSource,
+    sequence: u64,
+    report: &[u8],
+    source_timestamp_ns: i64,
+    observed_at: String,
+) -> MuninnHidControllerStateRecord {
+    MuninnHidControllerStateRecord {
+        stream_id: format!(
+            "{}:{}:hid-controller-state",
+            options.host_id, source.move_id
+        ),
+        host_id: options.host_id.clone(),
+        device_id: source.move_id.clone(),
+        device_kind: hid_controller_kind_from_source(source),
+        sequence,
+        source_timestamp_ns,
+        axes: hid_controller_axes_from_report(source, report),
+        buttons: hid_controller_button_names(source, report),
+        battery01: move_battery01(report.get(12).copied().unwrap_or_default()),
+        observed_at,
+        source_path: source.hidraw_path.clone(),
+    }
+}
+
+fn trace_hid_controller_record(
+    source: &str,
+    record: &MuninnHidControllerStateRecord,
+    report: &[u8],
+) {
+    if !muninn_hid_trace_enabled() {
+        return;
+    }
+    let raw = report
+        .iter()
+        .take(24)
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    eprintln!(
+        "Muninn HID trace source={source} device={} kind={} seq={} axes={:?} buttons={:?} raw24=[{}] path={}",
+        record.device_id,
+        record.device_kind,
+        record.sequence,
+        record.axes,
+        record.buttons,
+        raw,
+        record.source_path
+    );
+}
+
+fn muninn_hid_trace_enabled() -> bool {
+    env::var("MUNINN_HID_TRACE")
+        .map(|value| {
+            let value = value.trim();
+            value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("yes")
+        })
+        .unwrap_or(false)
+}
+
+fn hid_controller_axes_from_report(source: &MoveStateSource, report: &[u8]) -> Vec<f32> {
+    if hid_controller_kind_from_source(source) == "ps3-navigation" {
+        return vec![
+            byte_axis_to_signed_unit(report.get(6).copied()),
+            byte_axis_to_signed_unit(report.get(7).copied()),
+            trigger_to_signed_unit(report.get(18).copied().unwrap_or_default()),
+        ];
+    }
+    vec![
+        signed_report_axis_to_unit(report, 19),
+        signed_report_axis_to_unit(report, 21),
+        trigger_to_signed_unit(report.get(6).copied().unwrap_or_default()),
+        signed_report_axis_to_unit(report, 25),
+        signed_report_axis_to_unit(report, 27),
+    ]
+}
+
+fn hid_controller_button_names(source: &MoveStateSource, report: &[u8]) -> Vec<String> {
+    if hid_controller_kind_from_source(source) == "ps3-navigation" {
+        return ps3_navigation_button_names(report);
+    }
+    move_button_names(report)
+}
+
+fn ps3_navigation_button_names(report: &[u8]) -> Vec<String> {
+    let bits = report.get(1).copied().unwrap_or_default() as u32
+        | ((report.get(2).copied().unwrap_or_default() as u32) << 8)
+        | ((report.get(3).copied().unwrap_or_default() as u32) << 16);
+    [
+        (1 << 0, "up"),
+        (1 << 1, "right"),
+        (1 << 2, "down"),
+        (1 << 3, "left"),
+        (1 << 4, "triangle"),
+        (1 << 5, "circle"),
+        (1 << 6, "cross"),
+        (1 << 7, "square"),
+        (1 << 8, "select"),
+        (1 << 9, "l3"),
+        (1 << 10, "r3"),
+        (1 << 11, "start"),
+        (1 << 12, "up"),
+        (1 << 13, "right"),
+        (1 << 14, "down"),
+        (1 << 15, "left"),
+        (1 << 16, "ps"),
+        (1 << 18, "l1"),
+        (1 << 19, "l2"),
+        (1 << 20, "trigger"),
+    ]
+    .iter()
+    .filter_map(|(mask, name)| {
+        if bits & mask != 0 {
+            Some((*name).to_string())
+        } else {
+            None
+        }
+    })
+    .fold(Vec::<String>::new(), |mut buttons, button| {
+        if !buttons.iter().any(|existing| existing == &button) {
+            buttons.push(button);
+        }
+        buttons
+    })
+}
+
+fn byte_axis_to_signed_unit(value: Option<u8>) -> f32 {
+    match value {
+        Some(value) => ((value as f32 / 255.0) * 2.0 - 1.0).clamp(-1.0, 1.0),
+        None => 0.0,
+    }
+}
+
+fn signed_report_axis_to_unit(report: &[u8], offset: usize) -> f32 {
+    axis_to_signed_unit(read_le_i16(report, offset))
+}
+
+fn sanitize_hid_controller_record(
+    mut record: MuninnHidControllerStateRecord,
+) -> MuninnHidControllerStateRecord {
+    if !record.battery01.is_finite() {
+        record.battery01 = -1.0;
+    }
+    for axis in &mut record.axes {
+        if !axis.is_finite() {
+            *axis = 0.0;
+        }
+    }
+    record
+}
+
+fn create_hid_controller_stream(options: &Options) -> Result<Option<ActiveHidControllerStream>> {
+    let Some(target) = options.hid_controller_rudp_target else {
+        return Ok(None);
+    };
+    let bind_address = if target.is_ipv4() {
+        "0.0.0.0:0"
+    } else {
+        "[::]:0"
+    };
+    let socket = UdpSocket::bind(bind_address)
+        .with_context(|| format!("binding Muninn HID RUDP sender at {bind_address}"))?;
+    socket.set_read_timeout(Some(Duration::from_millis(1)))?;
+    eprintln!("Muninn HID fast stream targeting {target} over CultNet RUDP");
+    let transport = CultNetRudpSocketTransportConnection::new(CultNetRudpSocketTransportOptions {
+        runtime_id: "muninn-hid-controller-rudp".to_string(),
+        socket,
+        mode: cultnet_rs::CultNetRudpSocketMode::Client,
+        remote_addr: Some(target),
+        connection_id: MUNINN_HID_CONTROLLER_RUDP_CONNECTION_ID,
+        initial_sequence: 1,
+        resend_delay_ms: 5,
+        transport_id: Some("muninn-hid-controller-rudp".to_string()),
+        max_payload_bytes: None,
+        max_fragment_bytes: Some(HID_CONTROLLER_RUDP_MAX_FRAGMENT_BYTES),
+        max_pending_reliable_packets: Some(256),
+        media_reliable_expire_after_ms: Some(25),
+    })?;
+    Ok(Some(ActiveHidControllerStream {
+        target,
+        transport,
+        last_connect_attempt_at: None,
+        connected_logged: false,
+        sent_frames: 0,
+        last_wait_log_at: None,
+        last_sent_at: None,
+        last_stale_log_at: None,
+    }))
+}
+
+fn publish_hid_controller_state_to_stream(
+    stream: Option<&mut ActiveHidControllerStream>,
+    record: &MuninnHidControllerStateRecord,
+) {
+    let Some(stream) = stream else {
+        return;
+    };
+    if let Err(error) = publish_hid_controller_state_to_stream_inner(stream, record) {
+        eprintln!(
+            "Muninn could not publish HID controller {} to fast RUDP stream {}: {error:#}",
+            record.device_id, stream.target
+        );
+    }
+}
+
+fn publish_hid_controller_state_to_stream_inner(
+    stream: &mut ActiveHidControllerStream,
+    record: &MuninnHidControllerStateRecord,
+) -> Result<()> {
+    if !stream.transport.connected() {
+        if stream.connected_logged {
+            eprintln!(
+                "Muninn HID fast stream lost connection to {}; reconnecting",
+                stream.target
+            );
+            stream.connected_logged = false;
+        }
+        let should_attempt = stream
+            .last_connect_attempt_at
+            .is_none_or(|attempt| attempt.elapsed() >= Duration::from_millis(250));
+        if should_attempt {
+            stream.last_connect_attempt_at = Some(Instant::now());
+            eprintln!("Muninn HID fast stream connecting to {}", stream.target);
+            stream.transport.connect(Vec::new())?;
+        }
+        for _ in 0..8 {
+            if stream.transport.connected() {
+                break;
+            }
+            let _ = stream.transport.receive_once()?;
+            stream.transport.poll_resends()?;
+        }
+        if !stream.transport.connected() {
+            let should_log_wait = stream
+                .last_wait_log_at
+                .is_none_or(|logged| logged.elapsed() >= Duration::from_secs(2));
+            if should_log_wait {
+                stream.last_wait_log_at = Some(Instant::now());
+                eprintln!(
+                    "Muninn HID fast stream waiting for RUDP accept from {}",
+                    stream.target
+                );
+            }
+            return Ok(());
+        }
+    }
+    if !stream.connected_logged {
+        eprintln!("Muninn HID fast stream connected to {}", stream.target);
+        stream.connected_logged = true;
+    }
+    if stream.transport.check_timeout(2_000) {
+        eprintln!(
+            "Muninn HID fast stream timed out waiting for {}",
+            stream.target
+        );
+        stream.connected_logged = false;
+        return Ok(());
+    }
+    let mut frame = record.clone();
+    if !frame.battery01.is_finite() {
+        frame.battery01 = -1.0;
+    }
+    for axis in &mut frame.axes {
+        if !axis.is_finite() {
+            *axis = 0.0;
+        }
+    }
+    let payload = serde_json::to_vec(&frame).context("encoding HID controller stream frame")?;
+    stream.transport.send("latest", payload)?;
+    stream.last_sent_at = Some(Instant::now());
+    stream.last_stale_log_at = None;
+    for _ in 0..4 {
+        if stream.transport.receive_once()?.is_none() {
+            break;
+        }
+    }
+    stream.transport.poll_resends()?;
+    stream.sent_frames = stream.sent_frames.saturating_add(1);
+    if stream.sent_frames <= 5 || stream.sent_frames % 120 == 0 {
+        eprintln!(
+            "Muninn HID fast stream sent frame #{} device={} seq={} buttons=[{}]",
+            stream.sent_frames,
+            record.device_id,
+            record.sequence,
+            record.buttons.join(",")
+        );
+    }
+    Ok(())
+}
+
+fn publish_hid_controller_state_to_odin(
+    node: &mut cultmesh_rs::CultMeshNode,
+    record: &MuninnHidControllerStateRecord,
+) {
+    if let Err(error) = node.put(&record.stream_id, record) {
+        eprintln!(
+            "Muninn could not store HID controller {} discovery record: {error:#}",
+            record.device_id
+        );
+    }
 }
 
 #[cfg(windows)]
@@ -3463,6 +4343,94 @@ fn build_move_controller_state_record_from_joystick(
     }
 }
 
+fn build_hid_controller_state_record_from_joystick(
+    options: &Options,
+    source: &MoveStateSource,
+    sequence: u64,
+    axes: [i16; 16],
+    buttons: [bool; 32],
+    source_timestamp_ns: i64,
+    observed_at: String,
+) -> MuninnHidControllerStateRecord {
+    MuninnHidControllerStateRecord {
+        stream_id: format!(
+            "{}:{}:hid-controller-state",
+            options.host_id, source.move_id
+        ),
+        host_id: options.host_id.clone(),
+        device_id: source.move_id.clone(),
+        device_kind: hid_controller_kind_from_source(source),
+        sequence,
+        source_timestamp_ns,
+        axes: axes.into_iter().map(axis_to_signed_unit).collect(),
+        buttons: joystick_button_names(buttons),
+        battery01: f32::NAN,
+        observed_at,
+        source_path: source.hidraw_path.clone(),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct XinputGamepadSnapshot {
+    buttons: u16,
+    left_trigger: u8,
+    right_trigger: u8,
+    thumb_lx: i16,
+    thumb_ly: i16,
+    thumb_rx: i16,
+    thumb_ry: i16,
+}
+
+fn build_hid_controller_state_record_from_xinput_gamepad(
+    options: &Options,
+    source: &MoveStateSource,
+    sequence: u64,
+    gamepad: &XinputGamepadSnapshot,
+    source_timestamp_ns: i64,
+    observed_at: String,
+) -> MuninnHidControllerStateRecord {
+    MuninnHidControllerStateRecord {
+        stream_id: format!(
+            "{}:{}:hid-controller-state",
+            options.host_id, source.move_id
+        ),
+        host_id: options.host_id.clone(),
+        device_id: source.move_id.clone(),
+        device_kind: "xinput-controller".to_string(),
+        sequence,
+        source_timestamp_ns,
+        axes: vec![
+            axis_to_signed_unit(gamepad.thumb_lx),
+            axis_to_signed_unit(gamepad.thumb_ly),
+            trigger_to_signed_unit(gamepad.left_trigger),
+            axis_to_signed_unit(gamepad.thumb_rx),
+            axis_to_signed_unit(gamepad.thumb_ry),
+            trigger_to_signed_unit(gamepad.right_trigger),
+        ],
+        buttons: xinput_button_names(gamepad.buttons),
+        battery01: f32::NAN,
+        observed_at,
+        source_path: source.hidraw_path.clone(),
+    }
+}
+
+fn hid_controller_kind_from_source(source: &MoveStateSource) -> String {
+    let haystack = format!(
+        "{} {}",
+        source.move_id.to_ascii_lowercase(),
+        source.hidraw_path.to_ascii_lowercase()
+    );
+    if haystack.contains("nav") || haystack.contains("navigation") || haystack.contains("042f") {
+        "ps3-navigation".to_string()
+    } else if haystack.contains("xinput") || haystack.contains("xbox") {
+        "xinput-controller".to_string()
+    } else if haystack.contains("move") || haystack.contains("03d5") {
+        "ps-move".to_string()
+    } else {
+        "generic-hid-controller".to_string()
+    }
+}
+
 fn joystick_button_names(buttons: [bool; 32]) -> Vec<String> {
     [
         (0, "select"),
@@ -3498,6 +4466,79 @@ fn joystick_button_names(buttons: [bool; 32]) -> Vec<String> {
 
 fn axis_to_unit(value: i16) -> f32 {
     ((value as f32 + 32768.0) / 65535.0).clamp(0.0, 1.0)
+}
+
+fn axis_to_signed_unit(value: i16) -> f32 {
+    if value == i16::MIN {
+        -1.0
+    } else {
+        (value as f32 / i16::MAX as f32).clamp(-1.0, 1.0)
+    }
+}
+
+fn trigger_to_signed_unit(value: u8) -> f32 {
+    ((value as f32 / 255.0) * 2.0 - 1.0).clamp(-1.0, 1.0)
+}
+
+fn xinput_button_names(buttons: u16) -> Vec<String> {
+    [
+        (XINPUT_GAMEPAD_DPAD_UP_MASK, "up"),
+        (XINPUT_GAMEPAD_DPAD_DOWN_MASK, "down"),
+        (XINPUT_GAMEPAD_DPAD_LEFT_MASK, "left"),
+        (XINPUT_GAMEPAD_DPAD_RIGHT_MASK, "right"),
+        (XINPUT_GAMEPAD_START_MASK, "start"),
+        (XINPUT_GAMEPAD_BACK_MASK, "back"),
+        (XINPUT_GAMEPAD_LEFT_THUMB_MASK, "l3"),
+        (XINPUT_GAMEPAD_RIGHT_THUMB_MASK, "r3"),
+        (XINPUT_GAMEPAD_LEFT_SHOULDER_MASK, "l1"),
+        (XINPUT_GAMEPAD_RIGHT_SHOULDER_MASK, "r1"),
+        (XINPUT_GAMEPAD_A_MASK, "a"),
+        (XINPUT_GAMEPAD_B_MASK, "b"),
+        (XINPUT_GAMEPAD_X_MASK, "x"),
+        (XINPUT_GAMEPAD_Y_MASK, "y"),
+    ]
+    .iter()
+    .filter_map(|(mask, name)| {
+        if buttons & *mask != 0 {
+            Some((*name).to_string())
+        } else {
+            None
+        }
+    })
+    .collect()
+}
+
+#[cfg(windows)]
+fn platform_xinput_gamepad(index: u32) -> Result<Option<XinputGamepadSnapshot>> {
+    let mut state: XINPUT_STATE = unsafe { std::mem::zeroed() };
+    let result = unsafe { XInputGetState(index, &mut state) };
+    if result != 0 {
+        return Ok(None);
+    }
+    Ok(Some(xinput_snapshot_from_gamepad(state.Gamepad)))
+}
+
+#[cfg(not(windows))]
+fn platform_xinput_gamepad(index: u32) -> Result<Option<XinputGamepadSnapshot>> {
+    if index >= 4 {
+        return Err(anyhow!(
+            "XInput index {index} is outside the supported 0..3 range"
+        ));
+    }
+    Ok(None)
+}
+
+#[cfg(windows)]
+fn xinput_snapshot_from_gamepad(gamepad: XINPUT_GAMEPAD) -> XinputGamepadSnapshot {
+    XinputGamepadSnapshot {
+        buttons: gamepad.wButtons,
+        left_trigger: gamepad.bLeftTrigger,
+        right_trigger: gamepad.bRightTrigger,
+        thumb_lx: gamepad.sThumbLX,
+        thumb_ly: gamepad.sThumbLY,
+        thumb_rx: gamepad.sThumbRX,
+        thumb_ry: gamepad.sThumbRY,
+    }
 }
 
 fn move_button_names(report: &[u8]) -> Vec<String> {
@@ -3829,17 +4870,20 @@ fn platform_move_state_sources() -> Vec<MoveStateSource> {
             continue;
         };
         let uevent = read_move_uevent_chain(&sysfs_device);
-        if !is_ps_move_uevent(&uevent) {
+        let input_name = read_sysfs_input_name(&sysfs_device);
+        if !is_muninn_hid_controller_uevent(&uevent, input_name.as_deref()) {
             continue;
         }
 
         let hidraw_path = joystick_light_hidraw_path(&joystick_path);
-        let move_id = hidraw_path
-            .as_deref()
-            .and_then(controller_id_from_hidraw)
-            .map(|id| format!("move-{id}"))
-            .or_else(|| move_unique_id_from_uevent(&uevent))
-            .unwrap_or_else(|| format!("move-{name}"));
+        let move_id = hid_controller_unique_id_from_uevent(&uevent, input_name.as_deref())
+            .or_else(|| {
+                hidraw_path
+                    .as_deref()
+                    .and_then(controller_id_from_hidraw)
+                    .map(|id| format!("move-{id}"))
+            })
+            .unwrap_or_else(|| format!("hid-{name}"));
         let score = if uevent.contains("HID_ID=0005:0000054C:000003D5") {
             2
         } else {
@@ -3876,15 +4920,18 @@ const WINDOWS_PS_MOVE_SOURCE_PREFIX: &str = "windows-psmove:";
 
 #[cfg(windows)]
 fn platform_move_state_sources() -> Vec<MoveStateSource> {
-    let Ok(targets) = windows_ps_move_state_paths() else {
-        return Vec::new();
-    };
-    targets
+    let targets = windows_ps_move_state_paths().unwrap_or_default();
+    let mut sources = targets
         .into_iter()
         .enumerate()
         .map(|(index, target)| {
-            let move_id = if target.identity.starts_with("move-") {
+            let path_lower = target.path.to_ascii_lowercase();
+            let move_id = if target.identity.starts_with("move-")
+                || target.identity.starts_with("nav-")
+            {
                 target.identity
+            } else if path_lower.contains("pid_042f") || path_lower.contains("vid_054c&pid_042f") {
+                format!("nav-windows-psnav-{index}")
             } else {
                 format!("move-windows-psmove-{index}")
             };
@@ -3893,7 +4940,23 @@ fn platform_move_state_sources() -> Vec<MoveStateSource> {
                 hidraw_path: windows_ps_move_source_token(&target.path),
             }
         })
-        .collect()
+        .collect::<Vec<_>>();
+    for index in 0..4 {
+        if matches!(platform_xinput_gamepad(index), Ok(Some(_))) {
+            let source = MoveStateSource {
+                move_id: format!("xbox-xinput-{index}"),
+                hidraw_path: format!("{WINDOWS_XINPUT_SOURCE_PREFIX}{index}"),
+            };
+            if !sources.iter().any(|existing| {
+                existing
+                    .hidraw_path
+                    .eq_ignore_ascii_case(&source.hidraw_path)
+            }) {
+                sources.push(source);
+            }
+        }
+    }
+    sources
 }
 
 #[cfg(windows)]
@@ -3924,6 +4987,19 @@ fn read_move_uevent_chain(start: &Path) -> String {
 }
 
 #[cfg(unix)]
+fn read_sysfs_input_name(sysfs_device: &Path) -> Option<String> {
+    fs::read_to_string(sysfs_device.join("name"))
+        .ok()
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+}
+
+#[cfg(unix)]
+fn is_muninn_hid_controller_uevent(uevent: &str, input_name: Option<&str>) -> bool {
+    is_ps_move_uevent(uevent) || is_ps3_navigation_uevent(uevent, input_name)
+}
+
+#[cfg(unix)]
 fn is_ps_move_uevent(uevent: &str) -> bool {
     uevent.contains("ID_VENDOR_ID=054c") && uevent.contains("ID_MODEL_ID=03d5")
         || uevent.contains("ID_MODEL=Motion_Controller")
@@ -3932,11 +5008,28 @@ fn is_ps_move_uevent(uevent: &str) -> bool {
 }
 
 #[cfg(unix)]
-fn move_unique_id_from_uevent(uevent: &str) -> Option<String> {
+fn is_ps3_navigation_uevent(uevent: &str, input_name: Option<&str>) -> bool {
+    uevent.contains("ID_VENDOR_ID=054c") && uevent.contains("ID_MODEL_ID=042f")
+        || uevent.contains("HID_ID=0005:0000054C:0000042F")
+        || uevent.contains("HID_ID=0003:0000054C:0000042F")
+        || input_name.is_some_and(|name| {
+            name.to_ascii_lowercase()
+                .contains("sony navigation controller")
+        })
+}
+
+#[cfg(unix)]
+fn hid_controller_unique_id_from_uevent(uevent: &str, input_name: Option<&str>) -> Option<String> {
     value_from_uevent(uevent, "HID_UNIQ")
         .map(|value| value.replace(':', ""))
         .filter(|value| !value.is_empty())
-        .map(|value| format!("move-{value}"))
+        .map(|value| {
+            if is_ps3_navigation_uevent(uevent, input_name) {
+                format!("nav-{value}")
+            } else {
+                format!("move-{value}")
+            }
+        })
 }
 
 #[cfg(unix)]
@@ -4458,7 +5551,7 @@ fn windows_ps_move_state_paths() -> Result<Vec<DefaultMoveLightTarget>> {
         let is_move = unsafe {
             HidD_GetAttributes(handle, &mut attributes) != 0
                 && attributes.VendorID == 0x054c
-                && attributes.ProductID == 0x03d5
+                && matches!(attributes.ProductID, 0x03d5 | 0x042f)
                 && HidD_GetPreparsedData(handle, &mut preparsed) != 0
         };
         if is_move {
@@ -4470,7 +5563,13 @@ fn windows_ps_move_state_paths() -> Result<Vec<DefaultMoveLightTarget>> {
                         windows_ps_move_physical_key(&path)
                             .and_then(|key| sibling_identities.get(&key).cloned())
                     })
-                    .map(|id| format!("move-{id}"))
+                    .map(|id| {
+                        if attributes.ProductID == 0x042f {
+                            format!("nav-{id}")
+                        } else {
+                            format!("move-{id}")
+                        }
+                    })
                     .unwrap_or_else(|| path.clone());
                 paths.push(DefaultMoveLightTarget { path, identity });
             }
@@ -4859,18 +5958,21 @@ fn windows_ps_move_input_report(source: &str) -> Result<Option<Vec<u8>>> {
         return Ok(None);
     }
 
+    let interrupt_report = windows_read_hid_interrupt_report(handle, caps.InputReportByteLength as usize, &path)?;
+    if interrupt_report.is_some() {
+        unsafe { CloseHandle(handle) };
+        return Ok(interrupt_report);
+    }
+
     let mut report = vec![0u8; caps.InputReportByteLength as usize];
     report[0] = 0x01;
     let ok =
         unsafe { HidD_GetInputReport(handle, report.as_mut_ptr().cast(), report.len() as u32) };
+    unsafe { CloseHandle(handle) };
     if ok != 0 {
-        unsafe { CloseHandle(handle) };
         return Ok(Some(report));
     }
-
-    let interrupt_report = windows_read_hid_interrupt_report(handle, report.len(), &path)?;
-    unsafe { CloseHandle(handle) };
-    Ok(interrupt_report)
+    Ok(None)
 }
 
 #[cfg(windows)]
@@ -4894,6 +5996,126 @@ fn windows_ps_move_input_path(source: &str) -> Result<Option<String>> {
         return Ok(None);
     }
     Ok(Some(path.to_string()))
+}
+
+#[cfg(windows)]
+fn start_windows_hid_report_reader_if_supported(
+    source: &str,
+) -> Option<mpsc::Receiver<LatestHidReport>> {
+    if !is_windows_ps_move_source(source) {
+        return None;
+    }
+    let path = match windows_ps_move_input_path(source) {
+        Ok(Some(path)) => path,
+        Ok(None) => return None,
+        Err(error) => {
+            eprintln!("Muninn could not resolve Windows HID input source {source}: {error:#}");
+            return None;
+        }
+    };
+    let (tx, rx) = mpsc::channel();
+    thread::Builder::new()
+        .name("muninn-windows-hid-reader".to_string())
+        .spawn(move || run_windows_hid_report_reader(path, tx))
+        .ok()?;
+    Some(rx)
+}
+
+#[cfg(windows)]
+fn run_windows_hid_report_reader(path: String, tx: mpsc::Sender<LatestHidReport>) {
+    loop {
+        match read_windows_hid_reports_until_error(&path, &tx) {
+            Ok(()) => return,
+            Err(error) => {
+                eprintln!("Muninn Windows HID reader for {path} restarting after: {error:#}");
+                thread::sleep(Duration::from_millis(100));
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn read_windows_hid_reports_until_error(
+    path: &str,
+    tx: &mpsc::Sender<LatestHidReport>,
+) -> Result<()> {
+    use windows_sys::Win32::Devices::HumanInterfaceDevice::{
+        HIDP_CAPS, HIDP_STATUS_SUCCESS, HidD_FreePreparsedData, HidD_GetPreparsedData,
+        HidP_GetCaps,
+    };
+    use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_READ, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+        ReadFile,
+    };
+
+    let wide = wide_null(path);
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            std::ptr::null_mut(),
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("opening persistent Windows HID input path {path}"));
+    }
+
+    let mut preparsed = 0;
+    if unsafe { HidD_GetPreparsedData(handle, &mut preparsed) } == 0 {
+        let error = std::io::Error::last_os_error();
+        unsafe { CloseHandle(handle) };
+        return Err(error).with_context(|| format!("reading HID preparsed data from {path}"));
+    }
+
+    let mut caps: HIDP_CAPS = unsafe { std::mem::zeroed() };
+    let caps_ok = unsafe { HidP_GetCaps(preparsed, &mut caps) == HIDP_STATUS_SUCCESS };
+    unsafe { HidD_FreePreparsedData(preparsed) };
+    if !caps_ok || caps.InputReportByteLength == 0 {
+        unsafe { CloseHandle(handle) };
+        return Err(anyhow!("Windows HID input path {path} has no input reports"));
+    }
+
+    eprintln!(
+        "Muninn Windows HID reader attached to {path} report_len={}",
+        caps.InputReportByteLength
+    );
+    loop {
+        let mut report = vec![0u8; caps.InputReportByteLength as usize];
+        let mut bytes_read = 0;
+        let ok = unsafe {
+            ReadFile(
+                handle,
+                report.as_mut_ptr(),
+                report.len() as u32,
+                &mut bytes_read,
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            let error = std::io::Error::last_os_error();
+            unsafe { CloseHandle(handle) };
+            return Err(error).with_context(|| format!("reading persistent HID report from {path}"));
+        }
+        if bytes_read == 0 {
+            continue;
+        }
+        report.truncate(bytes_read as usize);
+        let latest = LatestHidReport {
+            bytes: report,
+            source_timestamp_ns: timestamp_ns().unwrap_or_default(),
+            observed_at: timestamp().unwrap_or_else(|_| "unix:0".to_string()),
+        };
+        if tx.send(latest).is_err() {
+            unsafe { CloseHandle(handle) };
+            return Ok(());
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -4950,7 +6172,7 @@ fn windows_read_hid_interrupt_report(
             .with_context(|| format!("starting Windows PS Move input read from {path}"));
     }
 
-    let wait = unsafe { WaitForSingleObject(event, 25) };
+    let wait = unsafe { WaitForSingleObject(event, 2) };
     if wait == WAIT_TIMEOUT {
         unsafe {
             CancelIoEx(handle, &mut overlapped);
@@ -5487,53 +6709,6 @@ fn publish_idunn_rudp_health(
     Ok(())
 }
 
-fn publish_rudp_schema_payload(
-    target: SocketAddr,
-    connection_id: u32,
-    peer_id: &str,
-    context: &str,
-    payload: Vec<u8>,
-) -> Result<()> {
-    let bind_address = if target.is_ipv4() {
-        "0.0.0.0:0"
-    } else {
-        "[::]:0"
-    };
-    let socket = UdpSocket::bind(bind_address)
-        .with_context(|| format!("binding Muninn RUDP sender at {bind_address}"))?;
-    socket.set_read_timeout(Some(Duration::from_millis(100)))?;
-    let mut transport = CultNetRudpSocketTransportConnection::new(
-        CultNetRudpSocketTransportOptions::client(peer_id, socket, target, connection_id),
-    )?;
-    transport.connect(Vec::new())?;
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while !transport.connected() {
-        let _ = transport.receive_once()?;
-        transport.poll_resends()?;
-        if Instant::now() >= deadline {
-            return Err(anyhow!(
-                "timed out connecting Muninn RUDP sender to {target}"
-            ));
-        }
-    }
-    transport
-        .send("schema", payload)
-        .with_context(|| format!("sending {context} to {target}"))?;
-    let ack_deadline = Instant::now() + Duration::from_millis(400);
-    while Instant::now() < ack_deadline {
-        match transport.receive_once() {
-            Ok(_) => {}
-            Err(error) if is_would_block_error(&error) => {}
-            Err(error) => return Err(error).with_context(|| format!("receiving {context} ACK")),
-        }
-        transport
-            .poll_resends()
-            .with_context(|| format!("polling {context} RUDP ACK"))?;
-        thread::sleep(Duration::from_millis(10));
-    }
-    Ok(())
-}
-
 fn verify_move_sources_fresh(options: &Options, node: &cultmesh_rs::CultMeshNode) -> Result<()> {
     let move_state_sources = live_move_state_sources(options);
     if move_state_sources.is_empty() {
@@ -5612,84 +6787,40 @@ fn request_move_light(options: Options) -> Result<()> {
 }
 
 fn request_capture_stream(options: Options) -> Result<()> {
+    require_media_target_uri(&options)?;
     let command = build_capture_stream_command(&options)?;
-    if let Some(target) = options.capture_command_rudp_target {
-        publish_capture_command_rudp(target, &command)?;
-        println!(
-            "Published Muninn capture stream command {} {} {} for {} over RUDP to {}.",
-            command.command_id, command.action, command.stream_id, command.host_id, target
-        );
-        return Ok(());
-    }
-
-    let mut command_options = options.clone();
-    if let Some(activation_store_path) = options.activation_store_path.as_ref() {
-        command_options.store_path = activation_store_path.clone();
-    }
-    ensure_state_dirs(&command_options)?;
-    let mut node = open_node(&command_options, "muninn-capture-stream-request")?;
-    node.put(&command.command_id, &command)?;
+    publish_capture_command_to_odin(&options, &command)?;
     println!(
-        "Published Muninn capture stream command {} {} {} for {}.",
+        "Published Muninn capture stream command {} {} {} for {} through Odin/CultMesh.",
         command.command_id, command.action, command.stream_id, command.host_id
     );
     Ok(())
 }
 
-fn publish_capture_command_rudp(
-    target: SocketAddr,
+fn publish_capture_command_to_odin(
+    options: &Options,
     command: &MuninnCaptureStreamCommandRecord,
 ) -> Result<()> {
-    let message = CultNetMessage::DocumentPutRaw {
-        message_id: format!(
-            "muninn-capture-command:{}:{}",
-            command.command_id,
-            command.updated_at.replace(':', "-")
-        ),
-        document: CultNetRawDocumentRecord {
-            schema_id: "muninn.capture_stream_command".to_string(),
-            record_key: command.command_id.clone(),
-            stored_at: command.updated_at.clone(),
-            payload_encoding: CultNetRawPayloadEncoding::Messagepack,
-            payload: rmp_serde::to_vec(command).context("encoding Muninn capture command")?,
-            source_runtime_id: Some("muninn-request-stream".to_string()),
-            source_agent_id: None,
-            source_role: Some("capture-command-publisher".to_string()),
-            tags: Some(vec![CULTNET_RUDP_PROTOCOL_ID.to_string()]),
-        },
+    let Some(target) = resolve_odin_cultmesh_uri(options) else {
+        return Err(anyhow!(
+            "muninn request-stream requires --odin-cultmesh-uri; direct activation-store writes and raw RUDP command targets have been removed"
+        ));
     };
-    let bind_address = if target.is_ipv4() {
-        "0.0.0.0:0"
-    } else {
-        "[::]:0"
-    };
-    let socket = UdpSocket::bind(bind_address)
-        .with_context(|| format!("binding Muninn capture command RUDP sender at {bind_address}"))?;
-    socket.set_read_timeout(Some(Duration::from_millis(100)))?;
-    let mut transport =
-        CultNetRudpSocketTransportConnection::new(CultNetRudpSocketTransportOptions::client(
-            "muninn-capture-command-request",
-            socket,
+    let node = open_node(options, "muninn-capture-command-odin-publisher")?;
+    node.publish_document_to_rudp_catalog(
+        &command.command_id,
+        command,
+        CultMeshRudpDocumentPublishOptions {
             target,
-            MUNINN_COMMAND_RUDP_CONNECTION_ID,
-        ))?;
-    transport.connect(Vec::new())?;
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while !transport.connected() {
-        let _ = transport.receive_once()?;
-        transport.poll_resends()?;
-        if Instant::now() >= deadline {
-            return Err(anyhow!(
-                "timed out connecting Muninn capture command RUDP sender to {target}"
-            ));
-        }
-    }
-    let payload = encode_cultnet_message_to_vec(&message, CultNetWireContract::CultNetSchemaV0)
-        .context("encoding Muninn capture command CultNet message")?;
-    transport
-        .send("schema", payload)
-        .with_context(|| format!("sending Muninn capture command to {target}"))?;
-    Ok(())
+            runtime_id: "muninn-request-stream".to_string(),
+            source_role: Some("capture-command-publisher".to_string()),
+            tags: vec![
+                "odin-cultmesh-command-route".to_string(),
+                "muninn.capture-stream".to_string(),
+            ],
+            ..CultMeshRudpDocumentPublishOptions::default()
+        },
+    )
 }
 
 fn move_light_status(options: Options) -> Result<()> {
@@ -6046,6 +7177,7 @@ fn build_move_light_command(options: &Options) -> Result<MuninnMoveLightCommandR
 }
 
 fn build_capture_stream_command(options: &Options) -> Result<MuninnCaptureStreamCommandRecord> {
+    require_media_target_uri(options)?;
     if options.stream_action != "start" && options.stream_action != "stop" {
         return Err(anyhow!("--stream-action must be start or stop"));
     }
@@ -6064,8 +7196,8 @@ fn build_capture_stream_command(options: &Options) -> Result<MuninnCaptureStream
         action: options.stream_action.clone(),
         target_host: options.target_host.clone(),
         port: options.port,
-        obs_target_host: options.obs_target_host.clone(),
-        obs_port: options.obs_port,
+        obs_target_host: None,
+        obs_port: 0,
         media_transport: media_transport_cli(&options.media_transport).to_string(),
         media_packet_bytes: options.media_packet_bytes as u32,
         requested_by: "muninn.request-stream".to_string(),
@@ -6176,54 +7308,26 @@ fn build_mux_plan(options: &Options, timestamp: String) -> MuxPlan {
     }
 }
 
-fn build_targets(options: &Options) -> Vec<String> {
-    match options.media_transport {
-        MediaTransport::Srt => {
-            let mut targets = vec![srt_endpoint(&options.target_host, options.port)];
-            if let Some(host) = &options.obs_target_host {
-                targets.push(srt_endpoint(host, options.obs_port));
-            }
-            targets
-        }
-        MediaTransport::Rudp => {
-            vec![rudp_endpoint_for_options(options)]
-        }
+fn require_media_target_uri(options: &Options) -> Result<()> {
+    if options.target_host.trim().is_empty() {
+        return Err(anyhow!(
+            "--target-host is required for Muninn media activation; provide an Odin/CultMesh media target URI"
+        ));
     }
+    if !options.target_host.starts_with("cultmesh://") {
+        return Err(anyhow!(
+            "Muninn media activation requires a cultmesh:// target URI resolved through Odin; raw hosts, IPs, and ports are not accepted"
+        ));
+    }
+    Ok(())
 }
 
-fn srt_endpoint(host: &str, port: u16) -> String {
-    format!("srt://{host}:{port}?mode=caller&latency=120000&timeout=30000000")
-}
-
-fn rudp_endpoint(host: &str, port: u16, stream_id: &str) -> String {
-    let profile = muninn_rudp_media_profile();
-    rudp_endpoint_for_profile(host, port, stream_id, &profile)
+fn build_targets(options: &Options) -> Vec<String> {
+    vec![rudp_endpoint_for_options(options)]
 }
 
 fn rudp_endpoint_for_options(options: &Options) -> String {
-    let profile = muninn_rudp_media_profile_for_options(options);
-    rudp_endpoint_for_profile(
-        &options.target_host,
-        options.port,
-        &options.stream_id,
-        &profile,
-    )
-}
-
-fn rudp_endpoint_for_profile(
-    host: &str,
-    port: u16,
-    stream_id: &str,
-    profile: &MuninnRudpMediaProfile,
-) -> String {
-    format!(
-        "rudp://{host}:{port}/{stream_id}?channel=media&format=muninn-typed-media&connection=0x{MUNINN_MEDIA_RUDP_CONNECTION_ID:08x}&audio_connection=0x{MUNINN_AUDIO_RUDP_CONNECTION_ID:08x}&profile={}&delivery=unreliable&sender_resend_delay_ms={}&reliable_expire_after_ms={}&assembly_deadline_ms={}&gap_wait_ms={}",
-        profile.profile_id,
-        profile.sender_resend_delay_ms,
-        profile.sender_reliable_expire_after_ms,
-        profile.receiver_assembly_deadline_ms,
-        profile.receiver_gap_wait_ms
-    )
+    format!("{}#{}", options.target_host, options.stream_id)
 }
 
 fn muninn_rudp_media_profile() -> MuninnRudpMediaProfile {
@@ -6428,104 +7532,8 @@ fn rudp_audio_ffmpeg_args(options: &Options) -> Vec<String> {
 }
 
 fn ffmpeg_args(options: &Options) -> Vec<String> {
-    if options.media_transport == MediaTransport::Rudp {
-        return rudp_video_ffmpeg_args(options);
-    }
-
-    let mut args = vec![
-        "-hide_banner".to_string(),
-        "-loglevel".to_string(),
-        "warning".to_string(),
-        "-fflags".to_string(),
-        "nobuffer".to_string(),
-        "-flags".to_string(),
-        "low_delay".to_string(),
-        "-thread_queue_size".to_string(),
-        "256".to_string(),
-        "-f".to_string(),
-        "lavfi".to_string(),
-        "-i".to_string(),
-        format!(
-            "ddagrab=framerate={}:output_idx={}:draw_mouse=1",
-            options.framerate, options.ddagrab_output_index
-        ),
-        "-thread_queue_size".to_string(),
-        "256".to_string(),
-        "-f".to_string(),
-        "f32le".to_string(),
-        "-ar".to_string(),
-        options.audio_sample_rate.to_string(),
-        "-ac".to_string(),
-        options.audio_channels.to_string(),
-        "-i".to_string(),
-        "pipe:0".to_string(),
-        "-map".to_string(),
-        "0:v:0".to_string(),
-        "-map".to_string(),
-        "1:a:0".to_string(),
-        "-c:v".to_string(),
-        "h264_nvenc".to_string(),
-        "-preset".to_string(),
-        "p1".to_string(),
-        "-tune".to_string(),
-        "ull".to_string(),
-        "-zerolatency".to_string(),
-        "1".to_string(),
-        "-bf".to_string(),
-        "0".to_string(),
-        "-delay".to_string(),
-        "0".to_string(),
-        "-b:v".to_string(),
-        "12000k".to_string(),
-        "-maxrate".to_string(),
-        "12000k".to_string(),
-        "-bufsize".to_string(),
-        "6000k".to_string(),
-        "-g".to_string(),
-        "30".to_string(),
-        "-forced-idr".to_string(),
-        "1".to_string(),
-        "-fps_mode".to_string(),
-        "cfr".to_string(),
-        "-r".to_string(),
-        options.framerate.max(1).to_string(),
-        "-c:a".to_string(),
-        "aac".to_string(),
-        "-b:a".to_string(),
-        "192k".to_string(),
-        "-ar".to_string(),
-        options.audio_sample_rate.to_string(),
-        "-ac".to_string(),
-        options.audio_channels.to_string(),
-    ];
-
-    match options.media_transport {
-        MediaTransport::Srt => {
-            let tee_targets = build_targets(options)
-                .iter()
-                .map(|target| format!("[f=mpegts]{target}"))
-                .collect::<Vec<_>>()
-                .join("|");
-            args.extend(["-f".to_string(), "tee".to_string(), tee_targets]);
-        }
-        MediaTransport::Rudp => {
-            args.extend([
-                "-flush_packets".to_string(),
-                "1".to_string(),
-                "-muxdelay".to_string(),
-                "0".to_string(),
-                "-muxpreload".to_string(),
-                "0".to_string(),
-                "-mpegts_flags".to_string(),
-                "resend_headers".to_string(),
-                "-f".to_string(),
-                "mpegts".to_string(),
-                "pipe:1".to_string(),
-            ]);
-        }
-    }
-
-    args
+    let _ = options.media_transport;
+    rudp_video_ffmpeg_args(options)
 }
 
 fn write_command_file(plan: &MuxPlan) -> Result<()> {
@@ -6581,15 +7589,15 @@ impl Options {
             store_path: PathBuf::from("C:/Meta/Odin/state/muninn.telemetry.cc"),
             activation_store_path: Some(PathBuf::from(MUNINN_DEFAULT_ACTIVATION_STORE_PATH)),
             surface_id: "muninn.telemetry.local".to_string(),
-            stream_id: "muninn.raven.av.srt".to_string(),
+            stream_id: "muninn.raven.av.rudp".to_string(),
             stream_filter_explicit: false,
             stream_action: "start".to_string(),
             host_id: "raven".to_string(),
-            target_host: "10.77.0.2".to_string(),
+            target_host: String::new(),
             port: 5200,
-            obs_target_host: Some("10.77.0.2".to_string()),
+            obs_target_host: None,
             obs_port: 5204,
-            media_transport: MediaTransport::Srt,
+            media_transport: MediaTransport::Rudp,
             media_packet_bytes: MUNINN_RUDP_MEDIA_PACKET_BYTES,
             rudp_video_bitrate_kbps: MUNINN_RUDP_MEDIA_VIDEO_BITRATE_KBPS,
             rudp_latency_budget_ms: MUNINN_RUDP_MEDIA_RECEIVER_ASSEMBLY_DEADLINE_MS as u32,
@@ -6628,10 +7636,11 @@ impl Options {
             quest_pose_stream_id: None,
             quest_video_input_stream_id: None,
             idunn_rudp_health: None,
-            odin_cultmesh_rudp: None,
-            capture_command_rudp_bind: None,
-            capture_command_rudp_target: None,
-            obs_catalog_rudp_target: None,
+            odin_cultmesh_uri: Some("cultmesh://odin/rendezvous/provider-catalog".to_string()),
+            hid_controller_rudp_target: None,
+            hid_controller_rudp_bind: None,
+            hid_controller_rudp_advertise: None,
+            hid_controller_receipt_retention_seconds: 3_600,
         };
 
         let mut args = args.peekable();
@@ -6669,11 +7678,6 @@ impl Options {
                 "--host" => options.host_id = take_value(&mut args, "--host")?,
                 "--target-host" => options.target_host = take_value(&mut args, "--target-host")?,
                 "--port" => options.port = take_value(&mut args, "--port")?.parse()?,
-                "--obs-target-host" => {
-                    options.obs_target_host = Some(take_value(&mut args, "--obs-target-host")?)
-                }
-                "--no-obs-target" => options.obs_target_host = None,
-                "--obs-port" => options.obs_port = take_value(&mut args, "--obs-port")?.parse()?,
                 "--media-transport" => {
                     options.media_transport =
                         parse_media_transport(&take_value(&mut args, "--media-transport")?)?
@@ -6811,32 +7815,58 @@ impl Options {
                     idunn_health_contract = Some(take_value(&mut args, "--idunn-health-contract")?)
                 }
                 "--odin-cultmesh-rudp" => {
-                    options.odin_cultmesh_rudp = Some(
-                        take_value(&mut args, "--odin-cultmesh-rudp")?
+                    let _ = take_value(&mut args, "--odin-cultmesh-rudp")?;
+                    return Err(anyhow!(
+                        "--odin-cultmesh-rudp has been removed; use --odin-cultmesh-uri cultmesh://odin/rendezvous/provider-catalog and let CultMesh resolve Odin's transport"
+                    ));
+                }
+                "--odin-cultmesh-uri" => {
+                    options.odin_cultmesh_uri = Some(take_value(&mut args, "--odin-cultmesh-uri")?)
+                }
+                "--hid-controller-rudp-target" | "--hid-controller-udp-target" => {
+                    options.hid_controller_rudp_target = Some(
+                        take_value(&mut args, &arg)?
                             .parse()
-                            .context("--odin-cultmesh-rudp must be a socket address")?,
+                            .context("--hid-controller-rudp-target must be a socket address")?,
                     )
+                }
+                "--hid-controller-rudp-bind" => {
+                    options.hid_controller_rudp_bind = Some(
+                        take_value(&mut args, "--hid-controller-rudp-bind")?
+                            .parse()
+                            .context("--hid-controller-rudp-bind must be a socket address")?,
+                    )
+                }
+                "--hid-controller-rudp-advertise" => {
+                    options.hid_controller_rudp_advertise =
+                        Some(take_value(&mut args, "--hid-controller-rudp-advertise")?)
+                }
+                "--hid-controller-receipt-retention-seconds" => {
+                    options.hid_controller_receipt_retention_seconds = take_value(
+                        &mut args,
+                        "--hid-controller-receipt-retention-seconds",
+                    )?
+                    .parse()
+                    .context(
+                        "--hid-controller-receipt-retention-seconds must be a positive integer",
+                    )?;
+                    if options.hid_controller_receipt_retention_seconds == 0 {
+                        return Err(anyhow!(
+                            "--hid-controller-receipt-retention-seconds must be greater than zero"
+                        ));
+                    }
                 }
                 "--capture-command-rudp-bind" => {
-                    options.capture_command_rudp_bind = Some(
-                        take_value(&mut args, "--capture-command-rudp-bind")?
-                            .parse()
-                            .context("--capture-command-rudp-bind must be a socket address")?,
-                    )
+                    let _ = take_value(&mut args, "--capture-command-rudp-bind")?;
+                    return Err(anyhow!(
+                        "--capture-command-rudp-bind has been removed; Muninn serve reads capture commands from Odin/CultMesh discovery"
+                    ));
                 }
                 "--capture-command-rudp-target" => {
-                    options.capture_command_rudp_target = Some(
-                        take_value(&mut args, "--capture-command-rudp-target")?
-                            .parse()
-                            .context("--capture-command-rudp-target must be a socket address")?,
-                    )
-                }
-                "--obs-catalog-rudp-target" => {
-                    options.obs_catalog_rudp_target = Some(
-                        take_value(&mut args, "--obs-catalog-rudp-target")?
-                            .parse()
-                            .context("--obs-catalog-rudp-target must be a socket address")?,
-                    )
+                    let _ = take_value(&mut args, "--capture-command-rudp-target")?;
+                    return Err(anyhow!(
+                        "--capture-command-rudp-target has been removed; use --odin-cultmesh-uri so request-stream publishes through Odin/CultMesh"
+                    ));
                 }
                 "--color" => options.move_colors.push(take_value(&mut args, "--color")?),
                 "--duration-ms" => options
@@ -6962,26 +7992,23 @@ fn timestamp_ns() -> Result<i64> {
 
 fn media_transport_id(transport: &MediaTransport) -> &'static str {
     match transport {
-        MediaTransport::Srt => "srt",
         MediaTransport::Rudp => CULTNET_RUDP_PROTOCOL_ID,
     }
 }
 
 fn media_transport_cli(transport: &MediaTransport) -> &'static str {
     match transport {
-        MediaTransport::Srt => "srt",
         MediaTransport::Rudp => "rudp",
     }
 }
 
 fn parse_media_transport(value: &str) -> Result<MediaTransport> {
     match value.to_ascii_lowercase().as_str() {
-        "srt" => Ok(MediaTransport::Srt),
         "rudp" | "cultnet-rudp" | "cultmesh-rudp" | CULTNET_RUDP_PROTOCOL_ID => {
             Ok(MediaTransport::Rudp)
         }
         _ => Err(anyhow!(
-            "--media-transport must be one of: srt, rudp, cultnet-rudp"
+            "--media-transport must be one of: rudp, cultnet-rudp"
         )),
     }
 }
@@ -7006,7 +8033,7 @@ fn parse_catalog_source(value: &str) -> Result<CatalogSource> {
 }
 
 fn help_text() -> &'static str {
-    "Usage: muninn [serve|activate|request-stream|capture-stream-status|request-move-light|move-light-status|move-identity-status|move-source-status|move-state-status|claim-move-host|quest-access-status] [--store <path>] [--activate-store <path>] [--stream-action <start|stop>] [--target-host <host>] [--port <port>] [--obs-target-host <host>] [--obs-port <port>] [--media-transport <srt|rudp>] [--media-packet-bytes <bytes>] [--rudp-video-bitrate-kbps <kbps>] [--rudp-latency-budget-ms <ms>] [--video-source <source-id=label>] [--audio-source <source-id=label>] [--audio-source-id <source-id>] [--no-video] [--no-audio] [--loopback-script <path>] [--ffmpeg <path>] [--capture-command-rudp-bind <addr>] [--capture-command-rudp-target <addr>] [--obs-catalog-rudp-target <addr>] [--odin-cultmesh-rudp <addr>] [--move-state <move-id>=<hidraw-path>] [--move-host <bt-addr>] [--move-evidence-stream <stream-id>] [--move-evidence-verse <verse-id>] [--quest-adb] [--quest-serial <serial>] [--quest-input-stream <stream-id>] [--quest-pose-stream <stream-id>] [--quest-video-input-stream <stream-id>] [--idunn-rudp-health <addr>] [--idunn-daemon <id>] [--idunn-health-contract <contract>] [--dry-run] [--health]\n\nMuninn is Odin's portable telemetry Verse assembler. serve publishes cheap typed telemetry affordances, optional Quest USB access surfaces, and the explicitly configured Move runtime; when serve receives --move-state, --move-host, or --move-evidence-stream it may publish source-local Move controller state, typed Move identity records, a CultMesh Move evidence stream, and keep USB-attached PS Moves claimed to that explicit Bluetooth host; serve also consumes typed capture stream commands from --activate-store or --capture-command-rudp-bind and owns the local ffmpeg/loopback activation child lifecycle, may project the OBS stream catalog to a local OBS plugin over --obs-catalog-rudp-target, and pays startup respect to Odin over --odin-cultmesh-rudp by publishing its provider advertisement once; activate starts an explicitly requested local stream over SRT or CultNet RUDP as a daemon child; request-stream publishes a typed capture stream command for Muninn serve to execute, either into the activation store or over --capture-command-rudp-target; capture-stream-status reads typed capture stream command receipts; use --no-video or --no-audio to request one leg without the other when the transport is CultNet RUDP; request-move-light publishes a typed Move light command for Muninn serve to execute; move-light-status reads typed command receipts; move-identity-status reads typed Move identity records; move-source-status prints live Move source discovery; move-state-status reads typed controller-state records; claim-move-host assigns USB-attached PS Moves to a Bluetooth host; quest-access-status reads typed Quest access state. In --health mode, the Idunn RUDP flags publish typed daemon health to Idunn while preserving command-probe exit semantics."
+    "Usage: muninn [serve|activate|request-stream|capture-stream-status|request-move-light|move-light-status|move-identity-status|move-source-status|move-state-status|claim-move-host|quest-access-status] [--store <path>] [--activate-store <path>] [--stream-action <start|stop>] [--target-host <cultmesh-uri>] [--media-transport <rudp>] [--media-packet-bytes <bytes>] [--rudp-video-bitrate-kbps <kbps>] [--rudp-latency-budget-ms <ms>] [--video-source <source-id=label>] [--audio-source <source-id=label>] [--audio-source-id <source-id>] [--no-video] [--no-audio] [--loopback-script <path>] [--ffmpeg <path>] [--odin-cultmesh-uri <cultmesh-uri>] [--move-state <move-id>=<hidraw-path>] [--move-host <bt-addr>] [--move-evidence-stream <stream-id>] [--move-evidence-verse <verse-id>] [--quest-adb] [--quest-serial <serial>] [--quest-input-stream <stream-id>] [--quest-pose-stream <stream-id>] [--quest-video-input-stream <stream-id>] [--idunn-rudp-health <addr>] [--idunn-daemon <id>] [--idunn-health-contract <contract>] [--dry-run] [--health]\n\nMuninn is Odin's portable telemetry Verse assembler. serve publishes cheap typed telemetry affordances, optional Quest USB access surfaces, and the explicitly configured Move runtime; when serve receives --move-state, --move-host, or --move-evidence-stream it may publish source-local Move controller state, typed Move identity records, a CultMesh Move evidence stream, and keep USB-attached PS Moves claimed to that explicit Bluetooth host; serve consumes typed capture stream commands from Odin/CultMesh plus its local activation store and owns the local ffmpeg/loopback activation child lifecycle, resolves media targets from Odin/CultMesh provider advertisements, and pays startup respect to Odin through --odin-cultmesh-uri by publishing its provider advertisement once; activate starts an explicitly requested local CultNet RUDP stream as a daemon child after resolving the cultmesh:// media target URI through Odin; request-stream publishes a typed capture stream command through Odin/CultMesh using --odin-cultmesh-uri; capture-stream-status reads typed capture stream command receipts; use --no-video or --no-audio to request one leg over the CultNet RUDP media lane; request-move-light publishes a typed Move light command for Muninn serve to execute; move-light-status reads typed command receipts; move-identity-status reads typed Move identity records; move-source-status prints live Move source discovery; move-state-status reads typed controller-state records; claim-move-host assigns USB-attached PS Moves to a Bluetooth host; quest-access-status reads typed Quest access state. In --health mode, the Idunn RUDP flags publish the same typed daemon health document to Idunn for explicit diagnostics."
 }
 
 fn parse_move_state_source(value: &str) -> Result<MoveStateSource> {
@@ -7256,6 +8283,8 @@ mod tests {
         let options = Options::parse(
             [
                 "activate",
+                "--target-host",
+                "cultmesh://odin/media/muninn-raven-av",
                 "--audio-source-id",
                 "wasapi-input:Microphone (USB Audio)",
             ]
@@ -7287,6 +8316,30 @@ mod tests {
         .to_string();
 
         assert!(error.contains("at least one leg alive"));
+    }
+
+    #[test]
+    fn media_activation_requires_cultmesh_target_uri() {
+        let options = Options::parse(["activate"].into_iter().map(String::from)).unwrap();
+
+        let error = require_media_target_uri(&options).unwrap_err().to_string();
+        assert!(error.contains("--target-host is required"));
+
+        let options = Options::parse(
+            ["activate", "--target-host", "198.51.100.66"]
+                .into_iter()
+                .map(String::from),
+        )
+        .unwrap();
+        let error = require_media_target_uri(&options).unwrap_err().to_string();
+        assert!(error.contains("cultmesh://"));
+
+        let options = Options::parse(["request-stream"].into_iter().map(String::from)).unwrap();
+
+        let error = build_capture_stream_command(&options)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("--target-host is required"));
     }
 
     #[test]
@@ -7338,18 +8391,92 @@ mod tests {
     }
 
     #[test]
-    fn serve_accepts_odin_cultmesh_rudp_startup_target() {
+    fn serve_accepts_odin_cultmesh_uri_startup_target() {
         let options = Options::parse(
-            ["serve", "--odin-cultmesh-rudp", "10.77.0.2:17871"]
+            [
+                "serve",
+                "--odin-cultmesh-uri",
+                "cultmesh://odin/rendezvous/provider-catalog",
+            ]
                 .into_iter()
                 .map(String::from),
         )
         .unwrap();
 
         assert_eq!(
-            options.odin_cultmesh_rudp,
-            Some("10.77.0.2:17871".parse().unwrap())
+            options.odin_cultmesh_uri.as_deref(),
+            Some("cultmesh://odin/rendezvous/provider-catalog")
         );
+    }
+
+    #[test]
+    fn serve_rejects_removed_odin_cultmesh_rudp_startup_target() {
+        let error = Options::parse(
+            ["serve", "--odin-cultmesh-rudp", "203.0.113.10:17871"]
+                .into_iter()
+                .map(String::from),
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("--odin-cultmesh-rudp has been removed"));
+    }
+
+    #[test]
+    fn request_stream_rejects_raw_capture_command_rudp_target() {
+        let error = Options::parse(
+            [
+                "request-stream",
+                "--target-host",
+                "cultmesh://odin/media/muninn-raven-av",
+                "--capture-command-rudp-target",
+                "127.0.0.1:17872",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("--capture-command-rudp-target has been removed"));
+    }
+
+    #[test]
+    fn serve_rejects_removed_capture_command_rudp_bind() {
+        let error = Options::parse(
+            [
+                "serve",
+                "--capture-command-rudp-bind",
+                "127.0.0.1:17884",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("--capture-command-rudp-bind has been removed"));
+    }
+
+    #[test]
+    fn request_stream_requires_odin_cultmesh_command_route() {
+        let options = Options::parse(
+            [
+                "request-stream",
+                "--host",
+                "raven",
+                "--stream",
+                "muninn.raven.av.rudp",
+                "--target-host",
+                "cultmesh://odin/media/muninn-raven-av",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap();
+        let error = request_capture_stream(options).unwrap_err().to_string();
+
+        assert!(error.contains("request-stream requires --odin-cultmesh-uri"));
     }
 
     #[test]
@@ -7414,155 +8541,6 @@ mod tests {
     }
 
     #[test]
-    fn obs_catalog_rudp_publisher_sends_typed_catalog_payload() {
-        let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
-        receiver
-            .set_read_timeout(Some(Duration::from_secs(1)))
-            .unwrap();
-        let receiver_addr = receiver.local_addr().unwrap();
-        let handle = thread::spawn(move || {
-            let mut transport = CultNetRudpSocketTransportConnection::new(
-                CultNetRudpSocketTransportOptions::server(
-                    "muninn-obs-catalog-test",
-                    receiver,
-                    MUNINN_OBS_CATALOG_RUDP_CONNECTION_ID,
-                ),
-            )
-            .unwrap();
-            let deadline = Instant::now() + Duration::from_secs(2);
-            loop {
-                if let Some(frame) = transport.receive_once().unwrap() {
-                    return frame.payload;
-                }
-                transport.poll_resends().unwrap();
-                if Instant::now() >= deadline {
-                    panic!("timed out waiting for Muninn OBS catalog frame");
-                }
-            }
-        });
-        let catalog = MuninnObsStreamCatalogRecord {
-            catalog_id: "muninn.obs.streams".to_string(),
-            host_id: "raven".to_string(),
-            stream_ids: vec!["muninn.raven.av.rudp".to_string()],
-            labels: vec!["raven screen and loopback A/V".to_string()],
-            urls: vec![rudp_endpoint("192.168.1.66", 5204, "muninn.raven.av.rudp")],
-            states: vec!["activation-ready".to_string()],
-            updated_at: "unix:100".to_string(),
-            command_rudp_target: "192.168.1.84:17873".to_string(),
-            media_target_host: "192.168.1.66".to_string(),
-            media_port: 5204,
-            media_packet_bytes: MUNINN_RUDP_MEDIA_PACKET_BYTES as u32,
-            rudp_video_bitrate_kbps: MUNINN_RUDP_MEDIA_VIDEO_BITRATE_KBPS,
-            rudp_latency_budget_ms: MUNINN_RUDP_MEDIA_RECEIVER_ASSEMBLY_DEADLINE_MS as u32,
-            video_source_ids: vec!["display:0".to_string()],
-            video_source_labels: vec!["raven display 1".to_string()],
-            audio_source_ids: vec!["wasapi-loopback:Realtek".to_string()],
-            audio_source_labels: vec!["raven loopback (Realtek)".to_string()],
-        };
-
-        publish_obs_catalog_rudp(receiver_addr, &catalog).unwrap();
-
-        let payload = handle.join().unwrap();
-        let decoded: MuninnObsStreamCatalogRecord = rmp_serde::from_slice(&payload).unwrap();
-        assert_eq!(decoded.catalog_id, "muninn.obs.streams");
-        assert_eq!(decoded.host_id, "raven");
-        assert_eq!(decoded.stream_ids, vec!["muninn.raven.av.rudp"]);
-        assert_eq!(decoded.states, vec!["activation-ready"]);
-        assert_eq!(decoded.command_rudp_target, "192.168.1.84:17873");
-        assert_eq!(decoded.media_target_host, "192.168.1.66");
-        assert_eq!(decoded.media_port, 5204);
-        assert_eq!(
-            decoded.media_packet_bytes,
-            MUNINN_RUDP_MEDIA_PACKET_BYTES as u32
-        );
-        assert_eq!(
-            decoded.rudp_video_bitrate_kbps,
-            MUNINN_RUDP_MEDIA_VIDEO_BITRATE_KBPS
-        );
-        assert_eq!(
-            decoded.rudp_latency_budget_ms,
-            MUNINN_RUDP_MEDIA_RECEIVER_ASSEMBLY_DEADLINE_MS as u32
-        );
-        assert!(decoded.urls[0].contains("delivery=unreliable"));
-        assert!(decoded.urls[0].contains("audio_connection=0x6d750004"));
-        assert!(decoded.urls[0].contains("reliable_expire_after_ms=2000"));
-        assert!(decoded.urls[0].contains("assembly_deadline_ms=2000"));
-        assert_eq!(decoded.video_source_ids, vec!["display:0"]);
-        assert_eq!(decoded.audio_source_ids, vec!["wasapi-loopback:Realtek"]);
-    }
-
-    #[test]
-    fn capture_command_rudp_publisher_sends_raw_command_document() {
-        let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
-        receiver
-            .set_read_timeout(Some(Duration::from_secs(1)))
-            .unwrap();
-        let receiver_addr = receiver.local_addr().unwrap();
-        let handle = thread::spawn(move || {
-            let mut transport = CultNetRudpSocketTransportConnection::new(
-                CultNetRudpSocketTransportOptions::server(
-                    "muninn-command-test",
-                    receiver,
-                    MUNINN_COMMAND_RUDP_CONNECTION_ID,
-                ),
-            )
-            .unwrap();
-            let deadline = Instant::now() + Duration::from_secs(2);
-            loop {
-                if let Some(frame) = transport.receive_once().unwrap() {
-                    return cultnet_rs::decode_cultnet_message_from_slice(
-                        &frame.payload,
-                        CultNetWireContract::CultNetSchemaV0,
-                    )
-                    .unwrap();
-                }
-                transport.poll_resends().unwrap();
-                if Instant::now() >= deadline {
-                    panic!("timed out waiting for Muninn capture command frame");
-                }
-            }
-        });
-        let options = Options::parse(
-            [
-                "request-stream",
-                "--host",
-                "raven",
-                "--stream",
-                "muninn.raven.av.rudp",
-                "--target-host",
-                "10.77.0.2",
-                "--port",
-                "5204",
-                "--media-transport",
-                "rudp",
-            ]
-            .into_iter()
-            .map(String::from),
-        )
-        .unwrap();
-        let command = build_capture_stream_command(&options).unwrap();
-
-        publish_capture_command_rudp(receiver_addr, &command).unwrap();
-
-        let message = handle.join().unwrap();
-        let CultNetMessage::DocumentPutRaw { document, .. } = message else {
-            panic!("expected raw document put");
-        };
-        assert_eq!(document.schema_id, "muninn.capture_stream_command");
-        assert_eq!(document.record_key, command.command_id);
-        assert_eq!(
-            document.payload_encoding,
-            CultNetRawPayloadEncoding::Messagepack
-        );
-        let decoded: MuninnCaptureStreamCommandRecord =
-            rmp_serde::from_slice(&document.payload).unwrap();
-        assert_eq!(decoded.host_id, "raven");
-        assert_eq!(decoded.stream_id, "muninn.raven.av.rudp");
-        assert_eq!(decoded.media_transport, "rudp");
-        assert_eq!(decoded.port, 5204);
-    }
-
-    #[test]
     fn repeated_capture_stream_start_is_equivalent_when_media_shape_matches() {
         let options = Options::parse(
             [
@@ -7572,7 +8550,7 @@ mod tests {
                 "--stream",
                 "muninn.raven.av.rudp",
                 "--target-host",
-                "192.168.1.66",
+                "cultmesh://odin/media/muninn-raven-av",
                 "--port",
                 "5204",
                 "--media-transport",
@@ -7606,6 +8584,8 @@ mod tests {
                     "rudp",
                     "--stream",
                     "muninn.raven.video.rudp",
+                    "--target-host",
+                    "cultmesh://odin/media/muninn-raven-av",
                     "--no-audio",
                 ]
                 .into_iter()
@@ -7625,6 +8605,8 @@ mod tests {
                     "rudp",
                     "--stream",
                     "muninn.raven.video.rudp",
+                    "--target-host",
+                    "cultmesh://odin/media/muninn-raven-av",
                 ]
                 .into_iter()
                 .map(String::from),
@@ -7655,9 +8637,9 @@ mod tests {
                     "--host",
                     "raven",
                     "--stream",
-                    "muninn.raven.av.srt",
+                    "muninn.raven.av.rudp",
                     "--target-host",
-                    "10.77.0.2",
+                    "cultmesh://odin/media/muninn-raven-av",
                     "--port",
                     "5204",
                     "--media-transport",
@@ -7683,7 +8665,7 @@ mod tests {
                     "--stream",
                     "muninn.raven.av.rudp",
                     "--target-host",
-                    "10.77.0.2",
+                    "cultmesh://odin/media/muninn-raven-av",
                     "--port",
                     "5204",
                     "--media-transport",
@@ -7715,9 +8697,9 @@ mod tests {
                     "--host",
                     "raven",
                     "--stream",
-                    "muninn.raven.av.srt",
+                    "muninn.raven.av.rudp",
                     "--target-host",
-                    "10.77.0.2",
+                    "cultmesh://odin/media/muninn-raven-av",
                     "--port",
                     "5204",
                     "--media-transport",
@@ -7747,59 +8729,32 @@ mod tests {
     }
 
     #[test]
-    fn builds_two_srt_targets_for_explicit_activation() {
+    fn media_target_contract_accepts_only_cultmesh_rudp() {
         let options = Options::parse(
             [
                 "activate",
                 "--target-host",
-                "10.77.0.2",
-                "--port",
-                "5200",
-                "--obs-target-host",
-                "10.77.0.2",
-                "--obs-port",
-                "5204",
+                "cultmesh://odin/media/muninn-raven-av",
+                "--media-transport",
+                "rudp",
             ]
             .into_iter()
             .map(String::from),
         )
         .unwrap();
+        assert_eq!(options.media_transport, MediaTransport::Rudp);
+        assert!(require_media_target_uri(&options).is_ok());
 
-        let plan = build_mux_plan(&options, "test".to_string());
-
-        assert_eq!(plan.targets.len(), 2);
-        assert!(plan.command_file.to_string_lossy().ends_with(".ps1"));
-        assert!(plan.command_line.contains("ddagrab=framerate=30"));
-        assert!(plan.command_line.contains(" | ffmpeg "));
-        assert!(plan.command_line.contains("srt://10.77.0.2:5200"));
-        assert!(plan.command_line.contains("srt://10.77.0.2:5204"));
-        assert!(plan.command_line.contains(
-            "5200?mode=caller&latency=120000&timeout=30000000|[f=mpegts]srt://10.77.0.2:5204"
-        ));
-        assert!(
-            plan.command_script
-                .contains("RedirectStandardInput = $true")
-        );
-        assert!(
-            plan.command_script
-                .contains("BaseStream.Write($buffer, 0, $read)")
-        );
-    }
-
-    #[test]
-    fn can_disable_obs_target_for_partial_activation_smoke() {
-        let options = Options::parse(
-            ["activate", "--no-obs-target"]
+        let raw_target_options = Options::parse(
+            ["activate", "--target-host", "198.51.100.66"]
                 .into_iter()
                 .map(String::from),
         )
         .unwrap();
-        let plan = build_mux_plan(&options, "test".to_string());
-
-        assert_eq!(
-            plan.targets,
-            vec!["srt://10.77.0.2:5200?mode=caller&latency=120000&timeout=30000000"]
-        );
+        let error = require_media_target_uri(&raw_target_options)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("cultmesh://"));
     }
 
     #[test]
@@ -7812,7 +8767,7 @@ mod tests {
                 "--stream",
                 "muninn.raven.av.rudp",
                 "--target-host",
-                "10.77.0.2",
+                "cultmesh://odin/media/muninn-raven-av",
                 "--port",
                 "5204",
             ]
@@ -7826,9 +8781,7 @@ mod tests {
 
         assert_eq!(
             plan.targets,
-            vec![
-                "rudp://10.77.0.2:5204/muninn.raven.av.rudp?channel=media&format=muninn-typed-media&connection=0x6d750001&audio_connection=0x6d750004&profile=muninn.rudp.low_latency_h264_lan.v1&delivery=unreliable&sender_resend_delay_ms=5&reliable_expire_after_ms=2000&assembly_deadline_ms=2000&gap_wait_ms=16"
-            ]
+            vec!["cultmesh://odin/media/muninn-raven-av#muninn.raven.av.rudp"]
         );
         assert!(!plan.command_line.contains("tee"));
     }
@@ -7845,7 +8798,7 @@ mod tests {
                     "muninn.raven.video.rudp",
                     "--no-audio",
                     "--target-host",
-                    "192.168.1.66",
+                    "cultmesh://odin/media/muninn-raven-av",
                     "--port",
                     "5204",
                 ]
@@ -7868,7 +8821,7 @@ mod tests {
                     "muninn.raven.audio.rudp",
                     "--no-video",
                     "--target-host",
-                    "192.168.1.66",
+                    "cultmesh://odin/media/muninn-raven-av",
                     "--port",
                     "5204",
                 ]
@@ -8001,6 +8954,8 @@ mod tests {
                 "activate",
                 "--media-transport",
                 "rudp",
+                "--target-host",
+                "cultmesh://odin/media/muninn-raven-av",
                 "--framerate",
                 "30",
                 "--rudp-video-bitrate-kbps",
@@ -8306,6 +9261,8 @@ mod tests {
                 "activate",
                 "--media-transport",
                 "rudp",
+                "--target-host",
+                "cultmesh://odin/media/muninn-raven-av",
                 "--framerate",
                 "30",
                 "--audio-sample-rate",
@@ -8332,7 +9289,10 @@ mod tests {
         assert_eq!(profile.receiver_assembly_deadline_ms, 2000);
         assert_eq!(rudp_media_deadline_delay_ticks(&profile), 180_000);
         assert_eq!(rudp_audio_deadline_delay_ticks(&options, &profile), 96_000);
-        assert!(rudp_endpoint_for_options(&options).contains("assembly_deadline_ms=2000"));
+        assert_eq!(
+            rudp_endpoint_for_options(&options),
+            "cultmesh://odin/media/muninn-raven-av#muninn.raven.av.rudp"
+        );
     }
 
     #[test]
@@ -8703,7 +9663,7 @@ mod tests {
 
         assert_eq!(options.mode, Mode::CaptureStreamStatus);
         assert_eq!(options.host_id, "raven");
-        assert_eq!(options.stream_id, "muninn.raven.av.srt");
+        assert_eq!(options.stream_id, "muninn.raven.av.rudp");
         assert!(!options.stream_filter_explicit);
     }
 
@@ -8735,6 +9695,8 @@ mod tests {
                     "raven",
                     "--stream",
                     "muninn.probe.video.rudp",
+                    "--target-host",
+                    "cultmesh://odin/media/muninn-raven-av",
                 ]
                 .into_iter()
                 .map(String::from),
@@ -9124,13 +10086,17 @@ Device 00:07:04:A8:00:D0 (public)
     struct DecodedMarkerCandidate;
 
     struct RecordingMoveStateReader {
+        reports: Vec<Vec<u8>>,
         joystick_events: Vec<JoystickEvent>,
         failing_joystick_path: Option<String>,
     }
 
     impl MoveControllerStateReader for RecordingMoveStateReader {
         fn read_report(&mut self, _hidraw_path: &str) -> Result<Option<Vec<u8>>> {
-            Ok(None)
+            if self.reports.is_empty() {
+                return Ok(None);
+            }
+            Ok(Some(self.reports.remove(0)))
         }
 
         fn read_joystick_events(&mut self, joystick_path: &str) -> Result<Vec<JoystickEvent>> {
@@ -9194,8 +10160,10 @@ Device 00:07:04:A8:00:D0 (public)
                 store_path.to_str().unwrap(),
                 "--activate-store",
                 "C:/Meta/Odin/state/muninn.activate.cc",
+                "--target-host",
+                "cultmesh://odin/media/muninn-raven-av",
                 "--idunn-rudp-health",
-                "10.77.0.2:17870",
+                "198.51.100.10:17870",
                 "--idunn-daemon",
                 "muninn",
                 "--idunn-health-contract",
@@ -9207,7 +10175,7 @@ Device 00:07:04:A8:00:D0 (public)
         .unwrap();
         let mut node = open_node(&options, "muninn-boundary-test").unwrap();
 
-        publish_runtime_boundary_records(&mut node, &options, "idle", &[]).unwrap();
+        publish_runtime_boundary_records(&mut node, &options, "idle", &[], &[]).unwrap();
 
         let boundary = node
             .get_required::<MuninnCommandBoundaryCompatRecord>("command-boundary:muninn")
@@ -9216,7 +10184,7 @@ Device 00:07:04:A8:00:D0 (public)
             .get_required::<MuninnTransportProfileCompatRecord>("transport-profile:muninn")
             .unwrap();
         let provider = node
-            .get_required::<EveProviderAdvertisementCompatRecord>("muninn.telemetry.raven")
+            .get_required::<EveProviderAdvertisementRecord>("muninn.telemetry.raven")
             .unwrap();
 
         let invocation = boundary
@@ -9230,13 +10198,14 @@ Device 00:07:04:A8:00:D0 (public)
         assert!(invocation.contains("C:/Meta/Odin/state/muninn.activate.cc"));
         assert!(invocation.contains(store_path.to_str().unwrap()));
         assert!(invocation.contains("request-stream"));
+        assert!(invocation.contains("--target-host cultmesh://odin/media/muninn-raven-av"));
 
-        let compatibility_mechanisms = transport
+        let command_lowerings = transport
             .value
-            .get("compatibility_mechanisms")
+            .get("command_lowerings")
             .and_then(|value| value.as_array())
             .unwrap();
-        assert!(compatibility_mechanisms.iter().any(|value| {
+        assert!(command_lowerings.iter().any(|value| {
             value
                 .as_str()
                 .is_some_and(|entry| entry.contains("C:/Meta/Odin/state/muninn.activate.cc"))
@@ -9343,13 +10312,111 @@ Device 00:07:04:A8:00:D0 (public)
             .get("routes")
             .and_then(|value| value.as_array())
             .unwrap();
-        assert!(routes.iter().any(|route| {
+        assert!(!routes.iter().any(|route| {
             route
                 .get("address")
                 .and_then(|value| value.as_str())
                 .is_some_and(|entry| entry.contains("C:/Meta/Odin/state/muninn.activate.cc"))
         }));
         let _ = fs::remove_file(store_path);
+    }
+
+    #[test]
+    fn runtime_boundary_advertises_live_hid_sources_not_move_evidence() {
+        let store_path = std::env::temp_dir().join(format!(
+            "muninn-boundary-hid-sources-{}.cc",
+            timestamp_ns().unwrap()
+        ));
+        let options = Options::parse(
+            [
+                "serve",
+                "--host",
+                "starfire",
+                "--store",
+                store_path.to_str().unwrap(),
+                "--move-evidence-stream",
+                "muninn:nightwing:move-evidence",
+                "--hid-controller-rudp-bind",
+                "0.0.0.0:17888",
+                "--hid-controller-rudp-advertise",
+                "198.51.100.66:17888",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap();
+        let mut node = open_node(&options, "muninn-boundary-hid-sources-test").unwrap();
+        let live_sources = vec![MoveStateSource {
+            move_id: "nav-windows-psnav-0".to_string(),
+            hidraw_path: "windows-psmove://nav".to_string(),
+        }];
+
+        publish_runtime_boundary_records(&mut node, &options, "idle", &[], &live_sources).unwrap();
+
+        let provider = node
+            .get_required::<EveProviderAdvertisementRecord>("muninn.telemetry.starfire")
+            .unwrap();
+        let streams = provider
+            .value
+            .get("inputStreams")
+            .and_then(|value| value.as_array())
+            .unwrap();
+        let hid_stream = streams.first().unwrap();
+        assert_eq!(
+            hid_stream.get("streamId").and_then(|value| value.as_str()),
+            Some("muninn:starfire:hid-controller-state")
+        );
+        assert_eq!(
+            hid_stream.get("address").and_then(|value| value.as_str()),
+            Some("198.51.100.66:17888")
+        );
+        let devices = hid_stream
+            .get("devices")
+            .and_then(|value| value.as_array())
+            .unwrap();
+        assert_eq!(
+            devices
+                .first()
+                .and_then(|device| device.get("deviceId"))
+                .and_then(|value| value.as_str()),
+            Some("nav-windows-psnav-0")
+        );
+        assert_eq!(
+            devices
+                .first()
+                .and_then(|device| device.get("deviceKind"))
+                .and_then(|value| value.as_str()),
+            Some("ps3-navigation")
+        );
+        let _ = fs::remove_file(store_path);
+    }
+
+    #[test]
+    fn ps3_navigation_hid_report_uses_live_stick_bytes() {
+        let source = MoveStateSource {
+            move_id: "nav-windows-psnav-0".to_string(),
+            hidraw_path: "windows-psmove://vid_054c&pid_042f".to_string(),
+        };
+        let mut report = vec![0u8; 49];
+        report[0] = 0x01;
+        report[6] = 0x7d;
+        report[7] = 0x80;
+        report[18] = 0x00;
+
+        let axes = hid_controller_axes_from_report(&source, &report);
+
+        assert!(axes[0].abs() < 0.02, "x axis should be near neutral: {}", axes[0]);
+        assert!(axes[1].abs() < 0.02, "y axis should be near neutral: {}", axes[1]);
+        assert_eq!(axes[2], -1.0);
+
+        report[6] = 0xff;
+        report[7] = 0x00;
+        report[18] = 0xff;
+        let axes = hid_controller_axes_from_report(&source, &report);
+
+        assert!(axes[0] > 0.95);
+        assert!(axes[1] < -0.95);
+        assert_eq!(axes[2], 1.0);
     }
 
     #[test]
@@ -9376,7 +10443,7 @@ Device 00:07:04:A8:00:D0 (public)
         .unwrap();
         let mut node = open_node(&options, "muninn-boundary-bitrate-test").unwrap();
 
-        publish_runtime_boundary_records(&mut node, &options, "idle", &[]).unwrap();
+        publish_runtime_boundary_records(&mut node, &options, "idle", &[], &[]).unwrap();
 
         let transport = node
             .get_required::<MuninnTransportProfileCompatRecord>("transport-profile:muninn")
@@ -9520,12 +10587,13 @@ Device 00:07:04:A8:00:D0 (public)
             light_hidraw_path: None,
         }];
         let mut reader = RecordingMoveStateReader {
+            reports: Vec::new(),
             joystick_events: Vec::new(),
             failing_joystick_path: None,
         };
         let mut node = open_node(&options, "muninn-empty-joystick-test").unwrap();
 
-        publish_move_controller_states(&mut node, &options, &mut active, &mut reader, None)
+        publish_move_controller_states(&mut node, &options, &mut active, &mut reader, None, None)
             .unwrap();
 
         let record = node
@@ -9537,6 +10605,55 @@ Device 00:07:04:A8:00:D0 (public)
         assert_eq!(record.host_id, "nightwing");
         assert_eq!(record.move_id, "move-usb");
         assert_eq!(record.accelerometer_xyz, vec![0.0, 0.0, 0.0]);
+        let _ = fs::remove_file(store_path);
+    }
+
+    #[test]
+    fn windows_hid_move_state_publishes_hid_controller_record() {
+        let store_path = std::env::temp_dir().join(format!(
+            "muninn-windows-hid-controller-state-{}.cc",
+            timestamp_ns().unwrap()
+        ));
+        let options = Options::parse(
+            [
+                "serve",
+                "--host",
+                "starfire",
+                "--store",
+                store_path.to_str().unwrap(),
+                "--move-state",
+                "nav-windows-psnav-0=windows-psmove://vid_054c&pid_042f",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap();
+        let mut active = active_move_state_sources(options.move_state_sources.clone());
+        let mut report = vec![0u8; 49];
+        report[0] = 0x01;
+        report[6] = 0xff;
+        report[7] = 0x00;
+        report[18] = 0xff;
+        let mut reader = RecordingMoveStateReader {
+            reports: vec![report],
+            joystick_events: Vec::new(),
+            failing_joystick_path: None,
+        };
+        let mut node = open_node(&options, "muninn-windows-hid-controller-state-test").unwrap();
+
+        publish_move_controller_states(&mut node, &options, &mut active, &mut reader, None, None)
+            .unwrap();
+
+        let record = node
+            .get_required::<MuninnHidControllerStateRecord>(
+                "starfire:nav-windows-psnav-0:hid-controller-state",
+            )
+            .unwrap();
+        assert_eq!(record.device_kind, "ps3-navigation");
+        assert_eq!(record.sequence, 1);
+        assert!(record.axes[0] > 0.95);
+        assert!(record.axes[1] < -0.95);
+        assert_eq!(record.axes[2], 1.0);
         let _ = fs::remove_file(store_path);
     }
 
@@ -9564,12 +10681,13 @@ Device 00:07:04:A8:00:D0 (public)
         .unwrap();
         let mut active = active_move_state_sources(options.move_state_sources.clone());
         let mut reader = RecordingMoveStateReader {
+            reports: Vec::new(),
             joystick_events: Vec::new(),
             failing_joystick_path: Some("/dev/input/js-missing".to_string()),
         };
         let mut node = open_node(&options, "muninn-missing-joystick-test").unwrap();
 
-        publish_move_controller_states(&mut node, &options, &mut active, &mut reader, None)
+        publish_move_controller_states(&mut node, &options, &mut active, &mut reader, None, None)
             .unwrap();
 
         assert!(
@@ -9585,6 +10703,46 @@ Device 00:07:04:A8:00:D0 (public)
             .unwrap();
         assert_eq!(record.move_id, "present");
         let _ = fs::remove_file(store_path);
+    }
+
+    #[test]
+    fn xinput_gamepad_snapshot_maps_to_generic_hid_controller_record() {
+        let options =
+            Options::parse(["serve", "--host", "raven"].into_iter().map(String::from)).unwrap();
+        let source = MoveStateSource {
+            move_id: "xbox-raven".to_string(),
+            hidraw_path: "xinput://0".to_string(),
+        };
+        let gamepad = XinputGamepadSnapshot {
+            buttons: XINPUT_GAMEPAD_A_MASK
+                | XINPUT_GAMEPAD_B_MASK
+                | XINPUT_GAMEPAD_X_MASK
+                | XINPUT_GAMEPAD_Y_MASK
+                | XINPUT_GAMEPAD_DPAD_UP_MASK,
+            left_trigger: 0,
+            right_trigger: 255,
+            thumb_lx: i16::MAX,
+            thumb_ly: i16::MIN,
+            thumb_rx: 0,
+            thumb_ry: 0,
+        };
+
+        let record = build_hid_controller_state_record_from_xinput_gamepad(
+            &options,
+            &source,
+            12,
+            &gamepad,
+            34,
+            "unix-56".to_string(),
+        );
+
+        assert_eq!(record.stream_id, "raven:xbox-raven:hid-controller-state");
+        assert_eq!(record.device_kind, "xinput-controller");
+        assert_eq!(record.axes[0], 1.0);
+        assert_eq!(record.axes[1], -1.0);
+        assert_eq!(record.axes[2], -1.0);
+        assert_eq!(record.axes[5], 1.0);
+        assert_eq!(record.buttons, vec!["up", "a", "b", "x", "y"]);
     }
 
     #[test]

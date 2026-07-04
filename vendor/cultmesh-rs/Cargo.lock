@@ -192,6 +192,7 @@ dependencies = [
  "cultcache-rs",
  "cultnet-rs",
  "pretty_assertions",
+ "rmp-serde",
  "serde",
  "tempfile",
 ]

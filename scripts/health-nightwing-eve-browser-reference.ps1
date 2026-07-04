@@ -265,8 +265,8 @@ if ($inspection.commandBoundary.writesAccepted) {
   Fail-IdunnHealth -State "failed" -Message "Nightwing Eve browser reference command boundary unexpectedly accepts writes."
 }
 
-if ($inspection.commandBoundary.lifecycleAuthority -notmatch "nightwing-eve-browser-reference\.service") {
-  Fail-IdunnHealth -State "degraded" -Message "Nightwing Eve browser reference lifecycle authority is '$($inspection.commandBoundary.lifecycleAuthority)', expected the systemd service to remain the compatibility lifecycle witness."
+if ($inspection.commandBoundary.lifecycleAuthority -ne "idunn-supervisor-command.restart") {
+  Fail-IdunnHealth -State "degraded" -Message "Nightwing Eve browser reference lifecycle authority is '$($inspection.commandBoundary.lifecycleAuthority)', expected 'idunn-supervisor-command.restart'."
 }
 
 if ($null -eq $inspection.transportProfile) {
@@ -277,8 +277,8 @@ if ($inspection.transportProfile.currentState -ne "partial-rudp-health-and-provi
   Fail-IdunnHealth -State "degraded" -Message "Nightwing Eve browser reference transport profile state is '$($inspection.transportProfile.currentState)', expected 'partial-rudp-health-and-provider-store-live'."
 }
 
-if ($inspection.transportProfile.inputTransport -ne "compatibility.http-static-lowering") {
-  Fail-IdunnHealth -State "degraded" -Message "Nightwing Eve browser reference input transport is '$($inspection.transportProfile.inputTransport)', expected 'compatibility.http-static-lowering'."
+if ($inspection.transportProfile.inputTransport -ne "http-static-lowering") {
+  Fail-IdunnHealth -State "degraded" -Message "Nightwing Eve browser reference input transport is '$($inspection.transportProfile.inputTransport)', expected 'http-static-lowering'."
 }
 
 if ($inspection.transportProfile.outputTransport -ne "daemon-owned-cultcache-boundary-store + daemon-published-rudp-health") {

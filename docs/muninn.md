@@ -22,7 +22,7 @@ microphones, cameras, and future sensors.
 
 ```powershell
 cargo build -p muninn-daemon
-muninn serve --store C:\Meta\Odin\state\muninn.telemetry.cc --interval-seconds 15 --idunn-rudp-health 127.0.0.1:17870 --idunn-daemon starfire-muninn --idunn-health-contract muninn.cultnet-rudp-local-telemetry-and-quest-access
+muninn serve --store C:\Meta\Odin\state\muninn.telemetry.cc --interval-seconds 15 --idunn-rudp-health $env:IDUNN_RUDP_HEALTH --idunn-daemon starfire-muninn --idunn-health-contract muninn.cultnet-rudp-local-telemetry-and-quest-access
 muninn --health --store C:\Meta\Odin\state\muninn.telemetry.cc
 ```
 
@@ -31,35 +31,28 @@ muninn --health --store C:\Meta\Odin\state\muninn.telemetry.cc
 without starting FFmpeg, screen capture, microphone capture, or loopback
 capture.
 
-Muninn also writes an OBS stream catalog as typed CultCache state inside:
+Muninn writes its stream affordance catalog as typed CultCache state inside:
 
 ```text
 C:\Meta\Odin\state\muninn.telemetry.cc
 ```
 
 The record is type `muninn.obs_stream_catalog` with schema
-`muninn.obs_stream_catalog.v1` at key `obs`. On Starfire, `health-muninn.ps1`
-syncs Raven's `.cc` store to the same local path so the OBS plugin can read
-CultCache directly without learning Raven SSH.
+`muninn.obs_stream_catalog.v1` at key `obs`. Consumers discover the catalog
+through Odin/CultMesh; Muninn does not publish a parallel OBS RUDP catalog.
 
-The current Raven A/V path is a compatibility proof, not the final hot media
-shape. Its rebuild map lives in
-[`docs/muninn-media-streaming.md`](muninn-media-streaming.md): Muninn should
-publish encoded video access units and audio packets as typed CultMesh media
-frames with frame ids, deadlines, receiver feedback, and explicit audio/video
-policy instead of treating MPEG-TS bytes as the transport's unit of truth.
-
-Activation is explicit:
+Activation is explicit typed state:
 
 ```powershell
-.\scripts\activate-muninn-raven-av-srt.ps1
+muninn request-stream --target-host cultmesh://odin/media/muninn-raven-av --media-transport rudp
 ```
 
-That Raven activation starts the requested screen and Realtek loopback stream
-and publishes `muninn.capture_stream.v1`. It is still a background-only Raven
-actuator: the remote scheduled task must launch through the hidden WScript /
-noninteractive PowerShell trampoline and must not create visible terminal
-windows on Raven. Mimir and OBS are stream consumers; they do not own Muninn.
+`target_host` in the legacy command record field is a CultMesh URI, not a host
+or IP. The activation child resolves `muninn.media.rudp.v1` endpoints from
+Odin's provider catalog before opening the CultNet RUDP media lane. SRT, OBS
+target flags, and standalone Raven activation scripts are archived; Mimir,
+OBS, and other renderers are consumers of Odin/CultMesh discovery, not transport
+owners.
 
 ## Quest Access And Unity Return Video
 
@@ -105,7 +98,8 @@ E:\Projects\Odin\scripts\health-starfire-muninn.cmd
 ```
 
 The restart script launches Muninn hidden with `--host starfire --quest-adb`,
-`--idunn-rudp-health 127.0.0.1:17870`, `--idunn-daemon starfire-muninn`, and
+`--idunn-rudp-health` from explicit `-IdunnRudpHealth` or
+`IDUNN_RUDP_HEALTH`, `--idunn-daemon starfire-muninn`, and
 `--idunn-health-contract muninn.cultnet-rudp-local-telemetry-and-quest-access`.
 If the CultCache store at `C:\Meta\Odin\state\starfire.muninn.telemetry.cc`
 fails MessagePack decode on boot, the restart path archives the corrupt file,
@@ -210,32 +204,23 @@ missing or the Quest is unavailable, Muninn publishes `muninn.quest_access` as
 ## Host Deployments
 
 Raven runs Muninn from `C:\Meta\Odin\Muninn`. `scripts/restart-muninn.ps1`
-recreates the `GameCult-Muninn` scheduled task with `wscript.exe` as the task
-action and `start-muninn-serve-hidden.vbs` as its argument. It also repairs
-`GameCult-Muninn-Activate` and `GameCult-Muninn-VideoProof` to execute hidden
-VBS launchers whose bodies call PowerShell entrypoints directly, not `.cmd`
-payloads. The serve VBS launches `start-muninn-serve.ps1` with noninteractive hidden
-PowerShell. The PowerShell launcher starts `muninn.exe` with
-`-WindowStyle Hidden`, passes `--idunn-rudp-health 192.168.1.66:17870`,
-`--idunn-daemon muninn`, and
+recreates only the `GameCult-Muninn` scheduled task. It also unregisters the
+obsolete `GameCult-Muninn-Activate` and `GameCult-Muninn-VideoProof` tasks if
+they are present. The serve launcher starts `muninn.exe` with
+`-WindowStyle Hidden`, requires `--idunn-rudp-health` from explicit
+`-IdunnRudpHealth` or `IDUNN_RUDP_HEALTH`, passes `--idunn-daemon muninn`, and
 `--idunn-health-contract muninn.cultnet-rudp-remote-telemetry-health`, and
+requires `-MediaTargetUri` / `MUNINN_MEDIA_TARGET_URI` to be a `cultmesh://`
+URI resolved through Odin at activation time. It
 redirects logs under `C:\Meta\Odin\logs\muninn`.
 Raven is an operator-consented host: Muninn operations on Raven must be
 background-only and must not create visible terminal windows. `.cmd` files may
 exist only as manual compatibility entrypoints that call the same hidden VBS
 launchers; neither Task Scheduler nor the hidden VBS layer may route through a
 `cmdPath` trampoline on Raven.
-The standalone repair actuator for live Raven task drift is
-`E:\Projects\Odin\scripts\repair-raven-muninn-task-actions.ps1`. It must
-register `GameCult-Muninn`, `GameCult-Muninn-Activate`, and
-`GameCult-Muninn-VideoProof` with `wscript.exe` as the task action and the
-corresponding `*-hidden.vbs` launcher as arguments while also verifying that the
-hidden VBS bodies reference `.ps1` launchers instead of `.cmd` payloads. If
-Raven is unreachable, the repo is prepared but the live scheduler is not clean.
-Run `scripts\verify-muninn-media-profile.ps1` after changing Raven media
-startup scripts; it verifies that the video proof path still uses the same
-low-latency NVENC profile as Muninn's RUDP media lane instead of drifting back
-to legacy buffered encoder settings.
+Health must fail if the obsolete activation or video-proof tasks still exist on
+Raven. If Raven is unreachable, the repo is prepared but the live scheduler is
+not clean.
 
 Nightwing Muninn is kept alive by the single Idunn supervisor through the
 `nightwing-muninn` daemon target. Idunn learns that target through Odin's typed
@@ -246,7 +231,8 @@ actuators only, not lifecycle owners. The binary is installed at
 `/home/metacrat/.local/state/gamecult/muninn/muninn.telemetry.cc`, and the
 restart actuator launches `serve --host nightwing --interval-seconds 15` with
 `--move-state move-usb=/dev/input/by-id/usb-Sony_Computer_Entertainment_Motion_Controller-joystick`,
-`--idunn-rudp-health 10.77.0.2:17870`,
+`--idunn-rudp-health` supplied by explicit `-IdunnRudpHealth` or
+`IDUNN_RUDP_HEALTH`,
 `--idunn-daemon nightwing-muninn`,
 `--idunn-health-contract muninn.cultnet-rudp-remote-telemetry-and-move-hid`,
 PID, and logs under
@@ -259,6 +245,6 @@ pairing collection and Bluetooth joystick can expose the same controller as
 separate `/dev/input/js*` paths; `nightwing-move-state-sources.sh` prefers the
 Bluetooth `HID_ID=0005:0000054C:000003D5` path so Idunn health does not demand
 fresh records from two faces of the same controller. The Nightwing health
-actuator publishes `nightwing-muninn` health over RUDP to Starfire Idunn at
-`10.77.0.2:17870`, but that command is fallback proof only; the live keepalive
-contract is now published by the long-running Nightwing `serve` process.
+actuator requires the same configured Idunn RUDP endpoint, but that command is
+fallback proof only; the live keepalive contract is now published by the
+long-running Nightwing `serve` process.

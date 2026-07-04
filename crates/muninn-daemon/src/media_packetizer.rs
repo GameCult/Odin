@@ -714,7 +714,9 @@ impl AudioPcmStreamSendState {
             .checked_mul(self.config.packet_duration_ticks as usize)
             .ok_or_else(|| anyhow!("PCM stream sender bytes_per_packet overflow"))?;
         if bytes_per_packet == 0 {
-            return Err(anyhow!("PCM stream sender bytes_per_packet must be non-zero"));
+            return Err(anyhow!(
+                "PCM stream sender bytes_per_packet must be non-zero"
+            ));
         }
         let complete_packets = self.pending.len() / bytes_per_packet;
         if complete_packets == 0 {

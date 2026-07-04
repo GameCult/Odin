@@ -1,2 +1,3 @@
 @echo off
-curl.exe -fsS http://127.0.0.1:8795/health >NUL
+echo health-mimir-eve-dashboard.cmd archived: Mimir Eve dashboard health is daemon-published over CultNet/RUDP as mimir.cultnet-rudp-provider-health. Do not probe localhost HTTP for daemon health. 1>&2
+exit /b 2

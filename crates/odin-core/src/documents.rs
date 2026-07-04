@@ -18,6 +18,7 @@ pub const IDUNN_RESTART_REQUEST_SCHEMA: &str = "idunn.restart_request.v1";
 pub const IDUNN_RESTART_RESULT_SCHEMA: &str = "idunn.restart_result.v1";
 pub const IDUNN_DEPLOYMENT_REQUEST_SCHEMA: &str = "idunn.deployment_request.v1";
 pub const IDUNN_DEPLOYMENT_RESULT_SCHEMA: &str = "idunn.deployment_result.v1";
+pub const IDUNN_LIFECYCLE_COMMAND_SCHEMA: &str = "idunn.lifecycle_command.v1";
 pub const IDUNN_RELEASE_TARGET_SCHEMA: &str = "idunn.release_target.v1";
 pub const IDUNN_DEPLOYMENT_ARTIFACT_SCHEMA: &str = "idunn.deployment_artifact.v1";
 pub const IDUNN_STATE_MIGRATION_PLAN_SCHEMA: &str = "idunn.state_migration_plan.v1";
@@ -41,11 +42,13 @@ pub const MUNINN_MEDIA_RECEIVER_FEEDBACK_SCHEMA: &str = "muninn.media_receiver_f
 pub const MUNINN_OBS_STREAM_CATALOG_SCHEMA: &str = "muninn.obs_stream_catalog.v1";
 pub const MUNINN_MOVE_MARKER_CANDIDATE_SCHEMA: &str = "muninn.move_marker_candidate.v1";
 pub const MUNINN_MOVE_CONTROLLER_STATE_SCHEMA: &str = "muninn.move_controller_state.v1";
+pub const MUNINN_HID_CONTROLLER_STATE_SCHEMA: &str = "muninn.hid_controller_state.v1";
 pub const MUNINN_MOVE_IDENTITY_SCHEMA: &str = "muninn.move_identity.v1";
 pub const MUNINN_MOVE_LIGHT_COMMAND_SCHEMA: &str = "muninn.move_light_command.v1";
 pub const MUNINN_QUEST_ACCESS_SCHEMA: &str = "muninn.quest_access.v1";
 pub const MUNINN_COMMAND_BOUNDARY_SCHEMA: &str = "muninn.command_boundary.v1";
 pub const MUNINN_TRANSPORT_PROFILE_SCHEMA: &str = "muninn.transport_profile.v1";
+pub const SLEIPNIR_INPUT_MAPPING_SCHEMA: &str = "sleipnir.input_mapping.v1";
 
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
 #[cultcache(type = "odin.snapshot", schema = "odin.snapshot.v1")]
@@ -197,7 +200,7 @@ pub struct EveInterfaceBindingCompatRecord {
     type = "gamecult.eve.provider_advertisement",
     schema = "gamecult.eve.provider_advertisement.v1"
 )]
-pub struct EveProviderAdvertisementCompatRecord {
+pub struct EveProviderAdvertisementRecord {
     #[cultcache(key = 0)]
     pub value: Value,
 }
@@ -350,6 +353,32 @@ pub struct IdunnDeploymentResultRecord {
     pub detail: String,
     #[cultcache(key = 5)]
     pub completed_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(
+    type = "idunn.lifecycle_command",
+    schema = "idunn.lifecycle_command.v1"
+)]
+pub struct IdunnLifecycleCommandRecord {
+    #[cultcache(key = 0)]
+    pub command_id: String,
+    #[cultcache(key = 1)]
+    pub daemon_id: String,
+    #[cultcache(key = 2)]
+    pub action: String,
+    #[cultcache(key = 3)]
+    pub state: String,
+    #[cultcache(key = 4)]
+    pub requested_by: String,
+    #[cultcache(key = 5)]
+    pub requested_at: String,
+    #[cultcache(key = 6)]
+    pub detail: String,
+    #[cultcache(key = 7, default)]
+    pub claimed_at: String,
+    #[cultcache(key = 8, default)]
+    pub result_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
@@ -607,7 +636,7 @@ pub struct IdunnDaemonTransportProfileRecord {
     #[cultcache(key = 6)]
     pub publication_schema: String,
     #[cultcache(key = 7)]
-    pub compatibility_mechanism: String,
+    pub debug_mechanism: String,
     #[cultcache(key = 8)]
     pub cut_line: String,
     #[cultcache(key = 9)]
@@ -632,7 +661,7 @@ pub struct IdunnCommandBoundaryRecord {
     #[cultcache(key = 6)]
     pub alarm_authority: String,
     #[cultcache(key = 7)]
-    pub compatibility_commands: Vec<String>,
+    pub command_lowerings: Vec<String>,
     #[cultcache(key = 8)]
     pub forbidden_authority: String,
     #[cultcache(key = 9)]
@@ -1056,6 +1085,36 @@ pub struct MuninnMoveControllerStateRecord {
     pub source_path: String,
 }
 
+#[derive(Clone, Debug, PartialEq, DatabaseEntry)]
+#[cultcache(
+    type = "muninn.hid_controller_state",
+    schema = "muninn.hid_controller_state.v1"
+)]
+pub struct MuninnHidControllerStateRecord {
+    #[cultcache(key = 0)]
+    pub stream_id: String,
+    #[cultcache(key = 1)]
+    pub host_id: String,
+    #[cultcache(key = 2)]
+    pub device_id: String,
+    #[cultcache(key = 3)]
+    pub device_kind: String,
+    #[cultcache(key = 4)]
+    pub sequence: u64,
+    #[cultcache(key = 5)]
+    pub source_timestamp_ns: i64,
+    #[cultcache(key = 6)]
+    pub axes: Vec<f32>,
+    #[cultcache(key = 7)]
+    pub buttons: Vec<String>,
+    #[cultcache(key = 8)]
+    pub battery01: f32,
+    #[cultcache(key = 9)]
+    pub observed_at: String,
+    #[cultcache(key = 10)]
+    pub source_path: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
 #[cultcache(type = "muninn.move_identity", schema = "muninn.move_identity.v1")]
 pub struct MuninnMoveIdentityRecord {
@@ -1162,6 +1221,31 @@ pub struct MuninnTransportProfileCompatRecord {
     pub value: Value,
 }
 
+#[derive(Clone, Debug, PartialEq, DatabaseEntry)]
+#[cultcache(type = "sleipnir.input_mapping", schema = "sleipnir.input_mapping.v1")]
+pub struct SleipnirInputMappingRecord {
+    #[cultcache(key = 0)]
+    pub provider_id: String,
+    #[cultcache(key = 1)]
+    pub enabled: bool,
+    #[cultcache(key = 2)]
+    pub device_filter: String,
+    #[cultcache(key = 3)]
+    pub stream_id: String,
+    #[cultcache(key = 4)]
+    pub presentation: String,
+    #[cultcache(key = 5)]
+    pub axis_map: Value,
+    #[cultcache(key = 6)]
+    pub button_map: Value,
+    #[cultcache(key = 7)]
+    pub pending_learn: Value,
+    #[cultcache(key = 8)]
+    pub updated_at: String,
+    #[cultcache(key = 9)]
+    pub source: String,
+}
+
 cultmesh_rs::cultmesh_documents!(OdinDocuments {
     OdinSnapshotRecord => ODIN_SNAPSHOT_SCHEMA,
     OdinVerseRecord => ODIN_VERSE_SCHEMA,
@@ -1171,7 +1255,7 @@ cultmesh_rs::cultmesh_documents!(OdinDocuments {
     OdinTranslationRouteRecord => ODIN_TRANSLATION_ROUTE_SCHEMA,
     EveSurfaceStateRecord => EVE_SURFACE_STATE_SCHEMA,
     EveInterfaceBindingCompatRecord => EVE_INTERFACE_BINDING_SCHEMA,
-    EveProviderAdvertisementCompatRecord => EVE_PROVIDER_ADVERTISEMENT_SCHEMA,
+    EveProviderAdvertisementRecord => EVE_PROVIDER_ADVERTISEMENT_SCHEMA,
     VoidBotSwarmStateSnapshotCompatRecord => VOIDBOT_SWARM_STATE_SNAPSHOT_SCHEMA,
     IdunnDesiredDaemonRecord => IDUNN_DESIRED_DAEMON_SCHEMA,
     IdunnDaemonHealthRecord => IDUNN_DAEMON_HEALTH_SCHEMA,
@@ -1180,6 +1264,7 @@ cultmesh_rs::cultmesh_documents!(OdinDocuments {
     IdunnRestartResultRecord => IDUNN_RESTART_RESULT_SCHEMA,
     IdunnDeploymentRequestRecord => IDUNN_DEPLOYMENT_REQUEST_SCHEMA,
     IdunnDeploymentResultRecord => IDUNN_DEPLOYMENT_RESULT_SCHEMA,
+    IdunnLifecycleCommandRecord => IDUNN_LIFECYCLE_COMMAND_SCHEMA,
     IdunnReleaseTargetRecord => IDUNN_RELEASE_TARGET_SCHEMA,
     IdunnDeploymentArtifactRecord => IDUNN_DEPLOYMENT_ARTIFACT_SCHEMA,
     IdunnStateMigrationPlanRecord => IDUNN_STATE_MIGRATION_PLAN_SCHEMA,
@@ -1203,11 +1288,13 @@ cultmesh_rs::cultmesh_documents!(OdinDocuments {
     MuninnObsStreamCatalogRecord => MUNINN_OBS_STREAM_CATALOG_SCHEMA,
     MuninnMoveMarkerCandidateRecord => MUNINN_MOVE_MARKER_CANDIDATE_SCHEMA,
     MuninnMoveControllerStateRecord => MUNINN_MOVE_CONTROLLER_STATE_SCHEMA,
+    MuninnHidControllerStateRecord => MUNINN_HID_CONTROLLER_STATE_SCHEMA,
     MuninnMoveIdentityRecord => MUNINN_MOVE_IDENTITY_SCHEMA,
     MuninnMoveLightCommandRecord => MUNINN_MOVE_LIGHT_COMMAND_SCHEMA,
     MuninnQuestAccessRecord => MUNINN_QUEST_ACCESS_SCHEMA,
     MuninnCommandBoundaryCompatRecord => MUNINN_COMMAND_BOUNDARY_SCHEMA,
     MuninnTransportProfileCompatRecord => MUNINN_TRANSPORT_PROFILE_SCHEMA,
+    SleipnirInputMappingRecord => SLEIPNIR_INPUT_MAPPING_SCHEMA,
 });
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

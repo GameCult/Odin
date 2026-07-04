@@ -2,6 +2,7 @@
 
 const path = require("path");
 const { createRequire } = require("module");
+const { createSocket } = require("dgram");
 
 const requireCultNet = createRequire(path.resolve(
   __dirname,
@@ -16,6 +17,7 @@ const requireCultNet = createRequire(path.resolve(
 
 const {
   CultNetDocumentRegistry,
+  decodeRudpPacket,
   defineCultNetDocumentBinding,
 } = requireCultNet("./dist/index.js");
 
@@ -34,9 +36,28 @@ function createCultMeshRudpDocumentServer(options) {
   }
 
   const bind = parseEndpoint(options.bind);
-  const registry = new CultNetDocumentRegistry([
-    defineCultNetDocumentBinding({ definition: options.documents.surfaceDefinition }),
-  ]);
+  const socket = createSocket(bind.host.includes(":") ? "udp6" : "udp4");
+  let observedPackets = 0;
+  socket.on("message", (wire, remote) => {
+    if (observedPackets >= 20) return;
+    observedPackets += 1;
+    try {
+      const packet = decodeRudpPacket(wire);
+      console.error(
+        `Odin RUDP observed packet #${observedPackets} ${packet.packetType} connection=${packet.connectionId.toString(16)} channel=${packet.channelId} from ${remote.address}:${remote.port} bytes=${wire.length}`,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(
+        `Odin RUDP observed undecodable packet #${observedPackets} from ${remote.address}:${remote.port} bytes=${wire.length}: ${message}`,
+      );
+    }
+  });
+  const registry = new CultNetDocumentRegistry(
+    Object.values(options.documents)
+      .filter(Boolean)
+      .map((definition) => defineCultNetDocumentBinding({ definition })),
+  );
   const server = options.CultMesh.createRudpDocumentServer(
     "odin-cultmesh-catalog",
     ODIN_RUDP_CONNECTION_ID,
@@ -44,6 +65,7 @@ function createCultMeshRudpDocumentServer(options) {
       bindHost: bind.host,
       bindPort: bind.port,
       documents: registry,
+      socket,
       getCache: options.getCache,
       onError: (error) => {
         const message = error instanceof Error ? error.message : String(error);

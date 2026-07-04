@@ -18,9 +18,8 @@ escalation, and continuity witness state.
   recovery, health watching, deploy/restart policy, and operator escalation.
 - Inputs: Odin's accepted service records, provider advertisements, `.cc`
   witnesses, advertised command boundaries, CultNet/RUDP health contracts,
-  freshness windows, operator policy, local service manager state, and demoted
-  compatibility probes only while daemon CultLib dependencies still lack the
-  shared RUDP health publication path.
+  freshness windows, operator policy, local service manager state, and explicit
+  deployment/debug witnesses that cannot satisfy daemon health.
 - Outputs: typed keepalive observations, deployment requests/results, restart
   requests/results, release targets, deployment artifacts, state migration
   plans/results, rollout plans/results, denied-action records, operator alarms,
@@ -76,8 +75,9 @@ Idunn now shares Odin's Rust body:
   publish a typed `gamecult.operator_dm_request.v1` CultMesh command document
   instead of learning Discord delivery itself.
 - `npm run idunn:build` builds the Rust daemon.
-- `npm run idunn:start -- ...` still supports the narrow one-daemon probe path
-  for manual use.
+- `npm run idunn:start -- ...` still supports the narrow one-daemon path for
+  manual use; RUDP health ingress stays disabled unless `--rudp-health-bind` is
+  supplied.
 - `npm run idunn:start -- --swarm-profile starfire-local --repo-root E:\Projects\Odin --execute`
   runs the singular local swarm supervisor.
 
@@ -122,59 +122,58 @@ idunn.rudp_health_ingress.v1
   Odin refresh or manual click, Idunn's ownership path is still incomplete.
 - Restart attempts must be witnessed: requested by whom, against which service,
   through which command boundary, with what result and timestamp.
-- Health command exit status is not daemon awareness by itself. Every Idunn
+- Health command exit status is not daemon awareness. Every Idunn
   target must declare a daemon-owned CultNet/RUDP health contract naming what
   health publication should prove and what unmarked failure means.
   `idunn.desired_daemon.v1` and
   `idunn.daemon_health.v1` both record that contract so later readers can
   distinguish process liveness, source deployment freshness, framebuffer
   composition, telemetry capture, and catalog coherence without mistaking a
-  temporary HTTP/WebSocket/SSH/systemd probe for the real protocol surface.
+  temporary product/deployment probe for the real protocol surface.
   `idunn.daemon_health.v1` also records `publication_source` and `transport` so
-  daemon-published RUDP health can be distinguished from compatibility command
+  daemon-published RUDP health can be verified as daemon-owned transport
   evidence.
 - `idunn.desired_daemon.v1` links to
   `idunn.daemon_transport_profile.v1` and `idunn.command_boundary.v1` records.
   The transport profile names the target transport
-  `cultnet.transport.rudp.v0`, the still-active compatibility mechanism, and
-  the cut line that demotes old probes. The command boundary names restart,
+  `cultnet.transport.rudp.v0`, the daemon-owned witness substrate, and the cut
+  line that keeps old probes demoted. The command boundary names restart,
   deploy, health, and alarm authority separately so Idunn can actuate only the
   commands it actually owns.
-- The Starfire-local shell probes are compatibility evidence, not the target
-  architecture. A daemon is fully Idunn-aware only when it publishes its health,
-  command boundary, and transport profile as typed CultNet/CultMesh documents
-  over `cultnet.transport.rudp.v0`. TCP, HTTP, WebSocket, and ad hoc port probes
-  are migration debt, tolerated only at xenos/legacy boundaries and while the
-  daemon's CultLib dependency has not yet been updated.
+- The Starfire-local shell probes are deployment/debug witnesses, not daemon
+  truth. A daemon is Idunn-aware when it publishes its health, command boundary,
+  and transport profile as typed CultNet/CultMesh documents over
+  `cultnet.transport.rudp.v0`. Product/debug probes are xenos-boundary
+  diagnostics or deployment checks only.
 - Rust now shares the canonical cross-runtime `cultnet.transport.rudp.v0`
   substrate in `vendor/cultnet-rs`: CNR0 packets, sessions, channels, reliable
   schema frames, and timeout/retry semantics matching the TypeScript/Python
   CultLib implementations. This removes "Rust cannot speak RUDP" as a substrate
   excuse. It does not make any daemon fully migrated until that daemon publishes
   its health and command boundary through the RUDP path and Idunn consumes that
-  daemon-owned publication instead of the compatibility command.
+  daemon-owned publication.
 - Idunn publishes `idunn.runtime_transport_check.v1` at startup. The current
   check sends a CultNet hello over loopback `cultnet.transport.rudp.v0` and
   records whether the acknowledgement path works in Idunn's own Rust runtime.
   This proves Idunn's local substrate, not fleet migration.
-- Idunn also opens a RUDP health ingress and publishes
-  `idunn.rudp_health_ingress.v1`. The Starfire local supervisor binds
-  `0.0.0.0:17870` so host-local publishers can use `127.0.0.1:17870` and
-  WireGuard peers such as Nightwing can publish to `10.77.0.2:17870`. That ingress
+- Idunn opens a RUDP health ingress only when `--rudp-health-bind` is supplied
+  and then publishes `idunn.rudp_health_ingress.v1`. The Starfire local
+  supervisor binds `0.0.0.0:17870` explicitly so host-local and WireGuard
+  publishers can use the configured Idunn health endpoint. That ingress
   accepts only raw `idunn.daemon_health` CultNet document puts on the `schema`
   channel, decodes the typed MessagePack payload, and writes it into the
   keepalive store. Each one-shot publisher gets its own RUDP session from its
   UDP source address and the session is discarded after a delivered health
   frame. Windows UDP `ConnectionReset`/`ConnectionAborted` reports from closed
   one-shot clients are nonfatal ingress noise, not a reason to kill the worker.
-  The ingress does not grant deploy/restart authority and it does not make
-  compatibility probes owners; it is the first daemon-owned health publication
-  path Idunn can consume.
-- During each target cycle, fresh daemon-published RUDP health wins over the
-  local compatibility command. Idunn accepts it only when the daemon id, health
-  contract, `publication_source=daemon-published`, transport
-  `cultnet.transport.rudp.v0`, and `max_silence_seconds` freshness window all
-  match. If any of those fail, the command probe remains fallback evidence.
+  The ingress does not grant deploy/restart authority; it is the daemon-owned
+  health publication path Idunn consumes.
+- During each target cycle, fresh daemon-published RUDP health is the health
+  owner. Idunn accepts it only when the daemon id, health contract,
+  `publication_source=daemon-published`, transport `cultnet.transport.rudp.v0`,
+  and `max_silence_seconds` freshness window all match. If any of those fail,
+  Idunn publishes a missing-publication observation on the daemon key and plans
+  from that typed absence instead of running a local health command.
 - Idunn publishes the active swarm transport migration plan as
   `idunn.swarm_surgery_plan.v1`. That record names the active profile, owner,
   objective, current mechanism, invariants, ordered phases, current phase, next
@@ -212,12 +211,13 @@ idunn.rudp_health_ingress.v1
 - Muninn continuity on Raven is a remote keepalive path. The long-running Raven
   `muninn.exe serve` process now carries its own Idunn RUDP identity and
   publishes `muninn.cultnet-rudp-remote-telemetry-health` directly; the
-  `muninn.exe --health` command remains fallback/manual proof only. Idunn still
-  restarts Muninn's idle `serve` posture when needed. Raven is the host/body;
-  Muninn is the local telemetry Verse assembler. Idunn must not activate
-  screen/audio streams as part of keepalive. Raven A/V over SRT is an explicit
-  activation path through `activate-muninn-raven-av-srt.ps1`, not daemon
-  startup behavior.
+  `muninn.exe --health` command is an explicit diagnostic publisher, not a
+  health owner. Idunn still restarts Muninn's idle `serve` posture
+  when needed. Raven is the host/body; Muninn is the local telemetry Verse
+  assembler. Idunn must not activate screen/audio streams as part of keepalive.
+  Raven media activation is a typed Muninn capture command whose target is a
+  `cultmesh://` URI resolved through Odin. Idunn does not install or run
+  standalone Raven A/V activation scripts.
 - Raven is an operator-consented shared machine. Idunn restart and health
   actuators for Raven must be background-only and must not open visible
   terminals or interactive windows on that host. The Raven Muninn restart path
@@ -252,10 +252,19 @@ idunn.rudp_health_ingress.v1
   `idunn.state_migration_result.v1`, stops the deployment, records a failed
   rollout/deployment result, and alarms instead of trying to repair state
   behind the daemon's back.
-- Deploy scripts are Idunn actuators, not agent tools. They refuse to run
-  unless Idunn invokes them with `IDUNN_ACTUATOR=1`. Agent work is to update the
-  target catalog, release target, command boundary, migration plan, and daemon
+- Deploy and restart scripts are Idunn actuators, not agent tools. They refuse
+  to run unless Idunn invokes them with `IDUNN_ACTUATOR=1` and
+  `IDUNN_COMMAND_AUTHORITY=idunn-daemon`. Agent work is to update the target
+  catalog, release target, command boundary, migration plan, and daemon
   publication surfaces so Idunn can run the shared command primitive.
+- Manual lifecycle requests are typed Idunn command records, not direct script
+  execution. Operators publish `idunn.lifecycle_command.v1` with `idunn restart
+  --daemon <id>` or `idunn redeploy --daemon <id>`. The running supervisor
+  claims pending records for its target catalog, writes the corresponding
+  `idunn.restart_request.v1` or `idunn.deployment_request.v1`, executes through
+  the same guarded actuator path used by health-driven decisions, and records
+  the matching result document. If a target lacks restart or deploy authority,
+  Idunn marks the lifecycle command rejected instead of inventing authority.
 - Zero downtime is a declared rollout capability, not a slogan. If a daemon
   lacks hot reload, blue/green routing, rolling instances, or another named
   in-place swap mechanism, Idunn records `restart-required` and verifies the
@@ -284,8 +293,8 @@ The local swarm mode owns:
 4. a typed `idunn.daemon_surgery_plan.v1` record per target, so transport debt
    is visible in the same state surface as daemon health;
 5. a typed `idunn.daemon_transport_profile.v1` and
-   `idunn.command_boundary.v1` record per target, so compatibility probes and
-   local commands cannot pretend to be daemon-owned CultNet/RUDP truth;
+   `idunn.command_boundary.v1` record per target, so debug probes and local
+   commands cannot pretend to be daemon-owned CultNet/RUDP truth;
 6. a startup `idunn.runtime_transport_check.v1` witness proving Idunn's own
    Rust RUDP loopback path;
 7. a local `idunn.rudp_health_ingress.v1` listener for daemon-owned RUDP
@@ -302,10 +311,12 @@ lane, Stonks daemon health, Weksa daemon health, VoidBot stack health, and
 Nightwing Gjallar framebuffer composition health as completed substrate cuts.
 Muninn's long-running `serve` bodies now publish
 `idunn.daemon_health` over RUDP themselves; Starfire publishes to local Idunn,
-while Nightwing publishes over WireGuard to `10.77.0.2:17870` and Raven's live
-launcher publishes over LAN to `192.168.1.66:17870` using their
-target daemon ids and health contracts. `muninn --health` keeps the same path
-as fallback/manual proof, but it is no longer the live owner. Odin
+while Nightwing and Raven publish to the configured Idunn RUDP health endpoint
+using their target daemon ids and health contracts. The Muninn restart and
+health wrappers require explicit `-IdunnRudpHealth` or `IDUNN_RUDP_HEALTH`;
+there is no baked Starfire LAN default. `muninn --health` is an explicit
+diagnostic publisher for the same typed health document, not live ownership.
+Odin
 publishes `odin.cultnet-rudp-provider-health` after each provider refresh.
 Stonks publishes `stonks.cultnet-rudp-market-health` after each serialized
 market refresh. Weksa publishes `weksa.cultnet-rudp-provider-health` after each
@@ -317,63 +328,66 @@ framebuffer service. Mimir Eve dashboard publishes
 `mimir.cultnet-rudp-provider-health` from the Nightwing systemd broker, and the
 same process publishes `nightwing.cultnet-rudp-eve-dashboard-health` for the
 Nightwing dashboard service itself. The Nightwing Eve browser reference now runs
-as `Mimir.EveBrowserReference` instead of raw `python3 -m http.server`, serving
+as `Mimir.EveBrowserReference`, serving
 the same static lowering and publishing
 `nightwing.cultnet-rudp-browser-reference-health` from its own service process.
-Live Idunn cycles accept these records before command-probe fallback.
+Live Idunn cycles accept these records as health truth; missing or stale
+publication becomes typed missing-publication state.
 Raven's Muninn scheduled-task repair remains a separate ops invariant:
-`GameCult-Muninn`, `GameCult-Muninn-Activate`, and
-`GameCult-Muninn-VideoProof` must execute `wscript.exe` hidden launcher actions,
-not raw `.cmd` task actions. Their hidden VBS launcher bodies must call
-PowerShell entrypoints directly rather than routing through `cmdPath`
-trampolines, and the live Raven `serve` process must carry its own
+`GameCult-Muninn` is the only live Muninn scheduled task. Health fails if
+obsolete activation or video-proof tasks still exist, and the live Raven
+`serve` process must carry its own
 `--idunn-rudp-health`, `--idunn-daemon`, and `--idunn-health-contract`
 arguments.
 
-Next: move the remaining Yggdrasil deployments off compatibility health/deck
-checks, with repixelizer now the explicit next cut, then continue
-runtime-by-runtime until compatibility probes can be deleted or demoted.
+Next: keep moving the remaining Yggdrasil deployments off product/deck checks and
+continue runtime-by-runtime until debug probes are unable to masquerade as
+daemon truth.
 Heimdall has now crossed the first live transport line: the Yggdrasil runtime
 publishes `heimdall.cultnet-rudp-provider-health`, writes a daemon-owned
 boundary witness at `/srv/heimdall/cultcache/heimdall.service.cc`, and the
 deploy lane ships the required `CultLib` snapshot beside the app artifact.
 Heimdall still owes Odin ingestion of that boundary store plus the later
 redacted auth-document witness export, but it is no longer waiting on basic
-RUDP keepalive surgery. Weksa
-now publishes daemon-owned provider advertisement, operator state, Eve surface,
-command boundary, and transport profile records in its provider store, and Odin
-local discovery can ingest those records. Weksa still owes CultNet/RUDP command
-document ingress for MiMo VoiceDesign before its HTTP command route can become a
-debug-only lowering. Stonks now publishes daemon-owned provider advertisement,
+RUDP keepalive surgery. Weksa now publishes daemon-owned provider
+advertisement, operator state, Eve surface, command boundary, and transport
+profile records in its provider store, accepts MiMo VoiceDesign commands over
+CultNet/RUDP command documents, and records deleted product command lanes as
+non-authority. Odin local discovery can ingest those records. The Weksa start
+and restart wrappers require explicit `-IdunnRudpHealth` or
+`WEKSA_IDUNN_RUDP_HEALTH`; there is no localhost Idunn default. Stonks now
+publishes daemon-owned provider advertisement,
 market snapshot, Eve surface, command boundary, and transport profile records in
-its CultCache store, and Odin local discovery can ingest those records; its
-HTTP/WebSocket endpoints are renderer/debug lowerings. StreamPixels now has a
+its CultCache store, and Odin local discovery can ingest those records; product
+routes are not provider transport. StreamPixels now has a
 service-owned CultCache boundary store at
 `E:\Projects\StreamPixels\.streampixels-data\cultcache\streampixels.service.cc`
 containing provider advertisement, command boundary, transport profile, and an
 Idunn health summary, and Odin local discovery can ingest it. The live
 Yggdrasil deployment now keeps
 `/srv/streampixels/env/service.env` wired for
-`STREAMPIXELS_IDUNN_RUDP_HEALTH=10.77.0.2:17870` with contract
+explicit `STREAMPIXELS_IDUNN_RUDP_HEALTH` with contract
 `streampixels.cultnet-rudp-service-health`, publishes the boundary store at
 `/srv/streampixels/app/.streampixels-data/cultcache/streampixels.service.cc`,
-and has live Idunn acceptance proof for `yggdrasil-streampixels` from
-`10.77.0.1`. StreamPixels now owes only the final demotion of
-SSH/systemd/HTTP checks from compatibility proof to deployment/debug witness
-once Odin consumes the typed store without fallback. Repixelizer still remains
-plain GUI/systemd compatibility debt today: `repixelizer-gui.service`,
-`/api/health`, `/api/config`, and nginx routing are still the live witnesses
-until the runtime publishes internal RUDP health and typed queue/provider
-state, so it is the next Yggdrasil target. VoidBot, Gjallar, Mimir, and
+and has live Idunn acceptance proof for `yggdrasil-streampixels` through the
+configured RUDP route. StreamPixels now owes only the final demotion of host
+checks to deployment/debug witnesses once Odin consumes the typed store.
+Repixelizer now has a daemon-owned Verse runtime witness in
+`src/repixelizer/verse_state.py`: the live GUI runtime writes provider
+advertisement, Eve surface state, runtime config, auth projection, queue/job
+records, command boundary, transport profile, and `idunn.daemon_health` into
+the configured `.cc` store, and publishes Idunn RUDP health when
+`GC_ACCESS_IDUNN_RUDP_HEALTH` is configured. Repixelizer product web and host
+supervisor checks are deployment/debug witnesses;
+absent RUDP health is a visible missing-publication state, not fallback truth.
+VoidBot, Mimir, and
 the Nightwing Eve runtime services still owe provider advertisement and
-command-boundary RUDP publication before their compatibility surfaces can be
-purely display/debug lowerings; Gjallar also owes native CultMesh/RUDP deck
-input to replace the current Odin WebSocket lowering bridge. Raven Muninn task
-action repair is no longer queued: the live host now executes
-`GameCult-Muninn`, `GameCult-Muninn-Activate`, and
-`GameCult-Muninn-VideoProof` through hidden `wscript.exe` launchers whose VBS
-bodies call `.ps1` launchers directly, and the repair actuator remains
-`scripts\repair-raven-muninn-task-actions.ps1`.
+command-boundary RUDP publication before their renderer surfaces can be derived
+from typed state alone. Gjallar consumes Odin's accepted provider-state
+snapshot over CultNet/RUDP; Odin no longer hosts a browser-deck lowering bridge
+for it to consume. Raven Muninn task action repair is no longer queued: the live
+target is the single `GameCult-Muninn` serve task, while obsolete activation and
+video-proof tasks are removed and treated as health failures if they return.
 
 Vili's Node daemon now has an in-process Idunn RUDP publisher for
 `vili.cultnet-rudp-animation-health`, and local smoke proof shows Idunn accepts
@@ -384,9 +398,10 @@ provider discovery can ingest that typed store, including the Vili command
 boundary and transport profile. That is now live Raven proof as well: Odin's
 `scripts\restart-vili.ps1` refreshes the Raven runtime from the authoritative
 local Vili and CultLib files, reinstalls the hidden `GameCult\Vili` task with
-`--idunn-rudp-health 10.77.0.2:17870`, and restarts it. Live Idunn accepts
-`vili.cultnet-rudp-animation-health` from `10.77.0.4`.
+`--idunn-rudp-health` supplied by explicit `-IdunnRudpHealth`,
+`VILI_IDUNN_RUDP_HEALTH`, or `IDUNN_RUDP_HEALTH`, and restarts it. Live Idunn
+accepts `vili.cultnet-rudp-animation-health` through the configured RUDP route.
 
-No ad hoc JSON manifest, HTTP endpoint, TCP socket, or WebSocket bridge may
-become the live state owner. Debug projections are fine when they name the
+No ad hoc JSON manifest, product endpoint, port socket, or browser-deck bridge
+may become the live state owner. Debug projections are fine when they name the
 `.cc` record, CultNet document, or CultMesh publication behind them.

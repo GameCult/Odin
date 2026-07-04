@@ -11,8 +11,11 @@
     "gjallar:start": "cargo run -p gjallar-daemon --",
     "idunn:build": "cargo build -p idunn-daemon",
     "idunn:start": "cargo run -p idunn-daemon --",
+    "sleipnir:build": "cargo build -p sleipnir-daemon",
+    "sleipnir:start": "cargo run -p sleipnir-daemon --",
     "muninn:build": "cargo build -p muninn-daemon",
     "muninn:start": "cargo run -p muninn-daemon --",
+    "hermodr:start": "node src/hermodr-daemon.cjs",
     "rust:test": "cargo test --workspace",
     "check": "node scripts/check-syntax.cjs",
     "start": "node src/odin-coordinator.cjs"

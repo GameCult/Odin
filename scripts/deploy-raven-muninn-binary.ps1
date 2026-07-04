@@ -1,10 +1,10 @@
 param(
-  [string] $RavenHost = "raven",
+  [string] $RavenHost = "raven.Home",
   [string] $MuninnExe = "C:\Meta\Odin\Muninn\muninn.exe",
   [string] $LocalMuninnExe = "",
   [int] $ConnectTimeoutSeconds = 10,
-  [string] $SshUser = "",
-  [string] $IdentityFile = "",
+  [string] $SshUser = "madman's lullaby",
+  [string] $IdentityFile = "C:\Users\Meta\.ssh\id_ed25519_192_168_1_84",
   [switch] $SkipBuild,
   [switch] $SkipRestart,
   [switch] $PreflightOnly
@@ -251,7 +251,8 @@ if (Test-Path -LiteralPath `$target) {
   Copy-Item -LiteralPath `$target -Destination `$backup -Force
 }
 
-Move-Item -LiteralPath `$incoming -Destination `$target -Force
+Copy-Item -LiteralPath `$incoming -Destination `$target -Force
+Remove-Item -LiteralPath `$incoming -Force -ErrorAction SilentlyContinue
 `$item = Get-Item -LiteralPath `$target
 Write-Output ("muninn.exe deployed length={0} path={1}" -f `$item.Length, `$item.FullName)
 `$global:LASTEXITCODE = 0

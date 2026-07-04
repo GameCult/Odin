@@ -58,26 +58,8 @@ function tailTextFile(filePath, maxBytes) {
   return buffer.toString("utf8");
 }
 
-function httpGet(url, timeoutMs) {
-  return new Promise((resolve, reject) => {
-    const req = require("http").get(url, { timeout: timeoutMs }, (res) => {
-      if ((res.statusCode || 0) >= 400) {
-        reject(new Error(`HTTP ${res.statusCode}`));
-        res.resume();
-        return;
-      }
-      const chunks = [];
-      res.on("data", (chunk) => chunks.push(chunk));
-      res.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
-    });
-    req.on("timeout", () => req.destroy(new Error("HTTP request timed out")));
-    req.on("error", reject);
-  });
-}
-
 module.exports = {
   clampNumber,
-  httpGet,
   parseArgs,
   parseObjectDocument,
   positiveNumber,
