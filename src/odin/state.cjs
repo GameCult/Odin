@@ -2,22 +2,15 @@
 
 const fs = require("fs");
 const { dashboardUnavailable } = require("./interfaces.cjs");
-const { observationServices, observationSnapshot } = require("./observations.cjs");
 const {
   adbSnapshot,
   dockerSnapshot,
-  hostChecks,
-  hostServices,
-  hostState,
-  remoteGpu,
-  remoteServices,
-  systemdState,
 } = require("./probes.cjs");
 const { buildMarqueeText } = require("./marquee.cjs");
 const { buildPendingSurface, buildSurface } = require("./surface.cjs");
 const { stableId } = require("./utils.cjs");
 
-function createStateBuilder({ cachePath, gamecultTextDocumentStorePath, interfaceDiscovery, layoutStore, observationFreshSeconds, observationLogPath, stonksBurstSize, stonksStateUrl }) {
+function createStateBuilder({ cachePath, gamecultTextDocumentStorePath, interfaceDiscovery, layoutStore, stonksBurstSize }) {
   let version = 0;
 
   function buildPendingState(message) {
@@ -42,33 +35,24 @@ function createStateBuilder({ cachePath, gamecultTextDocumentStorePath, interfac
     const [
       docker,
       adb,
-      hosts,
-      yggdrasilServices,
-      nightwingServices,
-      nightwingGpu,
       discovery,
-      observations,
     ] = await Promise.all([
       dockerSnapshot(),
       adbSnapshot(),
-      hostChecks(),
-      remoteServices("ygg", ["nginx", "streampixels-web", "streampixels-service", "heimdall", "repixelizer-gui", "bifrost"]),
-      remoteServices("nightwing", ["ssh", "nightwing-eve-dashboard", "nightwing-eve-browser-reference", "gjallar", "docker"]),
-      remoteGpu("nightwing"),
       interfaceDiscovery.discoverAll(),
-      observationSnapshot(observationLogPath, observationFreshSeconds),
     ]);
     const discoveredInterfaces = discovery.interfaces;
     const providerAdvertisements = discovery.providerAdvertisements;
     const interfaceById = new Map(discoveredInterfaces.map((entry) => [entry.providerId, entry]));
     const interfaces = [...interfaceById.values()];
-    const marqueeText = await buildMarqueeText({ interfaces, textDocumentStorePath: gamecultTextDocumentStorePath, stonksBurstSize, stonksStateUrl });
+    const marqueeText = await buildMarqueeText({ interfaces, textDocumentStorePath: gamecultTextDocumentStorePath, stonksBurstSize });
     const interfaceSummary = interfaces.map((entry) => `${entry.providerId}:${entry.state}`).join(", ");
+    const layout = await layoutStore.readLayout();
+    const verseEvidence = [...providerAdvertisements, ...interfaces];
     const voidBotDashboard = interfaceById.get("voidbot.swarm") || dashboardUnavailable("voidbot.swarm", "discovery", "not discovered");
     const mimirLiveStats = interfaceById.get("mimir.live.stats") || dashboardUnavailable("mimir.live.stats", "discovery", "not discovered");
     const periwinkleServices = [
       ...adbFaultServices(adb),
-      ...observationServices(observations, "periwinkle", service),
     ];
 
     const verses = [
@@ -80,21 +64,13 @@ function createStateBuilder({ cachePath, gamecultTextDocumentStorePath, interfac
         service("interfaces", "Eve interfaces", interfaces.some((entry) => entry.surface?.root) ? "active" : "waiting", interfaceSummary || "no provider surfaces"),
         service("voidbot-swarm", "VoidBot Swarm", voidBotDashboard.state, voidBotDashboard.detail),
         service("mimir-live-stats", "Mimir Live Stats", mimirLiveStats.state, mimirLiveStats.detail),
-        service("mimir-observation-ledger", "Mimir Observation Ledger", observations.state, observations.detail),
         ...docker.containers.map((container) => service(`docker-${container.name}`, container.name, "active", container.image)),
       ]),
-      verse("nightwing.local", "Nightwing", "dashboard-renderer", hostState(hosts.Nightwing), ["eve-tui", "gpu-worker"], [
-        ...hostServices("Nightwing", hosts.Nightwing),
-        ...nightwingServices.map((entry) => service(`systemd-${entry.name}`, entry.name, systemdState(entry.state), entry.state)),
-        service("gpu", "GTX 860M", nightwingGpu.state, nightwingGpu.detail),
-      ]),
-      verse("eve.ipad", "EVE", "ios-client", hostState(hosts.EVE), ["ssh", "native-eve"], hostServices("EVE", hosts.EVE)),
+      verse("nightwing.local", "Nightwing", "dashboard-renderer", bodyStatus(verseEvidence, "nightwing"), ["eve-tui", "gpu-worker"], bodyServices(verseEvidence, "nightwing")),
+      verse("eve.ipad", "EVE", "ios-client", bodyStatus(verseEvidence, "eve"), ["native-eve"], bodyServices(verseEvidence, "eve")),
       periwinkleServices.length ? verse("periwinkle.android", "Periwinkle", "android-client", periwinkleStatus(periwinkleServices), ["sensor-edge", "adb-transport"], periwinkleServices) : null,
-      verse("raven.local", "Raven", "local-peer", hostState(hosts.Raven), ["ssh"], hostServices("Raven", hosts.Raven)),
-      verse("yggdrasil.ops", "Yggdrasil", "ops-host", hostState(hosts.Yggdrasil), ["ssh", "https", "services"], [
-        ...hostServices("Yggdrasil", hosts.Yggdrasil),
-        ...yggdrasilServices.map((entry) => service(`systemd-${entry.name}`, entry.name, systemdState(entry.state), entry.state)),
-      ]),
+      verse("raven.local", "Raven", "local-peer", bodyStatus(verseEvidence, "raven"), ["cultmesh-provider"], bodyServices(verseEvidence, "raven")),
+      verse("yggdrasil.ops", "Yggdrasil", "ops-host", bodyStatus(verseEvidence, "yggdrasil"), ["cultmesh-provider"], bodyServices(verseEvidence, "yggdrasil")),
     ].filter(Boolean);
 
     return {
@@ -122,7 +98,7 @@ function createStateBuilder({ cachePath, gamecultTextDocumentStorePath, interfac
         detail: entry.capabilities.join(", "),
       })),
       providerCatalog: providerAdvertisements,
-      surface: buildSurface({ observedAt, docker, adb, hosts, yggdrasilServices, verses, interfaces, observations, layout: layoutStore.readLayout(), marqueeText }),
+      surface: buildSurface({ observedAt, docker, adb, verses, interfaces, layout, marqueeText }),
     };
   }
 
@@ -135,6 +111,70 @@ function verse(verseId, name, role, status, capabilities, services = []) {
 
 function service(id, name, state, detail = "") {
   return { id: stableId(id), name, state, detail: String(detail || "") };
+}
+
+function bodyStatus(entries, body) {
+  const matches = bodyEntries(entries, body);
+  if (!matches.length) return "waiting";
+  if (matches.some((entry) => providerState(entry) === "active")) return "active";
+  if (matches.some((entry) => providerState(entry) === "warn")) return "warn";
+  return "waiting";
+}
+
+function bodyServices(entries, body) {
+  const matches = bodyEntries(entries, body);
+  if (!matches.length) {
+    return [service(`${body}-cultmesh-witnesses`, `${titleCase(body)} CultMesh witnesses`, "waiting", "no provider advertisement or interface discovered")];
+  }
+
+  return matches
+    .slice(0, 8)
+    .map((entry) => service(
+      `${body}-${entry.providerId || entry.id || entry.title || "provider"}`,
+      entry.title || entry.providerId || entry.id || `${titleCase(body)} provider`,
+      providerState(entry),
+      providerDetail(entry),
+    ));
+}
+
+function bodyEntries(entries, body) {
+  const token = String(body).toLowerCase();
+  return entries.filter((entry) => providerBodyText(entry).includes(token));
+}
+
+function providerBodyText(entry) {
+  return [
+    entry.providerId,
+    entry.id,
+    entry.title,
+    entry.canonicalService,
+    entry.locatedService,
+    entry.cultMeshAddress,
+    entry.verseId,
+    entry.source,
+  ].filter(Boolean).join(" ").toLowerCase();
+}
+
+function providerState(entry) {
+  const state = String(entry.state || entry.status || "").toLowerCase();
+  if (["active", "ok", "ready", "running", "published"].includes(state)) return "active";
+  if (["warn", "warning", "degraded"].includes(state)) return "warn";
+  if (["failed", "error", "offline"].includes(state)) return "warn";
+  return entry.surface?.root ? "active" : "waiting";
+}
+
+function providerDetail(entry) {
+  return [
+    entry.detail,
+    entry.cultMeshAddress,
+    entry.locatedService,
+    entry.source,
+  ].filter(Boolean).join(" / ") || "provider-owned CultMesh discovery";
+}
+
+function titleCase(value) {
+  const text = String(value || "");
+  return text ? text[0].toUpperCase() + text.slice(1) : "";
 }
 
 function adbState(adb) {

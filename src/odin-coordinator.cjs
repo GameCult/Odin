@@ -12,7 +12,6 @@ const { createIdunnRudpHealthPublisher, publishIdunnRudpHealth } = require("./od
 const { createLayoutStore } = require("./odin/layout.cjs");
 const { createLiveProviderRegistry } = require("./odin/provider-ingress.cjs");
 const { createStateBuilder } = require("./odin/state.cjs");
-const { broadcastState, createDashboardServer } = require("./odin/websocket.cjs");
 
 const config = buildConfig(process.argv.slice(2));
 fs.mkdirSync(config.stateDir, { recursive: true });
@@ -24,24 +23,25 @@ if (cultRuntime.error) {
 }
 
 const documents = defineOdinDocuments(cultRuntime.defineDocumentType);
-const layoutStore = createLayoutStore(config.layoutPath);
+const allDocumentDefinitions = Object.values(documents).filter(Boolean);
+const layoutStore = createLayoutStore({
+  definition: documents.interfaceLayoutDefinition,
+  getNode: async () => meshNodePromise ? await meshNodePromise : null,
+  layoutPath: config.layoutPath,
+});
 const liveProviderRegistry = createLiveProviderRegistry();
 const interfaceDiscovery = createInterfaceDiscovery({
   CultMesh: cultRuntime.CultMesh,
   documents,
   interfaceBindingStores: config.interfaceBindingStores,
   liveProviderRegistry,
-  seedDeckUrls: config.seedDeckUrls,
 });
 const stateBuilder = createStateBuilder({
   cachePath: config.cachePath,
   gamecultTextDocumentStorePath: config.gamecultTextDocumentStorePath,
   interfaceDiscovery,
   layoutStore,
-  observationFreshSeconds: config.observationFreshSeconds,
-  observationLogPath: config.observationLogPath,
   stonksBurstSize: config.stonksBurstSize,
-  stonksStateUrl: config.stonksStateUrl,
 });
 
 let meshNodePromise = null;
@@ -54,6 +54,7 @@ let lastRefresh = {
   startedAt: null,
 };
 let lastIdunnRudpHealthPublishedAt = null;
+let observedRudpDocuments = 0;
 
 main().catch((error) => {
   console.error(error);
@@ -76,37 +77,63 @@ async function main() {
         return (await meshNodePromise).cache;
       },
       onDocumentPutRaw: (document) => {
+        if (observedRudpDocuments < 40) {
+          observedRudpDocuments += 1;
+          console.error(
+            `Odin RUDP document #${observedRudpDocuments} schema=${document.schemaId} key=${document.recordKey} source=${document.sourceRuntimeId || "unknown"} remote=${document.remote?.address}:${document.remote?.port}`,
+          );
+        }
         liveProviderRegistry.ingestDocument(document, document.remote);
+        persistRudpDocumentPut(document).catch((error) => {
+          console.error("CultMesh/RUDP document persist failed:", error.message);
+        });
       },
     });
     await cultMeshRudpDocumentServer.start();
     console.log(`CultMesh/RUDP document catalog: ${config.cultnetRudpBind}`);
   }
 
-  const dashboardServer = createDashboardServer({
-    applyClientCommand: (command) => layoutStore.applyClientCommand(command),
-    getCurrentState: () => currentState,
-    getHealth: () => health(dashboardServer.clients),
-    host: config.host,
-    port: config.port,
-  });
   console.log(`Durable surface cache: ${config.cachePath}`);
 
-  await refresh(dashboardServer.clients);
-  scheduleRefresh(dashboardServer.clients);
+  await refresh();
+  scheduleRefresh();
 }
 
-function scheduleRefresh(clients) {
+async function persistRudpDocumentPut(document) {
+  if (!meshNodePromise || !document?.schemaId || !document?.recordKey) return;
+  const definition = documentDefinitionForSchema(document.schemaId);
+  if (!definition) return;
+  const node = await meshNodePromise;
+  await node.put(definition, document.recordKey, normalizeRudpPayload(document.payload));
+}
+
+function documentDefinitionForSchema(schemaId) {
+  return allDocumentDefinitions.find((definition) =>
+    definition?.schemaId === schemaId
+    || definition?.schemaVersion === schemaId
+    || definition?.schemaName === schemaId
+    || definition?.type === schemaId
+  );
+}
+
+function normalizeRudpPayload(payload) {
+  if (Array.isArray(payload) && payload.length === 1 && payload[0] && typeof payload[0] === "object" && !Array.isArray(payload[0])) {
+    return payload[0];
+  }
+  return payload;
+}
+
+function scheduleRefresh() {
   setTimeout(() => {
-    refresh(clients)
+    refresh()
       .catch((error) => console.error("refresh failed:", error))
-      .finally(() => scheduleRefresh(clients));
+      .finally(() => scheduleRefresh());
   }, config.intervalMs);
 }
 
 async function createDurableSurfaceNode() {
   try {
-    return await cultRuntime.CultMesh.createNode(config.cachePath, { documents: [documents.surfaceDefinition] });
+    return await cultRuntime.CultMesh.createNode(config.cachePath, { documents: allDocumentDefinitions });
   } catch (error) {
     if (!fs.existsSync(config.cachePath)) {
       throw error;
@@ -116,11 +143,11 @@ async function createDurableSurfaceNode() {
     fs.renameSync(config.cachePath, corruptPath);
     console.error(`CultMesh surface cache was unreadable and has been quarantined: ${corruptPath}`);
     console.error(`CultMesh surface cache read error: ${error.message}`);
-    return cultRuntime.CultMesh.createNode(config.cachePath, { documents: [documents.surfaceDefinition] });
+    return cultRuntime.CultMesh.createNode(config.cachePath, { documents: allDocumentDefinitions });
   }
 }
 
-async function refresh(clients) {
+async function refresh() {
   const started = Date.now();
   lastRefresh = {
     completedAt: null,
@@ -131,7 +158,6 @@ async function refresh(clients) {
   try {
     currentState = await stateBuilder.buildState();
     await persistState(currentState);
-    broadcastState(clients, currentState);
     lastRefresh = {
       completedAt: new Date().toISOString(),
       durationMs: Date.now() - started,
@@ -171,7 +197,9 @@ async function publishOdinHealth(state, detail) {
 }
 
 async function persistState(state) {
-  fs.writeFileSync(path.join(config.stateDir, "latest-surface.json"), JSON.stringify(state, null, 2), "utf8");
+  if (config.writeDebugSurfaceJson) {
+    fs.writeFileSync(path.join(config.stateDir, "latest-surface.json"), JSON.stringify(state, null, 2), "utf8");
+  }
   if (!meshNodePromise || !documents.surfaceDefinition) {
     return;
   }
@@ -183,28 +211,4 @@ async function persistState(state) {
   } catch (error) {
     console.error("CultMesh snapshot write failed:", error.message);
   }
-}
-
-function health(clients) {
-  return {
-    ok: !lastRefresh.error,
-    providerId: currentState.providerId,
-    version: currentState.version,
-    clients: clients.size,
-    cachePath: config.cachePath,
-    stateDir: config.stateDir,
-    layoutPath: config.layoutPath,
-    intervalMs: config.intervalMs,
-    cultMesh: {
-      available: Boolean(cultRuntime.CultMesh && documents.surfaceDefinition),
-      error: cultRuntime.error?.message || null,
-    },
-    discovery: {
-      cultNetRudpBind: config.cultnetRudpBind || null,
-      seedDeckUrls: config.seedDeckUrls,
-      discoveredDeckUrls: interfaceDiscovery.getDiscoveredDeckUrls(),
-      interfaceBindingStores: config.interfaceBindingStores,
-    },
-    refresh: lastRefresh,
-  };
 }

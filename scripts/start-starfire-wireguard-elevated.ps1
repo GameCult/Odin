@@ -1,3 +1,8 @@
+param(
+  [string] $NightwingEndpointFallback = $env:STARFIRE_WIREGUARD_NIGHTWING_ENDPOINT_FALLBACK,
+  [string] $StarfireLanAddress = $env:STARFIRE_LAN_ADDRESS
+)
+
 $ErrorActionPreference = "Stop"
 
 $serviceName = "WireGuardTunnel`$wg-gamecult-starfire"
@@ -23,10 +28,13 @@ try {
   $configChanged = $false
   $backupPath = $null
   if (-not $nightwingHomeResolves -and $config -match "Endpoint\s*=\s*Nightwing\.Home:51820") {
+    if ([string]::IsNullOrWhiteSpace($NightwingEndpointFallback)) {
+      throw "Nightwing.Home does not resolve; supply -NightwingEndpointFallback or STARFIRE_WIREGUARD_NIGHTWING_ENDPOINT_FALLBACK instead of using a baked LAN endpoint."
+    }
     $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
     $backupPath = "$configPath.bak-nightwing-home-$stamp"
     Copy-Item -LiteralPath $configPath -Destination $backupPath
-    $config = $config -replace "Endpoint\s*=\s*Nightwing\.Home:51820", "Endpoint = 192.168.1.75:51820"
+    $config = $config -replace "Endpoint\s*=\s*Nightwing\.Home:51820", "Endpoint = $NightwingEndpointFallback"
     Set-Content -Encoding ASCII -LiteralPath $configPath -Value $config
     $configChanged = $true
   }
@@ -36,10 +44,9 @@ try {
 
   $service = Get-Service -Name $serviceName
   $ipAddresses = Get-NetIPAddress |
-    Where-Object { $_.IPAddress -match "^10\.77\." -or $_.IPAddress -eq "192.168.1.66" } |
+    Where-Object { $_.IPAddress -match "^10\.77\." -or ((-not [string]::IsNullOrWhiteSpace($StarfireLanAddress)) -and $_.IPAddress -eq $StarfireLanAddress) } |
     Select-Object InterfaceAlias, IPAddress, PrefixLength
   $portProxy = netsh interface portproxy show all
-  $ollamaTags = & curl.exe -fsS --connect-timeout 5 --max-time 10 http://127.0.0.1:11434/api/tags
 
   @(
     "completedAt=$((Get-Date).ToString("o"))"
@@ -56,9 +63,6 @@ try {
     ""
     "portProxy:"
     ($portProxy | Out-String)
-    ""
-    "ollamaTags:"
-    $ollamaTags
   ) | Set-Content -Encoding UTF8 -LiteralPath $logPath
 } catch {
   @(

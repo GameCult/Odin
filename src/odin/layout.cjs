@@ -3,24 +3,42 @@
 const fs = require("fs");
 const { clampNumber, positiveNumber, stableId } = require("./utils.cjs");
 
-function createLayoutStore(layoutPath) {
+const DEFAULT_LAYOUT_ID = "odin.providers";
+
+function createLayoutStore({ definition, getNode, layoutPath } = {}) {
+  let cachedLayout = null;
+  let attemptedMigration = false;
+
   return {
-    readLayout() {
-      try {
-        return JSON.parse(fs.readFileSync(layoutPath, "utf8"));
-      } catch {
-        return { schema: "odin.interface_layout.v1", tiles: {} };
+    async readLayout() {
+      const meshLayout = await readCultMeshLayout();
+      if (meshLayout) return meshLayout;
+      if (!attemptedMigration) {
+        attemptedMigration = true;
+        const migrated = readJsonMigrationLayout(layoutPath);
+        if (migrated) {
+          cachedLayout = migrated;
+          await this.writeLayout(migrated).catch(() => undefined);
+          return normalizeLayout(migrated);
+        }
       }
+      return cachedLayout || defaultLayout();
     },
 
-    writeLayout(layout) {
-      fs.writeFileSync(layoutPath, JSON.stringify(layout, null, 2), "utf8");
+    async writeLayout(layout) {
+      const normalized = normalizeLayout(layout);
+      cachedLayout = normalized;
+      const node = await layoutNode();
+      if (!node || !definition) {
+        throw new Error("Odin CultMesh layout store unavailable; refusing to write layout sidecar fallback.");
+      }
+      await node.put(definition, DEFAULT_LAYOUT_ID, normalized);
+      await node.flush?.(true);
     },
 
-    applyClientCommand(command) {
+    async applyClientCommand(command) {
       if (!command || command.type !== "odin-layout-intent" || !command.providerId) return;
-      const layout = this.readLayout();
-      layout.schema = "odin.interface_layout.v1";
+      const layout = await this.readLayout();
       layout.updatedAt = new Date().toISOString();
       layout.tiles ||= {};
       const current = layout.tiles[command.providerId] || defaultLayoutFor({ providerId: command.providerId }, []);
@@ -39,9 +57,45 @@ function createLayoutStore(layoutPath) {
         return;
       }
       layout.tiles[command.providerId] = next;
-      this.writeLayout(layout);
+      await this.writeLayout(layout);
     },
   };
+
+  async function readCultMeshLayout() {
+    const node = await layoutNode();
+    if (!node || !definition) return null;
+    const record = await node.get(definition, DEFAULT_LAYOUT_ID);
+    const normalized = record ? normalizeLayout(record) : null;
+    if (normalized) cachedLayout = normalized;
+    return normalized;
+  }
+
+  async function layoutNode() {
+    return typeof getNode === "function" ? await getNode() : null;
+  }
+}
+
+function defaultLayout() {
+  return { schema: "odin.interface_layout.v1", layoutId: DEFAULT_LAYOUT_ID, tiles: {} };
+}
+
+function normalizeLayout(layout) {
+  return {
+    ...defaultLayout(),
+    ...(layout && typeof layout === "object" ? layout : {}),
+    schema: "odin.interface_layout.v1",
+    layoutId: DEFAULT_LAYOUT_ID,
+    tiles: layout && typeof layout.tiles === "object" && layout.tiles ? layout.tiles : {},
+  };
+}
+
+function readJsonMigrationLayout(layoutPath) {
+  if (!layoutPath) return null;
+  try {
+    return normalizeLayout(JSON.parse(fs.readFileSync(layoutPath, "utf8")));
+  } catch {
+    return null;
+  }
 }
 
 function defaultLayoutFor(entry, interfaces) {
@@ -203,7 +257,7 @@ function normalizeDenseSurfaceIntent(intent, derived) {
 
 function isDenseLayoutStrategy(strategy) {
   const value = String(strategy || "");
-  return value === "dense-tree" || value === "legacy-node-groups" || value.startsWith("dense-");
+  return value === "dense-tree" || value.startsWith("dense-");
 }
 
 function textValue(element) {

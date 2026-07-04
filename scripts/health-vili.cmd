@@ -1,2 +1,3 @@
 @echo off
-curl.exe -fsS http://10.77.0.4:8824/health >nul
+echo health-vili.cmd archived: Vili health is daemon-published over CultNet/RUDP as vili.cultnet-rudp-animation-health. Do not probe HTTP for daemon health. 1>&2
+exit /b 2

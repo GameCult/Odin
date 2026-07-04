@@ -1,12 +1,10 @@
 "use strict";
 
 const { analyzeElementTree, fullscreenLayoutIntent, mergeLayoutIntent } = require("./layout.cjs");
-const { observationPane } = require("./observations.cjs");
 const { stableId } = require("./utils.cjs");
 
-function buildSurface({ observedAt, docker, adb, hosts, yggdrasilServices, verses, interfaces, observations, layout, marqueeText = "" }) {
+function buildSurface({ observedAt, docker, adb, verses, interfaces, layout, marqueeText = "" }) {
   const activeInterfaces = interfaces.filter((entry) => entry?.surface?.root);
-  const activeObservationStreams = observations.streams.filter((entry) => entry.state === "active");
   return {
     schema: "gamecult.eve.surface.v1",
     id: "gamecult.network.status.surface",
@@ -17,7 +15,7 @@ function buildSurface({ observedAt, docker, adb, hosts, yggdrasilServices, verse
       props: {
         title: "Odin Provider Catalog",
         observedAt,
-        summary: `${activeInterfaces.length} Eve surfaces / ${activeObservationStreams.length} live streams`,
+        summary: `${activeInterfaces.length} Eve surfaces`,
         marqueeText,
         layout: fullscreenLayoutIntent("odin.providers", -100),
         presentation: {
@@ -82,7 +80,6 @@ function hasOverviewSignal(entry) {
   if (providerId.includes("streampixels")) return streamPixelsHasOverviewSignal(root, text);
   if (providerId.includes("mimir.live.stats")) return mimirHasOverviewSignal(root, text);
 
-  if (root.props?.compatibility === "legacy-dashboard-nodes") return false;
   if (/\b(rate limit|playing:\s*none|queue:\s*empty|unavailable|not discovered)\b/i.test(text)) return false;
   return hasMetricElement(root) || /\b(users?|viewers?|events?|traffic|ingest|throughput|latency|dropout|queue|pressure|saturation|error|fault|warning)\b/i.test(text);
 }
@@ -101,10 +98,6 @@ function spotiverseHasOverviewSignal(root, text) {
 }
 
 function streamPixelsHasOverviewSignal(root, text) {
-  if (root.props?.compatibility === "legacy-dashboard-nodes" && !/\b(users?|viewers?|events?|traffic|ingest|throughput|latency|queue|pressure|saturation|dropped|errors?)\b/i.test(text)) {
-    return false;
-  }
-
   return [
     /\b(live\s*)?(users?|viewers?)\s*[:=]?\s*[1-9]/i,
     /\bevents?(\s*traffic|\s*\/\s*s|\s*per\s*sec)?\s*[:=]?\s*[1-9]/i,
@@ -116,7 +109,6 @@ function streamPixelsHasOverviewSignal(root, text) {
 }
 
 function mimirHasOverviewSignal(root, text) {
-  if (root.props?.compatibility === "legacy-dashboard-nodes") return false;
   return [
     /\bdropout\b.*\b[1-9]/i,
     /\bstale\s+streams?\s*[:=]?\s*[1-9]/i,
@@ -199,17 +191,6 @@ function hasBodyPrefix(providerId) {
 function sourceBody(source) {
   const value = String(source || "");
   if (value.startsWith("cultmesh:")) return "starfire";
-
-  try {
-    const url = new URL(value);
-    const host = url.hostname.toLowerCase();
-    if (host === "127.0.0.1" || host === "localhost" || host === "::1" || host === "172.17.0.1" || host === "192.168.1.66") {
-      return "starfire";
-    }
-    if (host === "192.168.1.75") return "eve";
-  } catch {
-    // Unknown source strings keep the provider-owned id unchanged.
-  }
 
   return "";
 }

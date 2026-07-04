@@ -5,8 +5,8 @@ param(
   [string] $SshTarget = "nwroot",
   [string] $RemoteDir = "/opt/gamecult/gjallar",
   [string] $CultCachePath = "/var/lib/gamecult/gjallar/cultcache/gjallar.service.cc",
-  [string] $OdinCultNetRudp = "192.168.1.66:17871",
-  [string] $IdunnRudpHealth = "10.77.0.2:17870",
+  [string] $OdinCultMeshUri = $(if ($env:GJALLAR_ODIN_CULTMESH_URI) { $env:GJALLAR_ODIN_CULTMESH_URI } elseif ($env:ODIN_CULTMESH_URI) { $env:ODIN_CULTMESH_URI } else { "cultmesh://odin/rendezvous/provider-catalog" }),
+  [string] $IdunnRudpHealth = $(if ($env:GJALLAR_IDUNN_RUDP_HEALTH) { $env:GJALLAR_IDUNN_RUDP_HEALTH } else { $env:IDUNN_RUDP_HEALTH }),
   [string] $IdunnDaemon = "nightwing-gjallar",
   [string] $IdunnHealthContract = "gjallar.cultnet-rudp-framebuffer-composition-health",
   [string] $UpstreamRemote = "origin",
@@ -54,8 +54,17 @@ function Export-GitArchive {
   }
 }
 
-if ($env:IDUNN_ACTUATOR -ne "1") {
+if ($env:IDUNN_ACTUATOR -ne "1" -or $env:IDUNN_COMMAND_AUTHORITY -ne "idunn-daemon") {
   throw "This deployment script is an Idunn actuator. Agents must configure Idunn release targets and let Idunn run deployment; do not invoke deploy scripts manually."
+}
+if ($env:GJALLAR_ODIN_CULTNET_RUDP -or $env:ODIN_CULTNET_RUDP) {
+  throw "GJALLAR_ODIN_CULTNET_RUDP and ODIN_CULTNET_RUDP were removed. Configure GJALLAR_ODIN_CULTMESH_URI or ODIN_CULTMESH_URI with a cultmesh:// Odin route."
+}
+if ([string]::IsNullOrWhiteSpace($OdinCultMeshUri) -or -not $OdinCultMeshUri.StartsWith("cultmesh://", [StringComparison]::OrdinalIgnoreCase)) {
+  throw "Odin CultMesh URI must be supplied by GJALLAR_ODIN_CULTMESH_URI, ODIN_CULTMESH_URI, or -OdinCultMeshUri and must start with cultmesh://."
+}
+if ([string]::IsNullOrWhiteSpace($IdunnRudpHealth)) {
+  throw "Idunn RUDP health endpoint must be supplied by GJALLAR_IDUNN_RUDP_HEALTH, IDUNN_RUDP_HEALTH, or -IdunnRudpHealth; no WireGuard endpoint default is allowed."
 }
 
 $sourceRef = "$UpstreamRemote/$UpstreamBranch"
@@ -132,7 +141,7 @@ $cultCacheDir = if ($CultCachePath.LastIndexOf('/') -gt 0) { $CultCachePath.Subs
 $dropIn = @"
 [Service]
 Environment=GJALLAR_CULTCACHE_PATH=$CultCachePath
-Environment=GJALLAR_ODIN_CULTNET_RUDP=$OdinCultNetRudp
+Environment=GJALLAR_ODIN_CULTMESH_URI=$OdinCultMeshUri
 Environment=GJALLAR_IDUNN_RUDP_HEALTH=$IdunnRudpHealth
 Environment=GJALLAR_IDUNN_DAEMON=$IdunnDaemon
 Environment=GJALLAR_IDUNN_HEALTH_CONTRACT=$IdunnHealthContract

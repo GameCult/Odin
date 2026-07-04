@@ -1,2 +1,3 @@
 @echo off
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File E:\Projects\Odin\scripts\health-muninn.ps1
+echo health-raven-capture-mux.cmd archived: Raven capture mux no longer owns Muninn daemon health; Muninn publishes muninn.cultnet-rudp-remote-telemetry-health over CultNet/RUDP.
+exit /b 2

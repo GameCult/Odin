@@ -1,2 +1,3 @@
 @echo off
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File E:\Projects\Odin\scripts\health-yggdrasil-source-app.ps1 -AppId yggdrasil-streampixels -RepoRoot E:\Projects\StreamPixels -RemoteAppHome /srv/streampixels -CheckScript E:\Projects\gamecult-ops\scripts\check-streampixels-preview.sh
+echo health-yggdrasil-streampixels.cmd archived: StreamPixels health is daemon-published over CultNet/RUDP as streampixels.cultnet-rudp-service-health. Use health-yggdrasil-source-app.ps1 only as an explicit deployment witness, not Idunn health truth.
+exit /b 2

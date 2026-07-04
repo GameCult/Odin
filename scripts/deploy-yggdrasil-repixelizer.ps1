@@ -16,7 +16,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-if ($env:IDUNN_ACTUATOR -ne "1") {
+if ($env:IDUNN_ACTUATOR -ne "1" -or $env:IDUNN_COMMAND_AUTHORITY -ne "idunn-daemon") {
   throw "This deployment script is an Idunn actuator. Agents must configure Idunn release targets and let Idunn run deployment; do not invoke deploy scripts manually."
 }
 
@@ -106,7 +106,7 @@ sudo -n install -o '$AppUser' -g '$AppUser' -m 600 '$remoteSourceTarball' '$targ
 sudo -n install -o '$AppUser' -g '$AppUser' -m 600 '$remoteCultLibTarball' '$targetCultLibTarball'
 sudo -n install -m 644 '$remoteManifest' '$targetManifest'
 chmod +x '$remoteDeploy' '$remoteCheck'
-sudo -n bash '$remoteDeploy'
+sudo -n env GAMECULT_IDUNN_REMOTE_ACTUATOR=1 IDUNN_COMMAND_AUTHORITY=idunn-daemon bash '$remoteDeploy'
 
 check_ok=0
 for i in `$(seq 1 30); do

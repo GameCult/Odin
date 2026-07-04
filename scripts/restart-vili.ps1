@@ -6,7 +6,7 @@ param(
   [int] $Port = 8824,
   [string] $HostName = "0.0.0.0",
   [string] $StateRoot = "E:\Projects\Vili\.vili",
-  [string] $IdunnRudpHealth = "10.77.0.2:17870",
+  [string] $IdunnRudpHealth = $(if ($env:VILI_IDUNN_RUDP_HEALTH) { $env:VILI_IDUNN_RUDP_HEALTH } else { $env:IDUNN_RUDP_HEALTH }),
   [string] $IdunnDaemon = "vili",
   [string] $IdunnHealthContract = "vili.cultnet-rudp-animation-health",
   [int] $IdunnHealthIntervalSeconds = 15
@@ -14,10 +14,17 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+if ($env:IDUNN_ACTUATOR -ne "1" -or $env:IDUNN_COMMAND_AUTHORITY -ne "idunn-daemon") {
+  throw "restart-vili.ps1 is an Idunn actuator body. Redeploy by poking Idunn; direct service restart is not an owned path."
+}
+
+if ([string]::IsNullOrWhiteSpace($IdunnRudpHealth)) {
+  throw "Idunn RUDP health endpoint must be supplied by VILI_IDUNN_RUDP_HEALTH, IDUNN_RUDP_HEALTH, or -IdunnRudpHealth; no WireGuard endpoint default is allowed."
+}
+
 $localFiles = @(
   (Join-Path $LocalViliRoot "package.json"),
   (Join-Path $LocalViliRoot "package-lock.json"),
-  (Join-Path $LocalViliRoot "scripts\health-vili-daemon.cmd"),
   (Join-Path $LocalViliRoot "scripts\idunn-rudp.cjs"),
   (Join-Path $LocalViliRoot "scripts\install-vili-task.ps1"),
   (Join-Path $LocalViliRoot "scripts\restart-vili-daemon.cmd"),
@@ -33,8 +40,7 @@ $localFiles = @(
   (Join-Path $LocalCultLibRoot "node_modules\fast-uri"),
   (Join-Path $LocalCultLibRoot "node_modules\json-schema-traverse"),
   (Join-Path $LocalCultLibRoot "node_modules\require-from-string"),
-  (Join-Path $LocalViliRoot "node_modules\@msgpack"),
-  (Join-Path $LocalViliRoot "node_modules\ws")
+  (Join-Path $LocalViliRoot "node_modules\@msgpack")
 )
 
 foreach ($path in $localFiles) {
@@ -93,7 +99,6 @@ try {
   Copy-Item -LiteralPath (Join-Path `$syncRoot "package-lock.json") -Destination (Join-Path `$remoteRoot "package-lock.json") -Force
 
   `$scriptFiles = @(
-    "health-vili-daemon.cmd",
     "idunn-rudp.cjs",
     "install-vili-task.ps1",
     "restart-vili-daemon.cmd",
@@ -180,13 +185,13 @@ try {
     throw "Vili process command line does not include the Idunn RUDP health arguments."
   }
 
-  `$statePath = Join-Path `$stateRoot "operator-state.json"
+  `$operatorStatePath = Join-Path `$stateRoot "operator-state.json"
   `$deadline = (Get-Date).AddSeconds(30)
   `$state = `$null
   while ((Get-Date) -lt `$deadline) {
-    if (Test-Path -LiteralPath `$statePath) {
+    if (Test-Path -LiteralPath `$operatorStatePath) {
       try {
-        `$state = Get-Content -LiteralPath `$statePath -Raw | ConvertFrom-Json
+        `$state = Get-Content -LiteralPath `$operatorStatePath -Raw | ConvertFrom-Json
         if (`$null -ne `$state.idunnRudpHealth -and `$state.idunnRudpHealth.status -eq "published") {
           break
         }
@@ -196,7 +201,7 @@ try {
     Start-Sleep -Seconds 1
   }
   if (`$null -eq `$state -or `$null -eq `$state.idunnRudpHealth) {
-    throw "Vili operator-state.json did not publish idunnRudpHealth after restart."
+    throw "Vili daemon state file did not report idunnRudpHealth after restart."
   }
   if (`$state.idunnRudpHealth.status -ne "published") {
     throw "Vili idunnRudpHealth status is `$(`$state.idunnRudpHealth.status): `$(`$state.idunnRudpHealth.error)"
@@ -227,14 +232,12 @@ try {
     @{ Source = (Join-Path $LocalCultLibRoot "node_modules\fast-uri"); Destination = (Join-Path $localBundleNodeModules "fast-uri") },
     @{ Source = (Join-Path $LocalCultLibRoot "node_modules\json-schema-traverse"); Destination = (Join-Path $localBundleNodeModules "json-schema-traverse") },
     @{ Source = (Join-Path $LocalCultLibRoot "node_modules\require-from-string"); Destination = (Join-Path $localBundleNodeModules "require-from-string") },
-    @{ Source = (Join-Path $LocalViliRoot "node_modules\@msgpack"); Destination = (Join-Path $localBundleNodeModules "@msgpack") },
-    @{ Source = (Join-Path $LocalViliRoot "node_modules\ws"); Destination = (Join-Path $localBundleNodeModules "ws") }
+    @{ Source = (Join-Path $LocalViliRoot "node_modules\@msgpack"); Destination = (Join-Path $localBundleNodeModules "@msgpack") }
   )
   New-Item -ItemType Directory -Force -Path $localBundleScripts, $localBundleNodeModules | Out-Null
   Copy-Item -LiteralPath (Join-Path $LocalViliRoot "package.json") -Destination (Join-Path $localBundleRoot "package.json") -Force
   Copy-Item -LiteralPath (Join-Path $LocalViliRoot "package-lock.json") -Destination (Join-Path $localBundleRoot "package-lock.json") -Force
   $scriptCopies = @(
-    "health-vili-daemon.cmd",
     "idunn-rudp.cjs",
     "install-vili-task.ps1",
     "restart-vili-daemon.cmd",
@@ -281,11 +284,4 @@ exit `$code
 }
 
 $restartExit = $LASTEXITCODE
-if ($restartExit -eq 0) {
-  Start-Sleep -Seconds 2
-  try {
-    & curl.exe -fsS --max-time 15 "http://10.77.0.4:$Port/operator-state" | Out-Null
-  } catch {
-  }
-}
 exit $restartExit

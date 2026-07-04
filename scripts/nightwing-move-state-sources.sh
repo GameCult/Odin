@@ -48,9 +48,13 @@ for js in /dev/input/js*; do
   props="$(udevadm info -q property -n "$js" 2>/dev/null || true)"
   uevent="/sys/class/input/$(basename "$js")/device/device/uevent"
   uevent_text="$(cat "$uevent" 2>/dev/null || true)"
+  is_nav=0
   case "$props
 $uevent_text" in
     *ID_VENDOR_ID=054c*ID_MODEL_ID=03d5*|*ID_MODEL=Motion_Controller*|*HID_ID=0005:0000054C:000003D5*|*HID_ID=0003:0000054C:000003D5*)
+      ;;
+    *ID_MODEL=Navigation_Controller*|*ID_USB_MODEL=Navigation_Controller*|*ID_MODEL_ID=042f*ID_VENDOR_ID=054c*|*ID_VENDOR_ID=054c*ID_MODEL_ID=042f*|*HID_ID=0005:0000054C:0000042F*|*HID_ID=0003:0000054C:0000042F*|*Sony_Navigation_Controller*|*Sony\ Navigation\ Controller*)
+      is_nav=1
       ;;
     *)
       continue
@@ -66,7 +70,13 @@ $uevent_text" in
     controller_id="$(controller_id_from_hidraw "$hidraw" 2>/dev/null || true)"
   fi
 
-  if [ -n "$controller_id" ]; then
+  if [ "$is_nav" = "1" ] && [ -n "$uniq" ]; then
+    id="nav-$uniq"
+  elif [ "$is_nav" = "1" ] && [ -n "$path_tag" ]; then
+    id="nav-usb-$path_tag"
+  elif [ "$is_nav" = "1" ]; then
+    id="nav-$(basename "$js")"
+  elif [ -n "$controller_id" ]; then
     id="move-$controller_id"
   elif [ "$bus" = "bluetooth" ] && [ -n "$uniq" ]; then
     id="move-$uniq"

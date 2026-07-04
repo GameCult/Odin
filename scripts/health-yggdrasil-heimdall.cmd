@@ -1,2 +1,3 @@
 @echo off
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File E:\Projects\Odin\scripts\health-yggdrasil-source-app.ps1 -AppId yggdrasil-heimdall -RepoRoot E:\Projects\Heimdall -RemoteAppHome /srv/heimdall -CheckScript E:\Projects\gamecult-ops\scripts\check-heimdall.sh
+echo health-yggdrasil-heimdall.cmd archived: Heimdall health is daemon-published over CultNet/RUDP as heimdall.cultnet-rudp-provider-health. Use health-yggdrasil-source-app.ps1 only as an explicit deployment witness, not Idunn health truth.
+exit /b 2

@@ -73,11 +73,10 @@ Local package surfaces:
 - Owner: Odin owns the network-wide Verse registry, schema catalog index, translation map, and accepted provider catalog/proxy surfaces.
 - Inputs: CultMesh/CultNet peer announcements, schema catalog responses, daemon
   health/provider publications over `cultnet.transport.rudp.v0`, local
-  compatibility probes, Docker/ADB host facts, SSH-reachable ops hosts, and
-  Mimir's normalized Eve observation ledger.
-- Outputs: CultCache-backed Odin state, CultMesh documents, CultNet
-  schema/catalog messages, and an Eve-compatible `/eve/deck` surface for
-  dashboards during the bridge period.
+  Docker/ADB debug facts, and provider-owned Eve/CultUI surfaces.
+- Outputs: CultCache-backed Odin state, CultMesh documents, and CultNet
+  schema/catalog messages. Browser, GUI, TUI, and framebuffer renderers lower
+  those documents outside Odin instead of asking Odin to host web surfaces.
 - Derived state: Gjallar's attached Nightwing display, browser dashboards, and future Eve clients are projections of Odin state and provider-owned Eve/CultUI surfaces.
 - Forbidden writers: renderers do not probe the network or decide Verse truth; individual projects do not maintain private incompatible discovery ledgers once Odin can see them.
 - Shared paths: human dashboards, worker schedulers, Verse bootstrap code, and compact TUI views consume the same registry and schema catalog.
@@ -86,31 +85,27 @@ Local package surfaces:
 ## Run Locally On Starfire
 
 ```powershell
-.\scripts\start-odin.ps1
-curl.exe -fsS http://127.0.0.1:8797/health
+.\scripts\start-odin.ps1 -IdunnRudpHealth $env:IDUNN_RUDP_HEALTH
 ```
 
-The Eve/CultUI deck endpoint is a compatibility bridge:
+`-IdunnRudpHealth`, `ODIN_IDUNN_RUDP_HEALTH`, or `IDUNN_RUDP_HEALTH` must name
+the Idunn RUDP health endpoint. Odin does not assume a localhost health target.
+
+Odin's native document catalog is addressed by CultMesh URI. Concrete RUDP
+bootstrap is configured behind CultMesh URI resolution by the operator or by
+Odin/Idunn deployment state:
 
 ```text
-ws://127.0.0.1:8797/eve/deck
+cultmesh://odin/rendezvous/provider-catalog
 ```
 
-The native CultMesh/RUDP document catalog endpoint is:
+That URI accepts typed document publication and schema/catalog requests through
+the shared CultMesh runtime. Consumers that need Odin's accepted surface can
+still request the current CultNet snapshot after CultMesh resolves the transport.
 
-```text
-127.0.0.1:17871
-```
-
-That endpoint accepts typed document publication and schema/catalog requests
-through the shared CultMesh runtime. Consumers that need Odin's accepted surface
-can still request the current CultNet snapshot over the same transport.
-
-Legacy browser/deck lowerers can consume the LAN bridge endpoint:
-
-```text
-ws://192.168.1.66:8797/eve/deck
-```
+Legacy browser/deck lowerers must consume Odin's CultMesh state through their
+own lowering process. Odin no longer hosts browser-deck surfaces or publishes
+deck URLs as discovery seed material.
 
 State and logs live under ignored `scratch/odin/`.
 
@@ -119,22 +114,18 @@ State and logs live under ignored `scratch/odin/`.
 The first executable is deliberately narrow:
 
 - publishes provider catalog `odin.providers`;
-- writes the latest surface to `scratch/odin/latest-surface.json`;
-- persists the same document through local CultMesh/CultCache when `CultLib` packages are available at `E:\Projects\CultLib\packages`;
-- observes Starfire Docker, Periwinkle ADB, Nightwing services/GPU, Raven, EVE, and Yggdrasil reachability;
-- exposes Yggdrasil service status when the local SSH alias can reach it.
+- persists the latest surface through local CultMesh/CultCache when `CultLib` packages are available at `E:\Projects\CultLib\packages`;
+- writes `scratch/odin/latest-surface.json` only when `--write-debug-surface-json` or `ODIN_WRITE_DEBUG_SURFACE_JSON=1` is explicitly supplied;
+- observes Starfire Docker and Periwinkle ADB as local debug/edge facts;
+- derives remote Verse presence from provider-owned CultMesh/CultNet
+  advertisements and interface records, not TCP/SSH/systemd probes.
 - publishes explicit `verse` and `service` nodes for compact Eve/CultUI lowerers.
-- publishes explicit `observation-stream` nodes for Periwinkle/EVE sensor, microphone, touch, and camera stream summaries when Mimir's CultMesh observation ledger is present.
-- discovers Eve deck provider manifests from known/LAN deck endpoints as a
-  compatibility bridge while daemon CultLib dependencies migrate to CultNet
-  RUDP transport profiles;
-- includes local Spotiverse on `ws://127.0.0.1:8796/eve/deck` in the known provider seed list;
 - ingests provider-owned Eve/CultUI dashboards, including `mimir.live.stats` and `voidbot.swarm`, and embeds them as Odin `interface` nodes;
-- accepts `gamecult.eve.provider_advertisement.v1` documents in CultMesh interface binding stores so daemons can announce schemas, `.cc` witnesses, surfaces, commands, nested Verses, and style capabilities without Odin scraping private dashboards;
-- preserves provider semantic addresses such as `asgard.starfire.bifrost/eve/tui` and `asgard.starfire.bifrost/eve/gui`, with CultNet routes and WebSocket bridges carried as transport metadata rather than identity;
-- persists operator tiling intent as `odin.interface_layout.v1` under ignored `scratch/odin/interface-layout.json`.
+- accepts live `gamecult.eve.provider_advertisement.v1` announcements through Odin's CultMesh/RUDP rendezvous path so daemons can announce schemas, surfaces, commands, nested Verses, and style capabilities without Odin scraping private dashboards;
+- accepts explicit local debug imports only when `--interfaceBindingStore` / `ODIN_INTERFACE_BINDING_STORES` entries are written as `cultmesh-store:file://...` URIs; raw filesystem paths are not discovery configuration;
+- preserves provider semantic addresses such as `asgard.starfire.bifrost/eve/tui` and `asgard.starfire.bifrost/eve/gui`, with CultNet routes carried as transport metadata rather than identity;
+- persists operator tiling intent as `odin.interface_layout.v1` in the Odin CultMesh store; ignored `scratch/odin/interface-layout.json` is migration input only.
 
-The next real cut is to make provider advertisements and CultNet RUDP transport
-profiles the primary discovery path. Static host probes, LAN Eve deck scans,
-hardcoded deck URLs, HTTP health checks, TCP probes, and WebSocket bridges are
-compatibility input adapters. They must not become the architecture.
+Provider advertisements and CultNet/RUDP transport profiles are the discovery
+path. External host probes, product health checks, port probes, and renderer
+bridges are debug or lowering surfaces outside Odin only.

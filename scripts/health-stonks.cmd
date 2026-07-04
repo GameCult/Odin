@@ -1,2 +1,3 @@
 @echo off
-curl.exe -fsS http://127.0.0.1:8802/health >NUL
+echo health-stonks.cmd archived: Stonks health is daemon-published over CultNet/RUDP as stonks.cultnet-rudp-market-health. Do not probe localhost HTTP for daemon health. 1>&2
+exit /b 2

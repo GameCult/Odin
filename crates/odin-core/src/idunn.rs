@@ -194,13 +194,13 @@ mod tests {
             verse_id: "local".to_string(),
             name: "VoidBot".to_string(),
             enabled: true,
-            health_command: Some("exit 1".to_string()),
+            health_command: None,
             restart_command: restart_command.map(ToString::to_string),
-            authority: "idunn.local-command".to_string(),
+            authority: "idunn-supervisor-command".to_string(),
             max_silence_seconds: 60,
             observed_at: "2026-06-04T00:00:00Z".to_string(),
             deploy_command: None,
-            health_contract: "test.command-exit".to_string(),
+            health_contract: "test.cultnet-rudp-health".to_string(),
             transport_profile_id: "transport:voidbot".to_string(),
             command_boundary_id: "command-boundary:voidbot".to_string(),
         }
@@ -210,11 +210,11 @@ mod tests {
         IdunnDaemonHealthRecord {
             daemon_id: "voidbot".to_string(),
             state: state.to_string(),
-            detail: "unit probe".to_string(),
+            detail: "unit daemon publication".to_string(),
             observed_at: "2026-06-04T00:00:01Z".to_string(),
-            health_contract: "test.command-exit".to_string(),
-            publication_source: "compatibility-command".to_string(),
-            transport: "compatibility.local-command".to_string(),
+            health_contract: "test.cultnet-rudp-health".to_string(),
+            publication_source: "debug-command".to_string(),
+            transport: "debug.local-command".to_string(),
         }
     }
 
@@ -348,9 +348,9 @@ mod tests {
             status: "transport-surgery-required".to_string(),
             owner: "VoidBot internal provider stack".to_string(),
             objective: "Publish VoidBot internal daemon health over CultNet/RUDP".to_string(),
-            current_mechanism: "compatibility command probe".to_string(),
+            current_mechanism: "daemon-published RUDP health".to_string(),
             intended_authority: "daemon-owned CultNet/RUDP health record".to_string(),
-            cut_line: "demote command probe after RUDP health exists".to_string(),
+            cut_line: "daemon health must be published over CultNet/RUDP".to_string(),
             steps: vec![
                 "update CultLib".to_string(),
                 "publish RUDP health".to_string(),
@@ -364,12 +364,12 @@ mod tests {
             status: "active-transport-migration".to_string(),
             owner: "Idunn swarm supervisor".to_string(),
             objective: "Move daemon awareness to CultNet/RUDP".to_string(),
-            current_mechanism: "compatibility probes with RUDP fallback".to_string(),
+            current_mechanism: "daemon-published RUDP health required".to_string(),
             invariants: vec!["daemon truth is typed RUDP state".to_string()],
             phases: vec!["install Muninn RUDP health".to_string()],
             current_phase: "Phase 2".to_string(),
             next_target: "starfire-muninn".to_string(),
-            cut_line: "cut command probe after RUDP health exists".to_string(),
+            cut_line: "daemon health must be published over CultNet/RUDP".to_string(),
             verification_layer: "CultMesh keepalive store".to_string(),
             updated_at: "2026-06-04T00:00:02Z".to_string(),
         };
@@ -379,25 +379,25 @@ mod tests {
             profile_id: "transport:voidbot".to_string(),
             daemon_id: "voidbot".to_string(),
             target_transport: "cultnet.transport.rudp.v0".to_string(),
-            current_transport: "compatibility.local-command".to_string(),
+            current_transport: "missing-daemon-published-rudp-health".to_string(),
             state: "migration-required".to_string(),
-            health_contract: "test.command-exit".to_string(),
+            health_contract: "test.cultnet-rudp-health".to_string(),
             publication_schema: "idunn.daemon_health.v1".to_string(),
-            compatibility_mechanism: "exit 1".to_string(),
-            cut_line: "cut command probe".to_string(),
+            debug_mechanism: "none".to_string(),
+            cut_line: "daemon health must be published over CultNet/RUDP".to_string(),
             observed_at: "2026-06-04T00:00:02Z".to_string(),
         };
         node.put(&transport_profile.profile_id, &transport_profile)?;
         let command_boundary = IdunnCommandBoundaryRecord {
             boundary_id: "command-boundary:voidbot".to_string(),
             daemon_id: "voidbot".to_string(),
-            owner: "idunn.local-command-compatibility".to_string(),
-            restart_authority: "idunn.local-command.restart".to_string(),
+            owner: "idunn-supervisor-command-boundary".to_string(),
+            restart_authority: "idunn-supervisor-command.restart".to_string(),
             deploy_authority: "none".to_string(),
-            health_authority: "compatibility.probe-only".to_string(),
+            health_authority: "daemon-published-rudp-health".to_string(),
             alarm_authority: "bifrost.operator-notification".to_string(),
-            compatibility_commands: vec!["exit 1".to_string(), "npm start".to_string()],
-            forbidden_authority: "compatibility probes do not own truth".to_string(),
+            command_lowerings: vec!["npm start".to_string()],
+            forbidden_authority: "debug probes do not own truth".to_string(),
             observed_at: "2026-06-04T00:00:02Z".to_string(),
         };
         node.put(&command_boundary.boundary_id, &command_boundary)?;
@@ -574,7 +574,7 @@ mod tests {
             reloaded
                 .get_required::<IdunnDaemonSurgeryPlanRecord>(&surgery_plan.plan_id)?
                 .cut_line,
-            "demote command probe after RUDP health exists"
+            "daemon health must be published over CultNet/RUDP"
         );
         assert_eq!(
             reloaded
@@ -586,7 +586,7 @@ mod tests {
             reloaded
                 .get_required::<IdunnCommandBoundaryRecord>(&command_boundary.boundary_id)?
                 .health_authority,
-            "compatibility.probe-only"
+            "daemon-published-rudp-health"
         );
         assert_eq!(
             reloaded

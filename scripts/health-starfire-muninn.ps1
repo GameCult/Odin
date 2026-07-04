@@ -4,10 +4,14 @@ param(
   [string] $LogRoot = "C:\Meta\Odin\logs\starfire-muninn",
   [string[]] $MoveState = @(),
   [int] $MaxStoreAgeSeconds = 180,
-  [string] $IdunnRudpHealth = "127.0.0.1:17870"
+  [string] $IdunnRudpHealth = $env:IDUNN_RUDP_HEALTH
 )
 
 $ErrorActionPreference = "Stop"
+
+if ([string]::IsNullOrWhiteSpace($IdunnRudpHealth)) {
+  throw "Idunn RUDP health endpoint must be supplied by -IdunnRudpHealth or IDUNN_RUDP_HEALTH; no Starfire LAN default is allowed."
+}
 
 if (-not (Test-Path -LiteralPath $MuninnExe)) {
   throw "Muninn executable not found at $MuninnExe"

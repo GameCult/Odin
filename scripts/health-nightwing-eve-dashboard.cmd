@@ -1,2 +1,3 @@
 @echo off
-powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0health-nightwing-eve-dashboard.ps1" %*
+echo health-nightwing-eve-dashboard.cmd archived: Nightwing Eve dashboard broker health is not daemon truth. Rebuild typed CultMesh/Odin dashboard state before restoring a health check. 1>&2
+exit /b 2

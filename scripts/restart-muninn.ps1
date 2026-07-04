@@ -1,5 +1,5 @@
 param(
-  [string] $RavenHost = "raven-local",
+  [string] $RavenHost = "raven.Home",
   [string] $MuninnExe = "C:\Meta\Odin\Muninn\muninn.exe",
   [string] $StorePath = "C:\Meta\Odin\state\muninn.telemetry.cc",
   [string] $ActivateStorePath = "C:\Meta\Odin\state\muninn.activate.cc",
@@ -7,31 +7,41 @@ param(
   [string] $LocalLoopbackScript = (Join-Path $PSScriptRoot "wasapi-loopback-capture.ps1"),
   [string] $LoopbackScript = "C:\Meta\Odin\Muninn\scripts\wasapi-loopback-capture.ps1",
   [string] $Ffmpeg = "C:\Users\Madman's Lullaby\AppData\Local\Microsoft\WinGet\Links\ffmpeg.exe",
-  [string] $TargetHost = "192.168.1.66",
-  [int] $Port = 5204,
-  [string] $MediaTransport = "rudp",
-  [string] $ObsTargetHost = "192.168.1.66",
-  [int] $ObsPort = 5204,
+  [string] $MediaTargetUri = $env:MUNINN_MEDIA_TARGET_URI,
   [string] $AudioDevice = "Realtek",
   [string[]] $VideoSources = @(),
   [string[]] $AudioSources = @(),
-  [string] $IdunnRudpHealth = "192.168.1.66:17870",
+  [string] $IdunnRudpHealth = $env:IDUNN_RUDP_HEALTH,
   [string] $IdunnDaemon = "muninn",
   [string] $IdunnHealthContract = "muninn.cultnet-rudp-remote-telemetry-health",
-  [string] $OdinCultMeshRudp = "",
-  [string] $CaptureCommandRudpBind = "0.0.0.0:17883",
-  [string] $CaptureCommandRudpTarget = "127.0.0.1:17883",
-  [string] $ObsCatalogRudpTarget = "192.168.1.66:17874",
+  [string] $OdinCultMeshUri = $(if ($env:ODIN_CULTMESH_URI) { $env:ODIN_CULTMESH_URI } else { "cultmesh://odin/rendezvous/provider-catalog" }),
+  [string[]] $MoveStates = @("xbox-raven=xinput://0"),
+  [string] $HidControllerRudpTarget = "",
+  [string] $HidControllerRudpBind = "0.0.0.0:17887",
+  [string] $HidControllerRudpAdvertise = $env:MUNINN_HID_CONTROLLER_RUDP_ADVERTISE,
   [int] $ConnectTimeoutSeconds = 10,
   [int] $ServeStartTimeoutSeconds = 20,
   [string] $SshUser = "madman's lullaby",
-  [string] $IdentityFile = ""
+  [string] $IdentityFile = "C:\Users\Meta\.ssh\id_ed25519_192_168_1_84"
 )
 
 $ErrorActionPreference = "Stop"
 
+if ($env:IDUNN_ACTUATOR -ne "1" -or $env:IDUNN_COMMAND_AUTHORITY -ne "idunn-daemon") {
+  throw "restart-muninn.ps1 is an Idunn actuator body. Redeploy by poking Idunn; direct service restart is not an owned path."
+}
+
 if (-not (Test-Path -LiteralPath $LocalLoopbackScript)) {
   throw "Local Muninn loopback script not found at $LocalLoopbackScript"
+}
+if ([string]::IsNullOrWhiteSpace($IdunnRudpHealth)) {
+  throw "Idunn RUDP health endpoint must be supplied by -IdunnRudpHealth or IDUNN_RUDP_HEALTH; no Starfire LAN default is allowed."
+}
+if ([string]::IsNullOrWhiteSpace($MediaTargetUri) -or -not $MediaTargetUri.StartsWith("cultmesh://", [System.StringComparison]::OrdinalIgnoreCase)) {
+  throw "Muninn media target URI must be supplied by -MediaTargetUri or MUNINN_MEDIA_TARGET_URI and must start with cultmesh://."
+}
+if (-not [string]::IsNullOrWhiteSpace($HidControllerRudpBind) -and [string]::IsNullOrWhiteSpace($HidControllerRudpAdvertise)) {
+  throw "HID controller RUDP advertise endpoint must be supplied by -HidControllerRudpAdvertise or MUNINN_HID_CONTROLLER_RUDP_ADVERTISE when HID RUDP bind is enabled; no Raven LAN default is allowed."
 }
 
 function Set-AsciiFile {
@@ -356,12 +366,6 @@ $muninnDir = Split-Path -Parent $MuninnExe
 $serveCmdPath = Join-Path $muninnDir "start-muninn-serve.cmd"
 $servePsPath = Join-Path $muninnDir "start-muninn-serve.ps1"
 $serveVbsPath = Join-Path $muninnDir "start-muninn-serve-hidden.vbs"
-$activateCmdPath = Join-Path $muninnDir "activate-raven-av-srt.cmd"
-$activatePsPath = Join-Path $muninnDir "activate-raven-av-srt.ps1"
-$activateVbsPath = Join-Path $muninnDir "activate-raven-av-srt-hidden.vbs"
-$videoProofCmdPath = Join-Path $muninnDir "muninn-raven-video-to-starfire-obs.cmd"
-$videoProofPsPath = Join-Path $muninnDir "muninn-raven-video-to-starfire-obs.ps1"
-$videoProofVbsPath = Join-Path $muninnDir "muninn-raven-video-to-starfire-obs-hidden.vbs"
 
 $serveArguments = @(
   "serve",
@@ -370,12 +374,20 @@ $serveArguments = @(
   "--log-root", $LogRoot,
   "--host", "raven",
   "--stream", "muninn.raven.av.rudp",
-  "--target-host", $TargetHost,
-  "--port", $Port.ToString(),
-  "--media-transport", $MediaTransport
+  "--target-host", $MediaTargetUri,
+  "--media-transport", "rudp"
 )
-if (-not [string]::IsNullOrWhiteSpace($OdinCultMeshRudp)) {
-  $serveArguments += @("--odin-cultmesh-rudp", $OdinCultMeshRudp)
+if (-not [string]::IsNullOrWhiteSpace($OdinCultMeshUri)) {
+  $serveArguments += @("--odin-cultmesh-uri", $OdinCultMeshUri)
+}
+if (-not [string]::IsNullOrWhiteSpace($HidControllerRudpTarget)) {
+  $serveArguments += @("--hid-controller-rudp-target", $HidControllerRudpTarget)
+}
+if (-not [string]::IsNullOrWhiteSpace($HidControllerRudpBind)) {
+  $serveArguments += @("--hid-controller-rudp-bind", $HidControllerRudpBind)
+}
+if (-not [string]::IsNullOrWhiteSpace($HidControllerRudpAdvertise)) {
+  $serveArguments += @("--hid-controller-rudp-advertise", $HidControllerRudpAdvertise)
 }
 foreach ($videoSource in $VideoSources) {
   $serveArguments += @("--video-source", $videoSource)
@@ -383,18 +395,20 @@ foreach ($videoSource in $VideoSources) {
 foreach ($audioSource in $AudioSources) {
   $serveArguments += @("--audio-source", $audioSource)
 }
+foreach ($moveState in $MoveStates) {
+  if (-not [string]::IsNullOrWhiteSpace($moveState)) {
+    $serveArguments += @("--move-state", $moveState)
+  }
+}
 $serveArguments += @(
   "--audio-device", $AudioDevice,
   "--ffmpeg", $Ffmpeg,
   "--loopback-script", $LoopbackScript,
   "--interval-seconds", "15",
-  "--capture-command-rudp-bind", $CaptureCommandRudpBind,
-  "--obs-catalog-rudp-target", $ObsCatalogRudpTarget,
   "--idunn-rudp-health", $IdunnRudpHealth,
   "--idunn-daemon", $IdunnDaemon,
   "--idunn-health-contract", $IdunnHealthContract
 )
-
 $serveDynamicArgumentsScript = @'
 function Test-LikelyVirtualDisplayToken {
   param([Parameter(Mandatory = $true)] [string] $Token)
@@ -664,68 +678,6 @@ if (-not $hasExplicitAudioSources) {
 }
 '@
 
-$activateArguments = @(
-  "request-stream",
-  "--store", $StorePath,
-  "--activate-store", $ActivateStorePath,
-  "--capture-command-rudp-target", $CaptureCommandRudpTarget,
-  "--host", "raven",
-  "--stream", "muninn.raven.av.rudp",
-  "--stream-action", "start",
-  "--target-host", $TargetHost,
-  "--port", $Port.ToString(),
-  "--media-transport", $MediaTransport
-)
-if ($MediaTransport -ne "srt" -or ($TargetHost -eq $ObsTargetHost -and $Port -eq $ObsPort)) {
-  $activateArguments += "--no-obs-target"
-} else {
-  $activateArguments += @("--obs-target-host", $ObsTargetHost, "--obs-port", $ObsPort.ToString())
-}
-$activateArguments += @(
-  "--audio-device", $AudioDevice,
-  "--ffmpeg", $Ffmpeg,
-  "--loopback-script", $LoopbackScript,
-  "--log-root", $LogRoot
-)
-
-$videoProofFramerate = 30
-$videoProofBitrateKbps = 12000
-$videoProofVbvKbits = [Math]::Ceiling($videoProofBitrateKbps / $videoProofFramerate)
-
-$videoProofArguments = @(
-  "-hide_banner",
-  "-loglevel", "info",
-  "-fflags", "nobuffer",
-  "-flags", "low_delay",
-  "-thread_queue_size", "1024",
-  "-f", "lavfi",
-  "-i", ("ddagrab=framerate={0}:output_idx=0:draw_mouse=1" -f $videoProofFramerate),
-  "-thread_queue_size", "1024",
-  "-f", "lavfi",
-  "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
-  "-map", "0:v:0",
-  "-map", "1:a:0",
-  "-c:v", "h264_nvenc",
-  "-preset", "p1",
-  "-tune", "ull",
-  "-zerolatency", "1",
-  "-bf", "0",
-  "-delay", "0",
-  "-rc", "cbr",
-  "-rc-lookahead", "0",
-  "-b:v", ("{0}k" -f $videoProofBitrateKbps),
-  "-maxrate", ("{0}k" -f $videoProofBitrateKbps),
-  "-bufsize", ("{0}k" -f $videoProofVbvKbits),
-  "-g", $videoProofFramerate.ToString(),
-  "-forced-idr", "1",
-  "-c:a", "aac",
-  "-b:a", "192k",
-  "-ar", "48000",
-  "-ac", "2",
-  "-f", "mpegts",
-  ("srt://{0}:{1}?mode=caller&latency=120000&timeout=30000000" -f $ObsTargetHost, $ObsPort)
-)
-
 $servePsContent = New-HiddenNativeLauncherPowerShellContent `
   -StorePath $StorePath `
   -LogRoot $LogRoot `
@@ -736,24 +688,6 @@ $servePsContent = New-HiddenNativeLauncherPowerShellContent `
   -PidPath (Join-Path $LogRoot "muninn-serve.pid") `
   -DynamicArgumentsScript $serveDynamicArgumentsScript
 
-$activatePsContent = New-HiddenNativeLauncherPowerShellContent `
-  -StorePath $ActivateStorePath `
-  -LogRoot $LogRoot `
-  -Arguments $activateArguments `
-  -FilePath $MuninnExe `
-  -StdoutPath (Join-Path $LogRoot "muninn-activate.out.log") `
-  -StderrPath (Join-Path $LogRoot "muninn-activate.err.log") `
-  -PidPath (Join-Path $LogRoot "muninn-activate.pid")
-
-$videoProofPsContent = New-HiddenNativeLauncherPowerShellContent `
-  -LogRoot $LogRoot `
-  -Arguments $videoProofArguments `
-  -FilePath $Ffmpeg `
-  -StdoutPath (Join-Path $LogRoot "muninn-video-proof.out.log") `
-  -StderrPath (Join-Path $LogRoot "muninn-video-proof.err.log") `
-  -PidPath (Join-Path $LogRoot "muninn-video-proof.pid") `
-  -WorkingDirectory $muninnDir
-
 $uploadRoot = Join-Path $env:TEMP ("odin-raven-muninn-launchers-" + [guid]::NewGuid().ToString("N"))
 
 try {
@@ -762,22 +696,10 @@ try {
   $localServePs = Join-Path $uploadRoot "start-muninn-serve.ps1"
   $localServeVbs = Join-Path $uploadRoot "start-muninn-serve-hidden.vbs"
   $localServeCmd = Join-Path $uploadRoot "start-muninn-serve.cmd"
-  $localActivatePs = Join-Path $uploadRoot "activate-raven-av-srt.ps1"
-  $localActivateVbs = Join-Path $uploadRoot "activate-raven-av-srt-hidden.vbs"
-  $localActivateCmd = Join-Path $uploadRoot "activate-raven-av-srt.cmd"
-  $localVideoProofPs = Join-Path $uploadRoot "muninn-raven-video-to-starfire-obs.ps1"
-  $localVideoProofVbs = Join-Path $uploadRoot "muninn-raven-video-to-starfire-obs-hidden.vbs"
-  $localVideoProofCmd = Join-Path $uploadRoot "muninn-raven-video-to-starfire-obs.cmd"
 
   Set-AsciiFile -Path $localServePs -Content $servePsContent
   Set-AsciiFile -Path $localServeVbs -Content (New-HiddenPowerShellVbsLauncherContent -PsPath $servePsPath)
   Set-AsciiFile -Path $localServeCmd -Content (New-WscriptCmdLauncherContent -WorkingDirectory $muninnDir -VbsPath $serveVbsPath)
-  Set-AsciiFile -Path $localActivatePs -Content $activatePsContent
-  Set-AsciiFile -Path $localActivateVbs -Content (New-HiddenPowerShellVbsLauncherContent -PsPath $activatePsPath)
-  Set-AsciiFile -Path $localActivateCmd -Content (New-WscriptCmdLauncherContent -WorkingDirectory $muninnDir -VbsPath $activateVbsPath)
-  Set-AsciiFile -Path $localVideoProofPs -Content $videoProofPsContent
-  Set-AsciiFile -Path $localVideoProofVbs -Content (New-HiddenPowerShellVbsLauncherContent -PsPath $videoProofPsPath)
-  Set-AsciiFile -Path $localVideoProofCmd -Content (New-WscriptCmdLauncherContent -WorkingDirectory $muninnDir -VbsPath $videoProofVbsPath)
 
   $remoteScript = @"
 `$ErrorActionPreference = "Stop"
@@ -794,11 +716,7 @@ if (-not (Test-Path -LiteralPath "$Ffmpeg")) {
 }
 foreach (`$path in @(
   "$servePsPath",
-  "$serveVbsPath",
-  "$activatePsPath",
-  "$activateVbsPath",
-  "$videoProofPsPath",
-  "$videoProofVbsPath"
+  "$serveVbsPath"
 )) {
   if (-not (Test-Path -LiteralPath `$path)) {
     throw "Required launcher path not found at `$path"
@@ -809,6 +727,10 @@ foreach (`$path in @(
 if (`$null -ne `$obsoleteActivateTask) {
   Unregister-ScheduledTask -TaskName "GameCult-Muninn-Activate" -Confirm:`$false | Out-Null
 }
+`$obsoleteVideoProofTask = Get-ScheduledTask -TaskName "GameCult-Muninn-VideoProof" -ErrorAction SilentlyContinue
+if (`$null -ne `$obsoleteVideoProofTask) {
+  Unregister-ScheduledTask -TaskName "GameCult-Muninn-VideoProof" -Confirm:`$false | Out-Null
+}
 
 Get-CimInstance Win32_Process |
   Where-Object { `$_.Name -like "muninn*.exe" } |
@@ -818,9 +740,12 @@ Get-CimInstance Win32_Process |
 
 New-Item -ItemType Directory -Force -Path "$LogRoot" | Out-Null
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent "$StorePath") | Out-Null
-`$captureCommandUdpPort = ([string] "$CaptureCommandRudpBind").Split(':')[-1]
 & netsh.exe advfirewall firewall delete rule name="GameCult Muninn Capture Command RUDP" | Out-Null 2>`$null
-& netsh.exe advfirewall firewall add rule name="GameCult Muninn Capture Command RUDP" dir=in action=allow protocol=UDP localport=`$captureCommandUdpPort | Out-Null
+if (-not [string]::IsNullOrWhiteSpace("$HidControllerRudpBind")) {
+  `$hidControllerUdpPort = ([string] "$HidControllerRudpBind").Split(':')[-1]
+  & netsh.exe advfirewall firewall delete rule name="GameCult Muninn HID Controller RUDP" | Out-Null 2>`$null
+  & netsh.exe advfirewall firewall add rule name="GameCult Muninn HID Controller RUDP" dir=in action=allow protocol=UDP localport=`$hidControllerUdpPort | Out-Null
+}
 
 function Register-HiddenVbsTask {
   param(
@@ -902,10 +827,8 @@ function Assert-HiddenPowerShellTask {
 }
 
 Register-HiddenPowerShellTask -TaskName "GameCult-Muninn" -PsPath "$servePsPath"
-Register-HiddenVbsTask -TaskName "GameCult-Muninn-VideoProof" -VbsPath "$videoProofVbsPath"
 
 Assert-HiddenPowerShellTask -TaskName "GameCult-Muninn" -PsPath "$servePsPath"
-Assert-HiddenVbsTask -TaskName "GameCult-Muninn-VideoProof" -VbsPath "$videoProofVbsPath" -PsPath "$videoProofPsPath"
 
 Start-ScheduledTask -TaskName "GameCult-Muninn"
 
@@ -938,13 +861,7 @@ foreach (`$pattern in @(
     @{ LocalPath = $LocalLoopbackScript; RemotePath = ($LoopbackScript -replace "\\", "/") },
     @{ LocalPath = $localServePs; RemotePath = ($servePsPath -replace "\\", "/") },
     @{ LocalPath = $localServeVbs; RemotePath = ($serveVbsPath -replace "\\", "/") },
-    @{ LocalPath = $localServeCmd; RemotePath = ($serveCmdPath -replace "\\", "/") },
-    @{ LocalPath = $localActivatePs; RemotePath = ($activatePsPath -replace "\\", "/") },
-    @{ LocalPath = $localActivateVbs; RemotePath = ($activateVbsPath -replace "\\", "/") },
-    @{ LocalPath = $localActivateCmd; RemotePath = ($activateCmdPath -replace "\\", "/") },
-    @{ LocalPath = $localVideoProofPs; RemotePath = ($videoProofPsPath -replace "\\", "/") },
-    @{ LocalPath = $localVideoProofVbs; RemotePath = ($videoProofVbsPath -replace "\\", "/") },
-    @{ LocalPath = $localVideoProofCmd; RemotePath = ($videoProofCmdPath -replace "\\", "/") }
+    @{ LocalPath = $localServeCmd; RemotePath = ($serveCmdPath -replace "\\", "/") }
   )
 
   Invoke-RavenUploadedPowerShell -RavenHost $RavenHost -RemoteScriptContent $remoteScript -UploadSpecs $uploadSpecs -TempPrefix "odin-raven-muninn-restart"
@@ -952,39 +869,4 @@ foreach (`$pattern in @(
   Remove-Item -LiteralPath $uploadRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 
-$restartExit = $LASTEXITCODE
-if ($restartExit -eq 0) {
-  Start-Sleep -Seconds 2
-  $healthScript = Join-Path $PSScriptRoot "health-muninn.ps1"
-  $healthArgs = @(
-    "-NoProfile",
-    "-ExecutionPolicy",
-    "Bypass",
-    "-File",
-    $healthScript,
-    "-RavenHost",
-    $RavenHost,
-    "-MuninnExe",
-    $MuninnExe,
-    "-StorePath",
-    $StorePath,
-    "-ActivateStorePath",
-    $ActivateStorePath,
-    "-IdunnRudpHealth",
-    $IdunnRudpHealth,
-    "-CaptureCommandRudpBind",
-    $CaptureCommandRudpBind,
-    "-ConnectTimeoutSeconds",
-    $ConnectTimeoutSeconds.ToString(),
-    "-MaxStoreAgeSeconds",
-    ([Math]::Max(180, $ServeStartTimeoutSeconds + 60)).ToString()
-  )
-  if (-not [string]::IsNullOrWhiteSpace($SshUser)) {
-    $healthArgs += @("-SshUser", $SshUser)
-  }
-  if (-not [string]::IsNullOrWhiteSpace($IdentityFile)) {
-    $healthArgs += @("-IdentityFile", $IdentityFile)
-  }
-  & powershell.exe @healthArgs
-}
-exit $restartExit
+exit $LASTEXITCODE

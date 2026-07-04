@@ -2,11 +2,9 @@
 
 const fs = require("fs");
 const { createRequire } = require("module");
-const os = require("os");
 const path = require("path");
-const { httpGet, stableId } = require("./utils.cjs");
-const { openWebSocket, readServerTextFrame, sendClientFrame } = require("./websocket.cjs");
-const { tcpCheck } = require("./probes.cjs");
+const { fileURLToPath } = require("url");
+const { stableId } = require("./utils.cjs");
 
 const requireCultCacheInspection = createRequire(
   path.resolve(__dirname, "..", "..", "..", "CultLib", "packages", "cultcache-ts", "package.json"),
@@ -18,11 +16,7 @@ function createInterfaceDiscovery({
   documents,
   interfaceBindingStores,
   liveProviderRegistry,
-  seedDeckUrls,
 }) {
-  let discoveredDeckUrls = [...seedDeckUrls];
-  let lastLanScanAt = 0;
-
   async function discoverInterfaces() {
     const { interfaces } = await discoverAll();
     return interfaces;
@@ -34,18 +28,13 @@ function createInterfaceDiscovery({
   }
 
   async function discoverAll() {
-    await refreshLanDeckDiscovery();
-    const manifestsByProvider = await discoverDeckProviderManifests();
-    const eveInterfaces = await Promise.all(
-      [...manifestsByProvider.values()].map(({ provider, deckUrl }) => fetchEveProvider(deckUrl, provider.id, provider)),
-    );
     const { interfaces: cultMeshInterfaces, providerAdvertisements } = await discoverCultMeshEntries();
     const liveAnnouncements = liveProviderRegistry?.snapshot?.() || {
       interfaces: [],
       providerAdvertisements: [],
     };
 
-    const interfaces = [...eveInterfaces];
+    const interfaces = [];
     for (const entry of [...cultMeshInterfaces, ...liveAnnouncements.interfaces]) {
       const existingIndex = interfaces.findIndex((candidate) => candidate.providerId === entry.providerId);
       if (existingIndex >= 0) {
@@ -59,7 +48,8 @@ function createInterfaceDiscovery({
     const providersById = new Map();
     for (const provider of allProviderAdvertisements) {
       if (provider?.id) {
-        providersById.set(String(provider.id), provider);
+        const existing = providersById.get(String(provider.id));
+        providersById.set(String(provider.id), mergeProviderAdvertisement(existing, provider));
       }
     }
     return {
@@ -71,7 +61,9 @@ function createInterfaceDiscovery({
   function cultMeshDocumentsAvailable() {
     const {
       interfaceBindingDefinition,
+      idunnCommandBoundaryDefinition,
       idunnDaemonHealthDefinition,
+      idunnTransportProfileDefinition,
       muninnCaptureStreamDefinition,
       muninnCommandBoundaryDefinition,
       muninnMoveControllerStateDefinition,
@@ -84,6 +76,7 @@ function createInterfaceDiscovery({
       muninnTransportProfileDefinition,
       operatorStateDefinition,
       providerAdvertisementDefinition,
+      voidbotProviderCatalogDefinition,
       stonksCommandBoundaryDefinition,
       stonksMarketSnapshotDefinition,
       stonksRequestEventDefinition,
@@ -101,7 +94,9 @@ function createInterfaceDiscovery({
     return Boolean(
       CultMesh &&
       interfaceBindingDefinition &&
+      idunnCommandBoundaryDefinition &&
       idunnDaemonHealthDefinition &&
+      idunnTransportProfileDefinition &&
       muninnCaptureStreamDefinition &&
       muninnCommandBoundaryDefinition &&
       muninnMoveControllerStateDefinition &&
@@ -114,6 +109,7 @@ function createInterfaceDiscovery({
       muninnTransportProfileDefinition &&
       operatorStateDefinition &&
       providerAdvertisementDefinition &&
+      voidbotProviderCatalogDefinition &&
       stonksCommandBoundaryDefinition &&
       stonksMarketSnapshotDefinition &&
       stonksRequestEventDefinition &&
@@ -130,30 +126,12 @@ function createInterfaceDiscovery({
     );
   }
 
-  async function discoverDeckProviderManifests() {
-    const manifestsByProvider = new Map();
-    await Promise.all(discoveredDeckUrls.map(async (deckUrl) => {
-      const manifestUrl = deckUrl.replace(/^ws:/, "http:").replace(/\/eve\/deck.*$/, "/eve/deck/providers");
-      try {
-        const catalog = JSON.parse(await httpGet(manifestUrl, 2500));
-        for (const provider of catalog.providers || []) {
-          if (!provider?.id || provider.id === "eve.dashboard.broker") continue;
-          const existing = manifestsByProvider.get(provider.id);
-          if (!existing || deckUrl.startsWith("ws://127.0.0.1")) {
-            manifestsByProvider.set(provider.id, { provider, deckUrl });
-          }
-        }
-      } catch {
-        // Discovery is opportunistic. Failed endpoints fall out of the next pass.
-      }
-    }));
-    return manifestsByProvider;
-  }
-
   async function discoverCultMeshEntries() {
     const {
       interfaceBindingDefinition,
+      idunnCommandBoundaryDefinition,
       idunnDaemonHealthDefinition,
+      idunnTransportProfileDefinition,
       muninnCaptureStreamDefinition,
       muninnCommandBoundaryDefinition,
       muninnMoveControllerStateDefinition,
@@ -166,6 +144,7 @@ function createInterfaceDiscovery({
       muninnTransportProfileDefinition,
       operatorStateDefinition,
       providerAdvertisementDefinition,
+      voidbotProviderCatalogDefinition,
       stonksCommandBoundaryDefinition,
       stonksMarketSnapshotDefinition,
       stonksRequestEventDefinition,
@@ -189,8 +168,11 @@ function createInterfaceDiscovery({
       stonksRequestEventDefinition,
       stonksMarketSnapshotDefinition,
       providerAdvertisementDefinition,
+      voidbotProviderCatalogDefinition,
       interfaceBindingDefinition,
       surfaceDefinition,
+      idunnCommandBoundaryDefinition,
+      idunnTransportProfileDefinition,
       stonksCommandBoundaryDefinition,
       stonksTransportProfileDefinition,
       streamPixelsCommandBoundaryDefinition,
@@ -226,7 +208,7 @@ function createInterfaceDiscovery({
           return { interfaces: [], providerAdvertisements: [] };
         }
         const node = await CultMesh.createNode(storePath, { documents: nodeDocuments });
-        return inspectCultMeshStore({
+        const typed = inspectCultMeshStore({
           documents,
           interfaceBindingDefinition,
           muninnTelemetrySurfaceDefinition,
@@ -235,18 +217,27 @@ function createInterfaceDiscovery({
           sourceId,
           storePath,
         });
+        const inspected = inspectCultMeshStoreBytes(storePath, sourceId);
+        return {
+          interfaces: mergeInterfaces([...typed.interfaces, ...inspected.interfaces]),
+          providerAdvertisements: mergeProviderAdvertisements([
+            ...typed.providerAdvertisements,
+            ...inspected.providerAdvertisements,
+          ]),
+        };
       } catch (error) {
         const interfaces = [];
         const providerAdvertisements = [];
         if (resolvedStore?.localPath && fs.existsSync(resolvedStore.localPath)) {
-          interfaces.push(...inspectCultMeshInterfacesFromStore(
-            resolvedStore.localPath,
-            resolvedStore.sourceId,
-          ));
-          providerAdvertisements.push(...inspectProviderAdvertisementsFromStore(
-            resolvedStore.localPath,
-            resolvedStore.sourceId,
-          ));
+          try {
+            const inspected = inspectCultMeshStoreBytes(resolvedStore.localPath, resolvedStore.sourceId);
+            interfaces.push(...inspected.interfaces);
+            providerAdvertisements.push(...inspected.providerAdvertisements);
+          } catch (fallbackError) {
+            if (fallbackError?.code !== "ENOENT") {
+              throw fallbackError;
+            }
+          }
         }
         if (interfaces.length === 0) {
           interfaces.push(dashboardUnavailable(`cultmesh:${storeSpec}`, `cultmesh:${storeSpec}`, error.message));
@@ -263,29 +254,10 @@ function createInterfaceDiscovery({
     };
   }
 
-  async function refreshLanDeckDiscovery() {
-    const now = Date.now();
-    if (now - lastLanScanAt < 60000) return;
-    lastLanScanAt = now;
-    const urls = new Set(seedDeckUrls);
-    const checks = [];
-    for (const prefix of localIpv4Prefixes()) {
-      for (let host = 1; host <= 254; host += 1) {
-        const address = `${prefix}.${host}`;
-        checks.push(tcpCheck(address, 8795).then((check) => {
-          if (check.state === "open") urls.add(`ws://${address}:8795/eve/deck`);
-        }));
-      }
-    }
-    await Promise.allSettled(checks);
-    discoveredDeckUrls = [...urls].sort();
-  }
-
   return {
     discoverAll,
     discoverProviderAdvertisements,
     discoverInterfaces,
-    getDiscoveredDeckUrls: () => [...discoveredDeckUrls],
   };
 }
 
@@ -300,6 +272,8 @@ function cultMeshProviderInterface({
   const surface = state.surface || null;
   const providerId = advertisement.providerId || advertisement.provider?.id || advertisement.id || "unknown-provider";
   const title = state.title || advertisement.title || advertisement.provider?.title || providerId;
+  const endpoints = sanitizeProviderEndpoints(advertisement.endpoints);
+  const routes = sanitizeProviderEndpoints(advertisement.routes);
   return {
     providerId,
     title,
@@ -308,12 +282,16 @@ function cultMeshProviderInterface({
     version: state.version || 0,
     updatedAt: state.updatedAt || advertisement.updatedAt || new Date().toISOString(),
     source: `cultmesh:${storePath}`,
-    manifest: advertisement,
+    manifest: {
+      ...advertisement,
+      endpoints,
+      routes,
+    },
     canonicalService: advertisement.canonicalService || null,
     locatedService: advertisement.locatedService || null,
     cultMeshAddress: advertisement.cultMeshAddress || null,
-    endpoints: advertisement.endpoints || [],
-    routes: advertisement.routes || [],
+    endpoints,
+    routes,
     operatorState,
     commandBoundary,
     transportProfile,
@@ -330,6 +308,8 @@ function inspectCultMeshStore({
   sourceId,
 }) {
   const {
+    idunnCommandBoundaryDefinition,
+    idunnTransportProfileDefinition,
     operatorStateDefinition,
     stonksCommandBoundaryDefinition,
     stonksTransportProfileDefinition,
@@ -356,27 +336,37 @@ function inspectCultMeshStore({
     if (!providerId) {
       continue;
     }
+    const endpoints = sanitizeProviderEndpoints(advertisement.endpoints);
+    const routes = sanitizeProviderEndpoints(advertisement.routes);
+    const providerEndpoint = advertisement.cultMeshAddress
+      || providerTypedEndpoint(routes)
+      || providerTypedEndpoint(endpoints)
+      || typedProviderEndpoint(advertisement.provider?.endpoint)
+      || `cultmesh:${sourceId}`;
     providerAdvertisements.push({
       id: providerId,
       title: advertisement.title || advertisement.provider?.title || providerId,
       description: advertisement.description || "Provider-owned CultMesh advertisement.",
       version: String(advertisement.version || 0),
-      endpoint: advertisement.cultMeshAddress || advertisement.endpoints?.[0]?.address || advertisement.provider?.endpoint || `cultmesh:${sourceId}`,
+      endpoint: providerEndpoint,
       canonicalService: advertisement.canonicalService || null,
       locatedService: advertisement.locatedService || null,
       cultMeshAddress: advertisement.cultMeshAddress || null,
-      endpoints: advertisement.endpoints || [],
-      routes: advertisement.routes || [],
-      transportEndpoint: advertisement.routes?.find((route) => route.transport === "cultnet")?.address
-        || advertisement.routes?.find((route) => route.transport === "compatibility-eve-deck")?.address
-        || advertisement.provider?.endpoint
-        || `cultmesh:${sourceId}`,
+      endpoints,
+      routes,
+      inputStreams: Array.isArray(advertisement.inputStreams) ? advertisement.inputStreams : [],
+      activeStreams: Array.isArray(advertisement.activeStreams) ? advertisement.activeStreams : [],
+      availableSources: Array.isArray(advertisement.availableSources) ? advertisement.availableSources : [],
+      transportEndpoint: providerTypedEndpoint(routes)
+        || typedProviderEndpoint(advertisement.provider?.endpoint)
+        || providerEndpoint,
       capabilities: advertisement.provider?.capabilities || advertisement.capabilities || [],
       operatorState: providerRecord(node, [
         operatorStateDefinition,
         weksaOperatorStateDefinition,
       ], advertisement) || null,
       commandBoundary: providerRecord(node, [
+        idunnCommandBoundaryDefinition,
         muninnCommandBoundaryDefinition,
         viliCommandBoundaryDefinition,
         weksaCommandBoundaryDefinition,
@@ -384,6 +374,7 @@ function inspectCultMeshStore({
         streamPixelsCommandBoundaryDefinition,
       ], advertisement) || null,
       transportProfile: providerRecord(node, [
+        idunnTransportProfileDefinition,
         muninnTransportProfileDefinition,
         viliTransportProfileDefinition,
         weksaTransportProfileDefinition,
@@ -414,6 +405,7 @@ function inspectCultMeshStore({
           weksaOperatorStateDefinition,
         ], advertisement) || null,
         commandBoundary: providerRecord(node, [
+          idunnCommandBoundaryDefinition,
           muninnCommandBoundaryDefinition,
           viliCommandBoundaryDefinition,
           weksaCommandBoundaryDefinition,
@@ -421,6 +413,7 @@ function inspectCultMeshStore({
           streamPixelsCommandBoundaryDefinition,
         ], advertisement) || null,
         transportProfile: providerRecord(node, [
+          idunnTransportProfileDefinition,
           muninnTransportProfileDefinition,
           viliTransportProfileDefinition,
           weksaTransportProfileDefinition,
@@ -452,8 +445,8 @@ function inspectCultMeshStore({
       canonicalService: binding.provider?.canonicalService || null,
       locatedService: binding.provider?.locatedService || null,
       cultMeshAddress: binding.provider?.cultMeshAddress || binding.provider?.endpoint || null,
-      endpoints: binding.provider?.endpoints || [],
-      routes: binding.provider?.routes || [],
+      endpoints: sanitizeProviderEndpoints(binding.provider?.endpoints),
+      routes: sanitizeProviderEndpoints(binding.provider?.routes),
       surface,
     });
   }
@@ -462,16 +455,25 @@ function inspectCultMeshStore({
 }
 
 function providerSurfaceState(node, advertisement, surfaceDefinition, muninnTelemetrySurfaceDefinition) {
-  const surfaceKey = advertisement.surfaceId || advertisement.surface_id || advertisement.providerId;
-  const surfaceState = unwrapDocumentRecord(node.get?.(surfaceDefinition, surfaceKey));
-  if (surfaceState?.surface?.root) {
-    return {
-      providerId: surfaceState.providerId || advertisement.providerId || advertisement.provider?.id || "unknown-provider",
-      title: surfaceState.title || advertisement.title || advertisement.provider?.title || advertisement.providerId || "unknown-provider",
-      version: Number(surfaceState.version || 0),
-      updatedAt: surfaceState.updatedAt || advertisement.updatedAt || new Date().toISOString(),
-      surface: surfaceState.surface,
-    };
+  const surfaceKeys = [
+    advertisement.surfaceId,
+    advertisement.surface_id,
+    advertisement.providerId,
+    advertisement.provider?.id,
+  ].filter(Boolean);
+  for (const surfaceKey of [...new Set(surfaceKeys.map(String))]) {
+    const surfaceState = unwrapDocumentRecord(node.get?.(surfaceDefinition, surfaceKey));
+    const providerId = surfaceState?.providerId || surfaceState?.provider_id;
+    const updatedAt = surfaceState?.updatedAt || surfaceState?.updated_at;
+    if (surfaceState?.surface?.root) {
+      return {
+        providerId: providerId || advertisement.providerId || advertisement.provider?.id || "unknown-provider",
+        title: surfaceState.title || advertisement.title || advertisement.provider?.title || advertisement.providerId || "unknown-provider",
+        version: Number(surfaceState.version || 0),
+        updatedAt: updatedAt || advertisement.updatedAt || new Date().toISOString(),
+        surface: surfaceState.surface,
+      };
+    }
   }
 
   const telemetryState = providerTelemetrySurfaceState(node, advertisement, muninnTelemetrySurfaceDefinition);
@@ -556,19 +558,23 @@ function buildInspectedProviderAdvertisement(record, records, sourceId) {
   }
   const commandBoundary = inspectProviderCommandBoundary(providerId, records);
   const transportProfile = inspectProviderTransportProfile(providerId, records);
-  const endpoints = normalizeInspectedEndpoints(advertisement.endpoints);
+  const endpoints = sanitizeProviderEndpoints(advertisement.endpoints);
+  const routes = sanitizeProviderEndpoints(normalizeInspectedRoutes(advertisement));
   return {
     id: providerId,
     title: advertisement.title || providerId,
     description: advertisement.description || "Provider-owned CultMesh advertisement.",
     version: String(advertisement.version || 0),
-    endpoint: advertisement.cultMeshAddress || endpoints[0]?.address || `cultmesh:${sourceId}`,
+    endpoint: advertisement.cultMeshAddress || providerTypedEndpoint(endpoints) || `cultmesh:${sourceId}`,
     canonicalService: advertisement.canonicalService || null,
     locatedService: advertisement.locatedService || null,
     cultMeshAddress: advertisement.cultMeshAddress || null,
     endpoints,
-    routes: normalizeInspectedRoutes(advertisement),
-    transportEndpoint: advertisement.cultMeshAddress || endpoints.find((entry) => String(entry.address || "").startsWith("ws://"))?.address || endpoints[0]?.address || `cultmesh:${sourceId}`,
+    routes,
+    inputStreams: Array.isArray(advertisement.inputStreams) ? advertisement.inputStreams : [],
+    activeStreams: Array.isArray(advertisement.activeStreams) ? advertisement.activeStreams : [],
+    availableSources: Array.isArray(advertisement.availableSources) ? advertisement.availableSources : [],
+    transportEndpoint: advertisement.cultMeshAddress || providerTypedEndpoint(routes) || providerTypedEndpoint(endpoints) || `cultmesh:${sourceId}`,
     capabilities: advertisement.capabilities || [],
     operatorState: null,
     commandBoundary,
@@ -613,6 +619,55 @@ function inspectCultMeshInterfacesFromStore(storePath, sourceId) {
   return [...surfaceInterfaces, ...telemetryInterfaces];
 }
 
+function inspectCultMeshStoreBytes(storePath, sourceId) {
+  return {
+    interfaces: inspectCultMeshInterfacesFromStore(storePath, sourceId),
+    providerAdvertisements: inspectProviderAdvertisementsFromStore(storePath, sourceId),
+  };
+}
+
+function mergeInterfaces(entries) {
+  const byProvider = new Map();
+  for (const entry of entries) {
+    if (!entry?.providerId) continue;
+    const existing = byProvider.get(String(entry.providerId));
+    if (!existing || (!existing.surface?.root && entry.surface?.root)) {
+      byProvider.set(String(entry.providerId), entry);
+    }
+  }
+  return [...byProvider.values()];
+}
+
+function mergeProviderAdvertisements(entries) {
+  const byProvider = new Map();
+  for (const entry of entries) {
+    if (!entry?.id) continue;
+    const existing = byProvider.get(String(entry.id));
+    byProvider.set(String(entry.id), mergeProviderAdvertisement(existing, entry));
+  }
+  return [...byProvider.values()];
+}
+
+function mergeProviderAdvertisement(existing, entry) {
+  if (!existing) return entry;
+  return {
+    ...existing,
+    ...entry,
+    endpoints: preferNonEmptyArray(entry.endpoints, existing.endpoints),
+    routes: preferNonEmptyArray(entry.routes, existing.routes),
+    inputStreams: preferNonEmptyArray(entry.inputStreams, existing.inputStreams),
+    activeStreams: preferNonEmptyArray(entry.activeStreams, existing.activeStreams),
+    availableSources: preferNonEmptyArray(entry.availableSources, existing.availableSources),
+    capabilities: preferNonEmptyArray(entry.capabilities, existing.capabilities),
+  };
+}
+
+function preferNonEmptyArray(candidate, fallback) {
+  return Array.isArray(candidate) && candidate.length > 0
+    ? candidate
+    : (Array.isArray(fallback) ? fallback : []);
+}
+
 function buildInspectedInterfaceFromSurfaceRecord(record, providersById, sourceId, records) {
   const state = normalizeInspectedSurfaceState(record?.payloadPreview);
   if (!state?.providerId || !state.surface?.root) {
@@ -634,14 +689,14 @@ function buildInspectedInterfaceFromSurfaceRecord(record, providersById, sourceI
       canonicalService: provider.canonicalService,
       locatedService: provider.locatedService,
       cultMeshAddress: provider.cultMeshAddress,
-      endpoints: provider.endpoints,
-      routes: provider.routes,
+      endpoints: sanitizeProviderEndpoints(provider.endpoints),
+      routes: sanitizeProviderEndpoints(provider.routes),
     } : null,
     canonicalService: provider?.canonicalService || null,
     locatedService: provider?.locatedService || null,
     cultMeshAddress: provider?.cultMeshAddress || null,
-    endpoints: provider?.endpoints || [],
-    routes: provider?.routes || [],
+    endpoints: sanitizeProviderEndpoints(provider?.endpoints),
+    routes: sanitizeProviderEndpoints(provider?.routes),
     operatorState: null,
     commandBoundary: provider?.commandBoundary || inspectProviderCommandBoundary(state.providerId, records),
     transportProfile: provider?.transportProfile || inspectProviderTransportProfile(state.providerId, records),
@@ -675,14 +730,14 @@ function buildInspectedInterfaceFromTelemetryRecord(record, providersById, sourc
       canonicalService: provider.canonicalService,
       locatedService: provider.locatedService,
       cultMeshAddress: provider.cultMeshAddress,
-      endpoints: provider.endpoints,
-      routes: provider.routes,
+      endpoints: sanitizeProviderEndpoints(provider.endpoints),
+      routes: sanitizeProviderEndpoints(provider.routes),
     } : null,
     canonicalService: provider?.canonicalService || null,
     locatedService: provider?.locatedService || null,
     cultMeshAddress: provider?.cultMeshAddress || null,
-    endpoints: provider?.endpoints || [],
-    routes: provider?.routes || [],
+    endpoints: sanitizeProviderEndpoints(provider?.endpoints),
+    routes: sanitizeProviderEndpoints(provider?.routes),
     operatorState: null,
     commandBoundary: provider?.commandBoundary || null,
     transportProfile: provider?.transportProfile || null,
@@ -976,7 +1031,7 @@ function inspectProviderTransportProfile(providerId, records) {
     profile_id: record.payloadPreview[0] || null,
     daemon_id: record.payloadPreview[1] || null,
     state: record.payloadPreview[2] || null,
-    compatibility_transport: record.payloadPreview[3] || null,
+    debug_transport: record.payloadPreview[3] || null,
     current_transport: record.payloadPreview[4] || null,
     health_contract: record.payloadPreview[5] || null,
     cut_line: record.payloadPreview[9] || null,
@@ -993,10 +1048,40 @@ function normalizeInspectedEndpoints(endpoints) {
       return entry;
     }
     return {
-      transport: String(entry || "").startsWith("ws://") ? "compatibility-eve-deck" : "witness",
+      transport: "witness",
       address: String(entry || ""),
     };
   });
+}
+
+function sanitizeProviderEndpoints(endpoints) {
+  return normalizeInspectedEndpoints(endpoints).filter((entry) => {
+    const transport = String(entry?.transport || "").toLowerCase();
+    const address = String(entry?.address || "").trim();
+    if (address.startsWith("cultmesh:")) {
+      return true;
+    }
+    if (transport.includes("cultmesh") || transport.includes("cultcache")) {
+      return true;
+    }
+    return false;
+  });
+}
+
+function providerTypedEndpoint(endpoints) {
+  const normalized = sanitizeProviderEndpoints(endpoints);
+  return normalized.find((entry) => {
+    const address = String(entry?.address || "");
+    return address.startsWith("cultmesh:");
+  })?.address || null;
+}
+
+function typedProviderEndpoint(endpoint) {
+  const value = typeof endpoint === "string" ? endpoint.trim() : "";
+  if (!value) {
+    return null;
+  }
+  return value.startsWith("cultmesh:") ? value : null;
 }
 
 function normalizeInspectedRoutes(advertisement) {
@@ -1013,104 +1098,23 @@ function resolveInterfaceBindingStore(storeSpec) {
   if (typeof storeSpec !== "string" || !storeSpec.trim()) {
     return null;
   }
-  if (storeSpec.startsWith("sftp://")) {
-    throw new Error(`remote interface binding stores are no longer supported by Odin discovery: ${storeSpec}`);
+  const text = storeSpec.trim();
+  if (text.startsWith("cultmesh-store:file://")) {
+    const localPath = fileURLToPath(text.slice("cultmesh-store:".length));
+    return {
+      localPath,
+      sourceId: text,
+      cleanup: () => {},
+    };
+  }
+  if (text.startsWith("cultmesh://")) {
+    throw new Error(`CultMesh rendezvous URI ${text} must announce through Odin; static interface store imports are not the rendezvous owner.`);
+  }
+  if (text.startsWith("sftp://") || text.startsWith("http://") || text.startsWith("https://") || text.startsWith("rudp://")) {
+    throw new Error(`network interface binding stores are no longer supported by Odin discovery: ${text}`);
   }
 
-  return {
-    localPath: storeSpec,
-    sourceId: storeSpec,
-    cleanup: () => {},
-  };
-}
-
-function localIpv4Prefixes() {
-  const prefixes = new Set();
-  for (const entries of Object.values(os.networkInterfaces())) {
-    for (const entry of entries || []) {
-      if (entry.family !== "IPv4" || entry.internal) continue;
-      const parts = entry.address.split(".");
-      if (parts.length === 4) prefixes.add(parts.slice(0, 3).join("."));
-    }
-  }
-  return [...prefixes];
-}
-
-async function fetchEveProvider(url, providerId, manifest = null) {
-  const direct = await fetchEveProviderDirect(providerDeckUrl(url, providerId), providerId, manifest);
-  if (direct.state === "active") {
-    return direct;
-  }
-
-  const broker = await fetchEveProviderViaBroker(url, providerId, manifest);
-  if (broker.state === "active") {
-    return broker;
-  }
-
-  return broker.detail ? broker : direct;
-}
-
-async function fetchEveProviderDirect(url, providerId, manifest = null) {
-  try {
-    const socket = await openWebSocket(url);
-    try {
-      for (let index = 0; index < 3; index += 1) {
-        const message = await readServerTextFrame(socket, 1000);
-        const state = JSON.parse(message);
-        if (state?.providerId === providerId) {
-          return activeProviderInterface(url, providerId, state, manifest);
-        }
-      }
-      return dashboardUnavailable(providerId, url, "direct provider stream did not publish matching state");
-    } finally {
-      socket.destroy();
-    }
-  } catch (error) {
-    return dashboardUnavailable(providerId, url, error.message);
-  }
-}
-
-async function fetchEveProviderViaBroker(url, providerId, manifest = null) {
-  try {
-    const socket = await openWebSocket(url);
-    try {
-      sendClientFrame(socket, JSON.stringify({ type: "open-provider", providerId }));
-      for (let index = 0; index < 8; index += 1) {
-        const message = await readServerTextFrame(socket, 2500);
-        const state = JSON.parse(message);
-        if (state?.providerId === providerId) {
-          return activeProviderInterface(url, providerId, state, manifest);
-        }
-      }
-      return dashboardUnavailable(providerId, url, "provider did not publish matching state");
-    } finally {
-      socket.destroy();
-    }
-  } catch (error) {
-    return dashboardUnavailable(providerId, url, error.message);
-  }
-}
-
-function activeProviderInterface(source, providerId, state, manifest = null) {
-  const surface = state.surface?.root ? state.surface : legacySurfaceFromNodes(state, manifest);
-  return {
-    providerId,
-    title: state.title || manifest?.title || providerId,
-    state: "active",
-    detail: `${surface?.root?.kind || "surface"} ${countSurfaceNodes(surface, state)} nodes`,
-    version: state.version,
-    updatedAt: state.updatedAt,
-    source,
-    manifest,
-    surface,
-  };
-}
-
-function providerDeckUrl(url, providerId) {
-  const deck = new URL(url);
-  deck.pathname = `/eve/deck/${encodeURIComponent(providerId)}`;
-  deck.search = "";
-  return deck.toString();
+  throw new Error(`raw interface binding store paths are no longer supported by Odin discovery: ${text}. Use CultMesh announcement through Odin, or an explicit cultmesh-store:file:// URI for a local debug import.`);
 }
 
 function dashboardUnavailable(providerId, source, detail) {
@@ -1152,137 +1156,6 @@ function countSurfaceNodes(surface, state = null) {
   return count;
 }
 
-function legacySurfaceFromNodes(state, manifest = null) {
-  const nodes = Array.isArray(state?.nodes) ? state.nodes : [];
-  if (!nodes.length) {
-    return null;
-  }
-
-  const providerId = state.providerId || manifest?.id || "legacy-provider";
-  const title = state.title || manifest?.title || providerId;
-  return {
-    schema: "gamecult.eve.surface.v1",
-    id: `legacy-${providerId}`,
-    title,
-    root: {
-      id: `legacy-root-${providerId}`,
-      kind: "dashboard",
-      props: {
-        title,
-        providerId,
-        compatibility: "legacy-dashboard-nodes",
-        layout: {
-          density: "dense",
-          viewportMode: "nested-scroll",
-          layoutStrategy: "legacy-node-groups",
-          preferredWidth: 96,
-          preferredHeight: 24,
-          minWidth: 36,
-          minHeight: 8,
-        },
-      },
-      children: legacyNodeGroups(nodes, providerId),
-    },
-    assets: [],
-  };
-}
-
-function legacyNodeGroups(nodes, providerId) {
-  const groups = new Map();
-  for (const node of nodes) {
-    const kind = String(node.kind || "node");
-    const key = kind;
-    if (!groups.has(key)) {
-      groups.set(key, { kind, nodes: [] });
-    }
-    groups.get(key).nodes.push(node);
-  }
-
-  return [...groups.values()]
-    .sort((left, right) => left.kind.localeCompare(right.kind))
-    .map((group) => legacyKindGroup(group, providerId));
-}
-
-function legacyKindGroup(group, providerId) {
-  const richNodes = [];
-  const statusBuckets = new Map();
-  for (const node of group.nodes) {
-    if (hasLegacyDetails(node)) {
-      richNodes.push(node);
-      continue;
-    }
-
-    const health = String(node.health || "unknown");
-    if (!statusBuckets.has(health)) {
-      statusBuckets.set(health, []);
-    }
-    statusBuckets.get(health).push(String(node.label || node.id || "node"));
-  }
-
-  const summaries = [...statusBuckets.entries()]
-    .sort((left, right) => left[0].localeCompare(right[0]))
-    .map(([health, labels]) => textElement(
-      `legacy-summary-${stableLegacyId(providerId, group.kind, health)}`,
-      `${health}: ${labels.sort((left, right) => left.localeCompare(right)).join(", ")}`,
-    ));
-
-  return {
-    id: `legacy-group-${stableLegacyId(providerId, group.kind)}`,
-    kind: "group",
-    props: {
-      title: group.kind,
-      count: group.nodes.length,
-      density: "dense",
-    },
-    children: [
-      ...summaries,
-      ...richNodes
-        .sort((left, right) => String(left.id || left.label || "").localeCompare(String(right.id || right.label || "")))
-        .map((node) => legacyNodeElement(node, providerId)),
-    ],
-  };
-}
-
-function hasLegacyDetails(node) {
-  return Boolean(node.endpoint || node.command || (node.providerId && node.providerId !== "unknown"));
-}
-
-function legacyNodeElement(node, providerId) {
-  const id = String(node.id || node.label || "node");
-  const title = String(node.label || node.id || "node");
-  const facts = [
-    compactFact(id, "kind", node.kind || "node"),
-    compactFact(id, "health", node.health || "unknown"),
-    node.providerId ? compactFact(id, "provider", node.providerId || providerId) : null,
-    node.endpoint ? compactFact(id, "endpoint", node.endpoint) : null,
-    node.command ? compactFact(id, "command", node.command) : null,
-  ].filter(Boolean);
-  return {
-    id,
-    kind: "card",
-    props: {
-      title,
-      status: String(node.health || ""),
-      providerId: node.providerId || providerId,
-      command: node.command || "",
-      endpoint: node.endpoint || "",
-      density: "compact",
-    },
-    children: facts,
-  };
-}
-
-function compactFact(ownerId, name, value) {
-  return textElement(`fact-${stableLegacyId(ownerId, name, value)}`, `${name}: ${value}`);
-}
-
-function stableLegacyId(...parts) {
-  return parts
-    .map((part) => String(part || "x").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, ""))
-    .filter(Boolean)
-    .join("-") || "x";
-}
-
 function textElement(id, text) {
   return {
     id: String(id),
@@ -1303,6 +1176,4 @@ function titleCase(value) {
 module.exports = {
   createInterfaceDiscovery,
   dashboardUnavailable,
-  fetchEveProvider,
-  legacySurfaceFromNodes,
 };

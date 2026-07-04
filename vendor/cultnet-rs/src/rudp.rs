@@ -6,6 +6,8 @@ use std::collections::VecDeque;
 use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::net::UdpSocket;
+use std::thread;
+use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -132,6 +134,7 @@ pub struct CultNetRudpSession {
     ordered_next_sequence_by_channel: BTreeMap<String, u32>,
     ordered_buffers: BTreeMap<String, BTreeMap<u32, PendingOrderedFrame>>,
     fragment_buffers: BTreeMap<(String, u16), FragmentBuffer>,
+    highest_delivered_sequenced_by_channel: BTreeMap<String, u32>,
     reliable_packets_expired: u64,
 }
 
@@ -151,6 +154,7 @@ impl CultNetRudpSession {
             ordered_next_sequence_by_channel: BTreeMap::new(),
             ordered_buffers: BTreeMap::new(),
             fragment_buffers: BTreeMap::new(),
+            highest_delivered_sequenced_by_channel: BTreeMap::new(),
             reliable_packets_expired: 0,
         }
     }
@@ -165,6 +169,23 @@ impl CultNetRudpSession {
 
     pub fn connected(&self) -> bool {
         self.connected
+    }
+
+    pub fn reset_peer_state(&mut self) {
+        self.connected = false;
+        self.last_received_at_ms = None;
+        self.highest_received_sequence = None;
+        self.received_sequences.clear();
+        self.pending_reliable.clear();
+        self.ordered_next_sequence_by_channel.clear();
+        self.ordered_buffers.clear();
+        self.fragment_buffers.clear();
+        self.highest_delivered_sequenced_by_channel.clear();
+    }
+
+    pub fn assume_connected(&mut self, now_ms: u64) {
+        self.connected = true;
+        self.last_received_at_ms = Some(now_ms);
     }
 
     pub fn pending_reliable_sequences(&self) -> Vec<u32> {
@@ -216,8 +237,12 @@ impl CultNetRudpSession {
             ));
         }
 
-        self.ensure_reliable_capacity(1)?;
+        let was_connected = self.connected;
+        if !was_connected {
+            self.ensure_reliable_capacity(1)?;
+        }
         self.remember_received(packet.sequence);
+        self.last_received_at_ms = Some(now_ms);
         self.connected = true;
         let response = self.create_packet(
             CultNetRudpPacketType::Accept,
@@ -227,16 +252,18 @@ impl CultNetRudpSession {
             true,
             false,
         );
-        self.track_reliable(
-            &CultNetRudpSendOptions {
-                reliable: true,
-                ordered: true,
-                sequenced: false,
-                now_ms,
-                reliable_expire_after_ms: None,
-            },
-            response.clone(),
-        );
+        if !was_connected {
+            self.track_reliable(
+                &CultNetRudpSendOptions {
+                    reliable: true,
+                    ordered: true,
+                    sequenced: false,
+                    now_ms,
+                    reliable_expire_after_ms: None,
+                },
+                response.clone(),
+            );
+        }
         Ok(response)
     }
 
@@ -426,6 +453,23 @@ impl CultNetRudpSession {
                 disconnect_reason: Vec::new(),
             });
         };
+        if packet.sequenced && !ordered {
+            let highest = self
+                .highest_delivered_sequenced_by_channel
+                .entry(frame.channel_id.clone())
+                .or_insert(frame.sequence);
+            if frame.sequence < *highest {
+                return Ok(CultNetRudpReceiveResult {
+                    delivered: Vec::new(),
+                    reply: None,
+                    pong: false,
+                    pong_payload: Vec::new(),
+                    disconnected: false,
+                    disconnect_reason: Vec::new(),
+                });
+            }
+            *highest = frame.sequence;
+        }
         let delivered = if ordered {
             self.deliver_ordered(frame, next_sequence, expected_sequence_if_uninitialized)
         } else {
@@ -859,6 +903,7 @@ pub struct CultNetRudpSocketTransportConnection {
     mode: CultNetRudpSocketMode,
     remote_addr: Option<SocketAddr>,
     pub profile: CultNetTransportProfile,
+    transport_id: Option<String>,
     stats: CultNetTransportStats,
     delivered_frames: VecDeque<CultNetTransportFrame>,
     max_fragment_bytes: Option<usize>,
@@ -869,6 +914,7 @@ pub struct CultNetRudpSocketTransportConnection {
 impl CultNetRudpSocketTransportConnection {
     pub fn new(options: CultNetRudpSocketTransportOptions) -> Result<Self> {
         let local_addr = options.socket.local_addr()?;
+        let transport_id = options.transport_id.clone();
         let profile = create_rudp_transport_profile(
             options.runtime_id,
             RudpTransportProfileOptions {
@@ -895,6 +941,7 @@ impl CultNetRudpSocketTransportConnection {
             mode: options.mode,
             remote_addr: options.remote_addr,
             profile,
+            transport_id,
             stats: CultNetTransportStats::default(),
             delivered_frames: VecDeque::new(),
             max_fragment_bytes: options.max_fragment_bytes.map(|value| value as usize),
@@ -905,6 +952,10 @@ impl CultNetRudpSocketTransportConnection {
 
     pub fn connected(&self) -> bool {
         self.session.connected()
+    }
+
+    pub fn assume_connected(&mut self) {
+        self.session.assume_connected(now_ms());
     }
 
     pub fn stats(&self) -> CultNetTransportStats {
@@ -936,8 +987,12 @@ impl CultNetRudpSocketTransportConnection {
         let packets =
             self.session
                 .send_many(channel_id, payload, options, self.max_fragment_bytes)?;
-        for packet in packets {
-            self.send_packet(&packet)?;
+        let fragmented = packets.len() > 1;
+        for (index, packet) in packets.iter().enumerate() {
+            self.send_packet(packet)?;
+            if fragmented && (index + 1) % 16 == 0 {
+                thread::sleep(Duration::from_millis(1));
+            }
         }
         self.stats.frames_sent += 1;
         Ok(())
@@ -992,6 +1047,7 @@ impl CultNetRudpSocketTransportConnection {
 
     pub fn receive_once(&mut self) -> Result<Option<CultNetTransportFrame>> {
         if let Some(frame) = self.delivered_frames.pop_front() {
+            self.session.assume_connected(now_ms());
             return Ok(Some(frame));
         }
 
@@ -1012,11 +1068,30 @@ impl CultNetRudpSocketTransportConnection {
             Ok(packet) => packet,
             Err(_) => return Ok(None),
         };
+        let trace_transport = std::env::var_os("CULTNET_RUDP_TRACE").is_some()
+            && self
+                .transport_id
+                .as_deref()
+                .is_some_and(|id| id == "sleipnir-hid-rudp" || id == "muninn-hid-controller-rudp");
+        if trace_transport {
+            eprintln!(
+                "RUDP {} recv {:?} channel={} seq={} ack={} reliable={} ordered={} sequenced={} bytes={} from {}",
+                self.transport_id.as_deref().unwrap_or("unknown"),
+                packet.packet_type,
+                packet.channel_id,
+                packet.sequence,
+                packet.ack,
+                packet.reliable,
+                packet.ordered,
+                packet.sequenced,
+                packet.payload.len(),
+                remote_addr
+            );
+        }
 
         if let Some(expected) = self.remote_addr {
             if expected != remote_addr {
                 if self.mode == CultNetRudpSocketMode::Server
-                    && !self.session.connected()
                     && packet.packet_type == CultNetRudpPacketType::Connect
                 {
                     self.remote_addr = Some(remote_addr);
@@ -1035,6 +1110,7 @@ impl CultNetRudpSocketTransportConnection {
         if self.mode == CultNetRudpSocketMode::Server
             && packet.packet_type == CultNetRudpPacketType::Connect
         {
+            self.session.reset_peer_state();
             let accept = self.session.accept_connect(&packet, now_ms(), Vec::new())?;
             self.send_packet(&accept)?;
             return Ok(None);
@@ -1068,8 +1144,11 @@ impl CultNetRudpSocketTransportConnection {
     }
 
     pub fn poll_resends(&mut self) -> Result<()> {
-        for packet in self.session.due_resends(now_ms()) {
+        for (index, packet) in self.session.due_resends(now_ms()).into_iter().enumerate() {
             self.send_packet(&packet)?;
+            if (index + 1) % 16 == 0 {
+                thread::sleep(Duration::from_millis(1));
+            }
         }
         Ok(())
     }
@@ -1081,6 +1160,27 @@ impl CultNetRudpSocketTransportConnection {
             ));
         };
         let wire = encode_rudp_packet(packet)?;
+        let trace_transport = std::env::var_os("CULTNET_RUDP_TRACE").is_some()
+            && self
+                .transport_id
+                .as_deref()
+                .is_some_and(|id| id == "sleipnir-hid-rudp" || id == "muninn-hid-controller-rudp");
+        if trace_transport {
+            eprintln!(
+                "RUDP {} send {:?} channel={} seq={} ack={} reliable={} ordered={} sequenced={} payload={} wire={} to {}",
+                self.transport_id.as_deref().unwrap_or("unknown"),
+                packet.packet_type,
+                packet.channel_id,
+                packet.sequence,
+                packet.ack,
+                packet.reliable,
+                packet.ordered,
+                packet.sequenced,
+                packet.payload.len(),
+                wire.len(),
+                remote_addr
+            );
+        }
         let sent = self.socket.send_to(&wire, remote_addr)?;
         self.stats.bytes_sent += sent as u64;
         Ok(())
@@ -1274,5 +1374,60 @@ fn packet_type_from_code(code: u8) -> Result<CultNetRudpPacketType> {
         6 => Ok(CultNetRudpPacketType::Pong),
         7 => Ok(CultNetRudpPacketType::Disconnect),
         _ => Err(anyhow!("Unsupported CultNet RUDP packet type {code}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn connected_session(initial_sequence: u32) -> CultNetRudpSession {
+        let mut session = CultNetRudpSession::new(CultNetRudpSessionOptions {
+            connection_id: 0xCAFE_BABE,
+            initial_sequence,
+            resend_delay_ms: 5,
+            max_pending_reliable_packets: Some(64),
+        });
+        session.assume_connected(1);
+        session
+    }
+
+    #[test]
+    fn sequenced_unordered_channel_drops_older_late_frames() {
+        let mut sender = connected_session(1);
+        let mut receiver = connected_session(1);
+        let first = sender
+            .send(
+                "latest",
+                b"first".to_vec(),
+                CultNetRudpSendOptions {
+                    reliable: false,
+                    ordered: false,
+                    sequenced: true,
+                    now_ms: 1,
+                    reliable_expire_after_ms: None,
+                },
+            )
+            .unwrap();
+        let second = sender
+            .send(
+                "latest",
+                b"second".to_vec(),
+                CultNetRudpSendOptions {
+                    reliable: false,
+                    ordered: false,
+                    sequenced: true,
+                    now_ms: 2,
+                    reliable_expire_after_ms: None,
+                },
+            )
+            .unwrap();
+
+        let delivered_second = receiver.receive(&second, 2).unwrap().delivered;
+        let delivered_first = receiver.receive(&first, 3).unwrap().delivered;
+
+        assert_eq!(delivered_second.len(), 1);
+        assert_eq!(delivered_second[0].payload, b"second");
+        assert!(delivered_first.is_empty());
     }
 }

@@ -56,11 +56,10 @@ Idunn is a Rust daemon inside Odin's Cargo workspace. The live local runtime is
 one long-lived `idunn.exe` process that owns the whole Starfire-local swarm:
 Odin, local adjunct daemons, the Yggdrasil deploy lanes, and the Nightwing
 display services. Each target declares a daemon-owned health contract and keeps
-its own interval and deploy/restart authority. The shell health commands now
-exist as compatibility probes and actuators; daemon truth is expected to come
-first from typed CultNet/RUDP publication and daemon-owned boundary stores, and
-the local commands only matter when that witness is absent or when an explicit
-restart/deploy boundary is advertised.
+its own interval and deploy/restart authority. Daemon truth comes from typed
+CultNet/RUDP publication and daemon-owned boundary stores. Shell scripts remain
+deployment, restart, and manual diagnostic lowerings only; they do not satisfy
+health.
 The scheduler and continuity witness now belong to one Rust process instead of
 a PowerShell-herded pile of one-daemon workers.
 
@@ -74,8 +73,11 @@ From `E:\Projects\Odin`:
 
 ```powershell
 npm run idunn:build
-npm run idunn:start -- --daemon demo --health-command "exit 0"
+npm run idunn:start -- --daemon demo --rudp-health-bind <idunn-rudp-health-bind>
 ```
+
+`--rudp-health-bind` is explicit. Bare one-daemon Idunn does not open a
+localhost health ingress.
 
 Install the local Starfire boot watchdog:
 
@@ -94,22 +96,28 @@ target catalog in `scripts/idunn-deployment-targets.ps1`. A repo/service is not
 allowed to vanish into shrug-space: it is either enforced by Idunn, explicitly
 blocked with the missing authority named, external-owned, or not a runtime.
 
-To record a failed health check and request a restart without actuating:
+To record that a daemon has not published health, run a manual target without a
+matching `idunn.daemon_health` RUDP publication:
 
 ```powershell
-npm run idunn:start -- --daemon demo --health-command "exit 1" --deploy-command "echo deploy demo" --restart-command "echo restart demo"
+npm run idunn:start -- --daemon demo --restart-command "echo restart demo"
 ```
 
-To actually run the restart command:
+Idunn writes a non-actuating missing-publication health record and plans from
+that typed absence. It does not run a local health command to decide daemon
+truth.
+
+To actually allow restart/deploy actuation after typed health planning decides
+one is needed:
 
 ```powershell
-npm run idunn:start -- --daemon demo --health-command "exit 1" --deploy-command "echo deploy demo" --restart-command "echo restart demo" --execute
+npm run idunn:start -- --daemon demo --deploy-command "echo deploy demo" --restart-command "echo restart demo" --execute
 ```
 
 To keep watching on a resident interval:
 
 ```powershell
-npm run idunn:start -- --daemon demo --health-command "exit 0" --interval-seconds 30
+npm run idunn:start -- --daemon demo --interval-seconds 30
 ```
 
 To run the built-in Starfire-local swarm profile directly:
@@ -121,7 +129,7 @@ npm run idunn:start -- --swarm-profile starfire-local --repo-root E:\Projects\Od
 Optional store override:
 
 ```powershell
-npm run idunn:start -- --daemon demo --store E:\path\to\idunn.keepalive.cc --health-command "exit 0"
+npm run idunn:start -- --daemon demo --store E:\path\to\idunn.keepalive.cc
 ```
 
 ## What Daemons Should Publish
@@ -178,14 +186,15 @@ external-owned.
 
 Idunn publishes one `idunn.daemon_surgery_plan.v1` record per swarm target when
 the swarm starts. Those records make the CultNet/RUDP migration queue explicit:
-owner, objective, current compatibility mechanism, intended authority, cut line,
+owner, objective, current mechanism, intended authority, cut line,
 steps, blockers, severity, and status.
 
 It also publishes one `idunn.daemon_transport_profile.v1` and one
 `idunn.command_boundary.v1` per target. The desired daemon record links to
 both. The transport profile names `cultnet.transport.rudp.v0` as the target and
-marks the current command probe as compatibility evidence. The command boundary
-names restart, deploy, health, and alarm authority separately.
+marks daemon publication and daemon-owned witness stores as the health
+substrate. The command boundary names restart, deploy, health, and alarm
+authority separately; health authority belongs to daemon-published RUDP state.
 
 At startup Idunn also publishes `idunn.runtime_transport_check.v1`, currently a
 loopback CultNet hello over `cultnet.transport.rudp.v0`. That proves Idunn's
@@ -206,10 +215,9 @@ surface, then let Idunn run the rollout. Direct script execution without
 `IDUNN_ACTUATOR=1` fails on purpose; the little hand reaching for the deploy
 button has been removed from the machine.
 
-The daemon itself defaults to `127.0.0.1:17870`, but
 `scripts/start-idunn-local.ps1` launches the local swarm with
-`--rudp-health-bind 0.0.0.0:17870` so WireGuard peers such as Raven and
-Nightwing can publish to `10.77.0.2:17870`. It accepts raw
+`--rudp-health-bind 0.0.0.0:17870` so host-local and explicitly configured peers
+can publish to the configured Idunn health endpoint. It accepts raw
 `idunn.daemon_health` document puts on the canonical CNR0 RUDP `schema` channel
 and writes them into the keepalive store. That is daemon-owned health
 publication, not restart/deploy authority. On Windows, UDP reset reports from
@@ -217,21 +225,19 @@ closed one-shot publishers are treated as nonfatal ingress noise so one accepted
 health frame cannot kill the listener.
 
 When a fresh daemon-published RUDP health record exists for a target, Idunn uses
-that record for keepalive planning before falling back to the local command
-probe. The record must match the daemon id, health contract, RUDP transport,
-and freshness window; otherwise the compatibility probe remains fallback
-evidence.
+that record for keepalive planning. The record must match the daemon id, health
+contract, RUDP transport, and freshness window. If it is absent or stale, Idunn
+publishes a missing-publication observation and raises/plans from that typed
+absence instead of running a local health probe.
 
 The active transport cut is no longer "make the daemons speak RUDP at all."
 Nightwing Gjallar now consumes Odin's accepted
 `surface:gamecult.network.status` snapshot over CultNet/RUDP, so every active
 Starfire-local daemon target now publishes daemon-owned RUDP health plus typed
-boundary state. The remaining debt is deleting or demoting compatibility
-probes, HTTP/WebSocket/TCP lowerings, and xenos-boundary ingestion shims
-without letting them reclaim ownership. Weksa still owes CultNet/RUDP command
-document ingress for MiMo VoiceDesign before its HTTP command route can become
-debug-only, and Odin still owes removal of hashed-store/C# witness shims once
-direct interoperable witness publication is ready.
+boundary state. The remaining debt is deleting bridge-only lowerings and
+xenos-boundary ingestion shims without letting them reclaim ownership. Odin
+still owes removal of hashed-store/C# witness shims once direct interoperable
+witness publication is ready.
 
 Muninn media uses a codec-owned prediction model, not a custom visual-delta
 codec. The canonical LAN profile is

@@ -6,16 +6,28 @@ param(
   [string] $MoveBluetoothHost = "5C:93:A2:9C:A8:A8",
   [string[]] $MoveState = @(),
   [switch] $EnableUsbMoveState,
-  [string] $IdunnRudpHealth = "127.0.0.1:17870",
+  [string] $IdunnRudpHealth = $env:IDUNN_RUDP_HEALTH,
   [string] $IdunnDaemon = "starfire-muninn",
   [string] $IdunnHealthContract = "muninn.cultnet-rudp-local-telemetry-and-quest-access",
-  [string] $OdinCultMeshRudp = "127.0.0.1:17871"
+  [string] $OdinCultMeshUri = $(if ($env:ODIN_CULTMESH_URI) { $env:ODIN_CULTMESH_URI } else { "cultmesh://odin/rendezvous/provider-catalog" }),
+  [string] $HidControllerRudpBind = "0.0.0.0:17888",
+  [string] $HidControllerRudpAdvertise = $env:MUNINN_HID_CONTROLLER_RUDP_ADVERTISE
 )
 
 $ErrorActionPreference = "Stop"
 
+if ($env:IDUNN_ACTUATOR -ne "1" -or $env:IDUNN_COMMAND_AUTHORITY -ne "idunn-daemon") {
+  throw "restart-starfire-muninn.ps1 is an Idunn actuator body. Redeploy by poking Idunn; direct service restart is not an owned path."
+}
+
 if (-not (Test-Path -LiteralPath $MuninnExe)) {
   throw "Muninn executable not found at $MuninnExe"
+}
+if ([string]::IsNullOrWhiteSpace($IdunnRudpHealth)) {
+  throw "Idunn RUDP health endpoint must be supplied by -IdunnRudpHealth or IDUNN_RUDP_HEALTH; no Starfire LAN default is allowed."
+}
+if (-not [string]::IsNullOrWhiteSpace($HidControllerRudpBind) -and [string]::IsNullOrWhiteSpace($HidControllerRudpAdvertise)) {
+  throw "HID controller RUDP advertise endpoint must be supplied by -HidControllerRudpAdvertise or MUNINN_HID_CONTROLLER_RUDP_ADVERTISE when HID RUDP bind is enabled; no Starfire LAN default is allowed."
 }
 
 Get-CimInstance Win32_Process |
@@ -50,8 +62,14 @@ $arguments = @(
   "--idunn-daemon", $IdunnDaemon,
   "--idunn-health-contract", $IdunnHealthContract
 )
-if (-not [string]::IsNullOrWhiteSpace($OdinCultMeshRudp)) {
-  $arguments += @("--odin-cultmesh-rudp", $OdinCultMeshRudp)
+if (-not [string]::IsNullOrWhiteSpace($OdinCultMeshUri)) {
+  $arguments += @("--odin-cultmesh-uri", $OdinCultMeshUri)
+}
+if (-not [string]::IsNullOrWhiteSpace($HidControllerRudpBind)) {
+  $arguments += @("--hid-controller-rudp-bind", $HidControllerRudpBind)
+}
+if (-not [string]::IsNullOrWhiteSpace($HidControllerRudpAdvertise)) {
+  $arguments += @("--hid-controller-rudp-advertise", $HidControllerRudpAdvertise)
 }
 if (-not [string]::IsNullOrWhiteSpace($MoveBluetoothHost)) {
   $arguments += @("--move-host", $MoveBluetoothHost)
@@ -142,6 +160,3 @@ foreach ($pattern in @(
     throw "Starfire Muninn serve command line is missing ${pattern}: $($processCheck.CommandLine)"
   }
 }
-& powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "health-starfire-muninn.ps1") `
-  -MuninnExe $MuninnExe `
-  -StorePath $StorePath

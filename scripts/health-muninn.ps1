@@ -5,14 +5,17 @@ param(
   [string] $ActivateStorePath = "C:\Meta\Odin\state\muninn.activate.cc",
   [string] $LogRoot = "C:\Meta\Odin\logs\muninn",
   [int] $MaxStoreAgeSeconds = 180,
-  [string] $IdunnRudpHealth = "192.168.1.66:17870",
-  [string] $CaptureCommandRudpBind = "0.0.0.0:17883",
+  [string] $IdunnRudpHealth = $env:IDUNN_RUDP_HEALTH,
   [int] $ConnectTimeoutSeconds = 10,
   [string] $SshUser = "madman's lullaby",
   [string] $IdentityFile = ""
 )
 
 $ErrorActionPreference = "Stop"
+
+if ([string]::IsNullOrWhiteSpace($IdunnRudpHealth)) {
+  throw "Idunn RUDP health endpoint must be supplied by -IdunnRudpHealth or IDUNN_RUDP_HEALTH; no Starfire LAN default is allowed."
+}
 
 function Set-AsciiFile {
   param(
@@ -97,8 +100,7 @@ if (-not (Test-Path -LiteralPath "$MuninnExe")) {
 }
 `$muninnDir = Split-Path -Parent "$MuninnExe"
 `$taskExpectations = @(
-  @{ Name = "GameCult-Muninn"; Launcher = "powershell"; Vbs = Join-Path `$muninnDir "start-muninn-serve-hidden.vbs"; Ps = Join-Path `$muninnDir "start-muninn-serve.ps1" },
-  @{ Name = "GameCult-Muninn-VideoProof"; Launcher = "wscript"; Vbs = Join-Path `$muninnDir "muninn-raven-video-to-starfire-obs-hidden.vbs"; Ps = Join-Path `$muninnDir "muninn-raven-video-to-starfire-obs.ps1" }
+  @{ Name = "GameCult-Muninn"; Launcher = "powershell"; Vbs = Join-Path `$muninnDir "start-muninn-serve-hidden.vbs"; Ps = Join-Path `$muninnDir "start-muninn-serve.ps1" }
 )
 foreach (`$expectation in `$taskExpectations) {
   `$task = Get-ScheduledTask -TaskName `$expectation.Name -ErrorAction Stop
@@ -137,33 +139,6 @@ foreach (`$expectation in `$taskExpectations) {
   if (`$psContent -notmatch 'Start-Process') {
     throw "`$(`$expectation.Ps) does not launch a hidden process"
   }
-  if (`$expectation.Name -eq "GameCult-Muninn-VideoProof" -and `$psContent -notmatch 'ffmpeg\.exe') {
-    throw "`$(`$expectation.Ps) does not launch ffmpeg.exe"
-  }
-  if (`$expectation.Name -eq "GameCult-Muninn-VideoProof" -and `$psContent -notmatch 'srt://.+:\d+\?mode=caller') {
-    throw "`$(`$expectation.Ps) does not carry the expected SRT caller target"
-  }
-  if (`$expectation.Name -eq "GameCult-Muninn-VideoProof") {
-    foreach (`$requiredPair in @(
-      @("'-c:v'\s*,\s*'h264_nvenc'", "h264_nvenc video encoder"),
-      @("'-preset'\s*,\s*'p1'", "NVENC p1 preset"),
-      @("'-tune'\s*,\s*'ull'", "ultra-low-latency tune"),
-      @("'-zerolatency'\s*,\s*'1'", "zero-latency encoder flag"),
-      @("'-bf'\s*,\s*'0'", "disabled B-frames"),
-      @("'-delay'\s*,\s*'0'", "zero encoder delay"),
-      @("'-rc'\s*,\s*'cbr'", "CBR rate control"),
-      @("'-rc-lookahead'\s*,\s*'0'", "disabled lookahead"),
-      @("'-bufsize'\s*,\s*'400k'", "one-frame VBV buffer"),
-      @("'-forced-idr'\s*,\s*'1'", "forced IDR keyframes")
-    )) {
-      if (`$psContent -notmatch `$requiredPair[0]) {
-        throw "`$(`$expectation.Ps) does not carry `$(`$requiredPair[1])"
-      }
-    }
-    if (`$psContent -match "'-preset'\s*,\s*'p4'|24000k") {
-      throw "`$(`$expectation.Ps) still carries legacy buffered NVENC settings"
-    }
-  }
   `$vbs = Get-Content -LiteralPath `$expectation.Vbs -Raw
   if (`$vbs -match 'cmdPath\s*=') {
     throw "`$(`$expectation.Vbs) still routes through a cmdPath trampoline"
@@ -174,6 +149,9 @@ foreach (`$expectation in `$taskExpectations) {
 }
 if (Get-ScheduledTask -TaskName "GameCult-Muninn-Activate" -ErrorAction SilentlyContinue) {
   throw "Obsolete GameCult-Muninn-Activate task is still present on Raven"
+}
+if (Get-ScheduledTask -TaskName "GameCult-Muninn-VideoProof" -ErrorAction SilentlyContinue) {
+  throw "Obsolete GameCult-Muninn-VideoProof task is still present on Raven"
 }
 `$servePidPath = Join-Path "$LogRoot" "muninn-serve.pid"
 `$servePid = `$null
@@ -200,7 +178,6 @@ if (`$null -eq `$process) {
 foreach (`$pattern in @(
   "--host raven",
   "--activate-store $ActivateStorePath",
-  "--capture-command-rudp-bind $CaptureCommandRudpBind",
   "--idunn-rudp-health $IdunnRudpHealth",
   "--idunn-daemon muninn",
   "--idunn-health-contract muninn.cultnet-rudp-remote-telemetry-health"
