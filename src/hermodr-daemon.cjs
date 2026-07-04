@@ -15,6 +15,7 @@ const defaultEveRepoRoot = path.resolve(projectsRoot, "Eve");
 const defaultEveWebRoot = path.resolve(defaultEveRepoRoot, "web");
 const defaultAetheriaResourcesRoot = path.resolve(projectsRoot, "Aetheria", "Assets", "Resources");
 const defaultOdinCultMeshUri = "cultmesh://odin/rendezvous/provider-catalog";
+const defaultOdinRudpEndpoint = "rudp://127.0.0.1:17871";
 const odinRudpConnectionId = 0x0d1d0002;
 const providerRudpConnectionId = 0x43554c54;
 const providerRudpPeers = new Map();
@@ -92,6 +93,10 @@ function parseOptions(argv) {
     odinCultMeshUri: stringOption(
       parsed.odinCultMeshUri || parsed.odinUri || parsed["odin-cultmesh-uri"],
       process.env.HERMODR_ODIN_CULTMESH_URI || process.env.ODIN_CULTMESH_URI || defaultOdinCultMeshUri,
+    ),
+    odinRudpEndpoint: stringOption(
+      parsed.odinRudpEndpoint || parsed["odin-rudp-endpoint"],
+      process.env.HERMODR_ODIN_RUDP || process.env.CULTMESH_URI_ODIN_RUDP || defaultOdinRudpEndpoint,
     ),
     odinSurfaceKey: stringOption(parsed.odinSurfaceKey, process.env.HERMODR_ODIN_SURFACE_KEY || "gamecult.network.status"),
     eveWebRoot: path.resolve(stringOption(parsed.eveWebRoot, process.env.HERMODR_EVE_WEB_ROOT || defaultEveWebRoot)),
@@ -291,6 +296,7 @@ async function readOdinProviderAdvertisements(options) {
       connectTimeoutMs: 2_000,
       maxFragmentBytes: 1200,
       maxPendingReliablePackets: 512,
+      resolveCultMeshRudpEndpoint: (uri) => resolveHermodrRudpEndpoint(uri, options),
     },
   );
   try {
@@ -315,6 +321,14 @@ async function readOdinProviderAdvertisements(options) {
       peer.close();
     }
   }
+}
+
+function resolveHermodrRudpEndpoint(uri, options) {
+  const text = String(uri || "").trim();
+  if (text === defaultOdinCultMeshUri || text.startsWith("cultmesh://odin/")) {
+    return options.odinRudpEndpoint;
+  }
+  return undefined;
 }
 
 async function readProviderSurface(catalog, providerId) {
