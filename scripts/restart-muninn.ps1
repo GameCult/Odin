@@ -15,6 +15,7 @@ param(
   [string] $IdunnDaemon = "muninn",
   [string] $IdunnHealthContract = "muninn.cultnet-rudp-remote-telemetry-health",
   [string] $OdinCultMeshUri = $(if ($env:ODIN_CULTMESH_URI) { $env:ODIN_CULTMESH_URI } else { "cultmesh://odin/rendezvous/provider-catalog" }),
+  [string] $OdinCultMeshRudpEndpoint = $env:CULTMESH_URI_ODIN_RUDP,
   [string[]] $MoveStates = @("xbox-raven=xinput://0"),
   [string] $HidControllerRudpTarget = "",
   [string] $HidControllerRudpBind = "0.0.0.0:17887",
@@ -39,6 +40,9 @@ if ([string]::IsNullOrWhiteSpace($IdunnRudpHealth)) {
 }
 if ([string]::IsNullOrWhiteSpace($MediaTargetUri) -or -not $MediaTargetUri.StartsWith("cultmesh://", [System.StringComparison]::OrdinalIgnoreCase)) {
   throw "Muninn media target URI must be supplied by -MediaTargetUri or MUNINN_MEDIA_TARGET_URI and must start with cultmesh://."
+}
+if (-not [string]::IsNullOrWhiteSpace($OdinCultMeshUri) -and $OdinCultMeshUri.StartsWith("cultmesh://", [System.StringComparison]::OrdinalIgnoreCase) -and [string]::IsNullOrWhiteSpace($OdinCultMeshRudpEndpoint)) {
+  throw "Odin CultMesh RUDP endpoint must be supplied by -OdinCultMeshRudpEndpoint or CULTMESH_URI_ODIN_RUDP when -OdinCultMeshUri is a cultmesh:// URI."
 }
 if (-not [string]::IsNullOrWhiteSpace($HidControllerRudpBind) -and [string]::IsNullOrWhiteSpace($HidControllerRudpAdvertise)) {
   throw "HID controller RUDP advertise endpoint must be supplied by -HidControllerRudpAdvertise or MUNINN_HID_CONTROLLER_RUDP_ADVERTISE when HID RUDP bind is enabled; no Raven LAN default is allowed."
@@ -68,6 +72,23 @@ function ConvertTo-PowerShellArrayLiteral {
 
   $lines = $Values | ForEach-Object { "  {0}" -f (ConvertTo-PowerShellStringLiteral $_) }
   return "@(`r`n{0}`r`n)" -f ($lines -join ",`r`n")
+}
+
+function ConvertTo-PowerShellEnvAssignmentLines {
+  param(
+    [Parameter(Mandatory = $true)] [hashtable] $Environment
+  )
+
+  $lines = @()
+  foreach ($key in ($Environment.Keys | Sort-Object)) {
+    $name = [string] $key
+    if ($name -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') {
+      throw "Invalid environment variable name for Muninn launcher: $name"
+    }
+    $value = [string] $Environment[$key]
+    $lines += '$env:{0} = {1}' -f $name, (ConvertTo-PowerShellStringLiteral $value)
+  }
+  return ($lines -join "`r`n")
 }
 
 function Get-SshCommonArgs {
@@ -200,6 +221,7 @@ function New-HiddenNativeLauncherPowerShellContent {
     [Parameter(Mandatory = $true)] [string] $StderrPath,
     [Parameter(Mandatory = $true)] [string] $PidPath,
     [Parameter(Mandatory = $false)] [string] $WorkingDirectory,
+    [Parameter(Mandatory = $false)] [hashtable] $Environment = @{},
     [Parameter(Mandatory = $false)] [string] $DynamicArgumentsScript,
     [Parameter(Mandatory = $false)] [switch] $WaitForExit
   )
@@ -211,6 +233,7 @@ __STORE_DIR_LINE__
 New-Item -ItemType Directory -Force -Path __LOG_ROOT__ | Out-Null
 $launcherLog = __PID_PATH__ + '.launcher.log'
 ('launcher-start ' + [DateTime]::UtcNow.ToString('o')) | Set-Content -Encoding ASCII -LiteralPath $launcherLog
+__ENVIRONMENT_LINES__
 $arguments = __ARGUMENTS__
 __DYNAMIC_ARGUMENTS_SCRIPT__
 function Quote-NativeArgument([string] $Value) {
@@ -263,6 +286,7 @@ __WAIT_FOR_EXIT_LINE__
   return $template.
     Replace("__STORE_DIR_LINE__", $storeDirLine).
     Replace("__LOG_ROOT__", (ConvertTo-PowerShellStringLiteral $LogRoot)).
+    Replace("__ENVIRONMENT_LINES__", (ConvertTo-PowerShellEnvAssignmentLines $Environment)).
     Replace("__ARGUMENTS__", (ConvertTo-PowerShellArrayLiteral $Arguments)).
     Replace("__DYNAMIC_ARGUMENTS_SCRIPT__", $DynamicArgumentsScript).
     Replace("__FILE_PATH__", (ConvertTo-PowerShellStringLiteral $FilePath)).
@@ -686,6 +710,7 @@ $servePsContent = New-HiddenNativeLauncherPowerShellContent `
   -StdoutPath (Join-Path $LogRoot "muninn-serve.out.log") `
   -StderrPath (Join-Path $LogRoot "muninn-serve.err.log") `
   -PidPath (Join-Path $LogRoot "muninn-serve.pid") `
+  -Environment @{ CULTMESH_URI_ODIN_RUDP = $OdinCultMeshRudpEndpoint } `
   -DynamicArgumentsScript $serveDynamicArgumentsScript
 
 $uploadRoot = Join-Path $env:TEMP ("odin-raven-muninn-launchers-" + [guid]::NewGuid().ToString("N"))
