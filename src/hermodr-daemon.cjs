@@ -19,13 +19,7 @@ const defaultOdinRudpEndpoint = "rudp://127.0.0.1:17871";
 const odinRudpConnectionId = 0x0d1d0002;
 const providerRudpConnectionId = 0x43554c54;
 const providerRudpPeers = new Map();
-const defaultProviderCatalogKeys = [
-  "aetheria.main_menu.root",
-  "aetheria.inventory.panel",
-  "aetheria.inventory.panel.dropdown",
-  "aetheria.map.zone_details",
-  "aetheria.trade.menu",
-];
+const defaultProviderCatalogKeys = [];
 
 const cultCacheRequire = createRequire(resolveCultCachePackagePath());
 const cultMeshRequire = createRequire(resolveCultMeshPackagePath());
@@ -208,7 +202,7 @@ function createHermodrBridge(options) {
       if (request.method === "GET" && url.pathname.startsWith("/hermodr/surface/")) {
         const providerId = decodeURIComponent(url.pathname.slice("/hermodr/surface/".length));
         const catalog = await readCatalog(options);
-        const surface = await readProviderSurface(catalog, providerId);
+        const surface = await readProviderSurface(options, catalog, providerId);
         if (!surface) {
           writeJson(response, 404, { ok: false, error: `No surface found for provider '${providerId}'.` });
           return;
@@ -398,12 +392,23 @@ function mergeProviderAdvertisements(providers) {
 function resolveHermodrRudpEndpoint(uri, options) {
   const text = String(uri || "").trim();
   if (text === defaultOdinCultMeshUri || text.startsWith("cultmesh://odin/")) {
-    return options.odinRudpEndpoint;
+    return normalizeRudpEndpoint(options.odinRudpEndpoint);
   }
   return undefined;
 }
 
-async function readProviderSurface(catalog, providerId) {
+function normalizeRudpEndpoint(endpoint) {
+  const text = String(endpoint || "").trim();
+  if (!text) return text;
+  return text.startsWith("rudp://") ? text : `rudp://${text}`;
+}
+
+async function readProviderSurface(options, catalog, providerId) {
+  const odinSurface = await readOdinProviderSurface(options, providerId);
+  if (odinSurface) {
+    return odinSurface;
+  }
+
   const route = findProviderSnapshotRoute(catalog, providerId);
   if (!route) return null;
   try {
@@ -436,6 +441,48 @@ async function readProviderSurface(catalog, providerId) {
     { timeoutMs: 4_000, messageIdPrefix: "hermodr-surface" },
   );
   return normalizeEveSurfaceDocument(decodeMessagePack(bufferFromPayload(document.payload)), providerId);
+}
+
+async function readOdinProviderSurface(options, providerId) {
+  const peer = await CultMesh.createRudpPeer(
+    "hermodr-browser-lowering-odin-provider-surface",
+    odinRudpConnectionId,
+    options.odinCultMeshUri,
+    {
+      connectTimeoutMs: 2_000,
+      maxFragmentBytes: 1200,
+      maxPendingReliablePackets: 512,
+      resolveCultMeshRudpEndpoint: (uri) => resolveHermodrRudpEndpoint(uri, options),
+    },
+  );
+  try {
+    const document = await requestCultNetRawSnapshotFirstDocument(
+      peer,
+      "gamecult.eve.surface_state.v1",
+      [providerId, `surface:${providerId}`],
+      { timeoutMs: 4_000, messageIdPrefix: "hermodr-odin-provider-surface" },
+    );
+    const state = normalizeSurfaceState(decodeMessagePack(bufferFromPayload(document.payload)), document.recordKey);
+    if (!state?.surface?.root) {
+      return null;
+    }
+    return {
+      providerId,
+      documentProviderId: state.providerId,
+      providerKind: "odin-cultmesh-surface-state",
+      title: state.title || providerId,
+      version: state.version ?? 0,
+      updatedAt: state.updatedAt || null,
+      surface: normalizeEveSurfaceTree(state.surface),
+      commands: [],
+    };
+  } catch {
+    return null;
+  } finally {
+    if (typeof peer.close === "function") {
+      peer.close();
+    }
+  }
 }
 
 function normalizeEveSurfaceDocument(value, fallbackProviderId) {
@@ -1346,7 +1393,7 @@ async function requestCultNetRawSnapshot(peer, recordKeys, options) {
     peer.sendSnapshotRequest({
       schemaVersion: "cultnet.snapshot_request.v0",
       messageId,
-      recordKeys: [...recordKeys],
+      ...(recordKeys.length > 0 ? { recordKeys: [...recordKeys] } : {}),
       schemaIds: Array.isArray(options.schemaIds) ? [...options.schemaIds] : undefined,
     });
   });
