@@ -18,8 +18,9 @@ use cultnet_rs::{
 };
 use odin_core::{
     EVE_PROVIDER_ADVERTISEMENT_SCHEMA, EveProviderAdvertisementRecord, IdunnDaemonHealthRecord,
-    MUNINN_CAPTURE_STREAM_COMMAND_SCHEMA, MuninnCaptureStreamCommandRecord, MuninnCaptureStreamRecord,
-    MuninnCommandBoundaryCompatRecord, MuninnHidControllerStateRecord,
+    MUNINN_CAPTURE_STREAM_COMMAND_SCHEMA, MUNINN_OBS_STREAM_CATALOG_SCHEMA,
+    MuninnCaptureStreamCommandRecord, MuninnCaptureStreamRecord, MuninnCommandBoundaryCompatRecord,
+    MuninnHidControllerStateRecord,
     MuninnMediaReceiverFeedbackRecord, MuninnMoveControllerStateRecord, MuninnMoveIdentityRecord,
     MuninnMoveLightCommandRecord, MuninnObsStreamCatalogRecord, MuninnQuestAccessRecord,
     MuninnTelemetrySurfaceRecord, MuninnTransportProfileCompatRecord, OdinDocuments,
@@ -115,6 +116,7 @@ enum Mode {
     RequestStream,
     RequestMoveLight,
     CaptureStreamStatus,
+    ObsCatalogStatus,
     MoveLightStatus,
     MoveIdentityStatus,
     MoveSourceStatus,
@@ -305,6 +307,7 @@ fn main() -> Result<()> {
         Mode::RequestStream => request_capture_stream(options),
         Mode::RequestMoveLight => request_move_light(options),
         Mode::CaptureStreamStatus => capture_stream_status(options),
+        Mode::ObsCatalogStatus => obs_catalog_status(options),
         Mode::MoveLightStatus => move_light_status(options),
         Mode::MoveIdentityStatus => move_identity_status(options),
         Mode::MoveSourceStatus => move_source_status(options),
@@ -480,6 +483,35 @@ fn pull_odin_capture_command_snapshot(node: &mut cultmesh_rs::CultMeshNode, opti
         resend_delay_ms: 15,
         ..CultMeshRudpSnapshotOptions::default()
     });
+}
+
+fn pull_odin_obs_catalog_snapshot(node: &mut cultmesh_rs::CultMeshNode, options: &Options) {
+    let Some(target) = resolve_odin_cultmesh_uri(options) else {
+        return;
+    };
+    let _ = node.pull_rudp_catalog_snapshot(CultMeshRudpSnapshotOptions {
+        target,
+        runtime_id: format!("muninn-{}-obs-catalog-client", options.host_id),
+        schema_ids: Some(vec![MUNINN_OBS_STREAM_CATALOG_SCHEMA.to_string()]),
+        connect_timeout: Duration::from_millis(250),
+        response_timeout: Duration::from_millis(250),
+        resend_delay_ms: 15,
+        ..CultMeshRudpSnapshotOptions::default()
+    });
+}
+
+fn obs_catalog_status(options: Options) -> Result<()> {
+    ensure_state_dirs(&options)?;
+    let mut node = open_node(&options, "muninn-obs-catalog-client")?;
+    pull_odin_obs_catalog_snapshot(&mut node, &options);
+    let catalogs = node.cache().get_all::<MuninnObsStreamCatalogRecord>()?;
+    if catalogs.is_empty() {
+        return Err(anyhow!(
+            "Odin did not return any {} records for OBS discovery",
+            MUNINN_OBS_STREAM_CATALOG_SCHEMA
+        ));
+    }
+    Ok(())
 }
 
 fn resolve_odin_cultmesh_uri(options: &Options) -> Option<SocketAddr> {
@@ -3053,6 +3085,24 @@ fn publish_obs_catalog(
             .collect(),
     };
     node.put("obs", &record)?;
+    if let Some(target) = resolve_odin_cultmesh_uri(options)
+        && let Err(error) = node.publish_document_to_rudp_catalog(
+            "obs",
+            &record,
+            CultMeshRudpDocumentPublishOptions {
+                target,
+                runtime_id: muninn_daemon_id(options),
+                source_role: Some("muninn.obs-catalog-provider".to_string()),
+                tags: vec![
+                    "obs-discovery".to_string(),
+                    "odin-verse-discovery".to_string(),
+                ],
+                ..CultMeshRudpDocumentPublishOptions::default()
+            },
+        )
+    {
+        eprintln!("Muninn could not publish OBS catalog to Odin: {error:#}");
+    }
     Ok(())
 }
 
@@ -6788,6 +6838,7 @@ fn request_move_light(options: Options) -> Result<()> {
 
 fn request_capture_stream(options: Options) -> Result<()> {
     require_media_target_uri(&options)?;
+    publish_obs_media_receiver_to_odin(&options)?;
     let command = build_capture_stream_command(&options)?;
     publish_capture_command_to_odin(&options, &command)?;
     println!(
@@ -6795,6 +6846,64 @@ fn request_capture_stream(options: Options) -> Result<()> {
         command.command_id, command.action, command.stream_id, command.host_id
     );
     Ok(())
+}
+
+fn publish_obs_media_receiver_to_odin(options: &Options) -> Result<()> {
+    let Some(address_host) = options.obs_target_host.as_deref() else {
+        return Ok(());
+    };
+    if address_host.trim().is_empty() || options.obs_port == 0 {
+        return Ok(());
+    }
+    let Some(target) = resolve_odin_cultmesh_uri(options) else {
+        return Err(anyhow!(
+            "muninn request-stream requires --odin-cultmesh-uri before OBS can advertise its media receiver"
+        ));
+    };
+    let address = format!("{address_host}:{}", options.obs_port);
+    let provider_id = format!("mimir.obs.media-receiver.{}", options.host_id);
+    let advertisement = EveProviderAdvertisementRecord {
+        value: json!({
+            "schema": "gamecult.eve.provider_advertisement.v1",
+            "providerId": provider_id,
+            "title": "Mimir OBS Muninn media receiver",
+            "description": "OBS-owned Muninn RUDP media receiver endpoint advertised for Odin-routed capture activation.",
+            "canonicalService": "mimir.obs.media-receiver",
+            "locatedService": options.target_host,
+            "cultMeshAddress": options.target_host,
+            "status": "active",
+            "updatedAt": timestamp()?,
+            "inputStreams": [{
+                "streamId": format!("{}#{}", options.target_host, options.stream_id),
+                "schema": MUNINN_MEDIA_RUDP_SCHEMA,
+                "transport": CULTNET_RUDP_PROTOCOL_ID,
+                "address": address,
+                "connectionId": MUNINN_MEDIA_RUDP_CONNECTION_ID,
+                "channel": "media",
+                "producer": "Mimir OBS Muninn source"
+            }],
+            "routes": [{
+                "schema": MUNINN_MEDIA_RUDP_SCHEMA,
+                "transport": CULTNET_RUDP_PROTOCOL_ID,
+                "address": address
+            }],
+        }),
+    };
+    let node = open_node(options, "muninn-obs-media-receiver-publisher")?;
+    node.publish_document_to_rudp_catalog(
+        &provider_id,
+        &advertisement,
+        CultMeshRudpDocumentPublishOptions {
+            target,
+            runtime_id: "muninn-request-stream".to_string(),
+            source_role: Some("obs-media-receiver-provider".to_string()),
+            tags: vec![
+                "odin-media-receiver-route".to_string(),
+                "muninn.media-rudp".to_string(),
+            ],
+            ..CultMeshRudpDocumentPublishOptions::default()
+        },
+    )
 }
 
 fn publish_capture_command_to_odin(
@@ -7654,6 +7763,7 @@ impl Options {
                 "request-stream" => options.mode = Mode::RequestStream,
                 "request-move-light" => options.mode = Mode::RequestMoveLight,
                 "capture-stream-status" => options.mode = Mode::CaptureStreamStatus,
+                "obs-catalog-status" => options.mode = Mode::ObsCatalogStatus,
                 "move-light-status" => options.mode = Mode::MoveLightStatus,
                 "move-identity-status" => options.mode = Mode::MoveIdentityStatus,
                 "move-source-status" => options.mode = Mode::MoveSourceStatus,
@@ -7678,6 +7788,10 @@ impl Options {
                 "--host" => options.host_id = take_value(&mut args, "--host")?,
                 "--target-host" => options.target_host = take_value(&mut args, "--target-host")?,
                 "--port" => options.port = take_value(&mut args, "--port")?.parse()?,
+                "--obs-target-host" => {
+                    options.obs_target_host = Some(take_value(&mut args, "--obs-target-host")?)
+                }
+                "--obs-port" => options.obs_port = take_value(&mut args, "--obs-port")?.parse()?,
                 "--media-transport" => {
                     options.media_transport =
                         parse_media_transport(&take_value(&mut args, "--media-transport")?)?
@@ -8033,7 +8147,7 @@ fn parse_catalog_source(value: &str) -> Result<CatalogSource> {
 }
 
 fn help_text() -> &'static str {
-    "Usage: muninn [serve|activate|request-stream|capture-stream-status|request-move-light|move-light-status|move-identity-status|move-source-status|move-state-status|claim-move-host|quest-access-status] [--store <path>] [--activate-store <path>] [--stream-action <start|stop>] [--target-host <cultmesh-uri>] [--media-transport <rudp>] [--media-packet-bytes <bytes>] [--rudp-video-bitrate-kbps <kbps>] [--rudp-latency-budget-ms <ms>] [--video-source <source-id=label>] [--audio-source <source-id=label>] [--audio-source-id <source-id>] [--no-video] [--no-audio] [--loopback-script <path>] [--ffmpeg <path>] [--odin-cultmesh-uri <cultmesh-uri>] [--move-state <move-id>=<hidraw-path>] [--move-host <bt-addr>] [--move-evidence-stream <stream-id>] [--move-evidence-verse <verse-id>] [--quest-adb] [--quest-serial <serial>] [--quest-input-stream <stream-id>] [--quest-pose-stream <stream-id>] [--quest-video-input-stream <stream-id>] [--idunn-rudp-health <addr>] [--idunn-daemon <id>] [--idunn-health-contract <contract>] [--dry-run] [--health]\n\nMuninn is Odin's portable telemetry Verse assembler. serve publishes cheap typed telemetry affordances, optional Quest USB access surfaces, and the explicitly configured Move runtime; when serve receives --move-state, --move-host, or --move-evidence-stream it may publish source-local Move controller state, typed Move identity records, a CultMesh Move evidence stream, and keep USB-attached PS Moves claimed to that explicit Bluetooth host; serve consumes typed capture stream commands from Odin/CultMesh plus its local activation store and owns the local ffmpeg/loopback activation child lifecycle, resolves media targets from Odin/CultMesh provider advertisements, and pays startup respect to Odin through --odin-cultmesh-uri by publishing its provider advertisement once; activate starts an explicitly requested local CultNet RUDP stream as a daemon child after resolving the cultmesh:// media target URI through Odin; request-stream publishes a typed capture stream command through Odin/CultMesh using --odin-cultmesh-uri; capture-stream-status reads typed capture stream command receipts; use --no-video or --no-audio to request one leg over the CultNet RUDP media lane; request-move-light publishes a typed Move light command for Muninn serve to execute; move-light-status reads typed command receipts; move-identity-status reads typed Move identity records; move-source-status prints live Move source discovery; move-state-status reads typed controller-state records; claim-move-host assigns USB-attached PS Moves to a Bluetooth host; quest-access-status reads typed Quest access state. In --health mode, the Idunn RUDP flags publish the same typed daemon health document to Idunn for explicit diagnostics."
+    "Usage: muninn [serve|activate|request-stream|capture-stream-status|obs-catalog-status|request-move-light|move-light-status|move-identity-status|move-source-status|move-state-status|claim-move-host|quest-access-status] [--store <path>] [--activate-store <path>] [--stream-action <start|stop>] [--target-host <cultmesh-uri>] [--media-transport <rudp>] [--media-packet-bytes <bytes>] [--rudp-video-bitrate-kbps <kbps>] [--rudp-latency-budget-ms <ms>] [--video-source <source-id=label>] [--audio-source <source-id=label>] [--audio-source-id <source-id>] [--no-video] [--no-audio] [--loopback-script <path>] [--ffmpeg <path>] [--odin-cultmesh-uri <cultmesh-uri>] [--move-state <move-id>=<hidraw-path>] [--move-host <bt-addr>] [--move-evidence-stream <stream-id>] [--move-evidence-verse <verse-id>] [--quest-adb] [--quest-serial <serial>] [--quest-input-stream <stream-id>] [--quest-pose-stream <stream-id>] [--quest-video-input-stream <stream-id>] [--idunn-rudp-health <addr>] [--idunn-daemon <id>] [--idunn-health-contract <contract>] [--dry-run] [--health]\n\nMuninn is Odin's portable telemetry Verse assembler. serve publishes cheap typed telemetry affordances, optional Quest USB access surfaces, and the explicitly configured Move runtime; when serve receives --move-state, --move-host, or --move-evidence-stream it may publish source-local Move controller state, typed Move identity records, a CultMesh Move evidence stream, and keep USB-attached PS Moves claimed to that explicit Bluetooth host; serve consumes typed capture stream commands from Odin/CultMesh plus its local activation store and owns the local ffmpeg/loopback activation child lifecycle, resolves media targets from Odin/CultMesh provider advertisements, and pays startup respect to Odin through --odin-cultmesh-uri by publishing its provider advertisement once; activate starts an explicitly requested local CultNet RUDP stream as a daemon child after resolving the cultmesh:// media target URI through Odin; request-stream publishes a typed capture stream command through Odin/CultMesh using --odin-cultmesh-uri; obs-catalog-status pulls Odin-owned muninn.obs_stream_catalog discovery into the local compatibility store for OBS; capture-stream-status reads typed capture stream command receipts; use --no-video or --no-audio to request one leg over the CultNet RUDP media lane; request-move-light publishes a typed Move light command for Muninn serve to execute; move-light-status reads typed command receipts; move-identity-status reads typed Move identity records; move-source-status prints live Move source discovery; move-state-status reads typed controller-state records; claim-move-host assigns USB-attached PS Moves to a Bluetooth host; quest-access-status reads typed Quest access state. In --health mode, the Idunn RUDP flags publish the same typed daemon health document to Idunn for explicit diagnostics."
 }
 
 fn parse_move_state_source(value: &str) -> Result<MoveStateSource> {
