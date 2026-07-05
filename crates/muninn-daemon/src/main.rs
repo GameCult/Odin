@@ -7,9 +7,10 @@ use crate::media_packetizer::{
 };
 use anyhow::{Context, Result, anyhow};
 use cultmesh_rs::{
-    CultMesh, CultMeshNodeOptions, CultMeshRudpDocumentPublishOptions, CultMeshRudpSnapshotOptions,
-    CultMeshSharedMemoryFrameRing, CultMeshStreamBodyTransport, CultMeshStreamCatalog,
-    CultMeshStreamClock, CultMeshStreamDescriptor, CultMeshStreamKind,
+    CULTMESH_RUDP_DOCUMENT_CATALOG_CONNECTION_ID, CultMesh, CultMeshNodeOptions,
+    CultMeshRudpDocumentPublishOptions, CultMeshRudpSnapshotOptions, CultMeshSharedMemoryFrameRing,
+    CultMeshStreamBodyTransport, CultMeshStreamCatalog, CultMeshStreamClock,
+    CultMeshStreamDescriptor, CultMeshStreamKind,
 };
 use cultnet_rs::{
     CultNetMessage, CultNetRawDocumentRecord, CultNetRawPayloadEncoding,
@@ -20,11 +21,11 @@ use odin_core::{
     EVE_PROVIDER_ADVERTISEMENT_SCHEMA, EveProviderAdvertisementRecord, IdunnDaemonHealthRecord,
     MUNINN_CAPTURE_STREAM_COMMAND_SCHEMA, MUNINN_OBS_STREAM_CATALOG_SCHEMA,
     MuninnCaptureStreamCommandRecord, MuninnCaptureStreamRecord, MuninnCommandBoundaryCompatRecord,
-    MuninnHidControllerStateRecord,
-    MuninnMediaReceiverFeedbackRecord, MuninnMoveControllerStateRecord, MuninnMoveIdentityRecord,
-    MuninnMoveLightCommandRecord, MuninnObsStreamCatalogRecord, MuninnQuestAccessRecord,
-    MuninnTelemetrySurfaceRecord, MuninnTransportProfileCompatRecord, OdinDocuments,
-    OdinEndpointQuery, discover_provider_endpoints,
+    MuninnHidControllerStateRecord, MuninnMediaReceiverFeedbackRecord,
+    MuninnMoveControllerStateRecord, MuninnMoveIdentityRecord, MuninnMoveLightCommandRecord,
+    MuninnObsStreamCatalogRecord, MuninnQuestAccessRecord, MuninnTelemetrySurfaceRecord,
+    MuninnTransportProfileCompatRecord, OdinDocuments, OdinEndpointQuery,
+    discover_provider_endpoints,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -474,30 +475,40 @@ fn pull_odin_capture_command_snapshot(node: &mut cultmesh_rs::CultMeshNode, opti
     let Some(target) = resolve_odin_cultmesh_uri(options) else {
         return;
     };
-    let _ = node.pull_rudp_catalog_snapshot(CultMeshRudpSnapshotOptions {
+    if let Err(error) = node.pull_rudp_catalog_snapshot(CultMeshRudpSnapshotOptions {
         target,
         runtime_id: format!("muninn-{}-capture-command-client", options.host_id),
         schema_ids: Some(vec![MUNINN_CAPTURE_STREAM_COMMAND_SCHEMA.to_string()]),
-        connect_timeout: Duration::from_millis(150),
-        response_timeout: Duration::from_millis(150),
+        record_keys: Some(vec![latest_capture_stream_command_key(
+            &options.host_id,
+            &options.stream_id,
+        )]),
+        connect_timeout: Duration::from_millis(2000),
+        response_timeout: Duration::from_millis(5000),
         resend_delay_ms: 15,
+        connection_id: CULTMESH_RUDP_DOCUMENT_CATALOG_CONNECTION_ID,
         ..CultMeshRudpSnapshotOptions::default()
-    });
+    }) {
+        eprintln!("Muninn could not pull capture commands from Odin: {error:#}");
+    }
 }
 
 fn pull_odin_obs_catalog_snapshot(node: &mut cultmesh_rs::CultMeshNode, options: &Options) {
     let Some(target) = resolve_odin_cultmesh_uri(options) else {
         return;
     };
-    let _ = node.pull_rudp_catalog_snapshot(CultMeshRudpSnapshotOptions {
+    if let Err(error) = node.pull_rudp_catalog_snapshot(CultMeshRudpSnapshotOptions {
         target,
         runtime_id: format!("muninn-{}-obs-catalog-client", options.host_id),
         schema_ids: Some(vec![MUNINN_OBS_STREAM_CATALOG_SCHEMA.to_string()]),
-        connect_timeout: Duration::from_millis(250),
-        response_timeout: Duration::from_millis(250),
+        connect_timeout: Duration::from_millis(2000),
+        response_timeout: Duration::from_millis(5000),
         resend_delay_ms: 15,
+        connection_id: CULTMESH_RUDP_DOCUMENT_CATALOG_CONNECTION_ID,
         ..CultMeshRudpSnapshotOptions::default()
-    });
+    }) {
+        eprintln!("Muninn could not pull OBS catalog from Odin: {error:#}");
+    }
 }
 
 fn obs_catalog_status(options: Options) -> Result<()> {
@@ -540,6 +551,14 @@ fn latest_capture_stream_command_ids(
         );
     }
     latest_command_by_stream
+}
+
+fn latest_capture_stream_command_key(host_id: &str, stream_id: &str) -> String {
+    format!(
+        "{}:{}:capture-stream:latest",
+        host_id,
+        canonical_muninn_stream_id(stream_id)
+    )
 }
 
 fn supersede_capture_stream_command(
@@ -684,6 +703,8 @@ fn capture_stream_commands_start_equivalent(
         && command.action == "start"
         && active.target_host == command.target_host
         && active.port == command.port
+        && active.obs_target_host == command.obs_target_host
+        && active.obs_port == command.obs_port
         && active.media_transport == command.media_transport
         && active.media_packet_bytes == command.media_packet_bytes
         && command_rudp_video_bitrate_kbps(active) == command_rudp_video_bitrate_kbps(command)
@@ -841,6 +862,17 @@ fn spawn_capture_stream_activation(
         ]);
     } else {
         args.push("--no-audio".to_string());
+    }
+    if let Some(obs_target_host) = command.obs_target_host.as_deref()
+        && !obs_target_host.trim().is_empty()
+        && command.obs_port != 0
+    {
+        args.extend([
+            "--obs-target-host".to_string(),
+            obs_target_host.to_string(),
+            "--obs-port".to_string(),
+            command.obs_port.to_string(),
+        ]);
     }
     args.extend([
         "--audio-sample-rate".to_string(),
@@ -1528,125 +1560,269 @@ fn run_rudp_mux_once(
         _ => None,
     };
 
-    let media_profile = muninn_rudp_media_profile_for_options(options);
-    let mut video_transport = open_media_rudp_transport(
-        options,
-        node,
-        MUNINN_MEDIA_RUDP_CONNECTION_ID,
-        None,
-        "video",
-    )?;
-    let mut audio_transport = open_media_rudp_transport(
-        options,
-        node,
-        MUNINN_AUDIO_RUDP_CONNECTION_ID,
-        Some(media_profile.receiver_assembly_deadline_ms),
-        "audio",
-    )?;
-    publish_stream(
-        node,
-        options,
-        plan,
-        "running",
-        supervisor_pid,
-        video_ffmpeg
-            .as_ref()
-            .map(Child::id)
-            .or_else(|| audio_ffmpeg.as_ref().map(Child::id)),
-        restart_count,
-        &rudp_media_activity_detail(options),
-    )?;
-    let mut last_stream_publish_at = Instant::now();
+    let mut video_sender = None;
+    let mut audio_sender = None;
+    let result = (|| -> Result<RudpMuxRestart> {
+        let media_profile = muninn_rudp_media_profile_for_options(options);
+        let mut video_transport = open_media_rudp_transport(
+            options,
+            node,
+            MUNINN_MEDIA_RUDP_CONNECTION_ID,
+            None,
+            "video",
+        )?;
+        let mut audio_transport = open_media_rudp_transport(
+            options,
+            node,
+            MUNINN_AUDIO_RUDP_CONNECTION_ID,
+            Some(media_profile.receiver_assembly_deadline_ms),
+            "audio",
+        )?;
+        publish_stream(
+            node,
+            options,
+            plan,
+            "running",
+            supervisor_pid,
+            video_ffmpeg
+                .as_ref()
+                .map(Child::id)
+                .or_else(|| audio_ffmpeg.as_ref().map(Child::id)),
+            restart_count,
+            &rudp_media_activity_detail(options),
+        )?;
+        let mut last_stream_publish_at = Instant::now();
 
-    let (payload_tx, payload_rx) = mpsc::channel::<Result<QueuedMuninnMediaSendPayload>>();
-    let video_sender = if let Some(stdout) = video_ffmpeg_stdout {
-        Some(video_rudp_payload_reader(
-            payload_tx.clone(),
-            stdout,
-            VideoAnnexBStreamSendConfig {
-                stream_id: options.stream_id.clone(),
-                session_id: format!("{}:{timestamp}:video", options.host_id),
-                codec: media_profile.video_codec.to_string(),
-                first_frame_id: 0,
-                first_pts_ticks: 0,
-                frame_duration_ticks: video_frame_duration_ticks(options)?,
-                timebase_num: 1,
-                timebase_den: 90_000,
-                deadline_delay_ticks: rudp_media_deadline_delay_ticks(&media_profile),
-                max_payload_bytes: options.media_packet_bytes.max(256),
-                max_pending_bytes: options.media_packet_bytes.max(256) * 4096,
-                source_runtime_id: options.host_id.clone(),
-                source_role: "muninn.rudp.video".to_string(),
-            },
-        ))
-    } else {
-        None
-    };
-    let audio_sender = if let Some(stdout) = audio_ffmpeg_stdout {
-        Some(audio_rudp_payload_reader(
-            payload_tx.clone(),
-            stdout,
-            AudioPcmStreamSendConfig {
-                stream_id: options.stream_id.clone(),
-                session_id: format!("{}:{timestamp}:audio", options.host_id),
-                codec: "pcm-f32le-interleaved".to_string(),
-                first_packet_id: 0,
-                first_pts_ticks: 0,
-                packet_duration_ticks: 480,
-                timebase_num: 1,
-                timebase_den: options.audio_sample_rate,
-                deadline_delay_ticks: rudp_audio_deadline_delay_ticks(options, &media_profile),
-                channels: options.audio_channels,
-                bytes_per_sample: 4,
-                max_pending_bytes: 480usize
-                    .saturating_mul(options.audio_channels as usize)
-                    .saturating_mul(4)
-                    .saturating_mul(128),
-                source_runtime_id: options.host_id.clone(),
-                source_role: "muninn.rudp.audio".to_string(),
-            },
-        ))
-    } else {
-        None
-    };
-    drop(payload_tx);
+        let (payload_tx, payload_rx) = mpsc::channel::<Result<QueuedMuninnMediaSendPayload>>();
+        video_sender = if let Some(stdout) = video_ffmpeg_stdout {
+            Some(video_rudp_payload_reader(
+                payload_tx.clone(),
+                stdout,
+                VideoAnnexBStreamSendConfig {
+                    stream_id: options.stream_id.clone(),
+                    session_id: format!("{}:{timestamp}:video", options.host_id),
+                    codec: media_profile.video_codec.to_string(),
+                    first_frame_id: 0,
+                    first_pts_ticks: 0,
+                    frame_duration_ticks: video_frame_duration_ticks(options)?,
+                    timebase_num: 1,
+                    timebase_den: 90_000,
+                    deadline_delay_ticks: rudp_media_deadline_delay_ticks(&media_profile),
+                    max_payload_bytes: options.media_packet_bytes.max(256),
+                    max_pending_bytes: options.media_packet_bytes.max(256) * 4096,
+                    source_runtime_id: options.host_id.clone(),
+                    source_role: "muninn.rudp.video".to_string(),
+                },
+            ))
+        } else {
+            None
+        };
+        audio_sender = if let Some(stdout) = audio_ffmpeg_stdout {
+            Some(audio_rudp_payload_reader(
+                payload_tx.clone(),
+                stdout,
+                AudioPcmStreamSendConfig {
+                    stream_id: options.stream_id.clone(),
+                    session_id: format!("{}:{timestamp}:audio", options.host_id),
+                    codec: "pcm-f32le-interleaved".to_string(),
+                    first_packet_id: 0,
+                    first_pts_ticks: 0,
+                    packet_duration_ticks: 480,
+                    timebase_num: 1,
+                    timebase_den: options.audio_sample_rate,
+                    deadline_delay_ticks: rudp_audio_deadline_delay_ticks(options, &media_profile),
+                    channels: options.audio_channels,
+                    bytes_per_sample: 4,
+                    max_pending_bytes: 480usize
+                        .saturating_mul(options.audio_channels as usize)
+                        .saturating_mul(4)
+                        .saturating_mul(128),
+                    source_runtime_id: options.host_id.clone(),
+                    source_role: "muninn.rudp.audio".to_string(),
+                },
+            ))
+        } else {
+            None
+        };
+        drop(payload_tx);
 
-    let mut payloads_sent = 0_u64;
-    let mut payloads_queue_expired = 0_u64;
-    let mut payloads_send_expired = 0_u64;
-    let mut receiver_feedback = MuninnRudpReceiverFeedbackStats::default();
-    let mut handled_keyframe_requests = 0_u64;
-    let mut repair_cache = RecentVideoChunkRepairCache::new(MUNINN_RUDP_MEDIA_REPAIR_CACHE_CHUNKS);
-    let mut repair_budget = MuninnRudpRepairBudget::new(
-        MUNINN_RUDP_MEDIA_REPAIR_INITIAL_CHUNKS_PER_SECOND,
-        MUNINN_RUDP_MEDIA_REPAIR_BURST_CHUNKS,
-    );
-    let mut video_send_pacer = MuninnRudpMediaSendPacer::new(
-        media_profile.sender_pace_every_payloads,
-        Duration::from_micros(media_profile.sender_pace_sleep_us),
-    );
-    let mut audio_send_pacer = MuninnRudpMediaSendPacer::new(0, Duration::ZERO);
-    let mut pending_payloads = PendingMuninnMediaSendQueues::default();
-    let mut payload_channel_disconnected = false;
-    let result = loop {
-        if pending_payloads.is_empty() && !payload_channel_disconnected {
-            payload_channel_disconnected = receive_pending_media_payloads(
-                &payload_rx,
-                &mut pending_payloads,
-                Duration::from_millis(5),
-            )?;
-        } else if !payload_channel_disconnected {
-            payload_channel_disconnected =
-                drain_available_media_payloads(&payload_rx, &mut pending_payloads)?;
-        }
+        let mut payloads_sent = 0_u64;
+        let mut payloads_queue_expired = 0_u64;
+        let mut payloads_send_expired = 0_u64;
+        let mut receiver_feedback = MuninnRudpReceiverFeedbackStats::default();
+        let mut handled_keyframe_requests = 0_u64;
+        let mut repair_cache =
+            RecentVideoChunkRepairCache::new(MUNINN_RUDP_MEDIA_REPAIR_CACHE_CHUNKS);
+        let mut repair_budget = MuninnRudpRepairBudget::new(
+            MUNINN_RUDP_MEDIA_REPAIR_INITIAL_CHUNKS_PER_SECOND,
+            MUNINN_RUDP_MEDIA_REPAIR_BURST_CHUNKS,
+        );
+        let mut video_send_pacer = MuninnRudpMediaSendPacer::new(
+            media_profile.sender_pace_every_payloads,
+            Duration::from_micros(media_profile.sender_pace_sleep_us),
+        );
+        let mut audio_send_pacer = MuninnRudpMediaSendPacer::new(0, Duration::ZERO);
+        let mut pending_payloads = PendingMuninnMediaSendQueues::default();
+        let mut payload_channel_disconnected = false;
+        loop {
+            if pending_payloads.is_empty() && !payload_channel_disconnected {
+                payload_channel_disconnected = receive_pending_media_payloads(
+                    &payload_rx,
+                    &mut pending_payloads,
+                    Duration::from_millis(5),
+                )?;
+            } else if !payload_channel_disconnected {
+                payload_channel_disconnected =
+                    drain_available_media_payloads(&payload_rx, &mut pending_payloads)?;
+            }
 
-        if let Some(queued) = pending_payloads.pop_next() {
-            if media_payload_queue_age_exceeded(
-                queued.queued_at,
-                Instant::now(),
-                Duration::from_millis(media_profile.sender_queue_deadline_ms),
-            ) {
-                payloads_queue_expired += 1;
+            if let Some(queued) = pending_payloads.pop_next() {
+                if media_payload_queue_age_exceeded(
+                    queued.queued_at,
+                    Instant::now(),
+                    Duration::from_millis(media_profile.sender_queue_deadline_ms),
+                ) {
+                    payloads_queue_expired += 1;
+                    let payloads_dropped = payloads_queue_expired + payloads_send_expired;
+                    poll_rudp_media_receiver_feedback(
+                        &mut video_transport,
+                        &mut receiver_feedback,
+                        &repair_cache,
+                        &mut repair_budget,
+                        &media_profile,
+                        &mut video_send_pacer,
+                        payloads_dropped,
+                    )?;
+                    record_receiver_keyframe_pressure(
+                        &receiver_feedback,
+                        &mut handled_keyframe_requests,
+                    );
+                    poll_rudp_resends_with_backpressure(&mut video_transport)?;
+                    poll_rudp_resends_with_backpressure(&mut audio_transport)?;
+                    republish_running_stream_if_due(
+                        node,
+                        options,
+                        plan,
+                        supervisor_pid,
+                        video_ffmpeg
+                            .as_ref()
+                            .map(Child::id)
+                            .or_else(|| audio_ffmpeg.as_ref().map(Child::id))
+                            .unwrap_or(supervisor_pid),
+                        restart_count,
+                        &mut last_stream_publish_at,
+                    )?;
+                    if payloads_dropped == 1 || payloads_dropped % 300 == 0 {
+                        let expired = reliable_packets_expired(&video_transport, &audio_transport);
+                        eprintln!(
+                            "{}",
+                            rudp_media_progress_detail(
+                                payloads_sent,
+                                payloads_dropped,
+                                payloads_queue_expired,
+                                payloads_send_expired,
+                                expired,
+                                &receiver_feedback
+                            )
+                        );
+                    }
+                    continue;
+                }
+
+                let payload_len = queued.payload.payload.len();
+                let sent = match queued.kind {
+                    QueuedMuninnMediaKind::Video => send_rudp_media_payload_with_backpressure(
+                        &mut video_transport,
+                        queued.payload.clone(),
+                        queued.queued_at,
+                        Duration::from_millis(media_profile.sender_queue_deadline_ms),
+                        &mut video_send_pacer,
+                    )?,
+                    QueuedMuninnMediaKind::Audio => send_rudp_media_payload_with_backpressure(
+                        &mut audio_transport,
+                        queued.payload.clone(),
+                        queued.queued_at,
+                        Duration::from_millis(media_profile.sender_queue_deadline_ms),
+                        &mut audio_send_pacer,
+                    )?,
+                };
+                if !sent {
+                    payloads_send_expired += 1;
+                    continue;
+                }
+                let payloads_dropped = payloads_queue_expired + payloads_send_expired;
+                if queued.kind == QueuedMuninnMediaKind::Video {
+                    repair_cache.remember(&queued.payload)?;
+                }
+                poll_rudp_media_receiver_feedback(
+                    &mut video_transport,
+                    &mut receiver_feedback,
+                    &repair_cache,
+                    &mut repair_budget,
+                    &media_profile,
+                    &mut video_send_pacer,
+                    payloads_dropped,
+                )?;
+                record_receiver_keyframe_pressure(
+                    &receiver_feedback,
+                    &mut handled_keyframe_requests,
+                );
+                poll_rudp_resends_with_backpressure(&mut video_transport)?;
+                poll_rudp_resends_with_backpressure(&mut audio_transport)?;
+                republish_running_stream_if_due(
+                    node,
+                    options,
+                    plan,
+                    supervisor_pid,
+                    video_ffmpeg
+                        .as_ref()
+                        .map(Child::id)
+                        .or_else(|| audio_ffmpeg.as_ref().map(Child::id))
+                        .unwrap_or(supervisor_pid),
+                    restart_count,
+                    &mut last_stream_publish_at,
+                )?;
+                payloads_sent += 1;
+                if payloads_sent == 1 || payloads_sent % 900 == 0 {
+                    let expired = reliable_packets_expired(&video_transport, &audio_transport);
+                    eprintln!(
+                        "{}; pending_audio={} pending_video={}; latest {:?} payload was {payload_len} bytes.",
+                        rudp_media_progress_detail(
+                            payloads_sent,
+                            payloads_dropped,
+                            payloads_queue_expired,
+                            payloads_send_expired,
+                            expired,
+                            &receiver_feedback
+                        ),
+                        pending_payloads.audio_len(),
+                        pending_payloads.video_len(),
+                        queued.kind
+                    );
+                }
+                continue;
+            }
+
+            if payload_channel_disconnected {
+                let expired = reliable_packets_expired(&video_transport, &audio_transport);
+                let payloads_dropped = payloads_queue_expired + payloads_send_expired;
+                break Ok(RudpMuxRestart {
+                    detail: format!(
+                        "encoder stdout ended; {}",
+                        rudp_media_progress_detail(
+                            payloads_sent,
+                            payloads_dropped,
+                            payloads_queue_expired,
+                            payloads_send_expired,
+                            expired,
+                            &receiver_feedback
+                        )
+                    ),
+                    delay: default_rudp_mux_restart_delay(restart_count),
+                });
+            }
+
+            {
                 let payloads_dropped = payloads_queue_expired + payloads_send_expired;
                 poll_rudp_media_receiver_feedback(
                     &mut video_transport,
@@ -1676,142 +1852,9 @@ fn run_rudp_mux_once(
                     restart_count,
                     &mut last_stream_publish_at,
                 )?;
-                if payloads_dropped == 1 || payloads_dropped % 300 == 0 {
-                    let expired = reliable_packets_expired(&video_transport, &audio_transport);
-                    eprintln!(
-                        "{}",
-                        rudp_media_progress_detail(
-                            payloads_sent,
-                            payloads_dropped,
-                            payloads_queue_expired,
-                            payloads_send_expired,
-                            expired,
-                            &receiver_feedback
-                        )
-                    );
-                }
-                continue;
             }
-
-            let payload_len = queued.payload.payload.len();
-            let sent = match queued.kind {
-                QueuedMuninnMediaKind::Video => send_rudp_media_payload_with_backpressure(
-                    &mut video_transport,
-                    queued.payload.clone(),
-                    queued.queued_at,
-                    Duration::from_millis(media_profile.sender_queue_deadline_ms),
-                    &mut video_send_pacer,
-                )?,
-                QueuedMuninnMediaKind::Audio => send_rudp_media_payload_with_backpressure(
-                    &mut audio_transport,
-                    queued.payload.clone(),
-                    queued.queued_at,
-                    Duration::from_millis(media_profile.sender_queue_deadline_ms),
-                    &mut audio_send_pacer,
-                )?,
-            };
-            if !sent {
-                payloads_send_expired += 1;
-                continue;
-            }
-            let payloads_dropped = payloads_queue_expired + payloads_send_expired;
-            if queued.kind == QueuedMuninnMediaKind::Video {
-                repair_cache.remember(&queued.payload)?;
-            }
-            poll_rudp_media_receiver_feedback(
-                &mut video_transport,
-                &mut receiver_feedback,
-                &repair_cache,
-                &mut repair_budget,
-                &media_profile,
-                &mut video_send_pacer,
-                payloads_dropped,
-            )?;
-            record_receiver_keyframe_pressure(&receiver_feedback, &mut handled_keyframe_requests);
-            poll_rudp_resends_with_backpressure(&mut video_transport)?;
-            poll_rudp_resends_with_backpressure(&mut audio_transport)?;
-            republish_running_stream_if_due(
-                node,
-                options,
-                plan,
-                supervisor_pid,
-                video_ffmpeg
-                    .as_ref()
-                    .map(Child::id)
-                    .or_else(|| audio_ffmpeg.as_ref().map(Child::id))
-                    .unwrap_or(supervisor_pid),
-                restart_count,
-                &mut last_stream_publish_at,
-            )?;
-            payloads_sent += 1;
-            if payloads_sent == 1 || payloads_sent % 900 == 0 {
-                let expired = reliable_packets_expired(&video_transport, &audio_transport);
-                eprintln!(
-                    "{}; pending_audio={} pending_video={}; latest {:?} payload was {payload_len} bytes.",
-                    rudp_media_progress_detail(
-                        payloads_sent,
-                        payloads_dropped,
-                        payloads_queue_expired,
-                        payloads_send_expired,
-                        expired,
-                        &receiver_feedback
-                    ),
-                    pending_payloads.audio_len(),
-                    pending_payloads.video_len(),
-                    queued.kind
-                );
-            }
-            continue;
         }
-
-        if payload_channel_disconnected {
-            let expired = reliable_packets_expired(&video_transport, &audio_transport);
-            let payloads_dropped = payloads_queue_expired + payloads_send_expired;
-            break Ok(RudpMuxRestart {
-                detail: format!(
-                    "encoder stdout ended; {}",
-                    rudp_media_progress_detail(
-                        payloads_sent,
-                        payloads_dropped,
-                        payloads_queue_expired,
-                        payloads_send_expired,
-                        expired,
-                        &receiver_feedback
-                    )
-                ),
-                delay: default_rudp_mux_restart_delay(restart_count),
-            });
-        }
-
-        {
-            let payloads_dropped = payloads_queue_expired + payloads_send_expired;
-            poll_rudp_media_receiver_feedback(
-                &mut video_transport,
-                &mut receiver_feedback,
-                &repair_cache,
-                &mut repair_budget,
-                &media_profile,
-                &mut video_send_pacer,
-                payloads_dropped,
-            )?;
-            record_receiver_keyframe_pressure(&receiver_feedback, &mut handled_keyframe_requests);
-            poll_rudp_resends_with_backpressure(&mut video_transport)?;
-            poll_rudp_resends_with_backpressure(&mut audio_transport)?;
-            republish_running_stream_if_due(
-                node,
-                options,
-                plan,
-                supervisor_pid,
-                video_ffmpeg
-                    .as_ref()
-                    .map(Child::id)
-                    .or_else(|| audio_ffmpeg.as_ref().map(Child::id))
-                    .unwrap_or(supervisor_pid),
-                restart_count,
-                &mut last_stream_publish_at,
-            )?;
-        }
-    };
+    })();
 
     if let Some(process) = video_ffmpeg.as_mut() {
         let _ = process.kill();
@@ -2339,6 +2382,18 @@ fn resolve_media_rudp_endpoint(
     node: &mut cultmesh_rs::CultMeshNode,
 ) -> Result<SocketAddr> {
     require_media_target_uri(options)?;
+    if let Some(obs_target_host) = options.obs_target_host.as_deref()
+        && !obs_target_host.trim().is_empty()
+        && options.obs_port != 0
+    {
+        let endpoint = format!("{}:{}", obs_target_host.trim(), options.obs_port);
+        return endpoint.parse().with_context(|| {
+            format!(
+                "parsing command-owned OBS Muninn media RUDP endpoint {endpoint} for {}",
+                options.target_host
+            )
+        });
+    }
     pull_odin_media_catalog_snapshot(node, options);
     let endpoint = discover_provider_endpoints(
         node,
@@ -3759,9 +3814,7 @@ fn run_hid_controller_rudp_ingress(socket: UdpSocket, options: Options) -> Resul
                 if sent_frames % 600 == 0 {
                     eprintln!(
                         "Muninn HID controller RUDP served frame #{} device={} seq={}",
-                        sent_frames,
-                        record.device_id,
-                        record.sequence
+                        sent_frames, record.device_id, record.sequence
                     );
                 }
             }
@@ -3792,7 +3845,10 @@ fn hid_controller_source_matches_subscription(
     device_filter: Option<&str>,
     stream_id: Option<&str>,
 ) -> bool {
-    let source_stream_id = format!("{}:{}:hid-controller-state", options.host_id, source.move_id);
+    let source_stream_id = format!(
+        "{}:{}:hid-controller-state",
+        options.host_id, source.move_id
+    );
     let stream_matches = stream_id.is_none_or(|stream_id| source_stream_id == stream_id);
     let device_matches = device_filter.is_none_or(|filter| {
         source.move_id == filter
@@ -3891,8 +3947,7 @@ fn read_hid_controller_state_for_stream(
             }
             if saw_report {
                 active.last_read_error_log_at = None;
-            } else if active.latest_report.is_none()
-                || !hid_controller_stream_heartbeat_due(active)
+            } else if active.latest_report.is_none() || !hid_controller_stream_heartbeat_due(active)
             {
                 return None;
             }
@@ -4009,7 +4064,9 @@ fn hid_controller_axes_changed(previous: &[f32], current: &[f32]) -> bool {
         || previous
             .iter()
             .zip(current.iter())
-            .any(|(previous, current)| (previous - current).abs() > HID_CONTROLLER_RUDP_AXIS_EPSILON)
+            .any(|(previous, current)| {
+                (previous - current).abs() > HID_CONTROLLER_RUDP_AXIS_EPSILON
+            })
 }
 
 fn build_hid_controller_state_record_from_report(
@@ -6008,7 +6065,8 @@ fn windows_ps_move_input_report(source: &str) -> Result<Option<Vec<u8>>> {
         return Ok(None);
     }
 
-    let interrupt_report = windows_read_hid_interrupt_report(handle, caps.InputReportByteLength as usize, &path)?;
+    let interrupt_report =
+        windows_read_hid_interrupt_report(handle, caps.InputReportByteLength as usize, &path)?;
     if interrupt_report.is_some() {
         unsafe { CloseHandle(handle) };
         return Ok(interrupt_report);
@@ -6090,8 +6148,7 @@ fn read_windows_hid_reports_until_error(
     tx: &mpsc::Sender<LatestHidReport>,
 ) -> Result<()> {
     use windows_sys::Win32::Devices::HumanInterfaceDevice::{
-        HIDP_CAPS, HIDP_STATUS_SUCCESS, HidD_FreePreparsedData, HidD_GetPreparsedData,
-        HidP_GetCaps,
+        HIDP_CAPS, HIDP_STATUS_SUCCESS, HidD_FreePreparsedData, HidD_GetPreparsedData, HidP_GetCaps,
     };
     use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_READ, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{
@@ -6128,7 +6185,9 @@ fn read_windows_hid_reports_until_error(
     unsafe { HidD_FreePreparsedData(preparsed) };
     if !caps_ok || caps.InputReportByteLength == 0 {
         unsafe { CloseHandle(handle) };
-        return Err(anyhow!("Windows HID input path {path} has no input reports"));
+        return Err(anyhow!(
+            "Windows HID input path {path} has no input reports"
+        ));
     }
 
     eprintln!(
@@ -6150,7 +6209,8 @@ fn read_windows_hid_reports_until_error(
         if ok == 0 {
             let error = std::io::Error::last_os_error();
             unsafe { CloseHandle(handle) };
-            return Err(error).with_context(|| format!("reading persistent HID report from {path}"));
+            return Err(error)
+                .with_context(|| format!("reading persistent HID report from {path}"));
         }
         if bytes_read == 0 {
             continue;
@@ -6901,6 +6961,7 @@ fn publish_obs_media_receiver_to_odin(options: &Options) -> Result<()> {
                 "odin-media-receiver-route".to_string(),
                 "muninn.media-rudp".to_string(),
             ],
+            connection_id: CULTMESH_RUDP_DOCUMENT_CATALOG_CONNECTION_ID,
             ..CultMeshRudpDocumentPublishOptions::default()
         },
     )
@@ -6917,7 +6978,7 @@ fn publish_capture_command_to_odin(
     };
     let node = open_node(options, "muninn-capture-command-odin-publisher")?;
     node.publish_document_to_rudp_catalog(
-        &command.command_id,
+        &latest_capture_stream_command_key(&command.host_id, &command.stream_id),
         command,
         CultMeshRudpDocumentPublishOptions {
             target,
@@ -6927,6 +6988,7 @@ fn publish_capture_command_to_odin(
                 "odin-cultmesh-command-route".to_string(),
                 "muninn.capture-stream".to_string(),
             ],
+            connection_id: CULTMESH_RUDP_DOCUMENT_CATALOG_CONNECTION_ID,
             ..CultMeshRudpDocumentPublishOptions::default()
         },
     )
@@ -7305,8 +7367,8 @@ fn build_capture_stream_command(options: &Options) -> Result<MuninnCaptureStream
         action: options.stream_action.clone(),
         target_host: options.target_host.clone(),
         port: options.port,
-        obs_target_host: None,
-        obs_port: 0,
+        obs_target_host: options.obs_target_host.clone(),
+        obs_port: options.obs_port,
         media_transport: media_transport_cli(&options.media_transport).to_string(),
         media_packet_bytes: options.media_packet_bytes as u32,
         requested_by: "muninn.request-stream".to_string(),
@@ -8512,8 +8574,8 @@ mod tests {
                 "--odin-cultmesh-uri",
                 "cultmesh://odin/rendezvous/provider-catalog",
             ]
-                .into_iter()
-                .map(String::from),
+            .into_iter()
+            .map(String::from),
         )
         .unwrap();
 
@@ -8558,13 +8620,9 @@ mod tests {
     #[test]
     fn serve_rejects_removed_capture_command_rudp_bind() {
         let error = Options::parse(
-            [
-                "serve",
-                "--capture-command-rudp-bind",
-                "127.0.0.1:17884",
-            ]
-            .into_iter()
-            .map(String::from),
+            ["serve", "--capture-command-rudp-bind", "127.0.0.1:17884"]
+                .into_iter()
+                .map(String::from),
         )
         .unwrap_err()
         .to_string();
@@ -10519,8 +10577,16 @@ Device 00:07:04:A8:00:D0 (public)
 
         let axes = hid_controller_axes_from_report(&source, &report);
 
-        assert!(axes[0].abs() < 0.02, "x axis should be near neutral: {}", axes[0]);
-        assert!(axes[1].abs() < 0.02, "y axis should be near neutral: {}", axes[1]);
+        assert!(
+            axes[0].abs() < 0.02,
+            "x axis should be near neutral: {}",
+            axes[0]
+        );
+        assert!(
+            axes[1].abs() < 0.02,
+            "y axis should be near neutral: {}",
+            axes[1]
+        );
         assert_eq!(axes[2], -1.0);
 
         report[6] = 0xff;
