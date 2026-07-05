@@ -98,7 +98,7 @@ function parseOptions(argv) {
       parsed.odinRudpEndpoint || parsed["odin-rudp-endpoint"],
       process.env.HERMODR_ODIN_RUDP || process.env.CULTMESH_URI_ODIN_RUDP || defaultOdinRudpEndpoint,
     ),
-    odinSurfaceKey: stringOption(parsed.odinSurfaceKey, process.env.HERMODR_ODIN_SURFACE_KEY || "gamecult.network.status"),
+    odinSurfaceKey: stringOption(parsed.odinSurfaceKey, process.env.HERMODR_ODIN_SURFACE_KEY || "surface:gamecult.network.status"),
     eveWebRoot: path.resolve(stringOption(parsed.eveWebRoot, process.env.HERMODR_EVE_WEB_ROOT || defaultEveWebRoot)),
     eveRepoRoot: path.resolve(stringOption(parsed.eveRepoRoot, process.env.HERMODR_EVE_REPO_ROOT || defaultEveRepoRoot)),
     aetheriaResourcesRoot: path.resolve(stringOption(
@@ -258,7 +258,10 @@ function createHermodrBridge(options) {
 }
 
 async function readCatalog(options) {
-  const providerAdvertisements = await readOdinProviderAdvertisements(options);
+  const providerAdvertisements = mergeProviderAdvertisements([
+    ...await readOdinProviderAdvertisements(options),
+    ...await readOdinSurfaceProviderCatalog(options),
+  ]);
   const surfaces = providerAdvertisements.map((provider) => ({
     providerId: provider.id,
     title: provider.title || provider.id,
@@ -285,6 +288,41 @@ async function readCatalog(options) {
     surfaces,
     providers: providerAdvertisements,
   };
+}
+
+async function readOdinSurfaceProviderCatalog(options) {
+  const peer = await CultMesh.createRudpPeer(
+    "hermodr-browser-lowering-odin-surface",
+    odinRudpConnectionId,
+    options.odinCultMeshUri,
+    {
+      connectTimeoutMs: 2_000,
+      maxFragmentBytes: 1200,
+      maxPendingReliablePackets: 512,
+      resolveCultMeshRudpEndpoint: (uri) => resolveHermodrRudpEndpoint(uri, options),
+    },
+  );
+  try {
+    const keys = [
+      options.odinSurfaceKey,
+      String(options.odinSurfaceKey || "").startsWith("surface:")
+        ? String(options.odinSurfaceKey || "").slice("surface:".length)
+        : `surface:${options.odinSurfaceKey}`,
+    ];
+    const document = await requestCultNetRawSnapshotFirstDocument(
+      peer,
+      "gamecult.eve.surface_state.v1",
+      keys,
+      { timeoutMs: 4_000, messageIdPrefix: "hermodr-odin-provider-catalog" },
+    );
+    const decoded = decodeMessagePack(bufferFromPayload(document.payload));
+    const catalog = Array.isArray(decoded?.providerCatalog) ? decoded.providerCatalog : [];
+    return catalog.map(normalizeCatalogProviderAdvertisement).filter(Boolean);
+  } finally {
+    if (typeof peer.close === "function") {
+      peer.close();
+    }
+  }
 }
 
 async function readOdinProviderAdvertisements(options) {
@@ -323,6 +361,40 @@ async function readOdinProviderAdvertisements(options) {
   }
 }
 
+function normalizeCatalogProviderAdvertisement(value) {
+  const providerId = value?.id || value?.providerId || value?.provider?.id;
+  if (!providerId) return null;
+  return {
+    id: String(providerId),
+    title: value.title || String(providerId),
+    description: value.description || "",
+    endpoint: value.endpoint || value.cultMeshAddress || value.provider?.endpoint || null,
+    cultMeshAddress: value.cultMeshAddress || value.endpoint || value.provider?.endpoint || null,
+    endpoints: arrayOfObjects(value.endpoints),
+    routes: arrayOfObjects(value.routes),
+    commandSurface: value.commandSurface || null,
+    status: value.status || "unknown",
+    updatedAt: value.updatedAt || null,
+  };
+}
+
+function mergeProviderAdvertisements(providers) {
+  const merged = new Map();
+  for (const provider of providers) {
+    if (!provider?.id) continue;
+    const existing = merged.get(provider.id) || {};
+    merged.set(provider.id, {
+      ...existing,
+      ...provider,
+      endpoints: provider.endpoints?.length ? provider.endpoints : existing.endpoints || [],
+      routes: provider.routes?.length ? provider.routes : existing.routes || [],
+      cultMeshAddress: provider.cultMeshAddress || existing.cultMeshAddress || null,
+      endpoint: provider.endpoint || existing.endpoint || null,
+    });
+  }
+  return [...merged.values()].sort((left, right) => String(left.id).localeCompare(String(right.id)));
+}
+
 function resolveHermodrRudpEndpoint(uri, options) {
   const text = String(uri || "").trim();
   if (text === defaultOdinCultMeshUri || text.startsWith("cultmesh://odin/")) {
@@ -334,9 +406,31 @@ function resolveHermodrRudpEndpoint(uri, options) {
 async function readProviderSurface(catalog, providerId) {
   const route = findProviderSnapshotRoute(catalog, providerId);
   if (!route) return null;
-  const peer = await getProviderRudpPeer(route.endpoint);
-  const document = await requestCultNetRawSnapshotFirstDocument(
-    peer,
+  try {
+    const document = await requestProviderSnapshotFirstDocumentWithReconnect(
+      route.endpoint,
+      "gamecult.eve.surface_state.v1",
+      [providerId, `surface:${providerId}`],
+      { timeoutMs: 4_000, messageIdPrefix: "hermodr-surface-state" },
+    );
+    const state = normalizeSurfaceState(decodeMessagePack(bufferFromPayload(document.payload)), document.recordKey);
+    if (state?.surface?.root) {
+      return {
+        providerId,
+        documentProviderId: state.providerId,
+        providerKind: "provider-cultmesh-rudp",
+        title: state.title || providerId,
+        version: state.version ?? 0,
+        updatedAt: state.updatedAt || null,
+        surface: normalizeEveSurfaceTree(state.surface),
+        commands: [],
+      };
+    }
+  } catch {
+    // Older providers may still expose gamecult.eve.surface.v1 directly.
+  }
+  const document = await requestProviderSnapshotFirstDocumentWithReconnect(
+    route.endpoint,
     "gamecult.eve.surface.v1",
     [providerId, `eve:surface:${providerId}`],
     { timeoutMs: 4_000, messageIdPrefix: "hermodr-surface" },
@@ -837,6 +931,24 @@ async function requestProviderSnapshotDocumentWithReconnect(endpoint, schemaId, 
   }
 }
 
+async function requestProviderSnapshotFirstDocumentWithReconnect(endpoint, schemaId, recordKeys, options = {}) {
+  try {
+    const peer = await getProviderRudpPeer(endpoint);
+    return await requestCultNetRawSnapshotFirstDocument(peer, schemaId, recordKeys, options);
+  } catch (firstError) {
+    await dropProviderRudpPeer(endpoint);
+    const peer = await getProviderRudpPeer(endpoint);
+    try {
+      return await requestCultNetRawSnapshotFirstDocument(peer, schemaId, recordKeys, options);
+    } catch (secondError) {
+      secondError.message = `${secondError.message} Provider route ${endpoint} was retried after dropping a stale Hermodr RUDP peer. First error: ${
+        firstError instanceof Error ? firstError.message : String(firstError)
+      }`;
+      throw secondError;
+    }
+  }
+}
+
 async function getProviderRudpPeer(endpoint) {
   const key = String(endpoint || "").trim();
   if (!key) throw new Error("Provider RUDP endpoint is empty.");
@@ -1112,10 +1224,10 @@ function findProviderSnapshotRoute(catalog, providerId) {
     if (!normalized) return true;
     return provider.id === normalized ||
       provider.id.includes(normalized) ||
-      normalized.includes(provider.id) ||
-      provider.id.includes("aetheria");
+      normalized.includes(provider.id);
   });
-  for (const provider of providers.length ? providers : (catalog.providers || [])) {
+  const candidates = normalized ? providers : (catalog.providers || []);
+  for (const provider of candidates) {
     const endpoints = [...(provider.endpoints || []), ...(provider.routes || [])];
     const route = endpoints.find((endpoint) => {
       const address = String(endpoint.uri || endpoint.endpoint || endpoint.address || "");
