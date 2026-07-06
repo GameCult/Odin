@@ -9,8 +9,8 @@ use cultnet_rs::{
 };
 use odin_core::{
     EVE_PROVIDER_ADVERTISEMENT_SCHEMA, EveProviderAdvertisementRecord, EveSurfaceStateRecord,
-    SleipnirInputMappingRecord, IdunnDaemonHealthRecord, MUNINN_HID_CONTROLLER_STATE_SCHEMA,
-    MuninnHidControllerStateRecord, OdinDocuments, OdinEndpointQuery, discover_provider_endpoints,
+    IdunnDaemonHealthRecord, MUNINN_HID_CONTROLLER_STATE_SCHEMA, MuninnHidControllerStateRecord,
+    OdinDocuments, OdinEndpointQuery, SleipnirInputMappingRecord, discover_provider_endpoints,
 };
 use std::collections::HashMap;
 use std::env;
@@ -83,12 +83,27 @@ struct SleipnirRuntimeState {
     last_device_kind: Option<String>,
     last_sequence: Option<u64>,
     last_frame_age_ms: Option<u128>,
+    last_input_latency: Option<SleipnirInputLatencySnapshot>,
     ignored_stream_frames: u64,
     available_devices: Vec<AvailableHidDevice>,
     axis_map: HashMap<String, AxisBinding>,
     button_map: HashMap<String, String>,
     pending_learn: Option<LearnRequest>,
     updated_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SleipnirInputLatencySnapshot {
+    device_id: String,
+    sequence: u64,
+    source_to_arrival_ms: Option<i64>,
+    arrival_to_buffer_ms: u128,
+    buffer_to_axis_ms: u128,
+    axis_to_hid_ms: u128,
+    source_to_hid_ms: Option<i64>,
+    total_observed_ms: u128,
+    axis_summary: Vec<String>,
+    emitted: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -134,6 +149,19 @@ struct VirtualPadState {
     left_y: i16,
     left_trigger: u8,
     right_trigger: u8,
+}
+
+#[derive(Clone, Debug)]
+struct TimedHidRecord {
+    record: MuninnHidControllerStateRecord,
+    timing: HidRecordTiming,
+}
+
+#[derive(Clone, Debug)]
+struct HidRecordTiming {
+    frame_received_at: Instant,
+    frame_received_unix_ns: i64,
+    buffer_ready_at: Instant,
 }
 
 impl Default for VirtualPadState {
@@ -268,11 +296,8 @@ fn main() -> Result<()> {
         };
     pull_odin_catalog_snapshot(discovery_node.as_mut().unwrap_or(&mut node), &options);
 
-    let mut desired_mapping = read_desired_mapping_from_sources(
-        &mut node,
-        discovery_node.as_mut(),
-        &options,
-    );
+    let mut desired_mapping =
+        read_desired_mapping_from_sources(&mut node, discovery_node.as_mut(), &options);
     let mut backend: Box<dyn VirtualPadBackend> = if options.dry_run {
         Box::new(LoggingBackend)
     } else {
@@ -312,21 +337,19 @@ fn main() -> Result<()> {
             None,
             0,
             &desired_mapping,
+            None,
         )
     };
     publish_sleipnir_runtime_surface(&mut node, &options, &initial_state, true)?;
     let mut last_idunn_health_attempt_at = Instant::now() - Duration::from_secs(60);
-    publish_idunn_health_if_configured(
-        &options,
-        &initial_state,
-        &mut last_idunn_health_attempt_at,
-    );
+    publish_idunn_health_if_configured(&options, &initial_state, &mut last_idunn_health_attempt_at);
 
     let mut last_sequence_by_device = HashMap::<String, u64>::new();
     let mut ignored_stream_frames = 0u64;
     let mut last_surface_publish_at = Instant::now() - Duration::from_secs(60);
     let mut last_odin_catalog_pull_at = Instant::now() - Duration::from_secs(60);
     let mut recent_applied_record: Option<MuninnHidControllerStateRecord> = None;
+    let mut recent_input_latency: Option<SleipnirInputLatencySnapshot> = None;
     let mut output_is_neutral = true;
     let mut last_output_frame_at: Option<Instant> = None;
     let mut last_output_source_timestamp_ns: Option<i64> = None;
@@ -340,11 +363,8 @@ fn main() -> Result<()> {
             pull_odin_catalog_snapshot(discovery_node.as_mut().unwrap_or(&mut node), &options);
             last_odin_catalog_pull_at = Instant::now();
         }
-        let next_desired_mapping = read_desired_mapping_from_sources(
-            &mut node,
-            discovery_node.as_mut(),
-            &options,
-        );
+        let next_desired_mapping =
+            read_desired_mapping_from_sources(&mut node, discovery_node.as_mut(), &options);
         if next_desired_mapping != desired_mapping {
             desired_mapping = next_desired_mapping;
             current_device_filter = effective_device_filter(&options, &desired_mapping);
@@ -410,7 +430,9 @@ fn main() -> Result<()> {
                     options.trace,
                 )?;
                 let records = receive_rudp_records(stream, options.trace)?;
-                for record in records {
+                for timed_record in records {
+                    let record = timed_record.record;
+                    let timing = timed_record.timing;
                     if record_matches_filter(&record, current_device_filter.as_deref()) {
                         stream.last_frame_at = Some(Instant::now());
                         stream.last_stale_log_at = None;
@@ -429,6 +451,7 @@ fn main() -> Result<()> {
                             .is_none_or(|last| record.source_timestamp_ns > last);
                         if has_new_sequence && has_new_source_timestamp {
                             let state = map_record_to_virtual_pad(&record, &desired_mapping);
+                            let axis_classified_at = Instant::now();
                             let output_frame_at = Instant::now();
                             if options.trace {
                                 let source_age_ms = unix_nanos_i64()
@@ -448,6 +471,15 @@ fn main() -> Result<()> {
                             }
                             match backend.update(&state) {
                                 Ok(()) => {
+                                    let hid_emitted_at = Instant::now();
+                                    recent_input_latency = Some(input_latency_snapshot(
+                                        &record,
+                                        &timing,
+                                        axis_classified_at,
+                                        hid_emitted_at,
+                                        &desired_mapping,
+                                        true,
+                                    ));
                                     output_is_neutral = state == VirtualPadState::default();
                                     last_output_frame_at = Some(output_frame_at);
                                     last_output_source_timestamp_ns =
@@ -459,6 +491,14 @@ fn main() -> Result<()> {
                                         "Sleipnir virtual pad update failed for device={} seq={}: {error:#}",
                                         record.device_id, record.sequence
                                     );
+                                    recent_input_latency = Some(input_latency_snapshot(
+                                        &record,
+                                        &timing,
+                                        axis_classified_at,
+                                        Instant::now(),
+                                        &desired_mapping,
+                                        false,
+                                    ));
                                     last_applied_record = Some(record);
                                 }
                             }
@@ -488,8 +528,7 @@ fn main() -> Result<()> {
                     if options.trace {
                         eprintln!(
                             "Sleipnir neutralized virtual pad after {:?} without a new selected input sequence for filter={:?}",
-                            stale_for,
-                            current_device_filter
+                            stale_for, current_device_filter
                         );
                     }
                 }
@@ -519,6 +558,7 @@ fn main() -> Result<()> {
                         recent_applied_record.as_ref(),
                         ignored_stream_frames,
                         &desired_mapping,
+                        recent_input_latency.as_ref(),
                     )
                 };
                 publish_sleipnir_runtime_surface(&mut node, &options, &runtime_state, true)?;
@@ -533,14 +573,16 @@ fn main() -> Result<()> {
             last_rudp_discovery_attempt_at = Instant::now();
         }
         let surface_age = last_surface_publish_at.elapsed();
-        if rudp_stream
+        let has_new_applied_record = last_applied_record.is_some();
+        let missing_input_target = rudp_stream
             .as_ref()
-            .is_none_or(|stream| stream.target.is_none())
-            && surface_age >= Duration::from_secs(5)
+            .is_none_or(|stream| stream.target.is_none());
+        if let Some(record) = last_applied_record.as_ref() {
+            recent_applied_record = Some(record.clone());
+        }
+        if (has_new_applied_record && surface_age >= Duration::from_secs(1))
+            || (missing_input_target && surface_age >= Duration::from_secs(5))
         {
-            if let Some(record) = last_applied_record.as_ref() {
-                recent_applied_record = Some(record.clone());
-            }
             let runtime_state = {
                 let discovery_ref = discovery_node.as_ref().unwrap_or(&node);
                 SleipnirRuntimeState::from_runtime(
@@ -551,9 +593,15 @@ fn main() -> Result<()> {
                     recent_applied_record.as_ref(),
                     ignored_stream_frames,
                     &desired_mapping,
+                    recent_input_latency.as_ref(),
                 )
             };
-            publish_sleipnir_runtime_surface(&mut node, &options, &runtime_state, false)?;
+            publish_sleipnir_runtime_surface(
+                &mut node,
+                &options,
+                &runtime_state,
+                has_new_applied_record,
+            )?;
             publish_idunn_health_if_configured(
                 &options,
                 &runtime_state,
@@ -578,6 +626,7 @@ impl SleipnirRuntimeState {
         last_record: Option<&MuninnHidControllerStateRecord>,
         ignored_stream_frames: u64,
         desired_mapping: &SleipnirDesiredMapping,
+        last_input_latency: Option<&SleipnirInputLatencySnapshot>,
     ) -> Self {
         let has_recent_frame = stream
             .and_then(|stream| stream.last_frame_at)
@@ -628,6 +677,7 @@ impl SleipnirRuntimeState {
             last_frame_age_ms: stream
                 .and_then(|stream| stream.last_frame_at)
                 .map(|last_frame| last_frame.elapsed().as_millis()),
+            last_input_latency: last_input_latency.cloned(),
             ignored_stream_frames,
             available_devices,
             axis_map: desired_mapping.axis_map.clone(),
@@ -917,7 +967,9 @@ fn pull_odin_catalog_snapshot(node: &mut cultmesh_rs::CultMeshNode, options: &Op
         }
         Ok(_) => {}
         Err(error) if options.trace => {
-            eprintln!("Sleipnir Odin Muninn provider snapshot pull failed from {target}: {error:#}");
+            eprintln!(
+                "Sleipnir Odin Muninn provider snapshot pull failed from {target}: {error:#}"
+            );
         }
         Err(_) => {}
     }
@@ -1090,6 +1142,20 @@ fn sleipnir_surface_document(state: &SleipnirRuntimeState) -> serde_json::Value 
                     ]
                 },
                 {
+                    "id": format!("{}.latency", state.provider_id),
+                    "kind": "pane",
+                    "props": { "title": "Input Latency" },
+                    "children": input_latency_elements(state)
+                },
+                {
+                    "id": format!("{}.axis", state.provider_id),
+                    "kind": "pane",
+                    "props": { "title": "Axis Classification" },
+                    "children": [
+                        text_element(format!("{}.axis.summary", state.provider_id), format!("mapped axes: {}", state.last_input_latency.as_ref().map(|trace| trace.axis_summary.join(", ")).filter(|text| !text.is_empty()).unwrap_or_else(|| "none".to_string())))
+                    ]
+                },
+                {
                     "id": format!("{}.remap", state.provider_id),
                     "kind": "pane",
                     "props": { "title": "Remapping Presets" },
@@ -1105,6 +1171,60 @@ fn sleipnir_surface_document(state: &SleipnirRuntimeState) -> serde_json::Value 
         },
         "assets": []
     })
+}
+
+fn input_latency_elements(state: &SleipnirRuntimeState) -> Vec<serde_json::Value> {
+    let Some(trace) = state.last_input_latency.as_ref() else {
+        return vec![text_element(
+            format!("{}.latency.empty", state.provider_id),
+            "no emitted input trace yet".to_string(),
+        )];
+    };
+    vec![
+        text_element(
+            format!("{}.latency.identity", state.provider_id),
+            format!(
+                "device: {} seq={} emitted={}",
+                trace.device_id, trace.sequence, trace.emitted
+            ),
+        ),
+        text_element(
+            format!("{}.latency.source-arrival", state.provider_id),
+            format!(
+                "signal arrival: {}",
+                trace
+                    .source_to_arrival_ms
+                    .map(|value| format!("source to arrival {} ms", value))
+                    .unwrap_or_else(|| "source timestamp unavailable".to_string())
+            ),
+        ),
+        text_element(
+            format!("{}.latency.buffer", state.provider_id),
+            format!("arrival to buffer: {} ms", trace.arrival_to_buffer_ms),
+        ),
+        text_element(
+            format!("{}.latency.axis", state.provider_id),
+            format!(
+                "buffer to axis classification: {} ms",
+                trace.buffer_to_axis_ms
+            ),
+        ),
+        text_element(
+            format!("{}.latency.hid", state.provider_id),
+            format!("axis to HID emission: {} ms", trace.axis_to_hid_ms),
+        ),
+        text_element(
+            format!("{}.latency.total", state.provider_id),
+            format!(
+                "observed mirror total: {} ms{}",
+                trace.total_observed_ms,
+                trace
+                    .source_to_hid_ms
+                    .map(|value| format!(" / source to HID {} ms", value))
+                    .unwrap_or_default()
+            ),
+        ),
+    ]
 }
 
 fn remap_preset_cards(state: &SleipnirRuntimeState) -> Vec<serde_json::Value> {
@@ -2355,16 +2475,15 @@ fn stream_host_hint(stream_id: Option<&str>) -> Option<String> {
     (!normalized.is_empty()).then_some(normalized)
 }
 
-fn receive_rudp_records(
-    stream: &mut ActiveRudpStream,
-    trace: bool,
-) -> Result<Vec<MuninnHidControllerStateRecord>> {
+fn receive_rudp_records(stream: &mut ActiveRudpStream, trace: bool) -> Result<Vec<TimedHidRecord>> {
     let mut records = Vec::new();
     let mut empty_polls = 0usize;
     for _ in 0..64 {
         match stream.transport.receive_once() {
             Ok(Some(frame)) if frame.channel_id == "latest" || frame.channel_id == "hid" => {
                 empty_polls = 0;
+                let frame_received_at = Instant::now();
+                let frame_received_unix_ns = unix_nanos_i64();
                 if trace {
                     eprintln!(
                         "Sleipnir received fast HID frame channel={} bytes={}",
@@ -2372,10 +2491,15 @@ fn receive_rudp_records(
                         frame.payload.len()
                     );
                 }
-                records.push(
-                    serde_json::from_slice(&frame.payload)
+                records.push(TimedHidRecord {
+                    record: serde_json::from_slice(&frame.payload)
                         .context("decoding Sleipnir RUDP HID frame")?,
-                );
+                    timing: HidRecordTiming {
+                        frame_received_at,
+                        frame_received_unix_ns,
+                        buffer_ready_at: frame_received_at,
+                    },
+                });
             }
             Ok(Some(frame)) => {
                 empty_polls = 0;
@@ -2406,7 +2530,36 @@ fn receive_rudp_records(
             eprintln!("Sleipnir RUDP resend warning: {error:#}");
         }
     }
-    Ok(coalesce_latest_hid_records_by_device(records))
+    let buffer_ready_at = Instant::now();
+    let mut records = coalesce_latest_timed_hid_records_by_device(records);
+    for record in &mut records {
+        record.timing.buffer_ready_at = buffer_ready_at;
+    }
+    Ok(records)
+}
+
+fn coalesce_latest_timed_hid_records_by_device(
+    records: Vec<TimedHidRecord>,
+) -> Vec<TimedHidRecord> {
+    let mut latest_by_device = HashMap::<String, (usize, TimedHidRecord)>::new();
+    for (index, record) in records.into_iter().enumerate() {
+        latest_by_device
+            .entry(record.record.device_id.clone())
+            .and_modify(|(latest_index, latest_record)| {
+                if record.record.source_timestamp_ns > latest_record.record.source_timestamp_ns
+                    || (record.record.source_timestamp_ns
+                        == latest_record.record.source_timestamp_ns
+                        && record.record.sequence > latest_record.record.sequence)
+                {
+                    *latest_index = index;
+                    *latest_record = record.clone();
+                }
+            })
+            .or_insert((index, record));
+    }
+    let mut latest = latest_by_device.into_values().collect::<Vec<_>>();
+    latest.sort_by_key(|(index, _)| *index);
+    latest.into_iter().map(|(_, record)| record).collect()
 }
 
 fn coalesce_latest_hid_records_by_device(
@@ -2454,6 +2607,69 @@ fn record_matches_filter(
             || record.source_path.contains(filter)
             || record.device_kind == filter
     })
+}
+
+fn input_latency_snapshot(
+    record: &MuninnHidControllerStateRecord,
+    timing: &HidRecordTiming,
+    axis_classified_at: Instant,
+    hid_emitted_at: Instant,
+    mapping: &SleipnirDesiredMapping,
+    emitted: bool,
+) -> SleipnirInputLatencySnapshot {
+    let source_to_arrival_ms = (record.source_timestamp_ns > 0).then(|| {
+        timing
+            .frame_received_unix_ns
+            .saturating_sub(record.source_timestamp_ns)
+            / 1_000_000
+    });
+    let source_to_hid_ms = (record.source_timestamp_ns > 0)
+        .then(|| unix_nanos_i64().saturating_sub(record.source_timestamp_ns) / 1_000_000);
+    SleipnirInputLatencySnapshot {
+        device_id: record.device_id.clone(),
+        sequence: record.sequence,
+        source_to_arrival_ms,
+        arrival_to_buffer_ms: timing
+            .buffer_ready_at
+            .saturating_duration_since(timing.frame_received_at)
+            .as_millis(),
+        buffer_to_axis_ms: axis_classified_at
+            .saturating_duration_since(timing.buffer_ready_at)
+            .as_millis(),
+        axis_to_hid_ms: hid_emitted_at
+            .saturating_duration_since(axis_classified_at)
+            .as_millis(),
+        source_to_hid_ms,
+        total_observed_ms: hid_emitted_at
+            .saturating_duration_since(timing.frame_received_at)
+            .as_millis(),
+        axis_summary: axis_classification_summary(record, mapping),
+        emitted,
+    }
+}
+
+fn axis_classification_summary(
+    record: &MuninnHidControllerStateRecord,
+    mapping: &SleipnirDesiredMapping,
+) -> Vec<String> {
+    let mut axes = mapping
+        .axis_map
+        .iter()
+        .map(|(target, binding)| {
+            let value = record.axes.get(binding.source).copied();
+            format!(
+                "{}<-axis{}{}{}",
+                target,
+                binding.source,
+                if binding.invert { " inverted" } else { "" },
+                value
+                    .map(|value| format!(" value={:.3}", value))
+                    .unwrap_or_else(|| " missing".to_string())
+            )
+        })
+        .collect::<Vec<_>>();
+    axes.sort();
+    axes
 }
 
 fn map_record_to_virtual_pad(
@@ -2615,11 +2831,13 @@ impl Options {
                         "--command-rudp-bind has been removed; Sleipnir reads input mapping commands from Odin/CultMesh discovery"
                     ));
                 }
-                "--command-route" => options.command_route = next_value(&mut args, "--command-route")?,
+                "--command-route" => {
+                    options.command_route = next_value(&mut args, "--command-route")?
+                }
                 "--command-rudp-advertise" => {
                     return Err(anyhow!(
                         "--command-rudp-advertise has been removed; use --command-route with a cultmesh:// Odin command route"
-                    ))
+                    ));
                 }
                 "--odin-cultmesh-rudp" => {
                     let _ = next_value(&mut args, "--odin-cultmesh-rudp")?;
@@ -2890,10 +3108,54 @@ mod tests {
             None,
             0,
             &mapping,
+            None,
         );
 
         assert_eq!(state.stream_state, "connected");
         let _ = fs::remove_file(store_path);
+    }
+
+    #[test]
+    fn surface_exposes_input_latency_and_axis_classification() {
+        let mapping = default_mapping();
+        let state = SleipnirRuntimeState {
+            provider_id: "sleipnir.input-mirror.test".to_string(),
+            selected_muninn_endpoint: Some("127.0.0.1:17888".to_string()),
+            selected_device_filter: Some("nav".to_string()),
+            presentation: "xbox360".to_string(),
+            virtual_backend: "logging.dry-run".to_string(),
+            stream_state: "connected".to_string(),
+            last_device_id: Some("nav".to_string()),
+            last_device_kind: Some("ps3-navigation".to_string()),
+            last_sequence: Some(42),
+            last_frame_age_ms: Some(3),
+            last_input_latency: Some(SleipnirInputLatencySnapshot {
+                device_id: "nav".to_string(),
+                sequence: 42,
+                source_to_arrival_ms: Some(2),
+                arrival_to_buffer_ms: 3,
+                buffer_to_axis_ms: 1,
+                axis_to_hid_ms: 1,
+                source_to_hid_ms: Some(7),
+                total_observed_ms: 5,
+                axis_summary: vec!["leftX<-axis0 value=0.500".to_string()],
+                emitted: true,
+            }),
+            ignored_stream_frames: 0,
+            available_devices: Vec::new(),
+            axis_map: mapping.axis_map,
+            button_map: mapping.button_map,
+            pending_learn: None,
+            updated_at: "unix-1".to_string(),
+        };
+
+        let surface = serde_json::to_string(&sleipnir_surface_document(&state)).unwrap();
+
+        assert!(surface.contains("Input Latency"));
+        assert!(surface.contains("arrival to buffer: 3 ms"));
+        assert!(surface.contains("buffer to axis classification: 1 ms"));
+        assert!(surface.contains("axis to HID emission: 1 ms"));
+        assert!(surface.contains("mapped axes: leftX<-axis0 value=0.500"));
     }
 
     #[test]
