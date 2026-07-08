@@ -169,6 +169,14 @@ struct Options {
     command_id: Option<String>,
     move_host_address: Option<String>,
     move_state_sources: Vec<MoveStateSource>,
+    move_marker_camera_sources: Vec<MoveMarkerCameraSource>,
+    move_marker_width: u32,
+    move_marker_height: u32,
+    move_marker_stride_bytes: Option<u32>,
+    move_marker_fps: u32,
+    move_marker_threshold_min: u8,
+    move_marker_min_area_px: u32,
+    move_marker_max_candidates: u32,
     move_evidence_stream_id: Option<String>,
     move_evidence_verse_id: String,
     move_evidence_ring_slots: usize,
@@ -190,6 +198,12 @@ struct Options {
 struct CatalogSource {
     id: String,
     label: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MoveMarkerCameraSource {
+    camera_id: String,
+    device_path: PathBuf,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -274,6 +288,12 @@ struct ActiveMoveStateSource {
     light_hidraw_path: Option<String>,
 }
 
+struct ActiveMoveMarkerCameraSource {
+    source: MoveMarkerCameraSource,
+    frame_source: MoveMarkerFrameSource,
+    sequence: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct DefaultMoveLightTarget {
     path: String,
@@ -285,6 +305,7 @@ struct MoveMarkerFrameSource {
     stream_id: String,
     host_id: String,
     camera_id: String,
+    fps: u32,
     tracker_config: muninn_move_tracker::MoveTrackerConfig,
 }
 
@@ -342,6 +363,8 @@ fn serve(options: Options) -> Result<()> {
     let move_runtime_enabled = serve_should_manage_move_runtime(&options);
     let mut active_move_states =
         active_move_state_sources(serve_move_state_sources(&options, move_runtime_enabled));
+    let mut active_move_marker_cameras = active_move_marker_camera_sources(&options);
+    let mut move_marker_camera_reader = PlatformMoveMarkerCameraFrameReader::default();
     let mut active_capture_streams = Vec::new();
     start_hid_controller_rudp_ingress(&options)?;
 
@@ -375,6 +398,11 @@ fn serve(options: Options) -> Result<()> {
                 move_evidence_stream.as_mut(),
                 hid_controller_stream.as_mut(),
             )?;
+            publish_move_marker_camera_frames(
+                &mut active_move_marker_cameras,
+                &mut move_marker_camera_reader,
+                move_evidence_stream.as_mut(),
+            )?;
             publish_quest_access_if_requested(&mut node, &options)?;
             let state = if active_stream_ids.is_empty() {
                 "idle"
@@ -407,6 +435,7 @@ fn serve(options: Options) -> Result<()> {
         if options.interval_seconds.is_none()
             && active_move_lights.is_empty()
             && active_move_states.is_empty()
+            && active_move_marker_cameras.is_empty()
             && active_capture_streams.is_empty()
             && !has_platform_default_move_lights
         {
@@ -414,6 +443,7 @@ fn serve(options: Options) -> Result<()> {
         }
         let sleep = if !active_move_lights.is_empty()
             || !active_move_states.is_empty()
+            || !active_move_marker_cameras.is_empty()
             || !active_capture_streams.is_empty()
             || has_platform_default_move_lights
         {
@@ -3167,7 +3197,10 @@ fn publish_obs_catalog(
 }
 
 fn create_move_evidence_stream(options: &Options) -> Result<Option<ActiveMoveEvidenceStream>> {
-    if options.move_state_sources.is_empty() && options.move_evidence_stream_id.is_none() {
+    if options.move_state_sources.is_empty()
+        && options.move_marker_camera_sources.is_empty()
+        && options.move_evidence_stream_id.is_none()
+    {
         return Ok(None);
     }
 
@@ -3341,6 +3374,460 @@ impl MoveLightWriter for HidMoveLightWriter {
 trait MoveControllerStateReader {
     fn read_report(&mut self, hidraw_path: &str) -> Result<Option<Vec<u8>>>;
     fn read_joystick_events(&mut self, joystick_path: &str) -> Result<Vec<JoystickEvent>>;
+}
+
+trait MoveMarkerCameraFrameReader {
+    fn read_luma_frame(
+        &mut self,
+        source: &MoveMarkerCameraSource,
+        frame_source: &MoveMarkerFrameSource,
+    ) -> Result<Option<Vec<u8>>>;
+}
+
+#[derive(Default)]
+struct PlatformMoveMarkerCameraFrameReader;
+
+impl MoveMarkerCameraFrameReader for PlatformMoveMarkerCameraFrameReader {
+    #[cfg(unix)]
+    fn read_luma_frame(
+        &mut self,
+        source: &MoveMarkerCameraSource,
+        frame_source: &MoveMarkerFrameSource,
+    ) -> Result<Option<Vec<u8>>> {
+        read_v4l2_yuyv_luma_frame(source, frame_source)
+    }
+
+    #[cfg(not(unix))]
+    fn read_luma_frame(
+        &mut self,
+        source: &MoveMarkerCameraSource,
+        _frame_source: &MoveMarkerFrameSource,
+    ) -> Result<Option<Vec<u8>>> {
+        Err(anyhow!(
+            "Move marker camera source {} at {} requires a Unix V4L2 runtime",
+            source.camera_id,
+            source.device_path.display()
+        ))
+    }
+}
+
+#[cfg(unix)]
+const V4L2_BUF_TYPE_VIDEO_CAPTURE: u32 = 1;
+#[cfg(unix)]
+const V4L2_FIELD_NONE: u32 = 1;
+#[cfg(unix)]
+const V4L2_MEMORY_MMAP: u32 = 1;
+#[cfg(unix)]
+const VIDIOC_G_FMT: libc::c_ulong = 0xC0D05604;
+#[cfg(unix)]
+const VIDIOC_S_FMT: libc::c_ulong = 0xC0D05605;
+#[cfg(unix)]
+const VIDIOC_REQBUFS: libc::c_ulong = 0xC0145608;
+#[cfg(unix)]
+const VIDIOC_QUERYBUF: libc::c_ulong = 0xC0585609;
+#[cfg(unix)]
+const VIDIOC_QBUF: libc::c_ulong = 0xC058560F;
+#[cfg(unix)]
+const VIDIOC_DQBUF: libc::c_ulong = 0xC0585611;
+#[cfg(unix)]
+const VIDIOC_STREAMON: libc::c_ulong = 0x40045612;
+#[cfg(unix)]
+const VIDIOC_STREAMOFF: libc::c_ulong = 0x40045613;
+#[cfg(unix)]
+const VIDIOC_G_PARM: libc::c_ulong = 0xC0CC5615;
+#[cfg(unix)]
+const VIDIOC_S_PARM: libc::c_ulong = 0xC0CC5616;
+
+#[cfg(unix)]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct V4l2PixFormat {
+    width: u32,
+    height: u32,
+    pixelformat: u32,
+    field: u32,
+    bytesperline: u32,
+    sizeimage: u32,
+    colorspace: u32,
+    priv_: u32,
+    flags: u32,
+    ycbcr_enc: u32,
+    quantization: u32,
+    xfer_func: u32,
+}
+
+#[cfg(unix)]
+#[repr(C)]
+union V4l2FormatUnion {
+    pix: V4l2PixFormat,
+    raw: [u8; 200],
+    align: u64,
+}
+
+#[cfg(unix)]
+#[repr(C)]
+struct V4l2Format {
+    type_: u32,
+    fmt: V4l2FormatUnion,
+}
+
+#[cfg(unix)]
+#[repr(C)]
+struct V4l2RequestBuffers {
+    count: u32,
+    type_: u32,
+    memory: u32,
+    capabilities: u32,
+    flags: u8,
+    reserved: [u8; 3],
+}
+
+#[cfg(unix)]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct V4l2Fract {
+    numerator: u32,
+    denominator: u32,
+}
+
+#[cfg(unix)]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct V4l2CaptureParm {
+    capability: u32,
+    capturemode: u32,
+    timeperframe: V4l2Fract,
+    extendedmode: u32,
+    readbuffers: u32,
+    reserved: [u32; 4],
+}
+
+#[cfg(unix)]
+#[repr(C)]
+union V4l2StreamParmUnion {
+    capture: V4l2CaptureParm,
+    raw: [u8; 200],
+}
+
+#[cfg(unix)]
+#[repr(C)]
+struct V4l2StreamParm {
+    type_: u32,
+    parm: V4l2StreamParmUnion,
+}
+
+#[cfg(unix)]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct V4l2Timecode {
+    type_: u32,
+    flags: u32,
+    frames: u8,
+    seconds: u8,
+    minutes: u8,
+    hours: u8,
+    userbits: [u8; 4],
+}
+
+#[cfg(unix)]
+#[repr(C)]
+#[derive(Clone, Copy)]
+union V4l2BufferUnion {
+    offset: u32,
+    userptr: libc::c_ulong,
+    planes: *mut libc::c_void,
+    fd: i32,
+}
+
+#[cfg(unix)]
+#[repr(C)]
+struct V4l2Buffer {
+    index: u32,
+    type_: u32,
+    bytesused: u32,
+    flags: u32,
+    field: u32,
+    timestamp: libc::timeval,
+    timecode: V4l2Timecode,
+    sequence: u32,
+    memory: u32,
+    m: V4l2BufferUnion,
+    length: u32,
+    reserved2: u32,
+    request_fd: i32,
+}
+
+#[cfg(unix)]
+struct V4l2MappedBuffer {
+    ptr: *mut libc::c_void,
+    length: usize,
+}
+
+#[cfg(unix)]
+fn read_v4l2_yuyv_luma_frame(
+    source: &MoveMarkerCameraSource,
+    frame_source: &MoveMarkerFrameSource,
+) -> Result<Option<Vec<u8>>> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let config = frame_source.tracker_config;
+    if config.stride_bytes != config.width {
+        return Err(anyhow!(
+            "Move marker V4L2 reader emits compact Y8 frames, so stride {} must equal width {}",
+            config.stride_bytes,
+            config.width
+        ));
+    }
+
+    let device = CString::new(source.device_path.as_os_str().as_bytes())
+        .with_context(|| format!("invalid V4L2 device path {}", source.device_path.display()))?;
+    let fd = unsafe { libc::open(device.as_ptr(), libc::O_RDWR | libc::O_NONBLOCK) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("opening V4L2 camera {}", source.device_path.display()));
+    }
+
+    let result = read_v4l2_yuyv_luma_frame_from_fd(fd, source, frame_source);
+    let close_result = unsafe { libc::close(fd) };
+    if close_result != 0 && result.is_ok() {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("closing V4L2 camera {}", source.device_path.display()));
+    }
+    result
+}
+
+#[cfg(unix)]
+fn read_v4l2_yuyv_luma_frame_from_fd(
+    fd: libc::c_int,
+    source: &MoveMarkerCameraSource,
+    frame_source: &MoveMarkerFrameSource,
+) -> Result<Option<Vec<u8>>> {
+    let config = frame_source.tracker_config;
+    let yuyv = fourcc("YUYV");
+    let mut stream_on = false;
+    let mut maps = Vec::new();
+    let read_result = (|| -> Result<Option<Vec<u8>>> {
+        set_v4l2_frame_interval(fd, frame_source.fps)?;
+
+        let mut fmt = zeroed_v4l2_format();
+        fmt.type_ = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        ioctl_mut(fd, VIDIOC_G_FMT, &mut fmt).with_context(|| {
+            format!("querying V4L2 format for {}", source.device_path.display())
+        })?;
+        fmt.fmt.pix.width = config.width;
+        fmt.fmt.pix.height = config.height;
+        fmt.fmt.pix.pixelformat = yuyv;
+        fmt.fmt.pix.field = V4L2_FIELD_NONE;
+        ioctl_mut(fd, VIDIOC_S_FMT, &mut fmt).with_context(|| {
+            format!(
+                "setting V4L2 YUYV format for {}",
+                source.device_path.display()
+            )
+        })?;
+        let actual = unsafe { fmt.fmt.pix };
+        if actual.width != config.width || actual.height != config.height {
+            return Err(anyhow!(
+                "V4L2 camera {} returned {}x{}, expected {}x{}",
+                source.device_path.display(),
+                actual.width,
+                actual.height,
+                config.width,
+                config.height
+            ));
+        }
+        if actual.pixelformat != yuyv {
+            return Err(anyhow!(
+                "V4L2 camera {} did not accept YUYV format",
+                source.device_path.display()
+            ));
+        }
+
+        let mut req = V4l2RequestBuffers {
+            count: 2,
+            type_: V4L2_BUF_TYPE_VIDEO_CAPTURE,
+            memory: V4L2_MEMORY_MMAP,
+            capabilities: 0,
+            flags: 0,
+            reserved: [0; 3],
+        };
+        ioctl_mut(fd, VIDIOC_REQBUFS, &mut req).with_context(|| {
+            format!(
+                "requesting V4L2 buffers for {}",
+                source.device_path.display()
+            )
+        })?;
+        if req.count == 0 {
+            return Err(anyhow!(
+                "V4L2 camera {} returned no mmap buffers",
+                source.device_path.display()
+            ));
+        }
+
+        for index in 0..req.count {
+            let mut buf = zeroed_v4l2_buffer();
+            buf.type_ = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+            buf.memory = V4L2_MEMORY_MMAP;
+            buf.index = index;
+            ioctl_mut(fd, VIDIOC_QUERYBUF, &mut buf).with_context(|| {
+                format!(
+                    "querying V4L2 buffer {index} for {}",
+                    source.device_path.display()
+                )
+            })?;
+            let length = usize::try_from(buf.length).context("V4L2 buffer length overflow")?;
+            let offset = unsafe { buf.m.offset };
+            let ptr = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    length,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_SHARED,
+                    fd,
+                    offset as libc::off_t,
+                )
+            };
+            if ptr == libc::MAP_FAILED {
+                return Err(std::io::Error::last_os_error()).with_context(|| {
+                    format!(
+                        "mapping V4L2 buffer {index} for {}",
+                        source.device_path.display()
+                    )
+                });
+            }
+            maps.push(V4l2MappedBuffer { ptr, length });
+            ioctl_mut(fd, VIDIOC_QBUF, &mut buf).with_context(|| {
+                format!(
+                    "queueing V4L2 buffer {index} for {}",
+                    source.device_path.display()
+                )
+            })?;
+        }
+
+        let mut capture_type = V4L2_BUF_TYPE_VIDEO_CAPTURE as libc::c_int;
+        ioctl_mut(fd, VIDIOC_STREAMON, &mut capture_type).with_context(|| {
+            format!("starting V4L2 stream for {}", source.device_path.display())
+        })?;
+        stream_on = true;
+
+        let mut poll_fd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let ready = unsafe { libc::poll(&mut poll_fd, 1, 250) };
+        if ready < 0 {
+            return Err(std::io::Error::last_os_error())
+                .with_context(|| format!("polling V4L2 camera {}", source.device_path.display()));
+        }
+        if ready == 0 {
+            return Ok(None);
+        }
+
+        let mut buf = zeroed_v4l2_buffer();
+        buf.type_ = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        buf.memory = V4L2_MEMORY_MMAP;
+        ioctl_mut(fd, VIDIOC_DQBUF, &mut buf)
+            .with_context(|| format!("reading V4L2 frame from {}", source.device_path.display()))?;
+        let index = usize::try_from(buf.index).context("V4L2 buffer index overflow")?;
+        let mapping = maps.get(index).ok_or_else(|| {
+            anyhow!(
+                "V4L2 camera {} returned unknown buffer index {}",
+                source.device_path.display(),
+                index
+            )
+        })?;
+        let bytes_used = usize::try_from(buf.bytesused).context("V4L2 bytesused overflow")?;
+        let raw_len = bytes_used.min(mapping.length);
+        let raw = unsafe { std::slice::from_raw_parts(mapping.ptr as *const u8, raw_len) };
+        Ok(Some(yuyv_to_compact_luma(
+            raw,
+            config.width,
+            config.height,
+            actual.bytesperline,
+        )?))
+    })();
+
+    if stream_on {
+        let mut capture_type = V4L2_BUF_TYPE_VIDEO_CAPTURE as libc::c_int;
+        let _ = ioctl_mut(fd, VIDIOC_STREAMOFF, &mut capture_type);
+    }
+    for mapping in maps {
+        unsafe {
+            libc::munmap(mapping.ptr, mapping.length);
+        }
+    }
+    read_result
+}
+
+#[cfg(unix)]
+fn set_v4l2_frame_interval(fd: libc::c_int, fps: u32) -> Result<()> {
+    let mut parm = zeroed_v4l2_stream_parm();
+    parm.type_ = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    let _ = ioctl_mut(fd, VIDIOC_G_PARM, &mut parm);
+    parm.parm.capture.timeperframe.numerator = 1;
+    parm.parm.capture.timeperframe.denominator = fps.max(1);
+    ioctl_mut(fd, VIDIOC_S_PARM, &mut parm)
+}
+
+#[cfg(unix)]
+fn yuyv_to_compact_luma(raw: &[u8], width: u32, height: u32, stride_bytes: u32) -> Result<Vec<u8>> {
+    let width = usize::try_from(width).context("YUYV width overflow")?;
+    let height = usize::try_from(height).context("YUYV height overflow")?;
+    let stride = usize::try_from(stride_bytes).context("YUYV stride overflow")?;
+    let required = height
+        .checked_sub(1)
+        .and_then(|last_row| last_row.checked_mul(stride))
+        .and_then(|last_row| last_row.checked_add(width.saturating_mul(2)))
+        .unwrap_or(0);
+    if raw.len() < required {
+        return Err(anyhow!(
+            "YUYV frame is too short: {} bytes, expected at least {}",
+            raw.len(),
+            required
+        ));
+    }
+    let mut luma = Vec::with_capacity(width.saturating_mul(height));
+    for row in 0..height {
+        let start = row * stride;
+        let row_bytes = &raw[start..start + width * 2];
+        luma.extend(row_bytes.iter().step_by(2).copied());
+    }
+    Ok(luma)
+}
+
+#[cfg(unix)]
+fn fourcc(value: &str) -> u32 {
+    let bytes = value.as_bytes();
+    u32::from(bytes[0])
+        | (u32::from(bytes[1]) << 8)
+        | (u32::from(bytes[2]) << 16)
+        | (u32::from(bytes[3]) << 24)
+}
+
+#[cfg(unix)]
+fn ioctl_mut<T>(fd: libc::c_int, request: libc::c_ulong, value: &mut T) -> Result<()> {
+    let result = unsafe { libc::ioctl(fd, request, value as *mut T) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error()).context("V4L2 ioctl failed")
+    }
+}
+
+#[cfg(unix)]
+fn zeroed_v4l2_format() -> V4l2Format {
+    unsafe { std::mem::zeroed() }
+}
+
+#[cfg(unix)]
+fn zeroed_v4l2_stream_parm() -> V4l2StreamParm {
+    unsafe { std::mem::zeroed() }
+}
+
+#[cfg(unix)]
+fn zeroed_v4l2_buffer() -> V4l2Buffer {
+    unsafe { std::mem::zeroed() }
 }
 
 struct HidMoveControllerStateReader;
@@ -3585,6 +4072,72 @@ fn publish_move_controller_states(
         publish_move_evidence_stream_frame(stream, &[], &published_records)?;
     }
     Ok(())
+}
+
+fn active_move_marker_camera_sources(options: &Options) -> Vec<ActiveMoveMarkerCameraSource> {
+    options
+        .move_marker_camera_sources
+        .iter()
+        .map(|source| {
+            let stream_id = format!(
+                "muninn:{}:{}:move-marker-candidates",
+                options.host_id, source.camera_id
+            );
+            ActiveMoveMarkerCameraSource {
+                source: source.clone(),
+                frame_source: MoveMarkerFrameSource {
+                    stream_id,
+                    host_id: options.host_id.clone(),
+                    camera_id: source.camera_id.clone(),
+                    fps: options.move_marker_fps,
+                    tracker_config: muninn_move_tracker::MoveTrackerConfig {
+                        width: options.move_marker_width,
+                        height: options.move_marker_height,
+                        stride_bytes: options
+                            .move_marker_stride_bytes
+                            .unwrap_or(options.move_marker_width),
+                        tile_size: 16,
+                        threshold_min: options.move_marker_threshold_min,
+                        min_area_px: options.move_marker_min_area_px,
+                        max_candidates: options.move_marker_max_candidates,
+                        source_id_hash: 0,
+                        frame_sequence: 0,
+                    },
+                },
+                sequence: 0,
+            }
+        })
+        .collect()
+}
+
+fn publish_move_marker_camera_frames(
+    active: &mut [ActiveMoveMarkerCameraSource],
+    reader: &mut impl MoveMarkerCameraFrameReader,
+    move_evidence_stream: Option<&mut ActiveMoveEvidenceStream>,
+) -> Result<()> {
+    let Some(stream) = move_evidence_stream else {
+        return Ok(());
+    };
+    for camera in active {
+        camera.sequence = camera.sequence.saturating_add(1);
+        let mut frame_source = camera.frame_source.clone();
+        frame_source.tracker_config.frame_sequence = camera.sequence;
+        frame_source.tracker_config.source_id_hash =
+            stable_marker_camera_source_hash(&frame_source);
+        let Some(frame) = reader.read_luma_frame(&camera.source, &frame_source)? else {
+            continue;
+        };
+        let observed_at = timestamp()?;
+        publish_move_marker_candidates_from_luma_frame(stream, &frame_source, &frame, observed_at)?;
+    }
+    Ok(())
+}
+
+fn stable_marker_camera_source_hash(source: &MoveMarkerFrameSource) -> u64 {
+    stable_u64_hash(&format!(
+        "{}:{}:{}",
+        source.host_id, source.camera_id, source.stream_id
+    ))
 }
 
 fn put_hid_controller_state_receipt(
@@ -4966,12 +5519,17 @@ fn push_unique_light_target(
 }
 
 fn default_move_color_for_identity(identity: &str) -> (u8, u8, u8) {
+    let hash = stable_u64_hash(identity);
+    DEFAULT_MOVE_LIGHT_COLORS[hash as usize % DEFAULT_MOVE_LIGHT_COLORS.len()]
+}
+
+fn stable_u64_hash(value: &str) -> u64 {
     let mut hash = 0xcbf29ce484222325u64;
-    for byte in identity.as_bytes() {
+    for byte in value.as_bytes() {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x100000001b3);
     }
-    DEFAULT_MOVE_LIGHT_COLORS[hash as usize % DEFAULT_MOVE_LIGHT_COLORS.len()]
+    if hash == 0 { 1 } else { hash }
 }
 
 fn default_move_light_report(color: (u8, u8, u8), seconds: f64) -> [u8; PS_MOVE_LED_REPORT_LEN] {
@@ -7868,6 +8426,14 @@ impl Options {
             command_id: None,
             move_host_address: None,
             move_state_sources: Vec::new(),
+            move_marker_camera_sources: Vec::new(),
+            move_marker_width: 320,
+            move_marker_height: 240,
+            move_marker_stride_bytes: None,
+            move_marker_fps: 187,
+            move_marker_threshold_min: 180,
+            move_marker_min_area_px: 4,
+            move_marker_max_candidates: 64,
             move_evidence_stream_id: None,
             move_evidence_verse_id: "mimir-live".to_string(),
             move_evidence_ring_slots: 4,
@@ -8012,6 +8578,39 @@ impl Options {
                     options
                         .move_state_sources
                         .push(parse_move_state_source(&value)?);
+                }
+                "--move-marker-camera" => {
+                    let value = take_value(&mut args, "--move-marker-camera")?;
+                    options
+                        .move_marker_camera_sources
+                        .push(parse_move_marker_camera_source(&value)?);
+                }
+                "--move-marker-width" => {
+                    options.move_marker_width =
+                        take_value(&mut args, "--move-marker-width")?.parse()?
+                }
+                "--move-marker-height" => {
+                    options.move_marker_height =
+                        take_value(&mut args, "--move-marker-height")?.parse()?
+                }
+                "--move-marker-stride-bytes" => {
+                    options.move_marker_stride_bytes =
+                        Some(take_value(&mut args, "--move-marker-stride-bytes")?.parse()?);
+                }
+                "--move-marker-fps" => {
+                    options.move_marker_fps = take_value(&mut args, "--move-marker-fps")?.parse()?
+                }
+                "--move-marker-threshold-min" => {
+                    options.move_marker_threshold_min =
+                        take_value(&mut args, "--move-marker-threshold-min")?.parse()?
+                }
+                "--move-marker-min-area-px" => {
+                    options.move_marker_min_area_px =
+                        take_value(&mut args, "--move-marker-min-area-px")?.parse()?
+                }
+                "--move-marker-max-candidates" => {
+                    options.move_marker_max_candidates =
+                        take_value(&mut args, "--move-marker-max-candidates")?.parse()?
                 }
                 "--move-evidence-stream" => {
                     options.move_evidence_stream_id =
@@ -8166,6 +8765,33 @@ impl Options {
                 "--move-evidence-slot-bytes must be greater than zero"
             ));
         }
+        if options.move_marker_width == 0 {
+            return Err(anyhow!("--move-marker-width must be greater than zero"));
+        }
+        if options.move_marker_height == 0 {
+            return Err(anyhow!("--move-marker-height must be greater than zero"));
+        }
+        if options
+            .move_marker_stride_bytes
+            .is_some_and(|stride| stride < options.move_marker_width)
+        {
+            return Err(anyhow!(
+                "--move-marker-stride-bytes must be at least --move-marker-width"
+            ));
+        }
+        if options.move_marker_fps == 0 {
+            return Err(anyhow!("--move-marker-fps must be greater than zero"));
+        }
+        if options.move_marker_min_area_px == 0 {
+            return Err(anyhow!(
+                "--move-marker-min-area-px must be greater than zero"
+            ));
+        }
+        if options.move_marker_max_candidates == 0 {
+            return Err(anyhow!(
+                "--move-marker-max-candidates must be greater than zero"
+            ));
+        }
         for (name, value) in [
             ("--quest-serial", options.quest_serial.as_ref()),
             (
@@ -8279,8 +8905,25 @@ fn parse_catalog_source(value: &str) -> Result<CatalogSource> {
     })
 }
 
+fn parse_move_marker_camera_source(value: &str) -> Result<MoveMarkerCameraSource> {
+    let Some((camera_id, device_path)) = value.split_once('=') else {
+        return Err(anyhow!(
+            "--move-marker-camera must be formatted as <camera-id>=<device-path>"
+        ));
+    };
+    if camera_id.trim().is_empty() || device_path.trim().is_empty() {
+        return Err(anyhow!(
+            "--move-marker-camera requires non-empty camera id and device path"
+        ));
+    }
+    Ok(MoveMarkerCameraSource {
+        camera_id: camera_id.to_string(),
+        device_path: PathBuf::from(device_path),
+    })
+}
+
 fn help_text() -> &'static str {
-    "Usage: muninn [serve|activate|request-stream|capture-stream-status|obs-catalog-status|request-move-light|move-light-status|move-identity-status|move-source-status|move-state-status|claim-move-host|quest-access-status] [--store <path>] [--activate-store <path>] [--stream-action <start|stop>] [--target-host <cultmesh-uri>] [--media-transport <rudp>] [--media-packet-bytes <bytes>] [--rudp-video-bitrate-kbps <kbps>] [--rudp-latency-budget-ms <ms>] [--video-source <source-id=label>] [--audio-source <source-id=label>] [--audio-source-id <source-id>] [--no-video] [--no-audio] [--loopback-script <path>] [--ffmpeg <path>] [--odin-cultmesh-uri <cultmesh-uri>] [--move-state <move-id>=<hidraw-path>] [--move-host <bt-addr>] [--move-evidence-stream <stream-id>] [--move-evidence-verse <verse-id>] [--quest-adb] [--quest-serial <serial>] [--quest-input-stream <stream-id>] [--quest-pose-stream <stream-id>] [--quest-video-input-stream <stream-id>] [--idunn-rudp-health <addr>] [--idunn-daemon <id>] [--idunn-health-contract <contract>] [--dry-run] [--health]\n\nMuninn is Odin's portable telemetry Verse assembler. serve publishes cheap typed telemetry affordances, optional Quest USB access surfaces, and the explicitly configured Move runtime; when serve receives --move-state, --move-host, or --move-evidence-stream it may publish source-local Move controller state, typed Move identity records, a CultMesh Move evidence stream, and keep USB-attached PS Moves claimed to that explicit Bluetooth host; serve consumes typed capture stream commands from Odin/CultMesh plus its local activation store and owns the local ffmpeg/loopback activation child lifecycle, resolves media targets from Odin/CultMesh provider advertisements, and pays startup respect to Odin through --odin-cultmesh-uri by publishing its provider advertisement once; activate starts an explicitly requested local CultNet RUDP stream as a daemon child after resolving the cultmesh:// media target URI through Odin; request-stream publishes a typed capture stream command through Odin/CultMesh using --odin-cultmesh-uri; obs-catalog-status pulls Odin-owned muninn.obs_stream_catalog discovery into the local compatibility store for OBS; capture-stream-status reads typed capture stream command receipts; use --no-video or --no-audio to request one leg over the CultNet RUDP media lane; request-move-light publishes a typed Move light command for Muninn serve to execute; move-light-status reads typed command receipts; move-identity-status reads typed Move identity records; move-source-status prints live Move source discovery; move-state-status reads typed controller-state records; claim-move-host assigns USB-attached PS Moves to a Bluetooth host; quest-access-status reads typed Quest access state. In --health mode, the Idunn RUDP flags publish the same typed daemon health document to Idunn for explicit diagnostics."
+    "Usage: muninn [serve|activate|request-stream|capture-stream-status|obs-catalog-status|request-move-light|move-light-status|move-identity-status|move-source-status|move-state-status|claim-move-host|quest-access-status] [--store <path>] [--activate-store <path>] [--stream-action <start|stop>] [--target-host <cultmesh-uri>] [--media-transport <rudp>] [--media-packet-bytes <bytes>] [--rudp-video-bitrate-kbps <kbps>] [--rudp-latency-budget-ms <ms>] [--video-source <source-id=label>] [--audio-source <source-id=label>] [--audio-source-id <source-id>] [--no-video] [--no-audio] [--loopback-script <path>] [--ffmpeg <path>] [--odin-cultmesh-uri <cultmesh-uri>] [--move-state <move-id>=<hidraw-path>] [--move-marker-camera <camera-id>=<device-path>] [--move-marker-width <px>] [--move-marker-height <px>] [--move-marker-fps <fps>] [--move-host <bt-addr>] [--move-evidence-stream <stream-id>] [--move-evidence-verse <verse-id>] [--quest-adb] [--quest-serial <serial>] [--quest-input-stream <stream-id>] [--quest-pose-stream <stream-id>] [--quest-video-input-stream <stream-id>] [--idunn-rudp-health <addr>] [--idunn-daemon <id>] [--idunn-health-contract <contract>] [--dry-run] [--health]\n\nMuninn is Odin's portable telemetry Verse assembler. serve publishes cheap typed telemetry affordances, optional Quest USB access surfaces, and the explicitly configured Move runtime; when serve receives --move-state, --move-marker-camera, --move-host, or --move-evidence-stream it may publish source-local Move controller state, source-local optical marker candidates, typed Move identity records, a CultMesh Move evidence stream, and keep USB-attached PS Moves claimed to that explicit Bluetooth host; serve consumes typed capture stream commands from Odin/CultMesh plus its local activation store and owns the local ffmpeg/loopback activation child lifecycle, resolves media targets from Odin/CultMesh provider advertisements, and pays startup respect to Odin through --odin-cultmesh-uri by publishing its provider advertisement once; activate starts an explicitly requested local CultNet RUDP stream as a daemon child after resolving the cultmesh:// media target URI through Odin; request-stream publishes a typed capture stream command through Odin/CultMesh using --odin-cultmesh-uri; obs-catalog-status pulls Odin-owned muninn.obs_stream_catalog discovery into the local compatibility store for OBS; capture-stream-status reads typed capture stream command receipts; use --no-video or --no-audio to request one leg over the CultNet RUDP media lane; request-move-light publishes a typed Move light command for Muninn serve to execute; move-light-status reads typed command receipts; move-identity-status reads typed Move identity records; move-source-status prints live Move source discovery; move-state-status reads typed controller-state records; claim-move-host assigns USB-attached PS Moves to a Bluetooth host; quest-access-status reads typed Quest access state. In --health mode, the Idunn RUDP flags publish the same typed daemon health document to Idunn for explicit diagnostics."
 }
 
 fn parse_move_state_source(value: &str) -> Result<MoveStateSource> {
@@ -10350,6 +10993,26 @@ Device 00:07:04:A8:00:D0 (public)
         failing_joystick_path: Option<String>,
     }
 
+    #[derive(Default)]
+    struct RecordingMoveMarkerCameraReader {
+        frames: Vec<Vec<u8>>,
+        configs: Vec<muninn_move_tracker::MoveTrackerConfig>,
+    }
+
+    impl MoveMarkerCameraFrameReader for RecordingMoveMarkerCameraReader {
+        fn read_luma_frame(
+            &mut self,
+            _source: &MoveMarkerCameraSource,
+            frame_source: &MoveMarkerFrameSource,
+        ) -> Result<Option<Vec<u8>>> {
+            self.configs.push(frame_source.tracker_config);
+            if self.frames.is_empty() {
+                return Ok(None);
+            }
+            Ok(Some(self.frames.remove(0)))
+        }
+    }
+
     impl MoveControllerStateReader for RecordingMoveStateReader {
         fn read_report(&mut self, _hidraw_path: &str) -> Result<Option<Vec<u8>>> {
             if self.reports.is_empty() {
@@ -11150,6 +11813,7 @@ Device 00:07:04:A8:00:D0 (public)
             stream_id: "muninn:nightwing:ps3eye0:move-markers".to_string(),
             host_id: "nightwing".to_string(),
             camera_id: "ps3eye0".to_string(),
+            fps: 187,
             tracker_config: muninn_move_tracker::MoveTrackerConfig {
                 width: 32,
                 height: 32,
@@ -11204,6 +11868,125 @@ Device 00:07:04:A8:00:D0 (public)
         assert!(marker.mean_luma > 250.0);
         assert!(marker.score > 0.65);
         assert_eq!(marker.observed_at, "unix-1");
+    }
+
+    #[test]
+    fn move_marker_camera_option_builds_owned_evidence_source() {
+        let options = Options::parse(
+            [
+                "serve",
+                "--host",
+                "nightwing",
+                "--move-marker-camera",
+                "ps3eye0=/dev/video0",
+                "--move-marker-width",
+                "32",
+                "--move-marker-height",
+                "32",
+                "--move-marker-fps",
+                "120",
+                "--move-marker-threshold-min",
+                "170",
+                "--move-marker-min-area-px",
+                "3",
+                "--move-marker-max-candidates",
+                "9",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap();
+
+        assert_eq!(options.move_marker_camera_sources.len(), 1);
+        assert_eq!(options.move_marker_camera_sources[0].camera_id, "ps3eye0");
+        assert_eq!(
+            options.move_marker_camera_sources[0].device_path,
+            PathBuf::from("/dev/video0")
+        );
+        let active = active_move_marker_camera_sources(&options);
+        assert_eq!(active.len(), 1);
+        assert_eq!(
+            active[0].frame_source.stream_id,
+            "muninn:nightwing:ps3eye0:move-marker-candidates"
+        );
+        assert_eq!(active[0].frame_source.fps, 120);
+        assert_eq!(active[0].frame_source.tracker_config.width, 32);
+        assert_eq!(active[0].frame_source.tracker_config.height, 32);
+        assert_eq!(active[0].frame_source.tracker_config.threshold_min, 170);
+        assert_eq!(active[0].frame_source.tracker_config.min_area_px, 3);
+        assert_eq!(active[0].frame_source.tracker_config.max_candidates, 9);
+        assert!(
+            create_move_evidence_stream(&options).unwrap().is_some(),
+            "marker camera alone should create the evidence stream"
+        );
+    }
+
+    #[test]
+    fn move_marker_camera_tick_publishes_extracted_evidence_frame() {
+        let options = Options::parse(
+            [
+                "serve",
+                "--host",
+                "nightwing",
+                "--move-marker-camera",
+                "ps3eye0=/dev/video0",
+                "--move-evidence-stream",
+                "muninn:nightwing:move-evidence",
+                "--move-marker-width",
+                "32",
+                "--move-marker-height",
+                "32",
+                "--move-marker-threshold-min",
+                "180",
+                "--move-marker-min-area-px",
+                "4",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap();
+        let mut y8 = vec![0u8; 32 * 32];
+        for y in 8..12 {
+            for x in 10..14 {
+                y8[y * 32 + x] = 255;
+            }
+        }
+        let mut active = active_move_marker_camera_sources(&options);
+        let mut reader = RecordingMoveMarkerCameraReader {
+            frames: vec![y8],
+            configs: Vec::new(),
+        };
+        let mut stream = create_move_evidence_stream(&options)
+            .unwrap()
+            .expect("marker camera should create stream");
+
+        publish_move_marker_camera_frames(&mut active, &mut reader, Some(&mut stream)).unwrap();
+
+        assert_eq!(active[0].sequence, 1);
+        assert_eq!(reader.configs.len(), 1);
+        assert_eq!(reader.configs[0].frame_sequence, 1);
+        assert_ne!(reader.configs[0].source_id_hash, 0);
+        let lease = stream
+            .catalog
+            .ring("muninn:nightwing:move-evidence")
+            .and_then(CultMeshSharedMemoryFrameRing::try_acquire_latest_read)
+            .expect("latest marker evidence frame should be readable");
+        let decoded: DecodedMoveEvidenceStreamFrame = rmp_serde::from_slice(lease.bytes()).unwrap();
+
+        assert_eq!(decoded.0, "muninn:nightwing:move-evidence:0");
+        assert_eq!(decoded.1, "muninn:nightwing");
+        assert_eq!(decoded.3.len(), 1);
+        assert!(decoded.4.is_empty());
+        assert_eq!(
+            decoded.3[0].stream_id,
+            "muninn:nightwing:ps3eye0:move-marker-candidates"
+        );
+        assert_eq!(decoded.3[0].camera_id, "ps3eye0");
+        assert_eq!(decoded.3[0].frame_sequence, 1);
+        assert_eq!(
+            decoded.3[0].source_id_hash,
+            reader.configs[0].source_id_hash
+        );
     }
 
     #[test]
