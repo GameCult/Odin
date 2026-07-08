@@ -504,6 +504,7 @@ dependencies = [
  "cultmesh-rs",
  "cultnet-rs",
  "libc",
+ "muninn-move-tracker",
  "odin-core",
  "rmp-serde",
  "serde",

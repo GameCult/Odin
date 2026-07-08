@@ -23,9 +23,9 @@ use odin_core::{
     MuninnCaptureStreamCommandRecord, MuninnCaptureStreamRecord, MuninnCommandBoundaryCompatRecord,
     MuninnHidControllerStateRecord, MuninnMediaReceiverFeedbackRecord,
     MuninnMoveControllerStateRecord, MuninnMoveIdentityRecord, MuninnMoveLightCommandRecord,
-    MuninnObsStreamCatalogRecord, MuninnQuestAccessRecord, MuninnTelemetrySurfaceRecord,
-    MuninnTransportProfileCompatRecord, OdinDocuments, OdinEndpointQuery,
-    discover_provider_endpoints,
+    MuninnMoveMarkerCandidateRecord, MuninnObsStreamCatalogRecord, MuninnQuestAccessRecord,
+    MuninnTelemetrySurfaceRecord, MuninnTransportProfileCompatRecord, OdinDocuments,
+    OdinEndpointQuery, discover_provider_endpoints,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -280,17 +280,22 @@ struct DefaultMoveLightTarget {
     identity: String,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct MoveMarkerFrameSource {
+    stream_id: String,
+    host_id: String,
+    camera_id: String,
+    tracker_config: muninn_move_tracker::MoveTrackerConfig,
+}
+
 #[derive(Serialize)]
 struct MuninnMoveEvidenceStreamFrame<'a>(
     &'a str,
     &'a str,
     i64,
-    &'a [MuninnMoveMarkerCandidateWire],
+    &'a [MuninnMoveMarkerCandidateRecord],
     &'a [MuninnMoveControllerStateRecord],
 );
-
-#[derive(Serialize)]
-struct MuninnMoveMarkerCandidateWire;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct JoystickEvent {
@@ -3162,7 +3167,7 @@ fn publish_obs_catalog(
 }
 
 fn create_move_evidence_stream(options: &Options) -> Result<Option<ActiveMoveEvidenceStream>> {
-    if options.move_state_sources.is_empty() {
+    if options.move_state_sources.is_empty() && options.move_evidence_stream_id.is_none() {
         return Ok(None);
     }
 
@@ -3208,16 +3213,16 @@ fn create_move_evidence_stream(options: &Options) -> Result<Option<ActiveMoveEvi
 
 fn publish_move_evidence_stream_frame(
     stream: &mut ActiveMoveEvidenceStream,
+    marker_candidates: &[MuninnMoveMarkerCandidateRecord],
     controller_states: &[MuninnMoveControllerStateRecord],
 ) -> Result<Option<cultmesh_rs::CultMeshStreamFrameHandle>> {
-    if controller_states.is_empty() {
+    if marker_candidates.is_empty() && controller_states.is_empty() {
         return Ok(None);
     }
 
     let published_at_ns = timestamp_ns()?;
     let frame_id = format!("{}:{}", stream.stream_id, stream.frame_counter);
     stream.frame_counter = stream.frame_counter.saturating_add(1);
-    let marker_candidates: &[MuninnMoveMarkerCandidateWire] = &[];
     let frame = MuninnMoveEvidenceStreamFrame(
         &frame_id,
         &stream.producer_peer_id,
@@ -3240,6 +3245,72 @@ fn publish_move_evidence_stream_frame(
         Ok(Some(handle))
     } else {
         Ok(None)
+    }
+}
+
+fn publish_move_marker_candidates_from_luma_frame(
+    stream: &mut ActiveMoveEvidenceStream,
+    source: &MoveMarkerFrameSource,
+    y8_frame: &[u8],
+    observed_at: String,
+) -> Result<Option<cultmesh_rs::CultMeshStreamFrameHandle>> {
+    let marker_candidates =
+        extract_move_marker_candidates_from_luma_frame(source, y8_frame, observed_at)?;
+    publish_move_evidence_stream_frame(stream, &marker_candidates, &[])
+}
+
+fn extract_move_marker_candidates_from_luma_frame(
+    source: &MoveMarkerFrameSource,
+    y8_frame: &[u8],
+    observed_at: String,
+) -> Result<Vec<MuninnMoveMarkerCandidateRecord>> {
+    let candidates = muninn_move_tracker::extract_luma_candidates(y8_frame, source.tracker_config)
+        .ok_or_else(|| {
+            anyhow!(
+                "invalid Move marker Y8 frame for camera {}: expected width={} height={} stride={}",
+                source.camera_id,
+                source.tracker_config.width,
+                source.tracker_config.height,
+                source.tracker_config.stride_bytes
+            )
+        })?;
+    Ok(candidates
+        .into_iter()
+        .map(|candidate| {
+            build_move_marker_candidate_record(
+                &source.stream_id,
+                &source.host_id,
+                &source.camera_id,
+                candidate,
+                observed_at.clone(),
+            )
+        })
+        .collect())
+}
+
+fn build_move_marker_candidate_record(
+    stream_id: &str,
+    host_id: &str,
+    camera_id: &str,
+    candidate: muninn_move_tracker::MoveMarkerCandidate,
+    observed_at: String,
+) -> MuninnMoveMarkerCandidateRecord {
+    MuninnMoveMarkerCandidateRecord {
+        stream_id: stream_id.to_string(),
+        host_id: host_id.to_string(),
+        camera_id: camera_id.to_string(),
+        frame_sequence: candidate.frame_sequence,
+        source_id_hash: candidate.source_id_hash,
+        tile_x: candidate.tile_x,
+        tile_y: candidate.tile_y,
+        center_x_px: candidate.center_x_px,
+        center_y_px: candidate.center_y_px,
+        radius_px: candidate.radius_px,
+        area_px: candidate.area_px,
+        mean_luma: candidate.mean_luma,
+        peak_luma: candidate.peak_luma,
+        score: candidate.score,
+        observed_at,
     }
 }
 
@@ -3511,7 +3582,7 @@ fn publish_move_controller_states(
         published_records.push(record);
     }
     if let Some(stream) = move_evidence_stream {
-        publish_move_evidence_stream_frame(stream, &published_records)?;
+        publish_move_evidence_stream_frame(stream, &[], &published_records)?;
     }
     Ok(())
 }
@@ -10255,7 +10326,23 @@ Device 00:07:04:A8:00:D0 (public)
     );
 
     #[derive(Deserialize)]
-    struct DecodedMarkerCandidate;
+    struct DecodedMarkerCandidate {
+        stream_id: String,
+        host_id: String,
+        camera_id: String,
+        frame_sequence: u64,
+        source_id_hash: u64,
+        tile_x: u32,
+        tile_y: u32,
+        center_x_px: f32,
+        center_y_px: f32,
+        radius_px: f32,
+        area_px: u32,
+        mean_luma: f32,
+        peak_luma: u32,
+        score: f32,
+        observed_at: String,
+    }
 
     struct RecordingMoveStateReader {
         reports: Vec<Vec<u8>>,
@@ -10993,7 +11080,7 @@ Device 00:07:04:A8:00:D0 (public)
             .unwrap()
             .expect("move state source should create a stream");
 
-        let handle = publish_move_evidence_stream_frame(&mut stream, &[record.clone()])
+        let handle = publish_move_evidence_stream_frame(&mut stream, &[], &[record.clone()])
             .unwrap()
             .expect("controller state should publish a frame");
 
@@ -11037,6 +11124,86 @@ Device 00:07:04:A8:00:D0 (public)
         assert_eq!(decoded.4[0].magnetometer_xyz, record.magnetometer_xyz);
         assert_eq!(decoded.4[0].buttons, record.buttons);
         assert!(decoded.4[0].battery01.is_nan());
+    }
+
+    #[test]
+    fn move_marker_candidates_publish_in_mimir_compatible_cultmesh_frame() {
+        let options = Options::parse(
+            [
+                "serve",
+                "--host",
+                "nightwing",
+                "--move-evidence-stream",
+                "muninn:nightwing:move-evidence",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap();
+        let mut y8 = vec![0u8; 32 * 32];
+        for y in 8..12 {
+            for x in 10..14 {
+                y8[y * 32 + x] = 255;
+            }
+        }
+        let frame_source = MoveMarkerFrameSource {
+            stream_id: "muninn:nightwing:ps3eye0:move-markers".to_string(),
+            host_id: "nightwing".to_string(),
+            camera_id: "ps3eye0".to_string(),
+            tracker_config: muninn_move_tracker::MoveTrackerConfig {
+                width: 32,
+                height: 32,
+                stride_bytes: 32,
+                tile_size: 16,
+                threshold_min: 180,
+                min_area_px: 4,
+                max_candidates: 8,
+                source_id_hash: 42,
+                frame_sequence: 7,
+            },
+        };
+        let mut stream = create_move_evidence_stream(&options)
+            .unwrap()
+            .expect("move evidence option should create a stream");
+
+        let handle = publish_move_marker_candidates_from_luma_frame(
+            &mut stream,
+            &frame_source,
+            &y8,
+            "unix-1".to_string(),
+        )
+        .unwrap()
+        .expect("marker candidates should publish a frame");
+
+        assert_eq!(handle.stream_id, "muninn:nightwing:move-evidence");
+        let lease = stream
+            .catalog
+            .ring("muninn:nightwing:move-evidence")
+            .and_then(CultMeshSharedMemoryFrameRing::try_acquire_latest_read)
+            .expect("latest frame should be readable");
+        let decoded: DecodedMoveEvidenceStreamFrame = rmp_serde::from_slice(lease.bytes()).unwrap();
+
+        assert_eq!(decoded.0, "muninn:nightwing:move-evidence:0");
+        assert_eq!(decoded.1, "muninn:nightwing");
+        assert!(decoded.2 > 0);
+        assert_eq!(decoded.3.len(), 1);
+        assert!(decoded.4.is_empty());
+        let marker = &decoded.3[0];
+        assert_eq!(marker.stream_id, "muninn:nightwing:ps3eye0:move-markers");
+        assert_eq!(marker.host_id, "nightwing");
+        assert_eq!(marker.camera_id, "ps3eye0");
+        assert_eq!(marker.frame_sequence, 7);
+        assert_eq!(marker.source_id_hash, 42);
+        assert_eq!(marker.tile_x, 0);
+        assert_eq!(marker.tile_y, 0);
+        assert!(marker.center_x_px > 11.0 && marker.center_x_px < 12.0);
+        assert!(marker.center_y_px > 9.0 && marker.center_y_px < 10.0);
+        assert!(marker.radius_px > 2.0);
+        assert_eq!(marker.area_px, 16);
+        assert_eq!(marker.peak_luma, 255);
+        assert!(marker.mean_luma > 250.0);
+        assert!(marker.score > 0.65);
+        assert_eq!(marker.observed_at, "unix-1");
     }
 
     #[test]

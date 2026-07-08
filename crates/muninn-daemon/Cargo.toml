@@ -14,6 +14,7 @@ anyhow = "1"
 cultmesh-rs = { path = "../../vendor/cultmesh-rs" }
 cultnet-rs = { path = "../../vendor/cultnet-rs" }
 libc = "0.2"
+muninn-move-tracker = { path = "../muninn-move-tracker" }
 odin-core = { path = "../odin-core" }
 rmp-serde = "1.3"
 serde = { version = "1", features = ["derive"] }
