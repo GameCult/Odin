@@ -13,7 +13,6 @@ const repoRoot = path.resolve(__dirname, "..");
 const projectsRoot = path.resolve(repoRoot, "..");
 const defaultEveRepoRoot = path.resolve(projectsRoot, "Eve");
 const defaultEveWebRoot = path.resolve(defaultEveRepoRoot, "web");
-const defaultAetheriaResourcesRoot = path.resolve(projectsRoot, "Aetheria", "Assets", "Resources");
 const defaultOdinCultMeshUri = "cultmesh://odin/rendezvous/provider-catalog";
 const defaultOdinRudpEndpoint = "rudp://127.0.0.1:17871";
 const odinRudpConnectionId = 0x0d1d0002;
@@ -95,16 +94,11 @@ function parseOptions(argv) {
     odinSurfaceKey: stringOption(parsed.odinSurfaceKey, process.env.HERMODR_ODIN_SURFACE_KEY || "surface:gamecult.network.status"),
     eveWebRoot: path.resolve(stringOption(parsed.eveWebRoot, process.env.HERMODR_EVE_WEB_ROOT || defaultEveWebRoot)),
     eveRepoRoot: path.resolve(stringOption(parsed.eveRepoRoot, process.env.HERMODR_EVE_REPO_ROOT || defaultEveRepoRoot)),
-    aetheriaResourcesRoot: path.resolve(stringOption(
-      parsed.aetheriaResourcesRoot,
-      process.env.HERMODR_AETHERIA_RESOURCES_ROOT || defaultAetheriaResourcesRoot,
-    )),
     providerCatalogKeys: stringListOption(
       parsed.providerCatalogKeys || parsed["provider-catalog-keys"],
       process.env.HERMODR_PROVIDER_CATALOG_KEYS,
       defaultProviderCatalogKeys,
     ),
-    enableLocalAetheriaAssetFallback: boolOption(parsed.enableLocalAetheriaAssetFallback, process.env.HERMODR_ENABLE_LOCAL_AETHERIA_ASSET_FALLBACK),
     sleipnirProviderId: stringOption(parsed.sleipnirProviderId, process.env.HERMODR_SLEIPNIR_PROVIDER_ID || "sleipnir.input-mirror.starfire"),
     raw: parsed,
   };
@@ -169,7 +163,6 @@ function createHermodrBridge(options) {
           odinCultMeshUri: options.odinCultMeshUri,
           eveWebRoot: options.eveWebRoot,
           assetBytes: "provider-cultmesh-cdn",
-          localAetheriaAssetFallback: options.enableLocalAetheriaAssetFallback,
         });
         return;
       }
@@ -201,8 +194,9 @@ function createHermodrBridge(options) {
 
       if (request.method === "GET" && url.pathname.startsWith("/hermodr/surface/")) {
         const providerId = decodeURIComponent(url.pathname.slice("/hermodr/surface/".length));
+        const surfaceId = stringOption(url.searchParams.get("surfaceId"), "");
         const catalog = await readCatalog(options);
-        const surface = await readProviderSurface(options, catalog, providerId);
+        const surface = await readProviderSurface(options, catalog, providerId, surfaceId);
         if (!surface) {
           writeJson(response, 404, { ok: false, error: `No surface found for provider '${providerId}'.` });
           return;
@@ -256,13 +250,22 @@ async function readCatalog(options) {
     ...await readOdinProviderAdvertisements(options),
     ...await readOdinSurfaceProviderCatalog(options),
   ]);
-  const surfaces = providerAdvertisements.map((provider) => ({
-    providerId: provider.id,
-    title: provider.title || provider.id,
-    version: 0,
-    updatedAt: provider.updatedAt || null,
-    surface: { advertised: true },
-  }));
+  return createBrowserCatalog(providerAdvertisements, options);
+}
+
+function createBrowserCatalog(providerAdvertisements, options = {}) {
+  const surfaces = providerAdvertisements.flatMap((provider) => {
+    const advertised = provider.surfaces?.length ? provider.surfaces : [{}];
+    return advertised.map((surface) => ({
+      providerId: provider.id,
+      surfaceId: surface.surfaceId || provider.id,
+      surfaceKind: surface.surfaceKind || "",
+      title: surface.title || provider.title || surface.surfaceId || provider.id,
+      version: 0,
+      updatedAt: provider.updatedAt || null,
+      surface: { advertised: true },
+    }));
+  });
 
   return {
     schema: "gamecult.hermodr.browser_lowering_catalog.v1",
@@ -275,8 +278,8 @@ async function readCatalog(options) {
       forbidden: ["provider catalog synthesis", "provider state ownership", "renderer-owned discovery"],
     },
     source: {
-      odinCultMeshUri: options.odinCultMeshUri,
-      odinSurfaceKey: options.odinSurfaceKey,
+      odinCultMeshUri: options.odinCultMeshUri || "",
+      odinSurfaceKey: options.odinSurfaceKey || "",
     },
     surface: null,
     surfaces,
@@ -367,6 +370,7 @@ function normalizeCatalogProviderAdvertisement(value) {
     endpoints: arrayOfObjects(value.endpoints),
     routes: arrayOfObjects(value.routes),
     commandSurface: value.commandSurface || null,
+    surfaces: normalizeAdvertisedSurfaces(value.surfaces),
     status: value.status || "unknown",
     updatedAt: value.updatedAt || null,
   };
@@ -382,11 +386,36 @@ function mergeProviderAdvertisements(providers) {
       ...provider,
       endpoints: provider.endpoints?.length ? provider.endpoints : existing.endpoints || [],
       routes: provider.routes?.length ? provider.routes : existing.routes || [],
+      surfaces: provider.surfaces?.length ? provider.surfaces : existing.surfaces || [],
       cultMeshAddress: provider.cultMeshAddress || existing.cultMeshAddress || null,
       endpoint: provider.endpoint || existing.endpoint || null,
     });
   }
   return [...merged.values()].sort((left, right) => String(left.id).localeCompare(String(right.id)));
+}
+
+function normalizeAdvertisedSurfaces(surfaces) {
+  return arrayOfObjects(surfaces)
+    .map((surface) => ({
+      ...surface,
+      surfaceId: String(surface.surfaceId || surface.id || "").trim(),
+      surfaceKind: String(surface.surfaceKind || surface.kind || "").trim(),
+      recordRef: String(surface.recordRef || surface.key || "").trim(),
+    }))
+    .filter((surface) => surface.surfaceId);
+}
+
+function surfaceRecordKeys(catalog, providerId, surfaceId) {
+  const provider = (catalog.providers || []).find((candidate) => candidate.id === providerId);
+  const surface = (provider?.surfaces || []).find((candidate) => candidate.surfaceId === surfaceId);
+  return [...new Set([
+    surface?.recordRef,
+    surfaceId,
+    `surface:${surfaceId}`,
+    `eve:surface:${surfaceId}`,
+    providerId,
+    `surface:${providerId}`,
+  ].filter(Boolean))];
 }
 
 function resolveHermodrRudpEndpoint(uri, options) {
@@ -403,8 +432,9 @@ function normalizeRudpEndpoint(endpoint) {
   return text.startsWith("rudp://") ? text : `rudp://${text}`;
 }
 
-async function readProviderSurface(options, catalog, providerId) {
-  const odinSurface = await readOdinProviderSurface(options, providerId);
+async function readProviderSurface(options, catalog, providerId, surfaceId = "") {
+  const selectedSurfaceId = surfaceId || providerId;
+  const odinSurface = await readOdinProviderSurface(options, providerId, selectedSurfaceId);
   if (odinSurface) {
     return odinSurface;
   }
@@ -415,7 +445,7 @@ async function readProviderSurface(options, catalog, providerId) {
     const document = await requestProviderSnapshotFirstDocumentWithReconnect(
       route.endpoint,
       "gamecult.eve.surface_state.v1",
-      [providerId, `surface:${providerId}`],
+      surfaceRecordKeys(catalog, providerId, selectedSurfaceId),
       { timeoutMs: 4_000, messageIdPrefix: "hermodr-surface-state" },
     );
     const state = normalizeSurfaceState(decodeMessagePack(bufferFromPayload(document.payload)), document.recordKey);
@@ -437,13 +467,13 @@ async function readProviderSurface(options, catalog, providerId) {
   const document = await requestProviderSnapshotFirstDocumentWithReconnect(
     route.endpoint,
     "gamecult.eve.surface.v1",
-    [providerId, `eve:surface:${providerId}`],
+    surfaceRecordKeys(catalog, providerId, selectedSurfaceId),
     { timeoutMs: 4_000, messageIdPrefix: "hermodr-surface" },
   );
   return normalizeEveSurfaceDocument(decodeMessagePack(bufferFromPayload(document.payload)), providerId);
 }
 
-async function readOdinProviderSurface(options, providerId) {
+async function readOdinProviderSurface(options, providerId, surfaceId = providerId) {
   const peer = await CultMesh.createRudpPeer(
     "hermodr-browser-lowering-odin-provider-surface",
     odinRudpConnectionId,
@@ -459,7 +489,7 @@ async function readOdinProviderSurface(options, providerId) {
     const document = await requestCultNetRawSnapshotFirstDocument(
       peer,
       "gamecult.eve.surface_state.v1",
-      [providerId, `surface:${providerId}`],
+      [surfaceId, `surface:${surfaceId}`, providerId, `surface:${providerId}`],
       { timeoutMs: 4_000, messageIdPrefix: "hermodr-odin-provider-surface" },
     );
     const state = normalizeSurfaceState(decodeMessagePack(bufferFromPayload(document.payload)), document.recordKey);
@@ -767,6 +797,7 @@ function normalizeProviderAdvertisement(value, recordKey) {
     endpoints,
     routes,
     commandSurface: value.commandSurface || null,
+    surfaces: normalizeAdvertisedSurfaces(value.surfaces),
     status: value.status || "unknown",
     updatedAt: value.updatedAt || value.generatedAt || null,
   };
@@ -897,34 +928,20 @@ async function serveCultMeshAsset(options, response, uri, headOnly = false) {
     response.end(asset.bytes);
     return;
   } catch (error) {
-    if (!options.enableLocalAetheriaAssetFallback) {
-      writeJson(response, 502, {
-        ok: false,
-        error: `Provider-owned CultMesh CDN fetch failed for ${assetUri}: ${error instanceof Error ? error.message : String(error)}`,
-        note: "Odin only exposes asset route metadata. Hermodr does not read asset bytes from Odin's cache or from Aetheria's filesystem.",
-      });
-      return;
-    }
-  }
-
-  const filePath = resolveAetheriaResourceAsset(options, assetUri);
-  if (options.enableLocalAetheriaAssetFallback && filePath) {
-    await serveStaticFile(response, filePath, undefined, headOnly);
+    writeJson(response, 502, {
+      ok: false,
+      error: `Provider-owned CultMesh CDN fetch failed for ${assetUri}: ${error instanceof Error ? error.message : String(error)}`,
+      note: "Hermodr resolves provider-advertised CultMesh CDN routes and never reads product filesystems.",
+    });
     return;
   }
-
-  writeJson(response, 404, {
-    ok: false,
-    error: `No provider-owned CultMesh CDN route could be lowered for ${uri}.`,
-    note: "Odin only exposes asset route metadata. Hermodr does not read asset bytes from Odin's cache.",
-  });
 }
 
 async function fetchCultMeshCdnAsset(options, assetUri) {
   const catalog = await readCatalog(options);
-  const route = findProviderCdnRoute(catalog);
+  const route = findProviderCdnRoute(catalog, assetUri);
   if (!route) {
-    throw new Error("No Aetheria provider advertised a cultmesh:// CDN route.");
+    throw new Error(`No provider advertised a CultMesh CDN route for '${assetUri}'.`);
   }
 
   const peer = await getProviderRudpPeer(route.endpoint);
@@ -1294,12 +1311,11 @@ function findProviderSnapshotRoute(catalog, providerId) {
   return null;
 }
 
-function findProviderCdnRoute(catalog) {
-  const providers = (catalog.providers || []).filter((provider) => {
-    const haystack = `${provider.id || ""} ${provider.title || ""} ${provider.canonicalService || ""}`.toLowerCase();
-    return haystack.includes("aetheria");
-  });
-  for (const provider of providers.length ? providers : (catalog.providers || [])) {
+function findProviderCdnRoute(catalog, assetUri = "") {
+  const providerHint = providerIdFromCultMeshUri(assetUri);
+  const providers = (catalog.providers || []).filter((provider) =>
+    !providerHint || provider.id === providerHint || provider.id.startsWith(`${providerHint}.`) || providerHint.startsWith(`${provider.id}.`));
+  for (const provider of providers) {
     const endpoints = [...(provider.endpoints || []), ...(provider.routes || [])];
     const route = endpoints.find((endpoint) => {
       const address = String(endpoint.uri || endpoint.endpoint || endpoint.address || "");
@@ -1428,52 +1444,12 @@ function normalizeCultMeshAssetUri(uri) {
   const text = String(uri || "").trim();
   if (!text) return "";
   if (text.startsWith("cultmesh://") || text.startsWith("resources://")) return text;
-  return `cultmesh://aetheria/assets/${text.replace(/^\/+/, "")}`;
+  throw new Error(`Asset URI '${text}' is not a provider-owned CultMesh URI.`);
 }
 
-function resolveAetheriaResourceAsset(options, uri) {
-  const parsed = parseAssetUri(uri);
-  if (!parsed) return "";
-  const aliases = {
-    "icons/ui/sun": "Sprites/Icons/Stroked/Sun.png",
-    "icons/ui/star": "Sprites/Icons/Stroked/Sun.png",
-    "icons/ui/planet": "Sprites/Icons/Stroked/Planet.png",
-    "icons/ui/gasgiant": "Sprites/Icons/Stroked/gasgiant.png",
-    "icons/ui/asteroid": "Sprites/Icons/Stroked/Planet.png",
-    "icons/ui/ship": "Sprites/Icons/Stroked/Ship.png",
-    "icons/ui/player": "Sprites/Icons/Stroked/Ship.png",
-    "icons/ui/station": "Sprites/Icons/station1.png",
-    "icons/ui/orbital": "Sprites/Icons/Stroked/orbital.png",
-    "textures/tint_splat": "Sprites/Flat UI/areaFade2.png",
-    "textures/perlines-nebula": "Sprites/MinimapBG.psd",
-  };
-  const relative = aliases[parsed.path] || parsed.resourcePath;
-  if (!relative) return "";
-  const candidates = [
-    safeJoin(options.aetheriaResourcesRoot, relative),
-    safeJoin(options.aetheriaResourcesRoot, `${relative}.png`),
-    safeJoin(options.aetheriaResourcesRoot, `${relative}.PNG`),
-  ];
-  return candidates.find((candidate) => candidate && fs.existsSync(candidate) && !fs.statSync(candidate).isDirectory()) || "";
-}
-
-function parseAssetUri(uri) {
-  const text = String(uri || "").trim();
-  if (!text) return null;
-  if (text.startsWith("resources://")) {
-    return { resourcePath: text.slice("resources://".length).replace(/^\/+/, "") };
-  }
-  if (!text.startsWith("cultmesh://")) {
-    return { path: text.replace(/^\/+/, ""), resourcePath: "" };
-  }
-  const parsed = new URL(text);
-  const parts = parsed.pathname.replace(/^\/+/, "").split("/");
-  const assetIndex = parts.indexOf("assets");
-  const pathParts = assetIndex >= 0 ? parts.slice(assetIndex + 1) : parts;
-  return {
-    path: pathParts.join("/"),
-    resourcePath: "",
-  };
+function providerIdFromCultMeshUri(uri) {
+  const match = /^cultmesh:\/\/([^/]+)/i.exec(String(uri || "").trim());
+  return match ? decodeURIComponent(match[1]) : "";
 }
 
 function contentTypeForPath(filePath) {
@@ -1497,11 +1473,6 @@ function stringOption(value, fallback) {
 function numberOption(value, fallback) {
   const parsed = Number.parseInt(String(value ?? ""), 10);
   return Number.isInteger(parsed) && parsed > 0 && parsed <= 65535 ? parsed : fallback;
-}
-
-function boolOption(value, fallback) {
-  const text = String(value ?? fallback ?? "").trim().toLowerCase();
-  return text === "1" || text === "true" || text === "yes" || text === "on";
 }
 
 function stringListOption(value, fallback, defaultValue = []) {
@@ -1543,8 +1514,17 @@ provider discovery, daemon health, or raw command transport.
 `);
 }
 
-main().catch((error) => {
-  const statusCode = error?.statusCode || 1;
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exitCode = statusCode === 409 ? 1 : statusCode;
-});
+if (require.main === module) {
+  main().catch((error) => {
+    const statusCode = error?.statusCode || 1;
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = statusCode === 409 ? 1 : statusCode;
+  });
+}
+
+module.exports = {
+  createBrowserCatalog,
+  findProviderCdnRoute,
+  normalizeProviderAdvertisement,
+  surfaceRecordKeys,
+};

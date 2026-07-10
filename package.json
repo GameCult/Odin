@@ -18,6 +18,7 @@
     "hermodr:start": "node src/hermodr-daemon.cjs",
     "rust:test": "cargo test --workspace",
     "check": "node scripts/check-syntax.cjs",
+    "test": "node --test test/*.test.cjs",
     "start": "node src/odin-coordinator.cjs"
   },
   "engines": {
