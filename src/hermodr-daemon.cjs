@@ -1063,20 +1063,20 @@ function closeProviderRudpPeers() {
 function normalizeProviderDocumentPayload(schemaId, value) {
   const documentSchema = Array.isArray(value) ? value[0] : value?.schema;
   if (
-    schemaMatches(schemaId, "gamecult.aetheria.render_splats_viewport.v1") ||
-    schemaMatches(documentSchema, "gamecult.aetheria.render_splats_viewport.v1")
+    schemaMatches(schemaId, "gamecult.fields.splats.v1") ||
+    schemaMatches(documentSchema, "gamecult.fields.splats.v1")
   ) {
     return normalizeRenderSplatsViewport(value);
   }
   if (
-    schemaMatches(schemaId, "gamecult.aetheria.gravity_viewport.v1") ||
-    schemaMatches(documentSchema, "gamecult.aetheria.gravity_viewport.v1")
+    schemaMatches(schemaId, "gamecult.fields.gravity.v1") ||
+    schemaMatches(documentSchema, "gamecult.fields.gravity.v1")
   ) {
     return normalizeGravityViewport(value);
   }
   if (
-    schemaMatches(schemaId, "gamecult.aetheria.objects_viewport.v1") ||
-    schemaMatches(documentSchema, "gamecult.aetheria.objects_viewport.v1")
+    schemaMatches(schemaId, "gamecult.fields.objects.v1") ||
+    schemaMatches(documentSchema, "gamecult.fields.objects.v1")
   ) {
     return normalizeObjectsViewport(value);
   }
