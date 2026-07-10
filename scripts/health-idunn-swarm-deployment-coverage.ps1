@@ -2,7 +2,7 @@ $ErrorActionPreference = "Stop"
 
 . (Join-Path $PSScriptRoot "idunn-deployment-targets.ps1")
 
-$unknown = @($IdunnDeploymentTargets | Where-Object { $_.Status -notin @("enforced", "runtime-enforced", "blocked", "external-owned", "not-runtime") })
+$unknown = @($IdunnDeploymentTargets | Where-Object { $_.Status -notin @("enforced", "runtime-enforced", "blocked", "external-owned", "not-runtime", "archived") })
 $enforcedWithoutDeploy = @($IdunnDeploymentTargets | Where-Object { $_.Status -eq "enforced" -and [string]::IsNullOrWhiteSpace($_.Deploy) })
 $enforcedWithoutHealth = @($IdunnDeploymentTargets | Where-Object { $_.Status -in @("enforced", "runtime-enforced") -and $_.Id -ne "idunn" -and [string]::IsNullOrWhiteSpace($_.Health) })
 $enforcedWithoutUpstream = @($IdunnDeploymentTargets | Where-Object { $_.Status -eq "enforced" -and ([string]::IsNullOrWhiteSpace($_.UpstreamRemote) -or [string]::IsNullOrWhiteSpace($_.UpstreamBranch)) })
@@ -72,4 +72,5 @@ $enforced = @($IdunnDeploymentTargets | Where-Object { $_.Status -eq "enforced" 
 $runtimeEnforced = @($IdunnDeploymentTargets | Where-Object { $_.Status -eq "runtime-enforced" })
 $blocked = @($IdunnDeploymentTargets | Where-Object { $_.Status -eq "blocked" })
 $external = @($IdunnDeploymentTargets | Where-Object { $_.Status -eq "external-owned" })
-Write-Host "Idunn deployment catalog coherent: $($IdunnDeploymentTargets.Count) targets, $($enforced.Count) deploy-enforced with upstream rollout contracts, $($runtimeEnforced.Count) runtime-enforced, $($blocked.Count) blocked, $($external.Count) external-owned, $($knownActuatorPaths.Count) cataloged actuator paths."
+$archived = @($IdunnDeploymentTargets | Where-Object { $_.Status -eq "archived" })
+Write-Host "Idunn deployment catalog coherent: $($IdunnDeploymentTargets.Count) targets, $($enforced.Count) deploy-enforced with upstream rollout contracts, $($runtimeEnforced.Count) runtime-enforced, $($blocked.Count) blocked, $($external.Count) external-owned, $($archived.Count) archived, $($knownActuatorPaths.Count) cataloged actuator paths."

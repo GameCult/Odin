@@ -2026,6 +2026,20 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 interval_seconds: 30,
             },
             DaemonTarget {
+                daemon_id: "hermodr".to_string(),
+                verse_id: "starfire.local".to_string(),
+                name: "Hermodr browser lowering".to_string(),
+                health_contract: health_contract(
+                    "hermodr.cultnet-rudp-browser-lowering-health",
+                    "failed",
+                ),
+                deploy_command: None,
+                restart_command: Some(script("restart-hermodr.ps1")),
+                release: None,
+                enabled: true,
+                interval_seconds: 30,
+            },
+            DaemonTarget {
                 daemon_id: "mimir-eve-dashboard".to_string(),
                 verse_id: "starfire.local".to_string(),
                 name: "Mimir Eve dashboard".to_string(),

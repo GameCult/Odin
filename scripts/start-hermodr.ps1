@@ -2,6 +2,9 @@ param(
   [string] $HostAddress = $(if ($env:HERMODR_BIND_HOST) { $env:HERMODR_BIND_HOST } else { "127.0.0.1" }),
   [int] $Port = $(if ($env:HERMODR_PORT) { [int]$env:HERMODR_PORT } else { 8798 }),
   [string] $OdinCultMeshUri = $(if ($env:HERMODR_ODIN_CULTMESH_URI) { $env:HERMODR_ODIN_CULTMESH_URI } elseif ($env:ODIN_CULTMESH_URI) { $env:ODIN_CULTMESH_URI } else { "cultmesh://odin/rendezvous/provider-catalog" }),
+  [string] $IdunnRudpHealth = $(if ($env:HERMODR_IDUNN_RUDP_HEALTH) { $env:HERMODR_IDUNN_RUDP_HEALTH } else { $env:IDUNN_RUDP_HEALTH }),
+  [string] $IdunnDaemon = "hermodr",
+  [string] $IdunnHealthContract = "hermodr.cultnet-rudp-browser-lowering-health",
   [string] $StateDir = $(Join-Path $PSScriptRoot "..\scratch\Hermodr"),
   [switch] $NoWindow
 )
@@ -35,6 +38,13 @@ $arguments = @(
   "--port", $Port,
   "--odin-cultmesh-uri", $OdinCultMeshUri
 )
+if (-not [string]::IsNullOrWhiteSpace($IdunnRudpHealth)) {
+  $arguments += @(
+    "--idunn-rudp-health", $IdunnRudpHealth,
+    "--idunn-daemon", $IdunnDaemon,
+    "--idunn-health-contract", $IdunnHealthContract
+  )
+}
 
 if ($NoWindow) {
   New-Item -ItemType Directory -Force -Path $StateDir | Out-Null

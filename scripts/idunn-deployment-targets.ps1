@@ -32,6 +32,19 @@ $IdunnDeploymentTargets = @(
     Reason = "start-idunn-local.ps1 is the bootstrap for Idunn itself; it is not a deploy/restart actuator over another daemon."
   },
   [pscustomobject]@{
+    Id = "hermodr"
+    Repo = "Odin"
+    LocalPath = "E:\Projects\Odin"
+    Host = "starfire"
+    Service = "Hermodr browser lowering"
+    Status = "runtime-enforced"
+    Health = "daemon-published-rudp:hermodr.cultnet-rudp-browser-lowering-health"
+    Deploy = $null
+    Restart = "$repoRoot\scripts\restart-hermodr.ps1"
+    Aliases = @()
+    Reason = "Idunn keeps Hermodr's browser lowering alive; Hermodr publishes its own RUDP health while Odin remains the CultMesh discovery authority."
+  },
+  [pscustomobject]@{
     Id = "stonks"
     Repo = "Stonks"
     LocalPath = "E:\Projects\Stonks"

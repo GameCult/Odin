@@ -2,24 +2,27 @@
 
 const dgram = require("dgram");
 const path = require("path");
+const { createRequire } = require("module");
+
+const requireCultNet = createRequire(path.resolve(
+  __dirname,
+  "..",
+  "..",
+  "..",
+  "CultLib",
+  "packages",
+  "cultnet-ts",
+  "package.json",
+));
 
 const {
   CultNetRudpSession,
   decodeRudpPacket,
   encodeCultNetMessageForWire,
   encodeRudpPacket,
-} = require("cultnet-ts");
+} = requireCultNet("./dist/index.js");
 
-const { encode } = require(path.resolve(
-  __dirname,
-  "..",
-  "..",
-  "..",
-  "CultLib",
-  "node_modules",
-  "@msgpack",
-  "msgpack",
-));
+const { encode } = requireCultNet("@msgpack/msgpack");
 
 const CULTNET_RUDP_PROTOCOL_ID = "cultnet.transport.rudp.v0";
 const IDUNN_HEALTH_RUDP_CONNECTION_ID = 0x1d0d0001;

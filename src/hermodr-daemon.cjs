@@ -7,6 +7,7 @@ const { createRequire } = require("module");
 const path = require("path");
 
 const { defineOdinDocuments } = require("./odin/documents.cjs");
+const { createIdunnRudpHealthPublisher, publishIdunnRudpHealth } = require("./odin/idunn-rudp.cjs");
 const { parseArgs } = require("./odin/utils.cjs");
 
 const repoRoot = path.resolve(__dirname, "..");
@@ -69,7 +70,22 @@ async function main() {
   console.log(`Hermodr browser lowering listening on http://${options.host}:${port}`);
   console.log(`Hermodr Odin CultMesh URI: ${options.odinCultMeshUri}`);
 
+  const idunnHealthPublisher = createIdunnRudpHealthPublisher(options.idunnRudpHealth);
+  const publishHealth = () => {
+    if (!idunnHealthPublisher) return;
+    publishIdunnRudpHealth(idunnHealthPublisher, {
+      state: "healthy",
+      detail: `Hermodr browser lowering accepts requests on http://${options.host}:${port}.`,
+      observedAt: new Date().toISOString(),
+    }).catch((error) => console.error(`Hermodr Idunn health publication failed: ${error.message}`));
+  };
+  publishHealth();
+  const healthTimer = idunnHealthPublisher
+    ? setInterval(publishHealth, options.idunnHealthIntervalMs)
+    : null;
+
   const shutdown = () => {
+    if (healthTimer) clearInterval(healthTimer);
     server.close(() => {});
     closeProviderRudpPeers();
   };
@@ -100,7 +116,28 @@ function parseOptions(argv) {
       defaultProviderCatalogKeys,
     ),
     sleipnirProviderId: stringOption(parsed.sleipnirProviderId, process.env.HERMODR_SLEIPNIR_PROVIDER_ID || "sleipnir.input-mirror.starfire"),
+    idunnRudpHealth: idunnRudpHealthOptions(parsed),
+    idunnHealthIntervalMs: Math.max(1_000, numberOption(
+      parsed.idunnHealthIntervalMs || parsed["idunn-health-interval-ms"],
+      process.env.HERMODR_IDUNN_HEALTH_INTERVAL_MS || 15_000,
+    )),
     raw: parsed,
+  };
+}
+
+function idunnRudpHealthOptions(parsed) {
+  const endpoint = stringOption(
+    parsed.idunnRudpHealth || parsed["idunn-rudp-health"],
+    process.env.HERMODR_IDUNN_RUDP_HEALTH || process.env.IDUNN_RUDP_HEALTH || "",
+  );
+  if (!endpoint) return null;
+  return {
+    endpoint,
+    daemonId: stringOption(parsed.idunnDaemon || parsed["idunn-daemon"], process.env.HERMODR_IDUNN_DAEMON || "hermodr"),
+    healthContract: stringOption(
+      parsed.idunnHealthContract || parsed["idunn-health-contract"],
+      process.env.HERMODR_IDUNN_HEALTH_CONTRACT || "hermodr.cultnet-rudp-browser-lowering-health",
+    ),
   };
 }
 
