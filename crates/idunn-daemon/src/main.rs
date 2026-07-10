@@ -57,12 +57,22 @@ struct ReleaseTarget {
 struct HealthContract {
     id: String,
     default_failure_state: String,
+    restart_on_missing_publication: bool,
 }
 
 fn health_contract(id: &str, default_failure_state: &str) -> HealthContract {
     HealthContract {
         id: id.to_string(),
         default_failure_state: default_failure_state.to_string(),
+        restart_on_missing_publication: false,
+    }
+}
+
+fn locally_supervised_health_contract(id: &str, default_failure_state: &str) -> HealthContract {
+    HealthContract {
+        id: id.to_string(),
+        default_failure_state: default_failure_state.to_string(),
+        restart_on_missing_publication: true,
     }
 }
 
@@ -645,17 +655,32 @@ fn missing_daemon_published_health(
     desired: &IdunnDesiredDaemonRecord,
     observed_at: &str,
 ) -> IdunnDaemonHealthRecord {
-    let _ = target;
+    let (state, detail, transport) = if target.health_contract.restart_on_missing_publication {
+        (
+            "failed",
+            format!(
+                "no fresh daemon-published {} record arrived over {}; Idunn owns this local restart boundary.",
+                desired.health_contract, CULTNET_RUDP_PROTOCOL_ID
+            ),
+            "cultmesh.missing-locally-supervised-daemon-publication",
+        )
+    } else {
+        (
+            "dependency-unavailable",
+            format!(
+                "no fresh daemon-published {} record arrived over {}; Idunn did not run local health probes.",
+                desired.health_contract, CULTNET_RUDP_PROTOCOL_ID
+            ),
+            "cultmesh.missing-daemon-publication",
+        )
+    };
     IdunnDaemonHealthRecord {
         daemon_id: desired.daemon_id.clone(),
-        state: "dependency-unavailable".to_string(),
-        detail: format!(
-            "no fresh daemon-published {} record arrived over {}; Idunn did not run local health probes.",
-            desired.health_contract, CULTNET_RUDP_PROTOCOL_ID
-        ),
+        state: state.to_string(),
+        detail,
         health_contract: desired.health_contract.clone(),
         publication_source: "idunn-supervisor-observation".to_string(),
-        transport: "cultmesh.missing-daemon-publication".to_string(),
+        transport: transport.to_string(),
         observed_at: observed_at.to_string(),
     }
 }
@@ -2029,7 +2054,7 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 daemon_id: "hermodr".to_string(),
                 verse_id: "starfire.local".to_string(),
                 name: "Hermodr browser lowering".to_string(),
-                health_contract: health_contract(
+                health_contract: locally_supervised_health_contract(
                     "hermodr.cultnet-rudp-browser-lowering-health",
                     "failed",
                 ),
