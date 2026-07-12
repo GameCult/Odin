@@ -166,6 +166,7 @@ struct Options {
     move_colors: Vec<String>,
     move_durations_ms: Vec<u32>,
     move_repeat_count: u32,
+    move_hue_cycle_ms: u64,
     command_id: Option<String>,
     move_host_address: Option<String>,
     move_state_sources: Vec<MoveStateSource>,
@@ -5795,7 +5796,19 @@ fn start_default_move_light_worker(
                 if suppressed.contains(&target.path) {
                     continue;
                 }
-                let color = golden_move_color_for_roster(&target.identity, &roster);
+                let now_ns = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos() as i128;
+                let color = scheduled_golden_move_color(
+                    &target.identity,
+                    &roster,
+                    0,
+                    i128::from(options.move_hue_cycle_ms) * 1_000_000,
+                    now_ns,
+                )
+                .map(|(color, _, _)| color)
+                .unwrap_or_else(|| golden_move_color_for_roster(&target.identity, &roster));
                 let report = default_move_light_report(color);
                 if let Err(error) = writer.write_report(&target.path, &report) {
                     let should_log = last_error_log_at
@@ -5873,6 +5886,35 @@ fn golden_move_color_for_roster(identity: &str, roster: &[String]) -> (u8, u8, u
     };
     let hue = ((index as f64 * GOLDEN_RATIO_CONJUGATE).fract() * 360.0 + 15.0) % 360.0;
     hsv_to_rgb(hue, 1.0, 1.0)
+}
+
+fn scheduled_golden_move_color(
+    identity: &str,
+    roster: &[String],
+    epoch_ns: i128,
+    cycle_ns: i128,
+    timestamp_ns: i128,
+) -> Option<((u8, u8, u8), i128, bool)> {
+    const GOLDEN_RATIO_CONJUGATE: f64 = 0.618_033_988_749_894_9;
+    if roster.is_empty() || cycle_ns <= 0 {
+        return None;
+    }
+    let identity_index = roster.iter().position(|candidate| candidate == identity)? as i128;
+    let roster_len = roster.len() as i128;
+    let elapsed_ns = (timestamp_ns - epoch_ns).max(0);
+    let completed_steps = elapsed_ns.saturating_mul(roster_len).div_euclid(cycle_ns);
+    let completed_cycles = completed_steps.div_euclid(roster_len);
+    let completed_in_cycle = completed_steps.rem_euclid(roster_len);
+    let descending_order = roster_len - 1 - identity_index;
+    let advanced_in_cycle = i128::from(descending_order < completed_in_cycle);
+    let sequence_index = identity_index + completed_cycles + advanced_in_cycle;
+    let hue = ((sequence_index as f64 * GOLDEN_RATIO_CONJUGATE).fract() * 360.0)
+        .rem_euclid(360.0);
+    Some((
+        hsv_to_rgb(hue, 1.0, 1.0),
+        sequence_index,
+        descending_order == completed_in_cycle,
+    ))
 }
 
 fn hsv_to_rgb(hue_degrees: f64, saturation: f64, value: f64) -> (u8, u8, u8) {
@@ -8787,6 +8829,7 @@ impl Options {
             move_colors: Vec::new(),
             move_durations_ms: Vec::new(),
             move_repeat_count: 1,
+            move_hue_cycle_ms: 1_000,
             command_id: None,
             move_host_address: None,
             move_state_sources: Vec::new(),
@@ -9103,6 +9146,11 @@ impl Options {
                         .parse()
                         .context("--repeat-count must be a positive integer")?
                 }
+                "--move-hue-cycle-ms" => {
+                    options.move_hue_cycle_ms = take_value(&mut args, "--move-hue-cycle-ms")?
+                        .parse()
+                        .context("--move-hue-cycle-ms must be a positive integer")?
+                }
                 "--command" => options.command_id = Some(take_value(&mut args, "--command")?),
                 "--move-host" => {
                     options.move_host_address = Some(take_value(&mut args, "--move-host")?)
@@ -9119,6 +9167,9 @@ impl Options {
 
         if options.interval_seconds == Some(0) {
             return Err(anyhow!("--interval-seconds must be greater than zero"));
+        }
+        if options.move_hue_cycle_ms == 0 {
+            return Err(anyhow!("--move-hue-cycle-ms must be greater than zero"));
         }
         if !options.capture_video && !options.capture_audio {
             return Err(anyhow!(
@@ -10827,6 +10878,34 @@ mod tests {
         assert!(colors.iter().any(|color| color.0 == 255 && color.1 < 100));
         assert!(colors.iter().any(|color| color.1 == 255 && color.0 < 100));
         assert!(colors.iter().any(|color| color.2 == 255 && color.0 < 100));
+    }
+
+    #[test]
+    fn scheduled_golden_colors_shift_window_in_descending_move_order() {
+        let roster = (0..4).map(|index| format!("move-{index}")).collect::<Vec<_>>();
+        let state = |millis: i128| {
+            roster
+                .iter()
+                .map(|identity| {
+                    scheduled_golden_move_color(
+                        identity,
+                        &roster,
+                        0,
+                        1_000_000_000,
+                        millis * 1_000_000,
+                    )
+                    .map(|(_, sequence, next)| (sequence, next))
+                    .unwrap()
+                })
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(state(0), vec![(0, false), (1, false), (2, false), (3, true)]);
+        assert_eq!(state(249), vec![(0, false), (1, false), (2, false), (3, true)]);
+        assert_eq!(state(250), vec![(0, false), (1, false), (2, true), (4, false)]);
+        assert_eq!(state(500), vec![(0, false), (1, true), (3, false), (4, false)]);
+        assert_eq!(state(750), vec![(0, true), (2, false), (3, false), (4, false)]);
+        assert_eq!(state(1_000), vec![(1, false), (2, false), (3, false), (4, true)]);
     }
 
     #[test]
