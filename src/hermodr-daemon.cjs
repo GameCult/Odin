@@ -284,8 +284,8 @@ function createHermodrBridge(options) {
 
 async function readCatalog(options) {
   const providerAdvertisements = mergeProviderAdvertisements([
-    ...await readOdinProviderAdvertisements(options),
     ...await readOdinSurfaceProviderCatalog(options),
+    ...await readOdinProviderAdvertisements(options),
   ]);
   return createBrowserCatalog(providerAdvertisements, options);
 }
