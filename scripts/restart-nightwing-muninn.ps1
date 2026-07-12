@@ -18,7 +18,7 @@ param(
   [string] $HidControllerRudpBind = "0.0.0.0:17888",
   [string] $HidControllerRudpAdvertise = $(if ($env:MUNINN_HID_CONTROLLER_RUDP_ADVERTISE) { $env:MUNINN_HID_CONTROLLER_RUDP_ADVERTISE } else { "10.77.0.3:17888" }),
   [string] $CommandRudpBind = "0.0.0.0:17889",
-  [string] $CommandRudpAdvertise = "10.77.0.3:17889"
+  [string] $CommandRudpAdvertise = "192.168.1.75:17889"
 )
 
 $ErrorActionPreference = "Stop"
