@@ -1340,13 +1340,10 @@ fn prepare_move_bluetooth_host_for_claim() -> Result<()> {
 }
 
 #[cfg(unix)]
-fn pickup_bluetooth_moves(active: &[ActiveMoveStateSource]) -> Result<()> {
+fn pickup_bluetooth_moves(_active: &[ActiveMoveStateSource]) -> Result<()> {
     let devices = bluetoothctl_motion_controller_devices()?;
     for device in devices {
-        if device.connected
-            || !device.trusted
-            || active_move_source_has_bluetooth_address(active, &device.address)
-        {
+        if !bluetooth_move_needs_pickup(&device) {
             continue;
         }
         match bluetoothctl_connect_device(&device.address) {
@@ -1364,21 +1361,13 @@ fn pickup_bluetooth_moves(active: &[ActiveMoveStateSource]) -> Result<()> {
     Ok(())
 }
 
+fn bluetooth_move_needs_pickup(device: &BluetoothMoveDevice) -> bool {
+    device.trusted && !device.connected
+}
+
 #[cfg(not(unix))]
 fn pickup_bluetooth_moves(_active: &[ActiveMoveStateSource]) -> Result<()> {
     Ok(())
-}
-
-#[cfg(unix)]
-fn active_move_source_has_bluetooth_address(
-    active: &[ActiveMoveStateSource],
-    address: &str,
-) -> bool {
-    bluetooth_address_move_id(address).is_some_and(|move_id| {
-        active
-            .iter()
-            .any(|state| state.source.move_id.eq_ignore_ascii_case(&move_id))
-    })
 }
 
 fn bluetooth_address_move_id(address: &str) -> Option<String> {
@@ -11031,6 +11020,28 @@ Device 00:07:04:A8:00:D0 (public)
         assert_eq!(record.source_path, "bluetooth:00:07:04:A8:00:D0");
         assert_eq!(record.bluetooth_host_address, "5C:93:A2:9C:A8:A8");
         assert_eq!(record.state, "bluetooth-waiting");
+        assert!(bluetooth_move_needs_pickup(&device));
+    }
+
+    #[test]
+    fn bluetooth_pickup_uses_bluez_state_not_stale_usb_sources() {
+        let disconnected_trusted = BluetoothMoveDevice {
+            address: "00:07:04:A8:00:D0".to_string(),
+            trusted: true,
+            connected: false,
+        };
+        let connected = BluetoothMoveDevice {
+            connected: true,
+            ..disconnected_trusted.clone()
+        };
+        let untrusted = BluetoothMoveDevice {
+            trusted: false,
+            ..disconnected_trusted.clone()
+        };
+
+        assert!(bluetooth_move_needs_pickup(&disconnected_trusted));
+        assert!(!bluetooth_move_needs_pickup(&connected));
+        assert!(!bluetooth_move_needs_pickup(&untrusted));
     }
 
     #[cfg(windows)]
