@@ -4615,7 +4615,7 @@ fn publish_move_controller_states(
 
 fn active_move_marker_camera_sources(
     options: &Options,
-    move_hue_program: Arc<Mutex<MuninnMoveHueProgramRecord>>,
+    _move_hue_program: Arc<Mutex<MuninnMoveHueProgramRecord>>,
 ) -> Vec<ActiveMoveMarkerCameraSource> {
     let mut move_roster = serve_move_state_sources(options, true)
         .into_iter()
@@ -4629,7 +4629,7 @@ fn active_move_marker_camera_sources(
         .unwrap_or_default()
         .as_nanos() as i128;
     #[cfg(feature = "psmoveapi-tracker")]
-    let program = move_hue_program
+    let program = _move_hue_program
         .lock()
         .map(|program| program.clone())
         .unwrap_or_else(|_| MuninnMoveHueProgramRecord {
@@ -4677,7 +4677,7 @@ fn active_move_marker_camera_sources(
                         camera_index,
                         options.move_tracker_exposure_milli as f32 / 1000.0,
                         move_colors.clone(),
-                        Arc::clone(&move_hue_program),
+                        Arc::clone(&_move_hue_program),
                     ))
                 }).map_or((None, None), |(observations, health)| (Some(observations), Some(health)))
             } else {
