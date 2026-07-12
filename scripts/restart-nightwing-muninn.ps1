@@ -7,7 +7,10 @@ param(
   [switch] $DiscoverMoveState = $true,
   [switch] $ClaimUsbMoves = $true,
   [string] $MoveEvidenceStream = "muninn:nightwing:move-evidence",
-  [string[]] $MoveMarkerCamera = @("nightwing-eye-1=/dev/video3"),
+  [string[]] $MoveMarkerCamera = @(
+    "nightwing-eye-0=/dev/video2",
+    "nightwing-eye-1=/dev/video3"
+  ),
   [int] $MoveTrackerExposureMilli = 100,
   [int] $IntervalSeconds = 15,
   [string] $IdunnRudpHealth = $env:IDUNN_RUDP_HEALTH,
@@ -18,11 +21,7 @@ param(
   [string] $HidControllerRudpBind = "0.0.0.0:17888",
   [string] $HidControllerRudpAdvertise = $(if ($env:MUNINN_HID_CONTROLLER_RUDP_ADVERTISE) { $env:MUNINN_HID_CONTROLLER_RUDP_ADVERTISE } else { "10.77.0.3:17888" }),
   [string] $CommandRudpBind = "0.0.0.0:17889",
-  [string] $CommandRudpAdvertise = "192.168.1.75:17889",
-  [string] $Eye0StorePath = "/home/metacrat/.local/state/gamecult/muninn/muninn-eye0.telemetry.cc",
-  [string] $Eye0EvidenceStream = "muninn:nightwing:eye-0:move-evidence",
-  [string] $Eye0RudpBind = "0.0.0.0:17890",
-  [string] $Eye0RudpAdvertise = "192.168.1.75:17890"
+  [string] $CommandRudpAdvertise = "192.168.1.75:17889"
 )
 
 $ErrorActionPreference = "Stop"
@@ -130,10 +129,6 @@ if (-not [string]::IsNullOrWhiteSpace($HidControllerRudpAdvertise)) {
 }
 $hidControllerRudpSetBlock = ($hidControllerRudpSetLines -join "`n")
 $commandRudpSetBlock = "set -- ""`$@"" --command-rudp-bind $(Quote-ShSingle $CommandRudpBind) --command-rudp-advertise $(Quote-ShSingle $CommandRudpAdvertise)"
-$eye0MoveStateSetLines = ($moveStateSpecs | ForEach-Object {
-  "set -- ""`$@"" --move-state $(Quote-ShSingle $_)"
-}) -join "`n"
-
 $remoteScript = @"
 set -eu
 mkdir -p '$LogRoot'
@@ -169,35 +164,15 @@ CULTNET_RUDP_TRACE=1 CULTMESH_URI_ODIN_RUDP='$OdinCultMeshRudpEndpoint' nohup '$
   2> '$LogRoot/muninn-serve.err.log' \
   < /dev/null &
 echo `$! > '$LogRoot/muninn.pid'
-set -- serve \
-  --store '$Eye0StorePath' \
-  --log-root '$LogRoot' \
-  --host nightwing-eye0
-$eye0MoveStateSetLines
-set -- "`$@" \
-  --move-light-passive \
-  --move-evidence-stream '$Eye0EvidenceStream' \
-  --move-marker-camera 'nightwing-eye-0=/dev/video2' \
-  --move-psmoveapi-tracker \
-  --move-tracker-exposure-milli '$MoveTrackerExposureMilli' \
-  --interval-seconds '$IntervalSeconds' \
-  --odin-cultmesh-uri '$OdinCultMeshUri' \
-  --hid-controller-rudp-bind '$Eye0RudpBind' \
-  --hid-controller-rudp-advertise '$Eye0RudpAdvertise'
-CULTNET_RUDP_TRACE=1 CULTMESH_URI_ODIN_RUDP='$OdinCultMeshRudpEndpoint' nohup '$MuninnExe' "`$@" \
-  > '$LogRoot/muninn-eye0-serve.out.log' \
-  2> '$LogRoot/muninn-eye0-serve.err.log' \
-  < /dev/null &
-echo `$! > '$LogRoot/muninn-eye0.pid'
 sleep 1
 muninn_pid="`$(cat '$LogRoot/muninn.pid')"
-eye0_pid="`$(cat '$LogRoot/muninn-eye0.pid')"
 kill -0 "`$muninn_pid" 2>/dev/null
-kill -0 "`$eye0_pid" 2>/dev/null
 muninn_cmdline="`$(tr '\0' ' ' < "/proc/`$muninn_pid/cmdline")"
 if ! printf '%s\n' "`$muninn_cmdline" | grep -F -- '--host nightwing' >/dev/null 2>&1 ||
-   ! printf '%s\n' "`$muninn_cmdline" | grep -F -- '--idunn-rudp-health $IdunnRudpHealth' >/dev/null 2>&1; then
-  echo 'Nightwing Muninn serve command line is missing Idunn RUDP health arguments' >&2
+   ! printf '%s\n' "`$muninn_cmdline" | grep -F -- '--idunn-rudp-health $IdunnRudpHealth' >/dev/null 2>&1 ||
+   ! printf '%s\n' "`$muninn_cmdline" | grep -F -- '--move-marker-camera nightwing-eye-0=/dev/video2' >/dev/null 2>&1 ||
+   ! printf '%s\n' "`$muninn_cmdline" | grep -F -- '--move-marker-camera nightwing-eye-1=/dev/video3' >/dev/null 2>&1; then
+  echo 'Nightwing Muninn serve command line is missing Idunn health or dual-camera arguments' >&2
   exit 1
 fi
 "@
