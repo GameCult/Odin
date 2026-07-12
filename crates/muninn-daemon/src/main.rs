@@ -380,6 +380,7 @@ fn serve(options: Options) -> Result<()> {
     let move_runtime_enabled = serve_should_manage_move_runtime(&options);
     let mut active_move_states =
         active_move_state_sources(serve_move_state_sources(&options, move_runtime_enabled));
+    publish_daemon_health_if_configured(&options, &mut last_idunn_health_publish_attempt_at)?;
     let mut active_move_marker_cameras = active_move_marker_camera_sources(&options);
     let mut move_marker_camera_reader = PlatformMoveMarkerCameraFrameReader::default();
     let mut active_capture_streams = Vec::new();
