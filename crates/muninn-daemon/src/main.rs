@@ -18,11 +18,14 @@ use cultnet_rs::{
     CultNetWireContract, encode_cultnet_message_to_vec,
 };
 use odin_core::{
-    EVE_PROVIDER_ADVERTISEMENT_SCHEMA, EveProviderAdvertisementRecord, IdunnDaemonHealthRecord,
-    MUNINN_CAPTURE_STREAM_COMMAND_SCHEMA, MUNINN_OBS_STREAM_CATALOG_SCHEMA,
+    EVE_PROVIDER_ADVERTISEMENT_SCHEMA, EveProviderAdvertisementRecord, EveSurfaceStateRecord,
+    IdunnDaemonHealthRecord,
+    MUNINN_CAPTURE_STREAM_COMMAND_SCHEMA, MUNINN_MOVE_HUE_PROGRAM_SCHEMA,
+    MUNINN_OBS_STREAM_CATALOG_SCHEMA,
     MuninnCaptureStreamCommandRecord, MuninnCaptureStreamRecord, MuninnCommandBoundaryCompatRecord,
     MuninnHidControllerStateRecord, MuninnMediaReceiverFeedbackRecord,
-    MuninnMoveControllerStateRecord, MuninnMoveIdentityRecord, MuninnMoveLightCommandRecord,
+    MuninnMoveControllerStateRecord, MuninnMoveHueProgramRecord, MuninnMoveIdentityRecord,
+    MuninnMoveLightCommandRecord,
     MuninnMoveMarkerCandidateRecord, MuninnObsStreamCatalogRecord, MuninnQuestAccessRecord,
     MuninnTelemetrySurfaceRecord, MuninnTransportProfileCompatRecord, OdinDocuments,
     OdinEndpointQuery, discover_provider_endpoints,
@@ -370,6 +373,7 @@ fn main() -> Result<()> {
 
 fn serve(options: Options) -> Result<()> {
     ensure_state_dirs(&options)?;
+    let move_hue_program = load_or_initialize_move_hue_program(&options)?;
     let mut move_evidence_stream = create_move_evidence_stream(&options)?;
     let mut active_move_lights = Vec::new();
     let suppressed_default_move_light_paths = Arc::new(Mutex::new(HashSet::new()));
@@ -380,7 +384,8 @@ fn serve(options: Options) -> Result<()> {
     let mut active_move_states =
         active_move_state_sources(serve_move_state_sources(&options, move_runtime_enabled));
     start_daemon_health_worker(&options);
-    let mut active_move_marker_cameras = active_move_marker_camera_sources(&options);
+    let mut active_move_marker_cameras =
+        active_move_marker_camera_sources(&options, Arc::clone(&move_hue_program));
     let mut move_marker_camera_reader = PlatformMoveMarkerCameraFrameReader::default();
     let mut active_capture_streams = Vec::new();
     let move_evidence_rudp_sender = start_hid_controller_rudp_ingress(&options)?;
@@ -388,8 +393,13 @@ fn serve(options: Options) -> Result<()> {
         stream.rudp_sender = move_evidence_rudp_sender;
     }
     if !options.move_psmoveapi_tracker {
-        start_default_move_light_worker(&options, Arc::clone(&suppressed_default_move_light_paths));
+        start_default_move_light_worker(
+            &options,
+            Arc::clone(&suppressed_default_move_light_paths),
+            Arc::clone(&move_hue_program),
+        );
     }
+    start_move_hue_program_sync_worker(&options, Arc::clone(&move_hue_program));
     start_odin_provider_lease_worker(&options);
     start_odin_capture_command_pull_worker(&options);
 
@@ -498,6 +508,101 @@ fn start_daemon_health_worker(options: &Options) {
     });
 }
 
+fn move_hue_program_key(host_id: &str) -> String {
+    format!("muninn:{host_id}:move-hue-program")
+}
+
+fn load_or_initialize_move_hue_program(
+    options: &Options,
+) -> Result<Arc<Mutex<MuninnMoveHueProgramRecord>>> {
+    let key = move_hue_program_key(&options.host_id);
+    let mut node = open_node(options, "muninn-move-hue-program-bootstrap")?;
+    let program = node.get::<MuninnMoveHueProgramRecord>(&key)?.unwrap_or_else(|| {
+        bootstrap_move_hue_program(options)
+    });
+    validate_move_hue_program(&program)?;
+    node.put(&key, &program)?;
+    Ok(Arc::new(Mutex::new(program)))
+}
+
+fn bootstrap_move_hue_program(options: &Options) -> MuninnMoveHueProgramRecord {
+    MuninnMoveHueProgramRecord {
+        program_id: move_hue_program_key(&options.host_id),
+        host_id: options.host_id.clone(),
+        mode: "animated".to_string(),
+        cycle_ms: options.move_hue_cycle_ms,
+        epoch_ns: 0,
+        hold_at_ns: 0,
+        requested_by: "muninn-bootstrap".to_string(),
+        updated_at: timestamp().unwrap_or_else(|_| "unix-0".to_string()),
+        order_mode: "descending".to_string(),
+    }
+}
+
+fn validate_move_hue_program(program: &MuninnMoveHueProgramRecord) -> Result<()> {
+    if !matches!(program.mode.as_str(), "animated" | "hold" | "static") {
+        return Err(anyhow!("unsupported Move hue mode {}", program.mode));
+    }
+    if program.cycle_ms == 0 {
+        return Err(anyhow!("Move hue cycle_ms must be greater than zero"));
+    }
+    if !matches!(
+        program.order_mode.as_str(),
+        "descending" | "ascending" | "bounce" | "rotating-lead" | "golden-permutation"
+    ) {
+        return Err(anyhow!("unsupported Move hue order mode {}", program.order_mode));
+    }
+    Ok(())
+}
+
+fn move_hue_program_timestamp_ns(program: &MuninnMoveHueProgramRecord, now_ns: i128) -> i128 {
+    match program.mode.as_str() {
+        "hold" => i128::from(program.hold_at_ns.max(program.epoch_ns)),
+        "static" => i128::from(program.epoch_ns),
+        _ => now_ns,
+    }
+}
+
+fn start_move_hue_program_sync_worker(
+    options: &Options,
+    runtime_program: Arc<Mutex<MuninnMoveHueProgramRecord>>,
+) {
+    let options = options.clone();
+    let mut activation_options = options.clone();
+    activation_options.store_path = options
+        .activation_store_path
+        .as_ref()
+        .cloned()
+        .unwrap_or_else(|| options.store_path.clone());
+    thread::spawn(move || loop {
+        let key = move_hue_program_key(&options.host_id);
+        let main_program = open_node(&options, "muninn-move-hue-program-sync")
+            .ok()
+            .and_then(|node| node.get::<MuninnMoveHueProgramRecord>(&key).ok().flatten());
+        let activation_program = open_node(
+            &activation_options,
+            "muninn-move-hue-program-activation-sync",
+        )
+        .ok()
+        .and_then(|node| node.get::<MuninnMoveHueProgramRecord>(&key).ok().flatten());
+        let program = [main_program, activation_program]
+            .into_iter()
+            .flatten()
+            .filter(|program| validate_move_hue_program(program).is_ok())
+            .max_by_key(|program| unix_timestamp_sort_key(&program.updated_at));
+        if let Some(program) = program
+            && let Ok(mut current) = runtime_program.lock()
+            && *current != program
+        {
+            *current = program.clone();
+            if let Ok(mut node) = open_node(&options, "muninn-move-hue-program-projection") {
+                let _ = node.put(&key, &program);
+            }
+        }
+        thread::sleep(Duration::from_millis(250));
+    });
+}
+
 fn tick_capture_stream_commands(
     options: &Options,
     active: &mut Vec<ActiveCaptureStreamCommand>,
@@ -555,11 +660,14 @@ fn pull_odin_capture_command_snapshot(node: &mut cultmesh_rs::CultMeshNode, opti
     if let Err(error) = node.pull_rudp_catalog_snapshot(CultMeshRudpSnapshotOptions {
         target,
         runtime_id: format!("muninn-{}-capture-command-client", options.host_id),
-        schema_ids: Some(vec![MUNINN_CAPTURE_STREAM_COMMAND_SCHEMA.to_string()]),
-        record_keys: Some(vec![latest_capture_stream_command_key(
-            &options.host_id,
-            &options.stream_id,
-        )]),
+        schema_ids: Some(vec![
+            MUNINN_CAPTURE_STREAM_COMMAND_SCHEMA.to_string(),
+            MUNINN_MOVE_HUE_PROGRAM_SCHEMA.to_string(),
+        ]),
+        record_keys: Some(vec![
+            latest_capture_stream_command_key(&options.host_id, &options.stream_id),
+            move_hue_program_key(&options.host_id),
+        ]),
         connect_timeout: Duration::from_millis(2000),
         response_timeout: Duration::from_millis(5000),
         resend_delay_ms: 15,
@@ -2770,6 +2878,134 @@ fn publish_surface(
     };
     node.put("latest", &record)?;
     node.put(&record.surface_id, &record)?;
+    publish_move_hue_eve_surface(node, options)?;
+    Ok(())
+}
+
+fn publish_move_hue_eve_surface(
+    node: &mut cultmesh_rs::CultMeshNode,
+    options: &Options,
+) -> Result<()> {
+    let program_key = move_hue_program_key(&options.host_id);
+    let program = node
+        .get::<MuninnMoveHueProgramRecord>(&program_key)?
+        .unwrap_or_else(|| bootstrap_move_hue_program(options));
+    let provider_id = muninn_provider_id(options);
+    let action = |id: &str, label: &str, mode: Option<&str>, order_mode: Option<&str>, cycle_ms: Option<u64>| {
+        json!({
+            "id": format!("{provider_id}.move-hue.{id}"),
+            "kind": "card",
+            "props": {
+                "title": label,
+                "commandId": "muninn.set-move-hue-program",
+                "action": {
+                    "type": "muninn.set-move-hue-program",
+                    "providerId": provider_id,
+                    "programId": program_key,
+                    "schema": MUNINN_MOVE_HUE_PROGRAM_SCHEMA,
+                    "mode": mode,
+                    "orderMode": order_mode,
+                    "cycleMs": cycle_ms
+                }
+            },
+            "children": []
+        })
+    };
+    let surface = EveSurfaceStateRecord {
+        provider_id: provider_id.clone(),
+        title: format!("Muninn {} Move Hue Program", options.host_id),
+        version: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64,
+        updated_at: timestamp()?,
+        surface: json!({
+            "schema": "gamecult.eve.surface.v1",
+            "id": format!("{provider_id}.move-hue.surface"),
+            "title": "Move Hue Program",
+            "root": {
+                "id": format!("{provider_id}.move-hue.root"),
+                "kind": "dashboard",
+                "props": {
+                    "title": "Move Hue Program",
+                    "summary": format!("{} / {} / {} ms", program.mode, program.order_mode, program.cycle_ms)
+                },
+                "children": [
+                    {
+                        "id": format!("{provider_id}.move-hue.state"),
+                        "kind": "pane",
+                        "props": { "title": "State" },
+                        "children": [
+                            { "id": format!("{provider_id}.move-hue.state.mode"), "kind": "text", "props": { "text": format!("mode: {}", program.mode) } },
+                            { "id": format!("{provider_id}.move-hue.state.order"), "kind": "text", "props": { "text": format!("order: {}", program.order_mode) } },
+                            { "id": format!("{provider_id}.move-hue.state.rate"), "kind": "text", "props": { "text": format!("cycle: {} ms", program.cycle_ms) } }
+                        ]
+                    },
+                    {
+                        "id": format!("{provider_id}.move-hue.mode"),
+                        "kind": "pane",
+                        "props": { "title": "Mode" },
+                        "children": [
+                            action("mode-animated", "Animate", Some("animated"), None, None),
+                            action("mode-hold", "Hold Current Colors", Some("hold"), None, None),
+                            action("mode-static", "Static Palette", Some("static"), None, None)
+                        ]
+                    },
+                    {
+                        "id": format!("{provider_id}.move-hue.order"),
+                        "kind": "pane",
+                        "props": { "title": "Update Order" },
+                        "children": [
+                            action("order-descending", "Descending", None, Some("descending"), None),
+                            action("order-ascending", "Ascending", None, Some("ascending"), None),
+                            action("order-bounce", "Bounce", None, Some("bounce"), None),
+                            action("order-rotating", "Rotating Lead", None, Some("rotating-lead"), None),
+                            action("order-golden", "Golden Permutation", None, Some("golden-permutation"), None)
+                        ]
+                    },
+                    {
+                        "id": format!("{provider_id}.move-hue.rate"),
+                        "kind": "pane",
+                        "props": { "title": "Cycle Rate" },
+                        "children": [
+                            action("rate-500", "2 Hz", None, None, Some(500)),
+                            action("rate-1000", "1 Hz", None, None, Some(1000)),
+                            action("rate-2000", "0.5 Hz", None, None, Some(2000))
+                        ]
+                    }
+                ]
+            }
+        }),
+    };
+    node.put(&provider_id, &surface)?;
+    if let Some(target) = resolve_odin_cultmesh_uri(options) {
+        let _ = node.publish_document_to_rudp_catalog(
+            &program_key,
+            &program,
+            CultMeshRudpDocumentPublishOptions {
+                target,
+                runtime_id: muninn_daemon_id(options),
+                source_role: Some("muninn.move-hue-program-state".to_string()),
+                tags: vec!["muninn".to_string(), "move-hue-program".to_string()],
+                flush_timeout: Duration::from_millis(300),
+                resend_delay_ms: 15,
+                ..CultMeshRudpDocumentPublishOptions::default()
+            },
+        );
+        let _ = node.publish_document_to_rudp_catalog(
+            &provider_id,
+            &surface,
+            CultMeshRudpDocumentPublishOptions {
+                target,
+                runtime_id: muninn_daemon_id(options),
+                source_role: Some("muninn.move-hue-eve-surface".to_string()),
+                tags: vec!["muninn".to_string(), "eve-surface".to_string()],
+                flush_timeout: Duration::from_millis(300),
+                resend_delay_ms: 15,
+                ..CultMeshRudpDocumentPublishOptions::default()
+            },
+        );
+    }
     Ok(())
 }
 
@@ -2970,6 +3206,18 @@ fn publish_runtime_boundary_records(
                     "schema": "muninn.move_light_command.v1",
                     "owns": [
                         "PS Move light pulses for attached local controllers"
+                    ]
+                },
+                {
+                    "command": "muninn.set-move-hue-program",
+                    "ingress": "cultmesh-document",
+                    "schema": MUNINN_MOVE_HUE_PROGRAM_SCHEMA,
+                    "record_key": move_hue_program_key(&options.host_id),
+                    "owns": [
+                        "live Move hue mode",
+                        "cycle duration",
+                        "deterministic update order",
+                        "hold timestamp"
                     ]
                 }
             ],
@@ -4254,7 +4502,10 @@ fn publish_move_controller_states(
     Ok(())
 }
 
-fn active_move_marker_camera_sources(options: &Options) -> Vec<ActiveMoveMarkerCameraSource> {
+fn active_move_marker_camera_sources(
+    options: &Options,
+    move_hue_program: Arc<Mutex<MuninnMoveHueProgramRecord>>,
+) -> Vec<ActiveMoveMarkerCameraSource> {
     let mut move_roster = serve_move_state_sources(options, true)
         .into_iter()
         .map(|source| source.move_id)
@@ -4265,15 +4516,31 @@ fn active_move_marker_camera_sources(options: &Options) -> Vec<ActiveMoveMarkerC
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos() as i128;
+    let program = move_hue_program
+        .lock()
+        .map(|program| program.clone())
+        .unwrap_or_else(|_| MuninnMoveHueProgramRecord {
+            program_id: move_hue_program_key(&options.host_id),
+            host_id: options.host_id.clone(),
+            mode: "animated".to_string(),
+            cycle_ms: options.move_hue_cycle_ms,
+            epoch_ns: 0,
+            hold_at_ns: 0,
+            requested_by: "tracker-bootstrap".to_string(),
+            updated_at: "unix-0".to_string(),
+            order_mode: "descending".to_string(),
+        });
+    let program_timestamp_ns = move_hue_program_timestamp_ns(&program, now_ns);
     let move_colors = move_roster
         .iter()
         .filter_map(|identity| {
-            scheduled_golden_move_color(
+            scheduled_golden_move_color_with_order(
                 identity,
                 &move_roster,
-                0,
-                i128::from(options.move_hue_cycle_ms) * 1_000_000,
-                now_ns,
+                i128::from(program.epoch_ns),
+                i128::from(program.cycle_ms) * 1_000_000,
+                program_timestamp_ns,
+                &program.order_mode,
             )
             .map(|(color, _, _)| (identity.clone(), [color.0, color.1, color.2]))
         })
@@ -4294,7 +4561,7 @@ fn active_move_marker_camera_sources(options: &Options) -> Vec<ActiveMoveMarkerC
                         camera_index,
                         options.move_tracker_exposure_milli as f32 / 1000.0,
                         move_colors.clone(),
-                        options.move_hue_cycle_ms,
+                        Arc::clone(&move_hue_program),
                     ))
                 })
             } else {
@@ -4396,20 +4663,29 @@ fn publish_move_marker_camera_frames(
 }
 
 #[cfg(feature = "psmoveapi-tracker")]
+static PSMOVE_API_TRACKER_AUTHORITY: Mutex<()> = Mutex::new(());
+
+#[cfg(feature = "psmoveapi-tracker")]
 fn start_psmoveapi_tracker_worker(
     camera_id: String,
     camera_index: i32,
     exposure: f32,
     colors: Vec<(String, [u8; 3])>,
-    move_hue_cycle_ms: u64,
+    move_hue_program: Arc<Mutex<MuninnMoveHueProgramRecord>>,
 ) -> mpsc::Receiver<Vec<muninn_psmoveapi_tracker::PsmoveApiObservation>> {
     let (sender, receiver) = mpsc::sync_channel(1);
     thread::spawn(move || {
-        let mut tracker = match muninn_psmoveapi_tracker::PsmoveApiTracker::open(
-            camera_index,
-            exposure,
-            &colors,
-        ) {
+        let mut tracker = match PSMOVE_API_TRACKER_AUTHORITY
+            .lock()
+            .map_err(|_| "PSMoveAPI tracker authority lock was poisoned".to_string())
+            .and_then(|_authority| {
+                muninn_psmoveapi_tracker::PsmoveApiTracker::open(
+                    camera_index,
+                    exposure,
+                    &colors,
+                )
+                .map_err(|error| error.to_string())
+            }) {
             Ok(tracker) => tracker,
             Err(error) => {
                 eprintln!("Muninn PSMoveAPI tracker failed camera={camera_id} index={camera_index}: {error}");
@@ -4418,6 +4694,10 @@ fn start_psmoveapi_tracker_worker(
         };
         let mut last_calibration_at = Instant::now();
         loop {
+            let Ok(_authority) = PSMOVE_API_TRACKER_AUTHORITY.lock() else {
+                eprintln!("Muninn PSMoveAPI tracker authority lock poisoned camera={camera_id}");
+                return;
+            };
             if last_calibration_at.elapsed() >= Duration::from_secs(30) {
                 tracker.observe_connected();
                 last_calibration_at = Instant::now();
@@ -4428,13 +4708,18 @@ fn start_psmoveapi_tracker_worker(
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_nanos() as i128;
+            let Some(program) = move_hue_program.lock().ok().map(|program| program.clone()) else {
+                continue;
+            };
+            let program_timestamp_ns = move_hue_program_timestamp_ns(&program, now_ns);
             for identity in &roster {
-                if let Some((color, _, _)) = scheduled_golden_move_color(
+                if let Some((color, _, _)) = scheduled_golden_move_color_with_order(
                     identity,
                     &roster,
-                    0,
-                    i128::from(move_hue_cycle_ms) * 1_000_000,
-                    now_ns,
+                    i128::from(program.epoch_ns),
+                    i128::from(program.cycle_ms) * 1_000_000,
+                    program_timestamp_ns,
+                    &program.order_mode,
                 ) {
                     tracker.set_expected_color(identity, [color.0, color.1, color.2]);
                 }
@@ -5805,6 +6090,7 @@ fn tick_move_light_commands(
 fn start_default_move_light_worker(
     options: &Options,
     suppressed_paths: Arc<Mutex<HashSet<String>>>,
+    move_hue_program: Arc<Mutex<MuninnMoveHueProgramRecord>>,
 ) {
     if !serve_should_manage_platform_move_lights(options) {
         return;
@@ -5832,16 +6118,32 @@ fn start_default_move_light_worker(
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_nanos() as i128;
+            let program = move_hue_program
+                .lock()
+                .map(|program| program.clone())
+                .unwrap_or_else(|_| MuninnMoveHueProgramRecord {
+                    program_id: move_hue_program_key(&options.host_id),
+                    host_id: options.host_id.clone(),
+                    mode: "static".to_string(),
+                    cycle_ms: options.move_hue_cycle_ms,
+                    epoch_ns: 0,
+                    hold_at_ns: 0,
+                    requested_by: "poisoned-runtime-fallback".to_string(),
+                    updated_at: "unix-0".to_string(),
+                    order_mode: "descending".to_string(),
+                });
+            let program_timestamp_ns = move_hue_program_timestamp_ns(&program, now_ns);
             for target in targets {
                 if suppressed.contains(&target.path) {
                     continue;
                 }
-                let Some((color, sequence_index, _)) = scheduled_golden_move_color(
+                let Some((color, sequence_index, _)) = scheduled_golden_move_color_with_order(
                     &target.identity,
                     &roster,
-                    0,
-                    i128::from(options.move_hue_cycle_ms) * 1_000_000,
-                    now_ns,
+                    i128::from(program.epoch_ns),
+                    i128::from(program.cycle_ms) * 1_000_000,
+                    program_timestamp_ns,
+                    &program.order_mode,
                 ) else {
                     continue;
                 };
@@ -5864,7 +6166,7 @@ fn start_default_move_light_worker(
                     written_sequence_by_target.insert(target_key, sequence_index);
                 }
             }
-            let cycle_ns = u128::from(options.move_hue_cycle_ms) * 1_000_000;
+            let cycle_ns = u128::from(program.cycle_ms) * 1_000_000;
             let subslot_ns = (cycle_ns / roster.len().max(1) as u128).max(1);
             let current_ns = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -5946,6 +6248,24 @@ fn scheduled_golden_move_color(
     cycle_ns: i128,
     timestamp_ns: i128,
 ) -> Option<((u8, u8, u8), i128, bool)> {
+    scheduled_golden_move_color_with_order(
+        identity,
+        roster,
+        epoch_ns,
+        cycle_ns,
+        timestamp_ns,
+        "descending",
+    )
+}
+
+fn scheduled_golden_move_color_with_order(
+    identity: &str,
+    roster: &[String],
+    epoch_ns: i128,
+    cycle_ns: i128,
+    timestamp_ns: i128,
+    order_mode: &str,
+) -> Option<((u8, u8, u8), i128, bool)> {
     const GOLDEN_RATIO_CONJUGATE: f64 = 0.618_033_988_749_894_9;
     if roster.is_empty() || cycle_ns <= 0 {
         return None;
@@ -5956,16 +6276,50 @@ fn scheduled_golden_move_color(
     let completed_steps = elapsed_ns.saturating_mul(roster_len).div_euclid(cycle_ns);
     let completed_cycles = completed_steps.div_euclid(roster_len);
     let completed_in_cycle = completed_steps.rem_euclid(roster_len);
-    let descending_order = roster_len - 1 - identity_index;
-    let advanced_in_cycle = i128::from(descending_order < completed_in_cycle);
+    let update_order = move_hue_update_order(roster.len(), completed_cycles, order_mode);
+    let order_position = update_order.iter().position(|index| *index == identity_index as usize)? as i128;
+    let advanced_in_cycle = i128::from(order_position < completed_in_cycle);
     let sequence_index = identity_index + completed_cycles + advanced_in_cycle;
     let hue = ((sequence_index as f64 * GOLDEN_RATIO_CONJUGATE).fract() * 360.0)
         .rem_euclid(360.0);
     Some((
         hsv_to_rgb(hue, 1.0, 1.0),
         sequence_index,
-        descending_order == completed_in_cycle,
+        order_position == completed_in_cycle,
     ))
+}
+
+fn move_hue_update_order(move_count: usize, cycle: i128, mode: &str) -> Vec<usize> {
+    let mut order = (0..move_count).collect::<Vec<_>>();
+    match mode {
+        "ascending" => order,
+        "bounce" if cycle.rem_euclid(2) == 1 => order,
+        "rotating-lead" => {
+            order.reverse();
+            if !order.is_empty() {
+                let rotation = cycle.rem_euclid(order.len() as i128) as usize;
+                order.rotate_left(rotation);
+            }
+            order
+        }
+        "golden-permutation" => {
+            const GOLDEN_RATIO_CONJUGATE: f64 = 0.618_033_988_749_894_9;
+            order.sort_by(|left, right| {
+                let left_phase = (((cycle * move_count as i128 + *left as i128) as f64)
+                    * GOLDEN_RATIO_CONJUGATE)
+                    .fract();
+                let right_phase = (((cycle * move_count as i128 + *right as i128) as f64)
+                    * GOLDEN_RATIO_CONJUGATE)
+                    .fract();
+                left_phase.total_cmp(&right_phase)
+            });
+            order
+        }
+        _ => {
+            order.reverse();
+            order
+        }
+    }
 }
 
 fn hsv_to_rgb(hue_degrees: f64, saturation: f64, value: f64) -> (u8, u8, u8) {
@@ -10869,6 +11223,40 @@ mod tests {
     }
 
     #[test]
+    fn muninn_eve_surface_exposes_live_move_hue_program_controls() {
+        let store_path = std::env::temp_dir().join(format!(
+            "muninn-move-hue-eve-{}.cc",
+            timestamp_ns().unwrap()
+        ));
+        let options = Options::parse(
+            [
+                "serve",
+                "--store",
+                store_path.to_str().unwrap(),
+                "--host",
+                "nightwing",
+                "--odin-cultmesh-uri",
+                "none",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap();
+        let _ = load_or_initialize_move_hue_program(&options).unwrap();
+        let mut node = open_node(&options, "muninn-move-hue-eve-test").unwrap();
+        publish_surface(&mut node, &options, "idle", &[]).unwrap();
+        let surface = node
+            .get_required::<EveSurfaceStateRecord>("muninn.telemetry.nightwing")
+            .unwrap();
+        let encoded = surface.surface.to_string();
+        assert!(encoded.contains("Hold Current Colors"));
+        assert!(encoded.contains("golden-permutation"));
+        assert!(encoded.contains(MUNINN_MOVE_HUE_PROGRAM_SCHEMA));
+        drop(node);
+        let _ = fs::remove_file(store_path);
+    }
+
+    #[test]
     fn move_light_command_writes_ps_move_led_report() {
         let command = pending_move_light_command();
         let mut writer = RecordingMoveLightWriter::default();
@@ -10957,6 +11345,19 @@ mod tests {
         assert_eq!(state(500), vec![(0, false), (1, true), (3, false), (4, false)]);
         assert_eq!(state(750), vec![(0, true), (2, false), (3, false), (4, false)]);
         assert_eq!(state(1_000), vec![(1, false), (2, false), (3, false), (4, true)]);
+    }
+
+    #[test]
+    fn hue_update_order_modes_are_deterministic_per_cycle() {
+        assert_eq!(move_hue_update_order(4, 0, "descending"), vec![3, 2, 1, 0]);
+        assert_eq!(move_hue_update_order(4, 0, "ascending"), vec![0, 1, 2, 3]);
+        assert_eq!(move_hue_update_order(4, 0, "bounce"), vec![3, 2, 1, 0]);
+        assert_eq!(move_hue_update_order(4, 1, "bounce"), vec![0, 1, 2, 3]);
+        assert_eq!(move_hue_update_order(4, 0, "rotating-lead"), vec![3, 2, 1, 0]);
+        assert_eq!(move_hue_update_order(4, 1, "rotating-lead"), vec![2, 1, 0, 3]);
+        let first = move_hue_update_order(4, 23, "golden-permutation");
+        assert_eq!(first, move_hue_update_order(4, 23, "golden-permutation"));
+        assert_eq!(first.iter().copied().collect::<HashSet<_>>().len(), 4);
     }
 
     #[test]
@@ -12566,7 +12967,10 @@ Device 00:07:04:A8:00:D0 (public)
             options.move_marker_camera_sources[0].device_path,
             PathBuf::from("/dev/video0")
         );
-        let active = active_move_marker_camera_sources(&options);
+        let active = active_move_marker_camera_sources(
+            &options,
+            Arc::new(Mutex::new(bootstrap_move_hue_program(&options))),
+        );
         assert_eq!(active.len(), 1);
         assert_eq!(
             active[0].frame_source.stream_id,
@@ -12614,7 +13018,10 @@ Device 00:07:04:A8:00:D0 (public)
                 y8[y * 32 + x] = 255;
             }
         }
-        let mut active = active_move_marker_camera_sources(&options);
+        let mut active = active_move_marker_camera_sources(
+            &options,
+            Arc::new(Mutex::new(bootstrap_move_hue_program(&options))),
+        );
         let mut reader = RecordingMoveMarkerCameraReader {
             frames: vec![y8],
             configs: Vec::new(),
@@ -12687,7 +13094,10 @@ Device 00:07:04:A8:00:D0 (public)
                 y8[y * 32 + x] = 255;
             }
         }
-        let mut active_cameras = active_move_marker_camera_sources(&options);
+        let mut active_cameras = active_move_marker_camera_sources(
+            &options,
+            Arc::new(Mutex::new(bootstrap_move_hue_program(&options))),
+        );
         let mut reader = RecordingMoveMarkerCameraReader {
             frames: vec![y8.clone(), y8],
             configs: Vec::new(),
@@ -12765,7 +13175,10 @@ Device 00:07:04:A8:00:D0 (public)
                 y8[y * 32 + x] = 255;
             }
         }
-        let mut active = active_move_marker_camera_sources(&options);
+        let mut active = active_move_marker_camera_sources(
+            &options,
+            Arc::new(Mutex::new(bootstrap_move_hue_program(&options))),
+        );
         let mut reader = RecordingMoveMarkerCameraReader {
             frames: vec![y8],
             configs: Vec::new(),

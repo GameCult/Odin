@@ -45,6 +45,7 @@ pub const MUNINN_MOVE_CONTROLLER_STATE_SCHEMA: &str = "muninn.move_controller_st
 pub const MUNINN_HID_CONTROLLER_STATE_SCHEMA: &str = "muninn.hid_controller_state.v1";
 pub const MUNINN_MOVE_IDENTITY_SCHEMA: &str = "muninn.move_identity.v1";
 pub const MUNINN_MOVE_LIGHT_COMMAND_SCHEMA: &str = "muninn.move_light_command.v1";
+pub const MUNINN_MOVE_HUE_PROGRAM_SCHEMA: &str = "muninn.move_hue_program.v1";
 pub const MUNINN_QUEST_ACCESS_SCHEMA: &str = "muninn.quest_access.v1";
 pub const MUNINN_COMMAND_BOUNDARY_SCHEMA: &str = "muninn.command_boundary.v1";
 pub const MUNINN_TRANSPORT_PROFILE_SCHEMA: &str = "muninn.transport_profile.v1";
@@ -1169,6 +1170,32 @@ pub struct MuninnMoveLightCommandRecord {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(
+    type = "muninn.move_hue_program",
+    schema = "muninn.move_hue_program.v1"
+)]
+pub struct MuninnMoveHueProgramRecord {
+    #[cultcache(key = 0)]
+    pub program_id: String,
+    #[cultcache(key = 1)]
+    pub host_id: String,
+    #[cultcache(key = 2)]
+    pub mode: String,
+    #[cultcache(key = 3)]
+    pub cycle_ms: u64,
+    #[cultcache(key = 4)]
+    pub epoch_ns: i64,
+    #[cultcache(key = 5)]
+    pub hold_at_ns: i64,
+    #[cultcache(key = 6)]
+    pub requested_by: String,
+    #[cultcache(key = 7)]
+    pub updated_at: String,
+    #[cultcache(key = 8, default)]
+    pub order_mode: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
 #[cultcache(type = "muninn.quest_access", schema = "muninn.quest_access.v1")]
 pub struct MuninnQuestAccessRecord {
     #[cultcache(key = 0)]
@@ -1293,6 +1320,7 @@ cultmesh_rs::cultmesh_documents!(OdinDocuments {
     MuninnHidControllerStateRecord => MUNINN_HID_CONTROLLER_STATE_SCHEMA,
     MuninnMoveIdentityRecord => MUNINN_MOVE_IDENTITY_SCHEMA,
     MuninnMoveLightCommandRecord => MUNINN_MOVE_LIGHT_COMMAND_SCHEMA,
+    MuninnMoveHueProgramRecord => MUNINN_MOVE_HUE_PROGRAM_SCHEMA,
     MuninnQuestAccessRecord => MUNINN_QUEST_ACCESS_SCHEMA,
     MuninnCommandBoundaryCompatRecord => MUNINN_COMMAND_BOUNDARY_SCHEMA,
     MuninnTransportProfileCompatRecord => MUNINN_TRANSPORT_PROFILE_SCHEMA,
