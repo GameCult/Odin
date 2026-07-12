@@ -1049,6 +1049,8 @@ pub struct MuninnMoveMarkerCandidateRecord {
     pub score: f32,
     #[cultcache(key = 14)]
     pub observed_at: String,
+    #[cultcache(key = 15, default)]
+    pub move_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq, DatabaseEntry)]

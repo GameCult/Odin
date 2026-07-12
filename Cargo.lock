@@ -505,6 +505,7 @@ dependencies = [
  "cultnet-rs",
  "libc",
  "muninn-move-tracker",
+ "muninn-psmoveapi-tracker",
  "odin-core",
  "rmp-serde",
  "serde",
@@ -516,6 +517,10 @@ dependencies = [
 
 [[package]]
 name = "muninn-move-tracker"
+version = "0.1.0"
+
+[[package]]
+name = "muninn-psmoveapi-tracker"
 version = "0.1.0"
 
 [[package]]

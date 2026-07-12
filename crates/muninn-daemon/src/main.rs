@@ -177,6 +177,8 @@ struct Options {
     move_marker_threshold_min: u8,
     move_marker_min_area_px: u32,
     move_marker_max_candidates: u32,
+    move_psmoveapi_tracker: bool,
+    move_tracker_exposure_milli: u32,
     move_evidence_stream_id: Option<String>,
     move_evidence_verse_id: String,
     move_evidence_ring_slots: usize,
@@ -294,6 +296,9 @@ struct ActiveMoveMarkerCameraSource {
     source: MoveMarkerCameraSource,
     frame_source: MoveMarkerFrameSource,
     sequence: u64,
+    #[cfg(feature = "psmoveapi-tracker")]
+    psmoveapi_tracker: Option<muninn_psmoveapi_tracker::PsmoveApiTracker>,
+    last_psmoveapi_calibration_at: Option<Instant>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -382,7 +387,9 @@ fn serve(options: Options) -> Result<()> {
     if let Some(stream) = move_evidence_stream.as_mut() {
         stream.rudp_sender = move_evidence_rudp_sender;
     }
-    start_default_move_light_worker(&options, Arc::clone(&suppressed_default_move_light_paths));
+    if !options.move_psmoveapi_tracker {
+        start_default_move_light_worker(&options, Arc::clone(&suppressed_default_move_light_paths));
+    }
     start_odin_provider_lease_worker(&options);
 
     loop {
@@ -3477,6 +3484,7 @@ fn build_move_marker_candidate_record(
         peak_luma: candidate.peak_luma,
         score: candidate.score,
         observed_at,
+        move_id: String::new(),
     }
 }
 
@@ -4211,6 +4219,13 @@ fn publish_move_controller_states(
 }
 
 fn active_move_marker_camera_sources(options: &Options) -> Vec<ActiveMoveMarkerCameraSource> {
+    let move_colors: Vec<(String, [u8; 3])> = serve_move_state_sources(options, true)
+        .into_iter()
+        .map(|source| {
+            let (red, green, blue) = default_move_color_for_identity(&source.move_id);
+            (source.move_id, [red, green, blue])
+        })
+        .collect();
     options
         .move_marker_camera_sources
         .iter()
@@ -4219,6 +4234,24 @@ fn active_move_marker_camera_sources(options: &Options) -> Vec<ActiveMoveMarkerC
                 "muninn:{}:{}:move-marker-candidates",
                 options.host_id, source.camera_id
             );
+            #[cfg(feature = "psmoveapi-tracker")]
+            let psmoveapi_tracker = if options.move_psmoveapi_tracker {
+                video_device_index(&source.device_path).and_then(|camera_index| {
+                    match muninn_psmoveapi_tracker::PsmoveApiTracker::open(
+                        camera_index,
+                        options.move_tracker_exposure_milli as f32 / 1000.0,
+                        &move_colors,
+                    ) {
+                        Ok(tracker) => Some(tracker),
+                        Err(error) => {
+                            eprintln!("Muninn PSMoveAPI tracker failed camera={} path={}: {error}", source.camera_id, source.device_path.display());
+                            None
+                        }
+                    }
+                })
+            } else {
+                None
+            };
             ActiveMoveMarkerCameraSource {
                 source: source.clone(),
                 frame_source: MoveMarkerFrameSource {
@@ -4241,6 +4274,9 @@ fn active_move_marker_camera_sources(options: &Options) -> Vec<ActiveMoveMarkerC
                     },
                 },
                 sequence: 0,
+                #[cfg(feature = "psmoveapi-tracker")]
+                psmoveapi_tracker,
+                last_psmoveapi_calibration_at: None,
             }
         })
         .collect()
@@ -4262,6 +4298,38 @@ fn publish_move_marker_camera_frames(
         frame_source.tracker_config.frame_sequence = camera.sequence;
         frame_source.tracker_config.source_id_hash =
             stable_marker_camera_source_hash(&frame_source);
+        #[cfg(feature = "psmoveapi-tracker")]
+        if let Some(tracker) = camera.psmoveapi_tracker.as_mut() {
+            let calibration_due = camera.last_psmoveapi_calibration_at
+                .is_none_or(|last| last.elapsed() >= Duration::from_secs(5));
+            if calibration_due {
+                tracker.calibrate_connected();
+                camera.last_psmoveapi_calibration_at = Some(Instant::now());
+            }
+            let observed_at = timestamp()?;
+            marker_candidates.extend(tracker.update().into_iter().map(|observation| {
+                let radius = observation.radius_px.max(0.0);
+                MuninnMoveMarkerCandidateRecord {
+                    stream_id: frame_source.stream_id.clone(),
+                    host_id: frame_source.host_id.clone(),
+                    camera_id: frame_source.camera_id.clone(),
+                    frame_sequence: camera.sequence,
+                    source_id_hash: frame_source.tracker_config.source_id_hash,
+                    tile_x: 0,
+                    tile_y: 0,
+                    center_x_px: observation.center_x_px,
+                    center_y_px: observation.center_y_px,
+                    radius_px: radius,
+                    area_px: (std::f32::consts::PI * radius * radius).round() as u32,
+                    mean_luma: 0.0,
+                    peak_luma: 0,
+                    score: (1.0 - observation.age_ms.max(0) as f32 / 250.0).clamp(0.0, 1.0),
+                    observed_at: observed_at.clone(),
+                    move_id: observation.move_id,
+                }
+            }));
+            continue;
+        }
         let Some(frame) = reader.read_luma_frame(&camera.source, &frame_source)? else {
             continue;
         };
@@ -4280,6 +4348,10 @@ fn publish_move_marker_camera_frames(
         )?;
     }
     Ok(())
+}
+
+fn video_device_index(path: &Path) -> Option<i32> {
+    path.file_name()?.to_str()?.strip_prefix("video")?.parse().ok()
 }
 
 fn stable_marker_camera_source_hash(source: &MoveMarkerFrameSource) -> u64 {
@@ -8661,6 +8733,8 @@ impl Options {
             move_marker_threshold_min: 180,
             move_marker_min_area_px: 4,
             move_marker_max_candidates: 64,
+            move_psmoveapi_tracker: false,
+            move_tracker_exposure_milli: 100,
             move_evidence_stream_id: None,
             move_evidence_verse_id: "mimir-live".to_string(),
             move_evidence_ring_slots: 4,
@@ -8839,6 +8913,11 @@ impl Options {
                 "--move-marker-max-candidates" => {
                     options.move_marker_max_candidates =
                         take_value(&mut args, "--move-marker-max-candidates")?.parse()?
+                }
+                "--move-psmoveapi-tracker" => options.move_psmoveapi_tracker = true,
+                "--move-tracker-exposure-milli" => {
+                    options.move_tracker_exposure_milli =
+                        take_value(&mut args, "--move-tracker-exposure-milli")?.parse()?
                 }
                 "--move-evidence-stream" => {
                     options.move_evidence_stream_id =
@@ -9035,6 +9114,14 @@ impl Options {
                 "--move-marker-max-candidates must be greater than zero"
             ));
         }
+        if options.move_tracker_exposure_milli > 1000 {
+            return Err(anyhow!("--move-tracker-exposure-milli must be within 0..=1000"));
+        }
+        if options.move_psmoveapi_tracker && !cfg!(feature = "psmoveapi-tracker") {
+            return Err(anyhow!(
+                "--move-psmoveapi-tracker requires a Muninn build with the psmoveapi-tracker feature"
+            ));
+        }
         for (name, value) in [
             ("--quest-serial", options.quest_serial.as_ref()),
             (
@@ -9166,7 +9253,7 @@ fn parse_move_marker_camera_source(value: &str) -> Result<MoveMarkerCameraSource
 }
 
 fn help_text() -> &'static str {
-    "Usage: muninn [serve|activate|request-stream|capture-stream-status|obs-catalog-status|request-move-light|move-light-status|move-identity-status|move-source-status|move-state-status|claim-move-host|quest-access-status] [--store <path>] [--activate-store <path>] [--stream-action <start|stop>] [--target-host <cultmesh-uri>] [--media-transport <rudp>] [--media-packet-bytes <bytes>] [--rudp-video-bitrate-kbps <kbps>] [--rudp-latency-budget-ms <ms>] [--video-source <source-id=label>] [--audio-source <source-id=label>] [--audio-source-id <source-id>] [--no-video] [--no-audio] [--loopback-script <path>] [--ffmpeg <path>] [--odin-cultmesh-uri <cultmesh-uri>] [--move-state <move-id>=<hidraw-path>] [--move-marker-camera <camera-id>=<device-path>] [--move-marker-width <px>] [--move-marker-height <px>] [--move-marker-fps <fps>] [--move-host <bt-addr>] [--move-evidence-stream <stream-id>] [--move-evidence-verse <verse-id>] [--move-evidence-ring-slots <slots>] [--move-evidence-slot-bytes <bytes>] [--move-evidence-snapshot <path>] [--quest-adb] [--quest-serial <serial>] [--quest-input-stream <stream-id>] [--quest-pose-stream <stream-id>] [--quest-video-input-stream <stream-id>] [--idunn-rudp-health <addr>] [--idunn-daemon <id>] [--idunn-health-contract <contract>] [--dry-run] [--health]\n\nMuninn is Odin's portable telemetry Verse assembler. serve publishes cheap typed telemetry affordances, optional Quest USB access surfaces, and the explicitly configured Move runtime; when serve receives --move-state, --move-marker-camera, --move-host, or --move-evidence-stream it may publish source-local Move controller state, source-local optical marker candidates, typed Move identity records, a CultMesh Move evidence stream, optionally write a latest one-copy Move proof evidence snapshot for Mimir field capture/replay, and keep USB-attached PS Moves claimed to that explicit Bluetooth host; serve consumes typed capture stream commands from Odin/CultMesh plus its local activation store and owns the local ffmpeg/loopback activation child lifecycle, resolves media targets from Odin/CultMesh provider advertisements, and pays startup respect to Odin through --odin-cultmesh-uri by publishing its provider advertisement once; activate starts an explicitly requested local CultNet RUDP stream as a daemon child after resolving the cultmesh:// media target URI through Odin; request-stream publishes a typed capture stream command through Odin/CultMesh using --odin-cultmesh-uri; obs-catalog-status pulls Odin-owned muninn.obs_stream_catalog discovery into the local compatibility store for OBS; capture-stream-status reads typed capture stream command receipts; use --no-video or --no-audio to request one leg over the CultNet RUDP media lane; request-move-light publishes a typed Move light command for Muninn serve to execute; move-light-status reads typed command receipts; move-identity-status reads typed Move identity records; move-source-status prints live Move source discovery; move-state-status reads typed controller-state records; claim-move-host assigns USB-attached PS Moves to a Bluetooth host; quest-access-status reads typed Quest access state. In --health mode, the Idunn RUDP flags publish the same typed daemon health document to Idunn for explicit diagnostics."
+    "Usage: muninn [serve|activate|request-stream|capture-stream-status|obs-catalog-status|request-move-light|move-light-status|move-identity-status|move-source-status|move-state-status|claim-move-host|quest-access-status] [--store <path>] [--activate-store <path>] [--stream-action <start|stop>] [--target-host <cultmesh-uri>] [--media-transport <rudp>] [--media-packet-bytes <bytes>] [--rudp-video-bitrate-kbps <kbps>] [--rudp-latency-budget-ms <ms>] [--video-source <source-id=label>] [--audio-source <source-id=label>] [--audio-source-id <source-id>] [--no-video] [--no-audio] [--loopback-script <path>] [--ffmpeg <path>] [--odin-cultmesh-uri <cultmesh-uri>] [--move-state <move-id>=<hidraw-path>] [--move-marker-camera <camera-id>=<device-path>] [--move-psmoveapi-tracker] [--move-tracker-exposure-milli <0..1000>] [--move-marker-width <px>] [--move-marker-height <px>] [--move-marker-fps <fps>] [--move-host <bt-addr>] [--move-evidence-stream <stream-id>] [--move-evidence-verse <verse-id>] [--move-evidence-ring-slots <slots>] [--move-evidence-slot-bytes <bytes>] [--move-evidence-snapshot <path>] [--quest-adb] [--quest-serial <serial>] [--quest-input-stream <stream-id>] [--quest-pose-stream <stream-id>] [--quest-video-input-stream <stream-id>] [--idunn-rudp-health <addr>] [--idunn-daemon <id>] [--idunn-health-contract <contract>] [--dry-run] [--health]\n\nMuninn is Odin's portable telemetry Verse assembler. serve publishes cheap typed telemetry affordances, optional Quest USB access surfaces, and the explicitly configured Move runtime; when serve receives --move-state, --move-marker-camera, --move-host, or --move-evidence-stream it may publish source-local Move controller state, source-local optical marker candidates, typed Move identity records, a CultMesh Move evidence stream, optionally write a latest one-copy Move proof evidence snapshot for Mimir field capture/replay, and keep USB-attached PS Moves claimed to that explicit Bluetooth host; --move-psmoveapi-tracker delegates camera exposure, orb calibration/color, and optical extraction to the reference PSMoveAPI backend and suppresses Muninn's raw default LED refresher; serve consumes typed capture stream commands from Odin/CultMesh plus its local activation store and owns the local ffmpeg/loopback activation child lifecycle, resolves media targets from Odin/CultMesh provider advertisements, and pays startup respect to Odin through --odin-cultmesh-uri by publishing its provider advertisement once; activate starts an explicitly requested local CultNet RUDP stream as a daemon child after resolving the cultmesh:// media target URI through Odin; request-stream publishes a typed capture stream command through Odin/CultMesh using --odin-cultmesh-uri; obs-catalog-status pulls Odin-owned muninn.obs_stream_catalog discovery into the local compatibility store for OBS; capture-stream-status reads typed capture stream command receipts; use --no-video or --no-audio to request one leg over the CultNet RUDP media lane; request-move-light publishes a typed Move light command for Muninn serve to execute; move-light-status reads typed command receipts; move-identity-status reads typed Move identity records; move-source-status prints live Move source discovery; move-state-status reads typed controller-state records; claim-move-host assigns USB-attached PS Moves to a Bluetooth host; quest-access-status reads typed Quest access state. In --health mode, the Idunn RUDP flags publish the same typed daemon health document to Idunn for explicit diagnostics."
 }
 
 fn parse_move_state_source(value: &str) -> Result<MoveStateSource> {
@@ -11270,6 +11357,7 @@ Device 00:07:04:A8:00:D0 (public)
         peak_luma: u32,
         score: f32,
         observed_at: String,
+        move_id: String,
     }
 
     struct RecordingMoveStateReader {
@@ -12233,6 +12321,7 @@ Device 00:07:04:A8:00:D0 (public)
         assert!(marker.mean_luma > 250.0);
         assert!(marker.score > 0.65);
         assert_eq!(marker.observed_at, "unix-1");
+        assert!(marker.move_id.is_empty());
     }
 
     #[test]

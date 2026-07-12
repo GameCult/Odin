@@ -1,0 +1,10 @@
+[package]
+name = "muninn-psmoveapi-tracker"
+version = "0.1.0"
+edition = "2024"
+description = "Safe Muninn ownership wrapper for the upstream PSMoveAPI tracker ABI"
+
+[lib]
+name = "muninn_psmoveapi_tracker"
+
+[dependencies]
