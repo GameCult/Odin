@@ -286,6 +286,7 @@ struct ActiveMoveStateSource {
     joystick_axes: [i16; 16],
     joystick_buttons: [bool; 32],
     light_hidraw_path: Option<String>,
+    latest_move_record: Option<MuninnMoveControllerStateRecord>,
 }
 
 struct ActiveMoveMarkerCameraSource {
@@ -409,9 +410,15 @@ fn serve(options: Options) -> Result<()> {
                 move_evidence_stream.as_mut(),
                 hid_controller_stream.as_mut(),
             )?;
+            let latest_move_controller_states: Vec<MuninnMoveControllerStateRecord> =
+                active_move_states
+                    .iter()
+                    .filter_map(|state| state.latest_move_record.clone())
+                    .collect();
             publish_move_marker_camera_frames(
                 &mut active_move_marker_cameras,
                 &mut move_marker_camera_reader,
+                &latest_move_controller_states,
                 move_evidence_stream.as_mut(),
             )?;
             publish_quest_access_if_requested(&mut node, &options)?;
@@ -1067,6 +1074,7 @@ fn active_move_state_source(source: MoveStateSource) -> ActiveMoveStateSource {
         sequence: 0,
         joystick_axes: [0; 16],
         joystick_buttons: [false; 32],
+        latest_move_record: None,
     }
 }
 
@@ -3346,17 +3354,6 @@ fn write_move_evidence_snapshot(
         .with_context(|| format!("writing Move proof evidence snapshot {}", path.display()))
 }
 
-fn publish_move_marker_candidates_from_luma_frame(
-    stream: &mut ActiveMoveEvidenceStream,
-    source: &MoveMarkerFrameSource,
-    y8_frame: &[u8],
-    observed_at: String,
-) -> Result<Option<cultmesh_rs::CultMeshStreamFrameHandle>> {
-    let marker_candidates =
-        extract_move_marker_candidates_from_luma_frame(source, y8_frame, observed_at)?;
-    publish_move_evidence_stream_frame(stream, &marker_candidates, &[])
-}
-
 fn extract_move_marker_candidates_from_luma_frame(
     source: &MoveMarkerFrameSource,
     y8_frame: &[u8],
@@ -4131,6 +4128,7 @@ fn publish_move_controller_states(
             )
         };
         put_move_controller_state_receipt(node, options, &record)?;
+        state.latest_move_record = Some(record.clone());
         published_records.push(record);
     }
     if let Some(stream) = move_evidence_stream {
@@ -4178,6 +4176,7 @@ fn active_move_marker_camera_sources(options: &Options) -> Vec<ActiveMoveMarkerC
 fn publish_move_marker_camera_frames(
     active: &mut [ActiveMoveMarkerCameraSource],
     reader: &mut impl MoveMarkerCameraFrameReader,
+    latest_move_controller_states: &[MuninnMoveControllerStateRecord],
     move_evidence_stream: Option<&mut ActiveMoveEvidenceStream>,
 ) -> Result<()> {
     let Some(stream) = move_evidence_stream else {
@@ -4193,7 +4192,13 @@ fn publish_move_marker_camera_frames(
             continue;
         };
         let observed_at = timestamp()?;
-        publish_move_marker_candidates_from_luma_frame(stream, &frame_source, &frame, observed_at)?;
+        let marker_candidates =
+            extract_move_marker_candidates_from_luma_frame(&frame_source, &frame, observed_at)?;
+        publish_move_evidence_stream_frame(
+            stream,
+            &marker_candidates,
+            latest_move_controller_states,
+        )?;
     }
     Ok(())
 }
@@ -11607,6 +11612,7 @@ Device 00:07:04:A8:00:D0 (public)
             joystick_axes: [0; 16],
             joystick_buttons: [false; 32],
             light_hidraw_path: None,
+            latest_move_record: None,
         }];
         let mut reader = RecordingMoveStateReader {
             reports: Vec::new(),
@@ -11623,6 +11629,13 @@ Device 00:07:04:A8:00:D0 (public)
                 "nightwing:move-usb:move-controller-state",
             )
             .unwrap();
+        assert_eq!(
+            active[0]
+                .latest_move_record
+                .as_ref()
+                .map(|record| record.sequence),
+            Some(1)
+        );
         assert_eq!(record.sequence, 1);
         assert_eq!(record.host_id, "nightwing");
         assert_eq!(record.move_id, "move-usb");
@@ -11922,14 +11935,15 @@ Device 00:07:04:A8:00:D0 (public)
             .unwrap()
             .expect("move evidence option should create a stream");
 
-        let handle = publish_move_marker_candidates_from_luma_frame(
-            &mut stream,
+        let marker_candidates = extract_move_marker_candidates_from_luma_frame(
             &frame_source,
             &y8,
             "unix-1".to_string(),
         )
-        .unwrap()
-        .expect("marker candidates should publish a frame");
+        .unwrap();
+        let handle = publish_move_evidence_stream_frame(&mut stream, &marker_candidates, &[])
+            .unwrap()
+            .expect("marker candidates should publish a frame");
 
         assert_eq!(handle.stream_id, "muninn:nightwing:move-evidence");
         let lease = stream
@@ -12052,7 +12066,8 @@ Device 00:07:04:A8:00:D0 (public)
             .unwrap()
             .expect("marker camera should create stream");
 
-        publish_move_marker_camera_frames(&mut active, &mut reader, Some(&mut stream)).unwrap();
+        publish_move_marker_camera_frames(&mut active, &mut reader, &[], Some(&mut stream))
+            .unwrap();
 
         assert_eq!(active[0].sequence, 1);
         assert_eq!(reader.configs.len(), 1);
@@ -12079,6 +12094,79 @@ Device 00:07:04:A8:00:D0 (public)
             decoded.3[0].source_id_hash,
             reader.configs[0].source_id_hash
         );
+    }
+
+    #[test]
+    fn move_marker_camera_tick_bundles_latest_controller_state() {
+        let options = Options::parse(
+            [
+                "serve",
+                "--host",
+                "nightwing",
+                "--move-state",
+                "move-usb=/dev/input/js0",
+                "--move-marker-camera",
+                "ps3eye0=/dev/video0",
+                "--move-evidence-stream",
+                "muninn:nightwing:move-evidence",
+                "--move-marker-width",
+                "32",
+                "--move-marker-height",
+                "32",
+                "--move-marker-threshold-min",
+                "180",
+                "--move-marker-min-area-px",
+                "4",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap();
+        let mut y8 = vec![0u8; 32 * 32];
+        for y in 8..12 {
+            for x in 10..14 {
+                y8[y * 32 + x] = 255;
+            }
+        }
+        let mut active_cameras = active_move_marker_camera_sources(&options);
+        let mut reader = RecordingMoveMarkerCameraReader {
+            frames: vec![y8],
+            configs: Vec::new(),
+        };
+        let source = options.move_state_sources[0].clone();
+        let controller = build_move_controller_state_record_from_joystick(
+            &options,
+            &source,
+            7,
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 0, 0, 0, 0, 0, 0],
+            [false; 32],
+            123_456_789,
+            "unix-123".to_string(),
+        );
+        let mut stream = create_move_evidence_stream(&options)
+            .unwrap()
+            .expect("marker camera should create stream");
+
+        publish_move_marker_camera_frames(
+            &mut active_cameras,
+            &mut reader,
+            std::slice::from_ref(&controller),
+            Some(&mut stream),
+        )
+        .unwrap();
+
+        let lease = stream
+            .catalog
+            .ring("muninn:nightwing:move-evidence")
+            .and_then(CultMeshSharedMemoryFrameRing::try_acquire_latest_read)
+            .expect("latest bundled evidence frame should be readable");
+        let decoded: DecodedMoveEvidenceStreamFrame = rmp_serde::from_slice(lease.bytes()).unwrap();
+
+        assert_eq!(decoded.3.len(), 1);
+        assert_eq!(decoded.4.len(), 1);
+        assert_eq!(decoded.4[0].move_id, "move-usb");
+        assert_eq!(decoded.4[0].sequence, 7);
+        assert_eq!(decoded.4[0].source_path, "/dev/input/js0");
     }
 
     #[test]
@@ -12126,7 +12214,8 @@ Device 00:07:04:A8:00:D0 (public)
             .unwrap()
             .expect("marker camera should create stream");
 
-        publish_move_marker_camera_frames(&mut active, &mut reader, Some(&mut stream)).unwrap();
+        publish_move_marker_camera_frames(&mut active, &mut reader, &[], Some(&mut stream))
+            .unwrap();
 
         let snapshot_bytes = fs::read(&snapshot_path).expect("snapshot should be written");
         let snapshot: DecodedMimirMoveProofEvidenceFrameSnapshot =
