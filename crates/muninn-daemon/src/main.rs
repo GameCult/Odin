@@ -5779,6 +5779,7 @@ fn start_default_move_light_worker(
     thread::spawn(move || {
         let mut writer = HidMoveLightWriter;
         let mut last_error_log_at = None::<Instant>;
+        let mut written_sequence_by_target = HashMap::<String, i128>::new();
         loop {
             let states = active_move_state_sources(serve_move_state_sources(&options, true));
             let targets = default_move_light_paths(&states, true);
@@ -5792,23 +5793,27 @@ fn start_default_move_light_worker(
                 .lock()
                 .map(|paths| paths.clone())
                 .unwrap_or_default();
+            let now_ns = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as i128;
             for target in targets {
                 if suppressed.contains(&target.path) {
                     continue;
                 }
-                let now_ns = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos() as i128;
-                let color = scheduled_golden_move_color(
+                let Some((color, sequence_index, _)) = scheduled_golden_move_color(
                     &target.identity,
                     &roster,
                     0,
                     i128::from(options.move_hue_cycle_ms) * 1_000_000,
                     now_ns,
-                )
-                .map(|(color, _, _)| color)
-                .unwrap_or_else(|| golden_move_color_for_roster(&target.identity, &roster));
+                ) else {
+                    continue;
+                };
+                let target_key = format!("{}:{}", target.identity, target.path);
+                if written_sequence_by_target.get(&target_key) == Some(&sequence_index) {
+                    continue;
+                }
                 let report = default_move_light_report(color);
                 if let Err(error) = writer.write_report(&target.path, &report) {
                     let should_log = last_error_log_at
@@ -5820,9 +5825,20 @@ fn start_default_move_light_worker(
                         );
                         last_error_log_at = Some(Instant::now());
                     }
+                } else {
+                    written_sequence_by_target.insert(target_key, sequence_index);
                 }
             }
-            thread::sleep(Duration::from_millis(100));
+            let cycle_ns = u128::from(options.move_hue_cycle_ms) * 1_000_000;
+            let subslot_ns = (cycle_ns / roster.len().max(1) as u128).max(1);
+            let current_ns = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let until_boundary_ns = subslot_ns - current_ns % subslot_ns;
+            thread::sleep(Duration::from_nanos(
+                until_boundary_ns.min(u128::from(u64::MAX)) as u64,
+            ));
         }
     });
 }
