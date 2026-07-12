@@ -30,6 +30,8 @@ use odin_core::{
     MuninnTelemetrySurfaceRecord, MuninnTransportProfileCompatRecord, OdinDocuments,
     OdinEndpointQuery, discover_provider_endpoints,
 };
+#[cfg(feature = "psmoveapi-tracker")]
+use odin_core::MuninnMoveTrackerHealthRecord;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -311,6 +313,8 @@ struct ActiveMoveMarkerCameraSource {
     sequence: u64,
     #[cfg(feature = "psmoveapi-tracker")]
     psmoveapi_observations: Option<mpsc::Receiver<Vec<muninn_psmoveapi_tracker::PsmoveApiObservation>>>,
+    #[cfg(feature = "psmoveapi-tracker")]
+    psmoveapi_health: Option<mpsc::Receiver<MuninnMoveTrackerHealthRecord>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -456,6 +460,7 @@ fn serve(options: Options) -> Result<()> {
                 &latest_move_controller_states,
                 move_evidence_stream.as_mut(),
             )?;
+            publish_move_tracker_health(&mut node, &mut active_move_marker_cameras)?;
             publish_quest_access_if_requested(&mut node, &options)?;
             let state = if active_stream_ids.is_empty() {
                 "idle"
@@ -4618,10 +4623,12 @@ fn active_move_marker_camera_sources(
         .collect::<Vec<_>>();
     move_roster.sort();
     move_roster.dedup();
+    #[cfg(feature = "psmoveapi-tracker")]
     let now_ns = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos() as i128;
+    #[cfg(feature = "psmoveapi-tracker")]
     let program = move_hue_program
         .lock()
         .map(|program| program.clone())
@@ -4636,7 +4643,9 @@ fn active_move_marker_camera_sources(
             updated_at: "unix-0".to_string(),
             order_mode: "descending".to_string(),
         });
+    #[cfg(feature = "psmoveapi-tracker")]
     let program_timestamp_ns = move_hue_program_timestamp_ns(&program, now_ns);
+    #[cfg(feature = "psmoveapi-tracker")]
     let move_colors = move_roster
         .iter()
         .filter_map(|identity| {
@@ -4660,18 +4669,19 @@ fn active_move_marker_camera_sources(
                 options.host_id, source.camera_id
             );
             #[cfg(feature = "psmoveapi-tracker")]
-            let psmoveapi_observations = if options.move_psmoveapi_tracker {
+            let (psmoveapi_observations, psmoveapi_health) = if options.move_psmoveapi_tracker {
                 video_device_index(&source.device_path).and_then(|camera_index| {
                     Some(start_psmoveapi_tracker_worker(
+                        options.host_id.clone(),
                         source.camera_id.clone(),
                         camera_index,
                         options.move_tracker_exposure_milli as f32 / 1000.0,
                         move_colors.clone(),
                         Arc::clone(&move_hue_program),
                     ))
-                })
+                }).map_or((None, None), |(observations, health)| (Some(observations), Some(health)))
             } else {
-                None
+                (None, None)
             };
             ActiveMoveMarkerCameraSource {
                 source: source.clone(),
@@ -4697,6 +4707,8 @@ fn active_move_marker_camera_sources(
                 sequence: 0,
                 #[cfg(feature = "psmoveapi-tracker")]
                 psmoveapi_observations,
+                #[cfg(feature = "psmoveapi-tracker")]
+                psmoveapi_health,
             }
         })
         .collect()
@@ -4773,13 +4785,15 @@ static PSMOVE_API_TRACKER_AUTHORITY: Mutex<()> = Mutex::new(());
 
 #[cfg(feature = "psmoveapi-tracker")]
 fn start_psmoveapi_tracker_worker(
+    host_id: String,
     camera_id: String,
     camera_index: i32,
     exposure: f32,
     colors: Vec<(String, [u8; 3])>,
     move_hue_program: Arc<Mutex<MuninnMoveHueProgramRecord>>,
-) -> mpsc::Receiver<Vec<muninn_psmoveapi_tracker::PsmoveApiObservation>> {
+) -> (mpsc::Receiver<Vec<muninn_psmoveapi_tracker::PsmoveApiObservation>>, mpsc::Receiver<MuninnMoveTrackerHealthRecord>) {
     let (sender, receiver) = mpsc::sync_channel(1);
+    let (health_sender, health_receiver) = mpsc::sync_channel(1);
     thread::spawn(move || {
         let mut tracker = match PSMOVE_API_TRACKER_AUTHORITY
             .lock()
@@ -4794,11 +4808,21 @@ fn start_psmoveapi_tracker_worker(
             }) {
             Ok(tracker) => tracker,
             Err(error) => {
+                let _ = health_sender.try_send(MuninnMoveTrackerHealthRecord {
+                    health_id: format!("muninn:{host_id}:{camera_id}:move-tracker-health"), host_id: host_id.clone(), camera_id: camera_id.clone(), camera_index,
+                    state: "failed".to_string(), camera_name: String::new(), camera_api: String::new(), width: 0, height: 0, exposure,
+                    calibrated_controller_count: 0, update_count: 0, observation_count: 0, latest_observation_count: 0,
+                    last_observation_at: String::new(), detail: error.clone(), updated_at: timestamp().unwrap_or_else(|_| "unix-0".to_string()),
+                });
                 eprintln!("Muninn PSMoveAPI tracker failed camera={camera_id} index={camera_index}: {error}");
                 return;
             }
         };
+        let camera_info = tracker.camera_info().clone();
         let mut last_calibration_at = Instant::now();
+        let mut update_count = 0u64;
+        let mut observation_count = 0u64;
+        let mut last_observation_at = String::new();
         loop {
             let Ok(_authority) = PSMOVE_API_TRACKER_AUTHORITY.lock() else {
                 eprintln!("Muninn PSMoveAPI tracker authority lock poisoned camera={camera_id}");
@@ -4831,15 +4855,44 @@ fn start_psmoveapi_tracker_worker(
                 }
             }
             let observations = tracker.update();
+            update_count = update_count.saturating_add(1);
+            observation_count = observation_count.saturating_add(observations.len() as u64);
+            if !observations.is_empty() { last_observation_at = timestamp().unwrap_or_else(|_| "unix-0".to_string()); }
+            let health = MuninnMoveTrackerHealthRecord {
+                health_id: format!("muninn:{host_id}:{camera_id}:move-tracker-health"), host_id: host_id.clone(), camera_id: camera_id.clone(), camera_index,
+                state: "running".to_string(), camera_name: camera_info.name.clone(), camera_api: camera_info.api.clone(), width: camera_info.width,
+                height: camera_info.height, exposure: camera_info.exposure, calibrated_controller_count: tracker.tracked_controller_count() as u32,
+                update_count, observation_count, latest_observation_count: observations.len() as u32, last_observation_at: last_observation_at.clone(),
+                detail: String::new(), updated_at: timestamp().unwrap_or_else(|_| "unix-0".to_string()),
+            };
+            match health_sender.try_send(health) {
+                Ok(()) | Err(mpsc::TrySendError::Full(_)) => {}
+                Err(mpsc::TrySendError::Disconnected(_)) => return,
+            }
             match sender.try_send(observations) {
                 Ok(()) | Err(mpsc::TrySendError::Full(_)) => {}
                 Err(mpsc::TrySendError::Disconnected(_)) => return,
             }
         }
     });
-    receiver
+    (receiver, health_receiver)
 }
 
+#[cfg(feature = "psmoveapi-tracker")]
+fn publish_move_tracker_health(node: &mut cultmesh_rs::CultMeshNode, active: &mut [ActiveMoveMarkerCameraSource]) -> Result<()> {
+    for camera in active {
+        let Some(receiver) = camera.psmoveapi_health.as_ref() else { continue; };
+        let mut latest = None;
+        while let Ok(record) = receiver.try_recv() { latest = Some(record); }
+        if let Some(record) = latest { node.put(&record.health_id, &record)?; }
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "psmoveapi-tracker"))]
+fn publish_move_tracker_health(_node: &mut cultmesh_rs::CultMeshNode, _active: &mut [ActiveMoveMarkerCameraSource]) -> Result<()> { Ok(()) }
+
+#[cfg(feature = "psmoveapi-tracker")]
 fn video_device_index(path: &Path) -> Option<i32> {
     path.file_name()?.to_str()?.strip_prefix("video")?.parse().ok()
 }
