@@ -1222,14 +1222,23 @@ fn live_move_state_sources(options: &Options) -> Vec<MoveStateSource> {
         return options.move_state_sources.clone();
     }
 
+    merge_move_state_sources(discovered, &options.move_state_sources)
+}
+
+fn merge_move_state_sources(
+    discovered: Vec<MoveStateSource>,
+    configured: &[MoveStateSource],
+) -> Vec<MoveStateSource> {
     let mut sources = discovered;
-    for source in &options.move_state_sources {
-        if is_joystick_path(&source.hidraw_path)
-            && sources
-                .iter()
-                .any(|discovered| discovered.hidraw_path == source.hidraw_path)
-        {
-            continue;
+    for source in configured {
+        if is_joystick_path(&source.hidraw_path) {
+            if let Some(discovered) = sources
+                .iter_mut()
+                .find(|discovered| discovered.hidraw_path == source.hidraw_path)
+            {
+                discovered.move_id = source.move_id.clone();
+                continue;
+            }
         }
         if !sources.iter().any(|discovered| discovered == source) {
             sources.push(source.clone());
@@ -11848,6 +11857,28 @@ Device 00:07:04:A8:00:D0 (public)
             !active
                 .iter()
                 .any(|state| state.source.move_id == "move-old")
+        );
+    }
+
+    #[test]
+    fn configured_move_identity_canonicalizes_discovered_joystick_path() {
+        let discovered = vec![MoveStateSource {
+            move_id: "hid-js0".to_string(),
+            hidraw_path: "/dev/input/js0".to_string(),
+        }];
+        let configured = vec![MoveStateSource {
+            move_id: "move-000704a800d0".to_string(),
+            hidraw_path: "/dev/input/js0".to_string(),
+        }];
+
+        let merged = merge_move_state_sources(discovered, &configured);
+
+        assert_eq!(
+            merged,
+            vec![MoveStateSource {
+                move_id: "move-000704a800d0".to_string(),
+                hidraw_path: "/dev/input/js0".to_string(),
+            }]
         );
     }
 
