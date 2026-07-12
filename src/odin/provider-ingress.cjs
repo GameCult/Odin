@@ -107,13 +107,19 @@ function normalizeDocumentPayload(record) {
     default:
       break;
   }
-  if (Array.isArray(payload) && payload.length === 1 && payload[0] && typeof payload[0] === "object" && !Array.isArray(payload[0])) {
-    return payload[0];
+  let normalized = payload;
+  for (let depth = 0; depth < 4; depth += 1) {
+    if (Array.isArray(normalized) && normalized.length === 1 && normalized[0] && typeof normalized[0] === "object") {
+      normalized = normalized[0];
+      continue;
+    }
+    if (normalized?.value && typeof normalized.value === "object" && !Array.isArray(normalized.value)) {
+      normalized = normalized.value;
+      continue;
+    }
+    break;
   }
-  if (payload?.value && typeof payload.value === "object" && !Array.isArray(payload.value)) {
-    return payload.value;
-  }
-  return payload || {};
+  return normalized || {};
 }
 
 function surfaceProviderId(surfaceState) {
