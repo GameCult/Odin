@@ -33,7 +33,7 @@ if (-not [string]::IsNullOrWhiteSpace($HidControllerRudpBind) -and [string]::IsN
 
 Get-CimInstance Win32_Process |
   Where-Object {
-    $_.Name -ieq "muninn.exe" -and
+    $_.Name -like "muninn*.exe" -and
     $_.CommandLine -like "*serve*" -and
     $_.CommandLine -like "*--host*starfire*"
   } |
@@ -112,7 +112,7 @@ function Start-MuninnServeProcess {
 function Get-StarfireMuninnServeProcess {
   return Get-CimInstance Win32_Process |
     Where-Object {
-      $_.Name -ieq "muninn.exe" -and
+      $_.Name -like "muninn*.exe" -and
       $_.CommandLine -like "*serve*" -and
       $_.CommandLine -like "*--host*starfire*"
     } |
