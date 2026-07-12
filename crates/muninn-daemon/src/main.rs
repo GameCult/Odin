@@ -5769,17 +5769,12 @@ fn start_default_move_light_worker(
                 .lock()
                 .map(|paths| paths.clone())
                 .unwrap_or_default();
-            let seconds = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs_f64();
-
             for target in targets {
                 if suppressed.contains(&target.path) {
                     continue;
                 }
                 let color = default_move_color_for_identity(&target.identity);
-                let report = default_move_light_report(color, seconds);
+                let report = default_move_light_report(color);
                 if let Err(error) = writer.write_report(&target.path, &report) {
                     let should_log = last_error_log_at
                         .is_none_or(|logged_at| logged_at.elapsed() >= Duration::from_secs(5));
@@ -5878,13 +5873,8 @@ fn stable_u64_hash(value: &str) -> u64 {
     if hash == 0 { 1 } else { hash }
 }
 
-fn default_move_light_report(color: (u8, u8, u8), seconds: f64) -> [u8; PS_MOVE_LED_REPORT_LEN] {
-    let intensity = seconds.sin().abs() * 0.5 + 0.5;
-    move_light_report(
-        scale_color_channel(color.0, intensity),
-        scale_color_channel(color.1, intensity),
-        scale_color_channel(color.2, intensity),
-    )
+fn default_move_light_report(color: (u8, u8, u8)) -> [u8; PS_MOVE_LED_REPORT_LEN] {
+    move_light_report(color.0, color.1, color.2)
 }
 
 fn move_light_report(red: u8, green: u8, blue: u8) -> [u8; PS_MOVE_LED_REPORT_LEN] {
@@ -5894,10 +5884,6 @@ fn move_light_report(red: u8, green: u8, blue: u8) -> [u8; PS_MOVE_LED_REPORT_LE
     report[3] = green;
     report[4] = blue;
     report
-}
-
-fn scale_color_channel(channel: u8, intensity: f64) -> u8 {
-    ((f64::from(channel) * intensity).round()).clamp(0.0, 255.0) as u8
 }
 
 fn default_move_light_path(source_path: &str) -> Option<String> {
@@ -10764,13 +10750,8 @@ mod tests {
     }
 
     #[test]
-    fn default_move_light_report_pulses_between_half_and_full_brightness() {
-        let half = default_move_light_report((100, 80, 60), 0.0);
-        assert_eq!(half.len(), PS_MOVE_LED_REPORT_LEN);
-        assert_eq!(&half[..5], &[0x06, 0, 50, 40, 30]);
-        assert!(half[5..].iter().all(|byte| *byte == 0));
-
-        let full = default_move_light_report((100, 80, 60), std::f64::consts::FRAC_PI_2);
+    fn default_move_light_report_holds_full_identity_color() {
+        let full = default_move_light_report((100, 80, 60));
         assert_eq!(full.len(), PS_MOVE_LED_REPORT_LEN);
         assert_eq!(&full[..5], &[0x06, 0, 100, 80, 60]);
         assert!(full[5..].iter().all(|byte| *byte == 0));
