@@ -119,6 +119,8 @@ enum Mode {
     DryRun,
     RequestStream,
     RequestMoveLight,
+    SetMoveHueProgram,
+    MoveHueProgramStatus,
     CaptureStreamStatus,
     ObsCatalogStatus,
     MoveLightStatus,
@@ -170,6 +172,9 @@ struct Options {
     move_durations_ms: Vec<u32>,
     move_repeat_count: u32,
     move_hue_cycle_ms: u64,
+    move_hue_cycle_ms_explicit: bool,
+    move_hue_mode: Option<String>,
+    move_hue_order_mode: Option<String>,
     command_id: Option<String>,
     move_host_address: Option<String>,
     move_state_sources: Vec<MoveStateSource>,
@@ -354,6 +359,8 @@ fn main() -> Result<()> {
         Mode::Health => health_check(&options),
         Mode::RequestStream => request_capture_stream(options),
         Mode::RequestMoveLight => request_move_light(options),
+        Mode::SetMoveHueProgram => set_move_hue_program(options),
+        Mode::MoveHueProgramStatus => move_hue_program_status(options),
         Mode::CaptureStreamStatus => capture_stream_status(options),
         Mode::ObsCatalogStatus => obs_catalog_status(options),
         Mode::MoveLightStatus => move_light_status(options),
@@ -8460,6 +8467,73 @@ fn move_light_status(options: Options) -> Result<()> {
     Ok(())
 }
 
+fn set_move_hue_program(options: Options) -> Result<()> {
+    let key = move_hue_program_key(&options.host_id);
+    let mut node = open_node(&options, "muninn-set-move-hue-program")?;
+    let mut program = node
+        .get::<MuninnMoveHueProgramRecord>(&key)?
+        .unwrap_or_else(|| bootstrap_move_hue_program(&options));
+    if let Some(mode) = options.move_hue_mode.as_deref() {
+        program.mode = mode.to_string();
+        if mode == "hold" {
+            program.hold_at_ns = timestamp_ns()?;
+        }
+    }
+    if let Some(order_mode) = options.move_hue_order_mode.as_deref() {
+        program.order_mode = order_mode.to_string();
+    }
+    if options.move_hue_cycle_ms_explicit {
+        program.cycle_ms = options.move_hue_cycle_ms;
+    }
+    program.requested_by = "muninn-cli-or-eve-lowering".to_string();
+    program.updated_at = timestamp()?;
+    validate_move_hue_program(&program)?;
+    node.put(&key, &program)?;
+    if let Some(target) = resolve_odin_cultmesh_uri(&options) {
+        node.publish_document_to_rudp_catalog(
+            &key,
+            &program,
+            CultMeshRudpDocumentPublishOptions {
+                target,
+                runtime_id: format!("muninn-{}-move-hue-command", options.host_id),
+                source_role: Some("muninn.move-hue-program-command".to_string()),
+                tags: vec!["muninn".to_string(), "move-hue-program".to_string()],
+                ..CultMeshRudpDocumentPublishOptions::default()
+            },
+        )?;
+    }
+    println!(
+        "{} mode={} order={} cycle_ms={} hold_at_ns={} updated={}",
+        program.program_id,
+        program.mode,
+        program.order_mode,
+        program.cycle_ms,
+        program.hold_at_ns,
+        program.updated_at
+    );
+    Ok(())
+}
+
+fn move_hue_program_status(options: Options) -> Result<()> {
+    let key = move_hue_program_key(&options.host_id);
+    let node = open_node(&options, "muninn-move-hue-program-status")?;
+    let program = node
+        .get_required::<MuninnMoveHueProgramRecord>(&key)
+        .context("Muninn Move hue program is unavailable")?;
+    println!(
+        "{} mode={} order={} cycle_ms={} epoch_ns={} hold_at_ns={} requested_by={} updated={}",
+        program.program_id,
+        program.mode,
+        program.order_mode,
+        program.cycle_ms,
+        program.epoch_ns,
+        program.hold_at_ns,
+        program.requested_by,
+        program.updated_at
+    );
+    Ok(())
+}
+
 fn capture_stream_status(options: Options) -> Result<()> {
     let mut status_options = options.clone();
     if let Some(activation_store_path) = status_options.activation_store_path.as_ref() {
@@ -9235,6 +9309,9 @@ impl Options {
             move_durations_ms: Vec::new(),
             move_repeat_count: 1,
             move_hue_cycle_ms: 1_000,
+            move_hue_cycle_ms_explicit: false,
+            move_hue_mode: None,
+            move_hue_order_mode: None,
             command_id: None,
             move_host_address: None,
             move_state_sources: Vec::new(),
@@ -9276,6 +9353,8 @@ impl Options {
                 "activate" => options.mode = Mode::Activate,
                 "request-stream" => options.mode = Mode::RequestStream,
                 "request-move-light" => options.mode = Mode::RequestMoveLight,
+                "set-move-hue-program" => options.mode = Mode::SetMoveHueProgram,
+                "move-hue-program-status" => options.mode = Mode::MoveHueProgramStatus,
                 "capture-stream-status" => options.mode = Mode::CaptureStreamStatus,
                 "obs-catalog-status" => options.mode = Mode::ObsCatalogStatus,
                 "move-light-status" => options.mode = Mode::MoveLightStatus,
@@ -9554,7 +9633,15 @@ impl Options {
                 "--move-hue-cycle-ms" => {
                     options.move_hue_cycle_ms = take_value(&mut args, "--move-hue-cycle-ms")?
                         .parse()
-                        .context("--move-hue-cycle-ms must be a positive integer")?
+                        .context("--move-hue-cycle-ms must be a positive integer")?;
+                    options.move_hue_cycle_ms_explicit = true;
+                }
+                "--move-hue-mode" => {
+                    options.move_hue_mode = Some(take_value(&mut args, "--move-hue-mode")?)
+                }
+                "--move-hue-order" => {
+                    options.move_hue_order_mode =
+                        Some(take_value(&mut args, "--move-hue-order")?)
                 }
                 "--command" => options.command_id = Some(take_value(&mut args, "--command")?),
                 "--move-host" => {
@@ -11252,6 +11339,45 @@ mod tests {
         assert!(encoded.contains("Hold Current Colors"));
         assert!(encoded.contains("golden-permutation"));
         assert!(encoded.contains(MUNINN_MOVE_HUE_PROGRAM_SCHEMA));
+        drop(node);
+        let _ = fs::remove_file(store_path);
+    }
+
+    #[test]
+    fn move_hue_program_command_updates_typed_live_state() {
+        let store_path = std::env::temp_dir().join(format!(
+            "muninn-move-hue-command-{}.cc",
+            timestamp_ns().unwrap()
+        ));
+        let options = Options::parse(
+            [
+                "set-move-hue-program",
+                "--store",
+                store_path.to_str().unwrap(),
+                "--host",
+                "nightwing",
+                "--move-hue-mode",
+                "hold",
+                "--move-hue-order",
+                "bounce",
+                "--move-hue-cycle-ms",
+                "1500",
+                "--odin-cultmesh-uri",
+                "none",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap();
+        set_move_hue_program(options.clone()).unwrap();
+        let node = open_node(&options, "muninn-move-hue-command-test").unwrap();
+        let program = node
+            .get_required::<MuninnMoveHueProgramRecord>(&move_hue_program_key("nightwing"))
+            .unwrap();
+        assert_eq!(program.mode, "hold");
+        assert_eq!(program.order_mode, "bounce");
+        assert_eq!(program.cycle_ms, 1500);
+        assert!(program.hold_at_ns > 0);
         drop(node);
         let _ = fs::remove_file(store_path);
     }
