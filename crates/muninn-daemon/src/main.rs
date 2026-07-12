@@ -372,14 +372,13 @@ fn serve(options: Options) -> Result<()> {
     let mut move_evidence_stream = create_move_evidence_stream(&options)?;
     let mut active_move_lights = Vec::new();
     let suppressed_default_move_light_paths = Arc::new(Mutex::new(HashSet::new()));
-    let mut last_idunn_health_publish_attempt_at = None;
     let mut hid_controller_stream = create_hid_controller_stream(&options)?;
     let mut last_move_host_claim_attempt_at = None;
     let mut last_move_bluetooth_pickup_attempt_at = None;
     let move_runtime_enabled = serve_should_manage_move_runtime(&options);
     let mut active_move_states =
         active_move_state_sources(serve_move_state_sources(&options, move_runtime_enabled));
-    publish_daemon_health_if_configured(&options, &mut last_idunn_health_publish_attempt_at)?;
+    start_daemon_health_worker(&options);
     let mut active_move_marker_cameras = active_move_marker_camera_sources(&options);
     let mut move_marker_camera_reader = PlatformMoveMarkerCameraFrameReader::default();
     let mut active_capture_streams = Vec::new();
@@ -456,7 +455,6 @@ fn serve(options: Options) -> Result<()> {
             &active_move_states,
             &mut last_move_bluetooth_pickup_attempt_at,
         );
-        publish_daemon_health_if_configured(&options, &mut last_idunn_health_publish_attempt_at)?;
         let has_platform_default_move_lights = serve_should_manage_platform_move_lights(&options);
         if options.interval_seconds.is_none()
             && active_move_lights.is_empty()
@@ -479,6 +477,24 @@ fn serve(options: Options) -> Result<()> {
         };
         thread::sleep(sleep);
     }
+}
+
+fn start_daemon_health_worker(options: &Options) {
+    if options.idunn_rudp_health.is_none() {
+        return;
+    }
+    let options = options.clone();
+    thread::spawn(move || {
+        let mut last_publish_attempt_at = None;
+        loop {
+            if let Err(error) =
+                publish_daemon_health_if_configured(&options, &mut last_publish_attempt_at)
+            {
+                eprintln!("Muninn Idunn health publish failed: {error:#}");
+            }
+            thread::sleep(Duration::from_secs(5));
+        }
+    });
 }
 
 fn tick_capture_stream_commands(
