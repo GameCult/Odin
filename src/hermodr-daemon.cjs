@@ -421,14 +421,25 @@ function mergeProviderAdvertisements(providers) {
     merged.set(provider.id, {
       ...existing,
       ...provider,
-      endpoints: provider.endpoints?.length ? provider.endpoints : existing.endpoints || [],
-      routes: provider.routes?.length ? provider.routes : existing.routes || [],
+      endpoints: mergeAdvertisedRoutes(existing.endpoints, provider.endpoints),
+      routes: mergeAdvertisedRoutes(existing.routes, provider.routes),
       surfaces: provider.surfaces?.length ? provider.surfaces : existing.surfaces || [],
       cultMeshAddress: provider.cultMeshAddress || existing.cultMeshAddress || null,
       endpoint: provider.endpoint || existing.endpoint || null,
     });
   }
   return [...merged.values()].sort((left, right) => String(left.id).localeCompare(String(right.id)));
+}
+
+function mergeAdvertisedRoutes(left, right) {
+  const merged = new Map();
+  for (const route of [...arrayOfObjects(left), ...arrayOfObjects(right)]) {
+    const key = [route.id, route.role, route.uri, route.endpoint, route.address, route.transport]
+      .map((value) => String(value || ""))
+      .join("\u001f");
+    merged.set(key, route);
+  }
+  return [...merged.values()];
 }
 
 function normalizeAdvertisedSurfaces(surfaces) {
