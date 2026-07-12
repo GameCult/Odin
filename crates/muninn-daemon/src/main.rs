@@ -11492,6 +11492,103 @@ mod tests {
     }
 
     #[test]
+    fn provider_command_rudp_ingress_applies_move_hue_command() {
+        let store_path = std::env::temp_dir().join(format!(
+            "muninn-provider-command-{}.cc",
+            timestamp_ns().unwrap()
+        ));
+        let options = Options::parse(
+            [
+                "serve",
+                "--store",
+                store_path.to_str().unwrap(),
+                "--host",
+                "nightwing",
+                "--odin-cultmesh-uri",
+                "none",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap();
+        let runtime_program = load_or_initialize_move_hue_program(&options).unwrap();
+        let server_socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        server_socket
+            .set_read_timeout(Some(Duration::from_millis(5)))
+            .unwrap();
+        let server_address = server_socket.local_addr().unwrap();
+        let server_options = options.clone();
+        let server_program = Arc::clone(&runtime_program);
+        thread::spawn(move || {
+            run_provider_command_ingress(server_socket, server_options, server_program).unwrap()
+        });
+
+        let client_socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        client_socket
+            .set_read_timeout(Some(Duration::from_millis(5)))
+            .unwrap();
+        let mut client = CultNetRudpSocketTransportConnection::new(
+            CultNetRudpSocketTransportOptions {
+                runtime_id: "muninn-provider-command-test-client".to_string(),
+                socket: client_socket,
+                mode: cultnet_rs::CultNetRudpSocketMode::Client,
+                remote_addr: Some(server_address),
+                connection_id: MUNINN_COMMAND_RUDP_CONNECTION_ID,
+                initial_sequence: 1,
+                resend_delay_ms: 15,
+                transport_id: Some("muninn-provider-command-test".to_string()),
+                max_payload_bytes: None,
+                max_fragment_bytes: Some(1200),
+                max_pending_reliable_packets: Some(64),
+                media_reliable_expire_after_ms: None,
+            },
+        )
+        .unwrap();
+        client.connect(Vec::new()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !client.connected() && Instant::now() < deadline {
+            let _ = client.receive_once().unwrap();
+            client.poll_resends().unwrap();
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(client.connected(), "provider command RUDP handshake");
+        let command = json!({
+            "type": "muninn.set-move-hue-program",
+            "providerId": "muninn.telemetry.nightwing",
+            "mode": "hold",
+            "publishedBy": "provider-command-test"
+        });
+        let message = CultNetMessage::DocumentPutRaw {
+            message_id: "provider-command-test".to_string(),
+            document: CultNetRawDocumentRecord {
+                schema_id: "gamecult.eve.command.v1".to_string(),
+                record_key: "provider-command-test".to_string(),
+                stored_at: timestamp().unwrap(),
+                payload_encoding: CultNetRawPayloadEncoding::Messagepack,
+                payload: rmp_serde::to_vec_named(&command).unwrap(),
+                source_runtime_id: Some("provider-command-test".to_string()),
+                source_agent_id: None,
+                source_role: Some("test".to_string()),
+                tags: None,
+            },
+        };
+        client
+            .send(
+                "schema",
+                encode_cultnet_message_to_vec(&message, CultNetWireContract::CultNetSchemaV0)
+                    .unwrap(),
+            )
+            .unwrap();
+        let apply_deadline = Instant::now() + Duration::from_secs(2);
+        while runtime_program.lock().unwrap().mode != "hold" && Instant::now() < apply_deadline {
+            client.poll_resends().unwrap();
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(runtime_program.lock().unwrap().mode, "hold");
+        let _ = fs::remove_file(store_path);
+    }
+
+    #[test]
     fn move_light_command_writes_ps_move_led_report() {
         let command = pending_move_light_command();
         let mut writer = RecordingMoveLightWriter::default();
