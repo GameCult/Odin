@@ -283,9 +283,13 @@ function createHermodrBridge(options) {
 }
 
 async function readCatalog(options) {
+  const providerSnapshots = [];
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    providerSnapshots.push(...await readOdinProviderAdvertisements(options));
+  }
   const providerAdvertisements = mergeProviderAdvertisements([
     ...await readOdinSurfaceProviderCatalog(options),
-    ...await readOdinProviderAdvertisements(options),
+    ...providerSnapshots,
   ]);
   return createBrowserCatalog(providerAdvertisements, options);
 }
