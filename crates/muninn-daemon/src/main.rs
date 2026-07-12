@@ -4383,7 +4383,7 @@ fn start_psmoveapi_tracker_worker(
         };
         let mut last_calibration_at = Instant::now();
         loop {
-            if last_calibration_at.elapsed() >= Duration::from_secs(5) {
+            if last_calibration_at.elapsed() >= Duration::from_secs(30) {
                 tracker.calibrate_connected();
                 last_calibration_at = Instant::now();
             }
