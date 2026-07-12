@@ -4255,13 +4255,29 @@ fn publish_move_controller_states(
 }
 
 fn active_move_marker_camera_sources(options: &Options) -> Vec<ActiveMoveMarkerCameraSource> {
-    let move_colors: Vec<(String, [u8; 3])> = serve_move_state_sources(options, true)
+    let mut move_roster = serve_move_state_sources(options, true)
         .into_iter()
-        .map(|source| {
-            let (red, green, blue) = default_move_color_for_identity(&source.move_id);
-            (source.move_id, [red, green, blue])
+        .map(|source| source.move_id)
+        .collect::<Vec<_>>();
+    move_roster.sort();
+    move_roster.dedup();
+    let now_ns = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as i128;
+    let move_colors = move_roster
+        .iter()
+        .filter_map(|identity| {
+            scheduled_golden_move_color(
+                identity,
+                &move_roster,
+                0,
+                i128::from(options.move_hue_cycle_ms) * 1_000_000,
+                now_ns,
+            )
+            .map(|(color, _, _)| (identity.clone(), [color.0, color.1, color.2]))
         })
-        .collect();
+        .collect::<Vec<_>>();
     options
         .move_marker_camera_sources
         .iter()
@@ -4278,6 +4294,7 @@ fn active_move_marker_camera_sources(options: &Options) -> Vec<ActiveMoveMarkerC
                         camera_index,
                         options.move_tracker_exposure_milli as f32 / 1000.0,
                         move_colors.clone(),
+                        options.move_hue_cycle_ms,
                     ))
                 })
             } else {
@@ -4384,6 +4401,7 @@ fn start_psmoveapi_tracker_worker(
     camera_index: i32,
     exposure: f32,
     colors: Vec<(String, [u8; 3])>,
+    move_hue_cycle_ms: u64,
 ) -> mpsc::Receiver<Vec<muninn_psmoveapi_tracker::PsmoveApiObservation>> {
     let (sender, receiver) = mpsc::sync_channel(1);
     thread::spawn(move || {
@@ -4401,8 +4419,25 @@ fn start_psmoveapi_tracker_worker(
         let mut last_calibration_at = Instant::now();
         loop {
             if last_calibration_at.elapsed() >= Duration::from_secs(30) {
-                tracker.calibrate_connected();
+                tracker.observe_connected();
                 last_calibration_at = Instant::now();
+            }
+            let mut roster = colors.iter().map(|(identity, _)| identity.clone()).collect::<Vec<_>>();
+            roster.sort();
+            let now_ns = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as i128;
+            for identity in &roster {
+                if let Some((color, _, _)) = scheduled_golden_move_color(
+                    identity,
+                    &roster,
+                    0,
+                    i128::from(move_hue_cycle_ms) * 1_000_000,
+                    now_ns,
+                ) {
+                    tracker.set_expected_color(identity, [color.0, color.1, color.2]);
+                }
             }
             let observations = tracker.update();
             match sender.try_send(observations) {

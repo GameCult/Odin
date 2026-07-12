@@ -1,0 +1,83 @@
+diff --git a/include/psmove_tracker.h b/include/psmove_tracker.h
+index 7de998b..d44db20 100644
+--- a/include/psmove_tracker.h
++++ b/include/psmove_tracker.h
+@@ -235,6 +235,25 @@ ADDCALL psmove_tracker_get_auto_update_leds(PSMoveTracker *tracker, PSMove *move
+ ADDAPI void
+ ADDCALL psmove_tracker_set_exposure(PSMoveTracker *tracker, float exposure);
+ 
++/**
++ * Enable reference blob tracking without writing controller LEDs.
++ * The caller owns LED output and supplies the expected fully-saturated RGB hue.
++ */
++ADDAPI enum PSMoveTracker_Status
++ADDCALL psmove_tracker_enable_color_observer(PSMoveTracker *tracker, PSMove *move,
++        unsigned char r, unsigned char g, unsigned char b);
++
++/**
++ * Change the expected RGB hue for an observer-enabled controller without
++ * writing controller LEDs or running blinking calibration.
++ */
++ADDAPI bool
++ADDCALL psmove_tracker_set_expected_color(PSMoveTracker *tracker, PSMove *move,
++        unsigned char r, unsigned char g, unsigned char b);
++
+ /**
+  * \brief Get exposure as fraction (0.0 -> 1.0)
+  **/
+diff --git a/src/tracker/psmove_tracker.cpp b/src/tracker/psmove_tracker.cpp
+index 23e33ed..621b9ea 100644
+--- a/src/tracker/psmove_tracker.cpp
++++ b/src/tracker/psmove_tracker.cpp
+@@ -547,6 +547,49 @@ psmove_tracker_get_exposure(PSMoveTracker *tracker)
+     return tracker->settings.camera_exposure;
+ }
+ 
++static void
++psmove_tracker_assign_observed_color(TrackedController *tc,
++        unsigned char r, unsigned char g, unsigned char b)
++{
++    struct PSMove_RGBValue rgb = { r, g, b };
++    CvScalar hsv = th_rgb2hsv(cvScalar(r, g, b, 255.0));
++    tc->color = rgb;
++    tc->auto_update_leds = false;
++    tc->eColorHSV = tc->eFColorHSV = hsv;
++    tc->assignedHSV = hsv;
++}
++
++enum PSMoveTracker_Status
++psmove_tracker_enable_color_observer(PSMoveTracker *tracker, PSMove *move,
++        unsigned char r, unsigned char g, unsigned char b)
++{
++    psmove_return_val_if_fail(tracker != NULL, Tracker_CALIBRATION_ERROR);
++    psmove_return_val_if_fail(move != NULL, Tracker_CALIBRATION_ERROR);
++
++    TrackedController *tc = psmove_tracker_find_controller(tracker, move);
++    if (tc == NULL) {
++        tc = psmove_tracker_find_controller(tracker, NULL);
++    }
++    if (tc == NULL) {
++        return Tracker_CALIBRATION_ERROR;
++    }
++    tc->move = move;
++    psmove_tracker_assign_observed_color(tc, r, g, b);
++    return Tracker_CALIBRATED;
++}
++
++bool
++psmove_tracker_set_expected_color(PSMoveTracker *tracker, PSMove *move,
++        unsigned char r, unsigned char g, unsigned char b)
++{
++    psmove_return_val_if_fail(tracker != NULL, false);
++    psmove_return_val_if_fail(move != NULL, false);
++    TrackedController *tc = psmove_tracker_find_controller(tracker, move);
++    if (tc == NULL) {
++        return false;
++    }
++    psmove_tracker_assign_observed_color(tc, r, g, b);
++    return true;
++}
++
+ void
+ psmove_tracker_reset_color_calibration(PSMoveTracker *tracker)
+ {

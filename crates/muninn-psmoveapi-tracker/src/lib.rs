@@ -52,13 +52,20 @@ mod linux {
         fn psmove_disconnect(controller: *mut c_void);
         fn psmove_tracker_new_with_camera(camera: c_int) -> *mut c_void;
         fn psmove_tracker_free(tracker: *mut c_void);
-        fn psmove_tracker_enable_with_color(
+        fn psmove_tracker_enable_color_observer(
             tracker: *mut c_void,
             controller: *mut c_void,
             red: c_uchar,
             green: c_uchar,
             blue: c_uchar,
         ) -> c_int;
+        fn psmove_tracker_set_expected_color(
+            tracker: *mut c_void,
+            controller: *mut c_void,
+            red: c_uchar,
+            green: c_uchar,
+            blue: c_uchar,
+        ) -> bool;
         fn psmove_tracker_disable(tracker: *mut c_void, controller: *mut c_void);
         fn psmove_tracker_set_exposure(tracker: *mut c_void, exposure: c_float);
         fn psmove_tracker_get_exposure(tracker: *mut c_void) -> c_float;
@@ -117,7 +124,7 @@ mod linux {
                     exposure,
                 },
             };
-            result.calibrate_connected();
+            result.observe_connected();
             result.camera_info = unsafe {
                 let info = psmove_tracker_get_camera_info(tracker);
                 if info.is_null() {
@@ -139,6 +146,10 @@ mod linux {
         }
 
         pub fn calibrate_connected(&mut self) -> usize {
+            self.observe_connected()
+        }
+
+        pub fn observe_connected(&mut self) -> usize {
             let count = unsafe { psmove_count_connected() }.max(0);
             for index in 0..count {
                 let handle = unsafe { psmove_connect_by_id(index) };
@@ -158,7 +169,7 @@ mod linux {
                     continue;
                 };
                 let status = unsafe {
-                    psmove_tracker_enable_with_color(
+                    psmove_tracker_enable_color_observer(
                         self.tracker, handle, color[0], color[1], color[2]
                     )
                 };
@@ -170,6 +181,23 @@ mod linux {
             }
 
             self.controllers.len()
+        }
+
+        pub fn set_expected_color(&mut self, move_id: &str, color: [u8; 3]) -> bool {
+            let Some(controller) = self.controllers.iter().find(|controller| {
+                controller.move_id.eq_ignore_ascii_case(move_id)
+            }) else {
+                return false;
+            };
+            unsafe {
+                psmove_tracker_set_expected_color(
+                    self.tracker,
+                    controller.handle,
+                    color[0],
+                    color[1],
+                    color[2],
+                )
+            }
         }
 
         pub fn camera_info(&self) -> &PsmoveApiCameraInfo {
@@ -254,6 +282,10 @@ impl PsmoveApiTracker {
     }
 
     pub fn calibrate_connected(&mut self) -> usize { 0 }
+
+    pub fn observe_connected(&mut self) -> usize { 0 }
+
+    pub fn set_expected_color(&mut self, _move_id: &str, _color: [u8; 3]) -> bool { false }
 
     pub fn tracked_controller_count(&self) -> usize { 0 }
 
