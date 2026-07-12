@@ -29,7 +29,7 @@ use odin_core::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
 use std::fs;
 #[cfg(not(windows))]
@@ -39,7 +39,7 @@ use std::net::{SocketAddr, UdpSocket};
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -366,7 +366,7 @@ fn serve(options: Options) -> Result<()> {
     ensure_state_dirs(&options)?;
     let mut move_evidence_stream = create_move_evidence_stream(&options)?;
     let mut active_move_lights = Vec::new();
-    let mut last_default_move_light_write_at = None;
+    let suppressed_default_move_light_paths = Arc::new(Mutex::new(HashSet::new()));
     let mut last_idunn_health_publish_attempt_at = None;
     let mut hid_controller_stream = create_hid_controller_stream(&options)?;
     let mut odin_respects_paid = false;
@@ -379,6 +379,7 @@ fn serve(options: Options) -> Result<()> {
     let mut move_marker_camera_reader = PlatformMoveMarkerCameraFrameReader::default();
     let mut active_capture_streams = Vec::new();
     start_hid_controller_rudp_ingress(&options)?;
+    start_default_move_light_worker(&options, Arc::clone(&suppressed_default_move_light_paths));
 
     loop {
         let live_move_sources = serve_move_state_sources(&options, move_runtime_enabled);
@@ -394,13 +395,14 @@ fn serve(options: Options) -> Result<()> {
                 &active_move_states,
             )?;
             register_move_light_commands(&mut node, &options, &mut active_move_lights)?;
-            tick_move_light_commands(&mut node, &mut active_move_lights, &mut HidMoveLightWriter)?;
-            tick_default_move_light_pulse(
-                &mut active_move_states,
+            update_suppressed_default_move_light_paths(
+                &suppressed_default_move_light_paths,
                 &active_move_lights,
-                &mut last_default_move_light_write_at,
-                serve_should_manage_platform_move_lights(&options),
-                &mut HidMoveLightWriter,
+            );
+            tick_move_light_commands(&mut node, &mut active_move_lights, &mut HidMoveLightWriter)?;
+            update_suppressed_default_move_light_paths(
+                &suppressed_default_move_light_paths,
+                &active_move_lights,
             );
             publish_move_controller_states(
                 &mut node,
@@ -5528,37 +5530,65 @@ const DEFAULT_MOVE_LIGHT_COLORS: &[(u8, u8, u8)] = &[
     (255, 128, 32),
 ];
 
-fn tick_default_move_light_pulse(
-    states: &mut [ActiveMoveStateSource],
-    active_commands: &[ActiveMoveLightCommand],
-    last_write_at: &mut Option<Instant>,
-    include_platform_defaults: bool,
-    writer: &mut impl MoveLightWriter,
+fn start_default_move_light_worker(
+    options: &Options,
+    suppressed_paths: Arc<Mutex<HashSet<String>>>,
 ) {
-    let now = Instant::now();
-    if last_write_at.is_some_and(|last| now.duration_since(last) < Duration::from_millis(200)) {
+    if !serve_should_manage_platform_move_lights(options) {
         return;
     }
 
-    let seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs_f64();
-    let paths = default_move_light_paths(states, include_platform_defaults);
+    let options = options.clone();
+    thread::spawn(move || {
+        let mut writer = HidMoveLightWriter;
+        let mut last_error_log_at = None::<Instant>;
+        loop {
+            let states = active_move_state_sources(serve_move_state_sources(&options, true));
+            let targets = default_move_light_paths(&states, true);
+            let suppressed = suppressed_paths
+                .lock()
+                .map(|paths| paths.clone())
+                .unwrap_or_default();
+            let seconds = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs_f64();
 
-    for target in paths.iter() {
-        if active_commands
-            .iter()
-            .any(|command| command.command.hidraw_path == target.path)
-        {
-            continue;
+            for target in targets {
+                if suppressed.contains(&target.path) {
+                    continue;
+                }
+                let color = default_move_color_for_identity(&target.identity);
+                let report = default_move_light_report(color, seconds);
+                if let Err(error) = writer.write_report(&target.path, &report) {
+                    let should_log = last_error_log_at
+                        .is_none_or(|logged_at| logged_at.elapsed() >= Duration::from_secs(5));
+                    if should_log {
+                        eprintln!(
+                            "Muninn default Move light refresh failed identity={} path={}: {error:#}",
+                            target.identity, target.path
+                        );
+                        last_error_log_at = Some(Instant::now());
+                    }
+                }
+            }
+            thread::sleep(Duration::from_millis(100));
         }
+    });
+}
 
-        let color = default_move_color_for_identity(&target.identity);
-        let report = default_move_light_report(color, seconds);
-        let _ = writer.write_report(&target.path, &report);
+fn update_suppressed_default_move_light_paths(
+    suppressed_paths: &Arc<Mutex<HashSet<String>>>,
+    active_commands: &[ActiveMoveLightCommand],
+) {
+    if let Ok(mut paths) = suppressed_paths.lock() {
+        paths.clear();
+        paths.extend(
+            active_commands
+                .iter()
+                .map(|command| command.command.hidraw_path.clone()),
+        );
     }
-    *last_write_at = Some(now);
 }
 
 fn default_move_light_paths(
