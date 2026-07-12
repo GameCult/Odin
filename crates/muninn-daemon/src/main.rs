@@ -1234,11 +1234,19 @@ fn merge_move_state_sources(
                 .iter_mut()
                 .find(|discovered| discovered.hidraw_path == source.hidraw_path)
             {
-                discovered.move_id = source.move_id.clone();
+                if discovered.move_id.starts_with("hid-") {
+                    discovered.move_id = source.move_id.clone();
+                }
+                continue;
+            }
+            #[cfg(unix)]
+            if !Path::new(&source.hidraw_path).exists() {
                 continue;
             }
         }
-        if !sources.iter().any(|discovered| discovered == source) {
+        if !sources.iter().any(|discovered| {
+            discovered == source || discovered.move_id == source.move_id
+        }) {
             sources.push(source.clone());
         }
     }
@@ -4411,6 +4419,35 @@ struct ActiveHidControllerRudpSource {
     last_read_error_log_at: Option<Instant>,
 }
 
+fn active_hid_controller_rudp_source(source: MoveStateSource) -> ActiveHidControllerRudpSource {
+    ActiveHidControllerRudpSource {
+        #[cfg(windows)]
+        report_rx: start_windows_hid_report_reader_if_supported(&source.hidraw_path),
+        source,
+        sequence: 0,
+        joystick_axes: [0; 16],
+        joystick_buttons: [false; 32],
+        latest_report: None,
+        last_emitted_axes: None,
+        last_emitted_buttons: None,
+        last_emitted_at: None,
+        last_read_error_log_at: None,
+    }
+}
+
+fn sync_hid_controller_rudp_sources(
+    active: &mut Vec<ActiveHidControllerRudpSource>,
+    desired: Vec<MoveStateSource>,
+) {
+    active.retain(|state| desired.iter().any(|source| source == &state.source));
+    for source in desired {
+        if active.iter().any(|state| state.source == source) {
+            continue;
+        }
+        active.push(active_hid_controller_rudp_source(source));
+    }
+}
+
 #[derive(Clone, Debug)]
 struct LatestHidReport {
     bytes: Vec<u8>,
@@ -4481,20 +4518,9 @@ fn run_hid_controller_rudp_ingress(
         })?;
     let mut sources = live_move_state_sources(&options)
         .into_iter()
-        .map(|source| ActiveHidControllerRudpSource {
-            #[cfg(windows)]
-            report_rx: start_windows_hid_report_reader_if_supported(&source.hidraw_path),
-            source,
-            sequence: 0,
-            joystick_axes: [0; 16],
-            joystick_buttons: [false; 32],
-            latest_report: None,
-            last_emitted_axes: None,
-            last_emitted_buttons: None,
-            last_emitted_at: None,
-            last_read_error_log_at: None,
-        })
+        .map(active_hid_controller_rudp_source)
         .collect::<Vec<_>>();
+    let mut last_source_refresh_at = Instant::now();
     let mut reader = HidMoveControllerStateReader;
     let mut sent_frames = 0u64;
     let mut last_sent_at = None::<Instant>;
@@ -4503,6 +4529,10 @@ fn run_hid_controller_rudp_ingress(
     let mut selected_stream_id = None::<String>;
     let mut last_waiting_for_subscription_log_at = None::<Instant>;
     loop {
+        if last_source_refresh_at.elapsed() >= Duration::from_millis(500) {
+            sync_hid_controller_rudp_sources(&mut sources, live_move_state_sources(&options));
+            last_source_refresh_at = Instant::now();
+        }
         for _ in 0..16 {
             match transport.receive_once() {
                 Ok(Some(frame)) if frame.channel_id == "hid.subscribe" => {
@@ -11985,6 +12015,37 @@ Device 00:07:04:A8:00:D0 (public)
                 hidraw_path: "/dev/input/js0".to_string(),
             }]
         );
+    }
+
+    #[test]
+    fn physical_move_identity_survives_configured_path_reuse() {
+        let discovered = vec![MoveStateSource {
+            move_id: "move-000704a6be5f".to_string(),
+            hidraw_path: "/dev/input/js2".to_string(),
+        }];
+        let configured = vec![MoveStateSource {
+            move_id: "move-000704a39772".to_string(),
+            hidraw_path: "/dev/input/js2".to_string(),
+        }];
+
+        assert_eq!(merge_move_state_sources(discovered.clone(), &configured), discovered);
+    }
+
+    #[test]
+    fn rudp_sources_reconcile_hotplugged_physical_identity() {
+        let mut active = vec![active_hid_controller_rudp_source(MoveStateSource {
+            move_id: "move-000704a39772".to_string(),
+            hidraw_path: "/dev/input/js2".to_string(),
+        })];
+        let desired = vec![MoveStateSource {
+            move_id: "move-000704a39772".to_string(),
+            hidraw_path: "/dev/input/js0".to_string(),
+        }];
+
+        sync_hid_controller_rudp_sources(&mut active, desired.clone());
+
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].source, desired[0]);
     }
 
     #[test]
