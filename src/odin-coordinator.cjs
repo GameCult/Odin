@@ -207,35 +207,8 @@ async function persistState(state) {
   try {
     const node = await meshNodePromise;
     await node.put(documents.surfaceDefinition, config.surfaceKey, state);
-    if (documents.providerAdvertisementDefinition && Array.isArray(state.providerCatalog)) {
-      for (const provider of state.providerCatalog) {
-        if (!provider?.id) continue;
-        await node.put(
-          documents.providerAdvertisementDefinition,
-          String(provider.id),
-          providerAdvertisementDocument(provider),
-        );
-      }
-    }
     await node.flush?.(true);
   } catch (error) {
     console.error("CultMesh snapshot write failed:", error.message);
   }
-}
-
-function providerAdvertisementDocument(provider) {
-  return {
-    schemaVersion: "gamecult.eve.provider_advertisement.v1",
-    providerId: provider.id,
-    title: provider.title || provider.id,
-    description: provider.description || "",
-    version: provider.version || "0",
-    status: provider.status || "unknown",
-    updatedAt: provider.updatedAt || new Date().toISOString(),
-    cultMeshAddress: provider.cultMeshAddress || provider.endpoint || null,
-    endpoints: Array.isArray(provider.endpoints) ? provider.endpoints : [],
-    routes: Array.isArray(provider.routes) ? provider.routes : [],
-    commandSurface: provider.commandSurface || null,
-    capabilities: Array.isArray(provider.capabilities) ? provider.capabilities : [],
-  };
 }
