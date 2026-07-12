@@ -10,6 +10,7 @@ param(
   [string] $IdunnDaemon = "starfire-muninn",
   [string] $IdunnHealthContract = "muninn.cultnet-rudp-local-telemetry-and-quest-access",
   [string] $OdinCultMeshUri = $(if ($env:ODIN_CULTMESH_URI) { $env:ODIN_CULTMESH_URI } else { "cultmesh://odin/rendezvous/provider-catalog" }),
+  [string] $OdinCultMeshRudpEndpoint = $(if ($env:CULTMESH_URI_ODIN_RUDP) { $env:CULTMESH_URI_ODIN_RUDP } else { "127.0.0.1:17871" }),
   [string] $HidControllerRudpBind = "0.0.0.0:17888",
   [string] $HidControllerRudpAdvertise = $(if ($env:MUNINN_HID_CONTROLLER_RUDP_ADVERTISE) { $env:MUNINN_HID_CONTROLLER_RUDP_ADVERTISE } else { "10.77.0.2:17888" })
 )
@@ -91,13 +92,19 @@ $lockPath = "$StorePath.lock"
 function Start-MuninnServeProcess {
   param([string[]] $ArgumentList)
 
-  $process = Start-Process `
-    -FilePath $MuninnExe `
-    -ArgumentList $ArgumentList `
-    -WindowStyle Hidden `
-    -PassThru `
-    -RedirectStandardOutput $serveOutLog `
-    -RedirectStandardError $serveErrLog
+  $previousOdinEndpoint = $env:CULTMESH_URI_ODIN_RUDP
+  try {
+    $env:CULTMESH_URI_ODIN_RUDP = $OdinCultMeshRudpEndpoint
+    $process = Start-Process `
+      -FilePath $MuninnExe `
+      -ArgumentList $ArgumentList `
+      -WindowStyle Hidden `
+      -PassThru `
+      -RedirectStandardOutput $serveOutLog `
+      -RedirectStandardError $serveErrLog
+  } finally {
+    $env:CULTMESH_URI_ODIN_RUDP = $previousOdinEndpoint
+  }
   $process.Id | Set-Content -Encoding ASCII -LiteralPath $pidPath
   return $process
 }

@@ -12,6 +12,7 @@ param(
   [string] $IdunnDaemon = "nightwing-muninn",
   [string] $IdunnHealthContract = "muninn.cultnet-rudp-remote-telemetry-and-move-hid",
   [string] $OdinCultMeshUri = $(if ($env:ODIN_CULTMESH_URI) { $env:ODIN_CULTMESH_URI } else { "cultmesh://odin/rendezvous/provider-catalog" }),
+  [string] $OdinCultMeshRudpEndpoint = $(if ($env:CULTMESH_URI_ODIN_RUDP) { $env:CULTMESH_URI_ODIN_RUDP } else { "10.77.0.2:17871" }),
   [string] $HidControllerRudpBind = "0.0.0.0:17888",
   [string] $HidControllerRudpAdvertise = $(if ($env:MUNINN_HID_CONTROLLER_RUDP_ADVERTISE) { $env:MUNINN_HID_CONTROLLER_RUDP_ADVERTISE } else { "10.77.0.3:17888" })
 )
@@ -140,7 +141,7 @@ set -- "`$@" \
   --idunn-health-contract '$IdunnHealthContract'
 $odinCultMeshUriSetBlock
 $hidControllerRudpSetBlock
-nohup '$MuninnExe' "`$@" \
+CULTMESH_URI_ODIN_RUDP='$OdinCultMeshRudpEndpoint' nohup '$MuninnExe' "`$@" \
   > '$LogRoot/muninn-serve.out.log' \
   2> '$LogRoot/muninn-serve.err.log' \
   < /dev/null &
