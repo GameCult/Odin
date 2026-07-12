@@ -520,6 +520,10 @@ fn move_hue_program_key(host_id: &str) -> String {
     format!("muninn:{host_id}:move-hue-program")
 }
 
+fn move_hue_surface_key(host_id: &str) -> String {
+    format!("surface:muninn.telemetry.{host_id}.move-hue")
+}
+
 fn load_or_initialize_move_hue_program(
     options: &Options,
 ) -> Result<Arc<Mutex<MuninnMoveHueProgramRecord>>> {
@@ -2967,6 +2971,7 @@ fn publish_move_hue_eve_surface(
         .get::<MuninnMoveHueProgramRecord>(&program_key)?
         .unwrap_or_else(|| bootstrap_move_hue_program(options));
     let provider_id = muninn_provider_id(options);
+    let surface_key = move_hue_surface_key(&options.host_id);
     let action = |id: &str, label: &str, mode: Option<&str>, order_mode: Option<&str>, cycle_ms: Option<u64>| {
         json!({
             "id": format!("{provider_id}.move-hue.{id}"),
@@ -3053,7 +3058,7 @@ fn publish_move_hue_eve_surface(
             }
         }),
     };
-    node.put(&provider_id, &surface)?;
+    node.put(&surface_key, &surface)?;
     if let Some(target) = resolve_odin_cultmesh_uri(options) {
         let _ = node.publish_document_to_rudp_catalog(
             &program_key,
@@ -3069,7 +3074,7 @@ fn publish_move_hue_eve_surface(
             },
         );
         let _ = node.publish_document_to_rudp_catalog(
-            &provider_id,
+            &surface_key,
             &surface,
             CultMeshRudpDocumentPublishOptions {
                 target,
@@ -3395,6 +3400,12 @@ fn publish_runtime_boundary_records(
             "endpoints": provider_endpoints,
             "inputStreams": provider_input_streams,
             "routes": provider_routes,
+            "surfaces": [{
+                "surfaceId": format!("{provider_id}.move-hue.surface"),
+                "surfaceKind": "gamecult.eve.surface_state.v1",
+                "recordRef": move_hue_surface_key(&options.host_id),
+                "title": "Move Hue Program"
+            }],
             "commandSurface": {
                 "commandBoundaryId": command_boundary_key,
                 "transportProfileId": transport_profile_key
@@ -11431,7 +11442,7 @@ mod tests {
         let mut node = open_node(&options, "muninn-move-hue-eve-test").unwrap();
         publish_surface(&mut node, &options, "idle", &[]).unwrap();
         let surface = node
-            .get_required::<EveSurfaceStateRecord>("muninn.telemetry.nightwing")
+            .get_required::<EveSurfaceStateRecord>(&move_hue_surface_key("nightwing"))
             .unwrap();
         let encoded = surface.surface.to_string();
         assert!(encoded.contains("Hold Current Colors"));
