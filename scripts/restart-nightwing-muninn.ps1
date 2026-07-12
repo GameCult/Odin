@@ -7,7 +7,7 @@ param(
   [switch] $DiscoverMoveState = $true,
   [switch] $ClaimUsbMoves = $true,
   [string] $MoveEvidenceStream = "muninn:nightwing:move-evidence",
-  [string[]] $MoveMarkerCamera = @(),
+  [string[]] $MoveMarkerCamera = @("nightwing-eye-1=/dev/video3"),
   [int] $MoveTrackerExposureMilli = 100,
   [int] $IntervalSeconds = 15,
   [string] $IdunnRudpHealth = $env:IDUNN_RUDP_HEALTH,
