@@ -7,7 +7,7 @@ param(
   [switch] $DiscoverMoveState = $true,
   [switch] $ClaimUsbMoves = $true,
   [string] $MoveEvidenceStream = "muninn:nightwing:move-evidence",
-  [string[]] $MoveMarkerCamera = @("nightwing-eye-1=/dev/video3"),
+  [string[]] $MoveMarkerCamera = @(),
   [int] $MoveTrackerExposureMilli = 100,
   [int] $IntervalSeconds = 15,
   [string] $IdunnRudpHealth = $env:IDUNN_RUDP_HEALTH,
@@ -102,11 +102,13 @@ $moveRuntimeSetLines = @()
 if ($moveStateSpecs.Count -gt 0) {
   $moveRuntimeSetLines += $moveStateSetLines
   $moveRuntimeSetLines += "set -- ""`$@"" --move-evidence-stream $(Quote-ShSingle $MoveEvidenceStream)"
-  foreach ($camera in $MoveMarkerCamera) {
-    $moveRuntimeSetLines += "set -- ""`$@"" --move-marker-camera $(Quote-ShSingle $camera)"
+  if ($MoveMarkerCamera.Count -gt 0) {
+    foreach ($camera in $MoveMarkerCamera) {
+      $moveRuntimeSetLines += "set -- ""`$@"" --move-marker-camera $(Quote-ShSingle $camera)"
+    }
+    $moveRuntimeSetLines += "set -- ""`$@"" --move-psmoveapi-tracker"
+    $moveRuntimeSetLines += "set -- ""`$@"" --move-tracker-exposure-milli $(Quote-ShSingle ([string]$MoveTrackerExposureMilli))"
   }
-  $moveRuntimeSetLines += "set -- ""`$@"" --move-psmoveapi-tracker"
-  $moveRuntimeSetLines += "set -- ""`$@"" --move-tracker-exposure-milli $(Quote-ShSingle ([string]$MoveTrackerExposureMilli))"
 }
 $moveRuntimeSetBlock = ($moveRuntimeSetLines -join "`n")
 $odinCultMeshUriSetBlock = ""
