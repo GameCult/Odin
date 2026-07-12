@@ -4795,6 +4795,13 @@ fn start_psmoveapi_tracker_worker(
     let (sender, receiver) = mpsc::sync_channel(1);
     let (health_sender, health_receiver) = mpsc::sync_channel(1);
     thread::spawn(move || {
+        let _ = health_sender.try_send(MuninnMoveTrackerHealthRecord {
+            health_id: format!("muninn:{host_id}:{camera_id}:move-tracker-health"), host_id: host_id.clone(), camera_id: camera_id.clone(), camera_index,
+            state: "opening".to_string(), camera_name: String::new(), camera_api: String::new(), width: 0, height: 0, exposure,
+            calibrated_controller_count: 0, update_count: 0, observation_count: 0, latest_observation_count: 0,
+            last_observation_at: String::new(), detail: "waiting for PSMoveAPI tracker initialization".to_string(),
+            updated_at: timestamp().unwrap_or_else(|_| "unix-0".to_string()),
+        });
         let mut tracker = match PSMOVE_API_TRACKER_AUTHORITY
             .lock()
             .map_err(|_| "PSMoveAPI tracker authority lock was poisoned".to_string())
