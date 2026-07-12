@@ -17,6 +17,11 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+$restartMutex = [System.Threading.Mutex]::new($false, "Global\GameCult-Starfire-Muninn-Restart")
+if (-not $restartMutex.WaitOne([TimeSpan]::FromMinutes(2))) {
+  throw "Timed out waiting for the Starfire Muninn restart actuator mutex."
+}
+
 if ($env:IDUNN_ACTUATOR -ne "1" -or $env:IDUNN_COMMAND_AUTHORITY -ne "idunn-daemon") {
   throw "restart-starfire-muninn.ps1 is an Idunn actuator body. Redeploy by poking Idunn; direct service restart is not an owned path."
 }
