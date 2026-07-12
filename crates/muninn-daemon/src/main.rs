@@ -3144,7 +3144,11 @@ fn publish_runtime_boundary_records(
         "transport": "cultcache-store",
         "address": options.store_path.display().to_string()
     })];
-    if let Some(address) = options.command_rudp_advertise.as_deref() {
+    if let Some(bind) = options.command_rudp_bind {
+        let address = options
+            .command_rudp_advertise
+            .clone()
+            .unwrap_or_else(|| bind.to_string());
         provider_routes.push(json!({
             "id": "muninn.provider.command",
             "role": "muninn provider command ingress",
@@ -12465,6 +12469,10 @@ Device 00:07:04:A8:00:D0 (public)
                 "0.0.0.0:17888",
                 "--hid-controller-rudp-advertise",
                 "198.51.100.66:17888",
+                "--command-rudp-bind",
+                "0.0.0.0:17889",
+                "--command-rudp-advertise",
+                "198.51.100.66:17889",
             ]
             .into_iter()
             .map(String::from),
@@ -12481,6 +12489,19 @@ Device 00:07:04:A8:00:D0 (public)
         let provider = node
             .get_required::<EveProviderAdvertisementRecord>("muninn.telemetry.starfire")
             .unwrap();
+        let command_route = provider
+            .value
+            .get("routes")
+            .and_then(|value| value.as_array())
+            .and_then(|routes| routes.iter().find(|route| {
+                route.get("role").and_then(|value| value.as_str())
+                    == Some("muninn provider command ingress")
+            }))
+            .expect("provider-owned command route");
+        assert_eq!(
+            command_route.get("uri").and_then(|value| value.as_str()),
+            Some("cultmesh://198.51.100.66:17889/muninn/starfire/commands")
+        );
         let streams = provider
             .value
             .get("inputStreams")
