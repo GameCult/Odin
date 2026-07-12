@@ -188,6 +188,7 @@ struct Options {
     move_marker_min_area_px: u32,
     move_marker_max_candidates: u32,
     move_psmoveapi_tracker: bool,
+    move_light_passive: bool,
     move_tracker_exposure_milli: u32,
     move_evidence_stream_id: Option<String>,
     move_evidence_verse_id: String,
@@ -402,11 +403,13 @@ fn serve(options: Options) -> Result<()> {
     if let Some(stream) = move_evidence_stream.as_mut() {
         stream.rudp_sender = move_evidence_rudp_sender;
     }
-    start_default_move_light_worker(
-        &options,
-        Arc::clone(&suppressed_default_move_light_paths),
-        Arc::clone(&move_hue_program),
-    );
+    if !options.move_light_passive {
+        start_default_move_light_worker(
+            &options,
+            Arc::clone(&suppressed_default_move_light_paths),
+            Arc::clone(&move_hue_program),
+        );
+    }
     start_move_hue_program_sync_worker(&options, Arc::clone(&move_hue_program));
     start_provider_command_ingress(&options, Arc::clone(&move_hue_program))?;
     start_odin_provider_lease_worker(&options);
@@ -9420,6 +9423,7 @@ impl Options {
             move_marker_min_area_px: 4,
             move_marker_max_candidates: 64,
             move_psmoveapi_tracker: false,
+            move_light_passive: false,
             move_tracker_exposure_milli: 100,
             move_evidence_stream_id: None,
             move_evidence_verse_id: "mimir-live".to_string(),
@@ -9605,6 +9609,7 @@ impl Options {
                         take_value(&mut args, "--move-marker-max-candidates")?.parse()?
                 }
                 "--move-psmoveapi-tracker" => options.move_psmoveapi_tracker = true,
+                "--move-light-passive" => options.move_light_passive = true,
                 "--move-tracker-exposure-milli" => {
                     options.move_tracker_exposure_milli =
                         take_value(&mut args, "--move-tracker-exposure-milli")?.parse()?
