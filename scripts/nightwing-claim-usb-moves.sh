@@ -6,6 +6,10 @@ if [ -z "$host_address" ]; then
   host_address="$(bluetoothctl show | awk '/^Controller / { print $2; exit }')"
 fi
 
+if [ -x /usr/local/sbin/muninn-pair-usb-moves ]; then
+  sudo -n /usr/local/sbin/muninn-pair-usb-moves
+fi
+
 python3 - "$host_address" <<'PY'
 import fcntl
 import os
