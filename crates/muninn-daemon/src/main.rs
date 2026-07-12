@@ -326,7 +326,7 @@ struct MimirMoveProofEvidenceFrameSnapshot<'a>(
     &'a str,
     i64,
     u64,
-    &'a [u8],
+    #[serde(with = "serde_bytes")] &'a [u8],
 );
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -12133,6 +12133,23 @@ Device 00:07:04:A8:00:D0 (public)
             rmp_serde::from_slice(&snapshot_bytes).unwrap();
         let payload_frame: DecodedMoveEvidenceStreamFrame =
             rmp_serde::from_slice(&snapshot.6).unwrap();
+        let payload_start = snapshot_bytes
+            .len()
+            .checked_sub(snapshot.6.len())
+            .expect("payload should be contained in snapshot bytes");
+        if snapshot.6.len() <= u8::MAX as usize {
+            assert_eq!(snapshot_bytes[payload_start - 2], 0xc4);
+            assert_eq!(snapshot_bytes[payload_start - 1] as usize, snapshot.6.len());
+        } else {
+            assert_eq!(snapshot_bytes[payload_start - 3], 0xc5);
+            assert_eq!(
+                u16::from_be_bytes([
+                    snapshot_bytes[payload_start - 2],
+                    snapshot_bytes[payload_start - 1]
+                ]) as usize,
+                snapshot.6.len()
+            );
+        }
 
         assert_eq!(snapshot.0, "muninn:nightwing:move-evidence:0:snapshot");
         assert_eq!(snapshot.1, "muninn:nightwing:move-evidence");
