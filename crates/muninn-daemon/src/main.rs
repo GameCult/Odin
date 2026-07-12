@@ -3490,7 +3490,9 @@ impl MoveLightWriter for HidMoveLightWriter {
     #[cfg(not(windows))]
     fn write_report(&mut self, hidraw_path: &str, report: &[u8]) -> Result<()> {
         let mut device = fs::OpenOptions::new()
+            .read(true)
             .write(true)
+            .custom_flags(libc::O_NONBLOCK)
             .open(hidraw_path)
             .with_context(|| format!("opening PS Move HID path {hidraw_path}"))?;
         device
