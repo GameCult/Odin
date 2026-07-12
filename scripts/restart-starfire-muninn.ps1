@@ -1,5 +1,5 @@
 param(
-  [string] $MuninnExe = "C:\Meta\Odin\Muninn\muninn.exe",
+  [string] $MuninnExe = "C:\Meta\Odin\Muninn\muninn-e02b878.exe",
   [string] $StorePath = "C:\Meta\Odin\state\starfire.muninn.telemetry.cc",
   [string] $LogRoot = "C:\Meta\Odin\logs\starfire-muninn",
   [string] $QuestSerial = "1WMHHB68PG1515",
