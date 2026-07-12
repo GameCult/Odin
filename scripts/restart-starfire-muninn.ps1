@@ -3,7 +3,7 @@ param(
   [string] $StorePath = "C:\Meta\Odin\state\starfire.muninn.telemetry.cc",
   [string] $LogRoot = "C:\Meta\Odin\logs\starfire-muninn",
   [string] $QuestSerial = "1WMHHB68PG1515",
-  [string] $MoveBluetoothHost = "5C:93:A2:9C:A8:A8",
+  [string] $MoveBluetoothHost = "",
   [string[]] $MoveState = @(),
   [switch] $EnableUsbMoveState,
   [string] $IdunnRudpHealth = $env:IDUNN_RUDP_HEALTH,
@@ -11,8 +11,8 @@ param(
   [string] $IdunnHealthContract = "muninn.cultnet-rudp-local-telemetry-and-quest-access",
   [string] $OdinCultMeshUri = $(if ($env:ODIN_CULTMESH_URI) { $env:ODIN_CULTMESH_URI } else { "cultmesh://odin/rendezvous/provider-catalog" }),
   [string] $OdinCultMeshRudpEndpoint = $(if ($env:CULTMESH_URI_ODIN_RUDP) { $env:CULTMESH_URI_ODIN_RUDP } else { "127.0.0.1:17871" }),
-  [string] $HidControllerRudpBind = "0.0.0.0:17888",
-  [string] $HidControllerRudpAdvertise = $(if ($env:MUNINN_HID_CONTROLLER_RUDP_ADVERTISE) { $env:MUNINN_HID_CONTROLLER_RUDP_ADVERTISE } else { "10.77.0.2:17888" })
+  [string] $HidControllerRudpBind = "",
+  [string] $HidControllerRudpAdvertise = ""
 )
 
 $ErrorActionPreference = "Stop"
