@@ -7812,7 +7812,8 @@ fn publish_idunn_rudp_health(
 }
 
 fn verify_move_sources_fresh(options: &Options, node: &cultmesh_rs::CultMeshNode) -> Result<()> {
-    let move_state_sources = live_move_state_sources(options);
+    let move_state_sources =
+        serve_move_state_sources(options, serve_should_manage_move_runtime(options));
     if move_state_sources.is_empty() {
         return Ok(());
     }
