@@ -2112,7 +2112,7 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 daemon_id: "starfire-muninn".to_string(),
                 verse_id: "starfire.local".to_string(),
                 name: "Starfire Muninn telemetry and Quest access daemon".to_string(),
-                health_contract: health_contract(
+                health_contract: locally_supervised_health_contract(
                     "muninn.cultnet-rudp-local-telemetry-and-quest-access",
                     "failed",
                 ),
@@ -2253,7 +2253,7 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 daemon_id: "nightwing-muninn".to_string(),
                 verse_id: "nightwing.local".to_string(),
                 name: "Nightwing Muninn telemetry and Move HID daemon".to_string(),
-                health_contract: health_contract(
+                health_contract: locally_supervised_health_contract(
                     "muninn.cultnet-rudp-remote-telemetry-and-move-hid",
                     "failed",
                 ),
@@ -3714,6 +3714,49 @@ mod tests {
                 .iter()
                 .any(|step| step.contains("CultLib cultcache-py snapshot"))
         );
+    }
+
+    #[test]
+    fn starfire_and_nightwing_muninn_restart_when_health_publication_is_missing() {
+        let options = SwarmOptions {
+            profile: "starfire-local".to_string(),
+            repo_root: PathBuf::from("E:/Projects/Odin"),
+        };
+        let targets = swarm_targets(&options).expect("starfire-local targets");
+
+        for daemon_id in ["starfire-muninn", "nightwing-muninn"] {
+            let target = targets
+                .iter()
+                .find(|target| target.daemon_id == daemon_id)
+                .expect("Muninn target");
+            assert!(target.health_contract.restart_on_missing_publication);
+
+            let desired = IdunnDesiredDaemonRecord {
+                daemon_id: target.daemon_id.clone(),
+                verse_id: target.verse_id.clone(),
+                name: target.name.clone(),
+                enabled: target.enabled,
+                health_command: None,
+                restart_command: target.restart_command.clone(),
+                deploy_command: target.deploy_command.clone(),
+                health_contract: target.health_contract.id.clone(),
+                transport_profile_id: transport_profile_id(target),
+                command_boundary_id: command_boundary_id(target),
+                authority: "idunn-supervisor-command".to_string(),
+                max_silence_seconds: 60,
+                observed_at: "unix:100".to_string(),
+            };
+            let health = missing_daemon_published_health(target, &desired, "unix:101");
+            let plan = plan_keepalive(&desired, &health, "unix:102");
+
+            assert_eq!(health.state, "failed");
+            assert_eq!(plan.decision.action, "restart");
+            assert_eq!(
+                plan.restart_request.expect("restart request").command,
+                target.restart_command.clone().expect("restart command")
+            );
+            assert!(plan.operator_alarm.is_none());
+        }
     }
 
     #[test]

@@ -11,7 +11,7 @@ param(
   [string] $IdunnHealthContract = "muninn.cultnet-rudp-local-telemetry-and-quest-access",
   [string] $OdinCultMeshUri = $(if ($env:ODIN_CULTMESH_URI) { $env:ODIN_CULTMESH_URI } else { "cultmesh://odin/rendezvous/provider-catalog" }),
   [string] $HidControllerRudpBind = "0.0.0.0:17888",
-  [string] $HidControllerRudpAdvertise = $env:MUNINN_HID_CONTROLLER_RUDP_ADVERTISE
+  [string] $HidControllerRudpAdvertise = $(if ($env:MUNINN_HID_CONTROLLER_RUDP_ADVERTISE) { $env:MUNINN_HID_CONTROLLER_RUDP_ADVERTISE } else { "10.77.0.2:17888" })
 )
 
 $ErrorActionPreference = "Stop"

@@ -4,8 +4,8 @@ param(
   [string] $StorePath = "/home/metacrat/.local/state/gamecult/muninn/muninn.telemetry.cc",
   [string] $LogRoot = "/home/metacrat/.local/state/gamecult/muninn",
   [string[]] $MoveState = @(),
-  [switch] $DiscoverMoveState,
-  [switch] $ClaimUsbMoves,
+  [switch] $DiscoverMoveState = $true,
+  [switch] $ClaimUsbMoves = $true,
   [string] $MoveEvidenceStream = "muninn:nightwing:move-evidence",
   [int] $IntervalSeconds = 15,
   [string] $IdunnRudpHealth = $env:IDUNN_RUDP_HEALTH,
@@ -13,7 +13,7 @@ param(
   [string] $IdunnHealthContract = "muninn.cultnet-rudp-remote-telemetry-and-move-hid",
   [string] $OdinCultMeshUri = $(if ($env:ODIN_CULTMESH_URI) { $env:ODIN_CULTMESH_URI } else { "cultmesh://odin/rendezvous/provider-catalog" }),
   [string] $HidControllerRudpBind = "0.0.0.0:17888",
-  [string] $HidControllerRudpAdvertise = $env:MUNINN_HID_CONTROLLER_RUDP_ADVERTISE
+  [string] $HidControllerRudpAdvertise = $(if ($env:MUNINN_HID_CONTROLLER_RUDP_ADVERTISE) { $env:MUNINN_HID_CONTROLLER_RUDP_ADVERTISE } else { "10.77.0.3:17888" })
 )
 
 $ErrorActionPreference = "Stop"
@@ -24,6 +24,9 @@ if ($env:IDUNN_ACTUATOR -ne "1" -or $env:IDUNN_COMMAND_AUTHORITY -ne "idunn-daem
 
 if ([string]::IsNullOrWhiteSpace($IdunnRudpHealth)) {
   throw "Idunn RUDP health endpoint must be supplied by -IdunnRudpHealth or IDUNN_RUDP_HEALTH; no Starfire LAN default is allowed."
+}
+if ($IdunnRudpHealth -match '^(127\.0\.0\.1|localhost):(\d+)$') {
+  $IdunnRudpHealth = "10.77.0.2:$($Matches[2])"
 }
 if (-not [string]::IsNullOrWhiteSpace($HidControllerRudpBind) -and [string]::IsNullOrWhiteSpace($HidControllerRudpAdvertise)) {
   throw "HID controller RUDP advertise endpoint must be supplied by -HidControllerRudpAdvertise or MUNINN_HID_CONTROLLER_RUDP_ADVERTISE when HID RUDP bind is enabled; no Nightwing LAN default is allowed."
@@ -143,8 +146,11 @@ nohup '$MuninnExe' "`$@" \
   < /dev/null &
 echo `$! > '$LogRoot/muninn.pid'
 sleep 1
-kill -0 "`$(cat '$LogRoot/muninn.pid')" 2>/dev/null
-if ! pgrep -af '[m]uninn serve .*--host nightwing' | grep -F -- '--idunn-rudp-health $IdunnRudpHealth' >/dev/null 2>&1; then
+muninn_pid="`$(cat '$LogRoot/muninn.pid')"
+kill -0 "`$muninn_pid" 2>/dev/null
+muninn_cmdline="`$(tr '\0' ' ' < "/proc/`$muninn_pid/cmdline")"
+if ! printf '%s\n' "`$muninn_cmdline" | grep -F -- '--host nightwing' >/dev/null 2>&1 ||
+   ! printf '%s\n' "`$muninn_cmdline" | grep -F -- '--idunn-rudp-health $IdunnRudpHealth' >/dev/null 2>&1; then
   echo 'Nightwing Muninn serve command line is missing Idunn RUDP health arguments' >&2
   exit 1
 fi
