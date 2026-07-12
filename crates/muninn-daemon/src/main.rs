@@ -87,6 +87,7 @@ const MUNINN_RUDP_MEDIA_SOCKET_BUFFER_BYTES: usize = 16 * 1024 * 1024;
 const MUNINN_RUDP_MEDIA_SEND_PACE_EVERY_PAYLOADS: usize = 4;
 const MUNINN_RUDP_MEDIA_SEND_PACE_SLEEP_US: u64 = 250;
 const MUNINN_RUDP_ACTIVE_CATALOG_REPUBLISH_MS: u64 = 2_000;
+const MUNINN_ODIN_PROVIDER_LEASE_REFRESH_SECONDS: u64 = 30;
 const PS_MOVE_LED_REPORT_LEN: usize = 49;
 const MUNINN_DISABLED_VIDEO_SOURCE_ID: &str = "video:none";
 const MUNINN_DISABLED_AUDIO_SOURCE_ID: &str = "audio:none";
@@ -369,7 +370,6 @@ fn serve(options: Options) -> Result<()> {
     let suppressed_default_move_light_paths = Arc::new(Mutex::new(HashSet::new()));
     let mut last_idunn_health_publish_attempt_at = None;
     let mut hid_controller_stream = create_hid_controller_stream(&options)?;
-    let mut odin_respects_paid = false;
     let mut last_move_host_claim_attempt_at = None;
     let mut last_move_bluetooth_pickup_attempt_at = None;
     let move_runtime_enabled = serve_should_manage_move_runtime(&options);
@@ -380,6 +380,7 @@ fn serve(options: Options) -> Result<()> {
     let mut active_capture_streams = Vec::new();
     start_hid_controller_rudp_ingress(&options)?;
     start_default_move_light_worker(&options, Arc::clone(&suppressed_default_move_light_paths));
+    start_odin_provider_lease_worker(&options);
 
     loop {
         let live_move_sources = serve_move_state_sources(&options, move_runtime_enabled);
@@ -437,12 +438,6 @@ fn serve(options: Options) -> Result<()> {
                 &active_stream_ids,
                 &live_move_sources,
             )?;
-            if !odin_respects_paid {
-                odin_respects_paid = true;
-                if let Err(error) = publish_odin_startup_respect(&node, &options) {
-                    eprintln!("Muninn could not publish startup respect to Odin: {error:#}");
-                }
-            }
             publish_obs_catalog_idle(&mut node, &options)?;
         }
         claim_move_host_if_due(&options, &mut last_move_host_claim_attempt_at);
@@ -2999,7 +2994,38 @@ fn publish_runtime_boundary_records(
     Ok(())
 }
 
-fn publish_odin_startup_respect(node: &cultmesh_rs::CultMeshNode, options: &Options) -> Result<()> {
+fn start_odin_provider_lease_worker(options: &Options) {
+    if resolve_odin_cultmesh_uri(options).is_none() {
+        return;
+    }
+
+    let options = options.clone();
+    thread::spawn(move || {
+        let mut has_published = false;
+        loop {
+            let result = open_node(&options, "muninn-odin-provider-lease")
+                .and_then(|node| publish_odin_provider_lease(&node, &options));
+            match result {
+                Ok(()) => {
+                    has_published = true;
+                    thread::sleep(Duration::from_secs(
+                        MUNINN_ODIN_PROVIDER_LEASE_REFRESH_SECONDS,
+                    ));
+                }
+                Err(error) => {
+                    eprintln!("Muninn could not renew its Odin provider lease: {error:#}");
+                    thread::sleep(if has_published {
+                        Duration::from_secs(MUNINN_ODIN_PROVIDER_LEASE_REFRESH_SECONDS)
+                    } else {
+                        Duration::from_secs(1)
+                    });
+                }
+            }
+        }
+    });
+}
+
+fn publish_odin_provider_lease(node: &cultmesh_rs::CultMeshNode, options: &Options) -> Result<()> {
     let Some(target) = resolve_odin_cultmesh_uri(options) else {
         return Ok(());
     };
@@ -3013,7 +3039,7 @@ fn publish_odin_startup_respect(node: &cultmesh_rs::CultMeshNode, options: &Opti
             runtime_id: muninn_daemon_id(options),
             source_role: Some("muninn.telemetry-provider".to_string()),
             tags: vec![
-                "startup-respect".to_string(),
+                "provider-lease".to_string(),
                 "odin-verse-discovery".to_string(),
             ],
             ..CultMeshRudpDocumentPublishOptions::default()
