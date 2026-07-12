@@ -297,8 +297,7 @@ struct ActiveMoveMarkerCameraSource {
     frame_source: MoveMarkerFrameSource,
     sequence: u64,
     #[cfg(feature = "psmoveapi-tracker")]
-    psmoveapi_tracker: Option<muninn_psmoveapi_tracker::PsmoveApiTracker>,
-    last_psmoveapi_calibration_at: Option<Instant>,
+    psmoveapi_observations: Option<mpsc::Receiver<Vec<muninn_psmoveapi_tracker::PsmoveApiObservation>>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -4236,19 +4235,14 @@ fn active_move_marker_camera_sources(options: &Options) -> Vec<ActiveMoveMarkerC
                 options.host_id, source.camera_id
             );
             #[cfg(feature = "psmoveapi-tracker")]
-            let psmoveapi_tracker = if options.move_psmoveapi_tracker {
+            let psmoveapi_observations = if options.move_psmoveapi_tracker {
                 video_device_index(&source.device_path).and_then(|camera_index| {
-                    match muninn_psmoveapi_tracker::PsmoveApiTracker::open(
+                    Some(start_psmoveapi_tracker_worker(
+                        source.camera_id.clone(),
                         camera_index,
                         options.move_tracker_exposure_milli as f32 / 1000.0,
-                        &move_colors,
-                    ) {
-                        Ok(tracker) => Some(tracker),
-                        Err(error) => {
-                            eprintln!("Muninn PSMoveAPI tracker failed camera={} path={}: {error}", source.camera_id, source.device_path.display());
-                            None
-                        }
-                    }
+                        move_colors.clone(),
+                    ))
                 })
             } else {
                 None
@@ -4276,8 +4270,7 @@ fn active_move_marker_camera_sources(options: &Options) -> Vec<ActiveMoveMarkerC
                 },
                 sequence: 0,
                 #[cfg(feature = "psmoveapi-tracker")]
-                psmoveapi_tracker,
-                last_psmoveapi_calibration_at: None,
+                psmoveapi_observations,
             }
         })
         .collect()
@@ -4300,15 +4293,13 @@ fn publish_move_marker_camera_frames(
         frame_source.tracker_config.source_id_hash =
             stable_marker_camera_source_hash(&frame_source);
         #[cfg(feature = "psmoveapi-tracker")]
-        if let Some(tracker) = camera.psmoveapi_tracker.as_mut() {
-            let calibration_due = camera.last_psmoveapi_calibration_at
-                .is_none_or(|last| last.elapsed() >= Duration::from_secs(5));
-            if calibration_due {
-                tracker.calibrate_connected();
-                camera.last_psmoveapi_calibration_at = Some(Instant::now());
-            }
+        if let Some(receiver) = camera.psmoveapi_observations.as_ref() {
             let observed_at = timestamp()?;
-            marker_candidates.extend(tracker.update().into_iter().map(|observation| {
+            let mut latest = None;
+            while let Ok(observations) = receiver.try_recv() {
+                latest = Some(observations);
+            }
+            marker_candidates.extend(latest.unwrap_or_default().into_iter().map(|observation| {
                 let radius = observation.radius_px.max(0.0);
                 MuninnMoveMarkerCandidateRecord {
                     stream_id: frame_source.stream_id.clone(),
@@ -4349,6 +4340,42 @@ fn publish_move_marker_camera_frames(
         )?;
     }
     Ok(())
+}
+
+#[cfg(feature = "psmoveapi-tracker")]
+fn start_psmoveapi_tracker_worker(
+    camera_id: String,
+    camera_index: i32,
+    exposure: f32,
+    colors: Vec<(String, [u8; 3])>,
+) -> mpsc::Receiver<Vec<muninn_psmoveapi_tracker::PsmoveApiObservation>> {
+    let (sender, receiver) = mpsc::sync_channel(1);
+    thread::spawn(move || {
+        let mut tracker = match muninn_psmoveapi_tracker::PsmoveApiTracker::open(
+            camera_index,
+            exposure,
+            &colors,
+        ) {
+            Ok(tracker) => tracker,
+            Err(error) => {
+                eprintln!("Muninn PSMoveAPI tracker failed camera={camera_id} index={camera_index}: {error}");
+                return;
+            }
+        };
+        let mut last_calibration_at = Instant::now();
+        loop {
+            if last_calibration_at.elapsed() >= Duration::from_secs(5) {
+                tracker.calibrate_connected();
+                last_calibration_at = Instant::now();
+            }
+            let observations = tracker.update();
+            match sender.try_send(observations) {
+                Ok(()) | Err(mpsc::TrySendError::Full(_)) => {}
+                Err(mpsc::TrySendError::Disconnected(_)) => return,
+            }
+        }
+    });
+    receiver
 }
 
 fn video_device_index(path: &Path) -> Option<i32> {
