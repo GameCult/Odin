@@ -378,7 +378,10 @@ fn serve(options: Options) -> Result<()> {
     let mut active_move_marker_cameras = active_move_marker_camera_sources(&options);
     let mut move_marker_camera_reader = PlatformMoveMarkerCameraFrameReader::default();
     let mut active_capture_streams = Vec::new();
-    start_hid_controller_rudp_ingress(&options)?;
+    let move_evidence_rudp_sender = start_hid_controller_rudp_ingress(&options)?;
+    if let Some(stream) = move_evidence_stream.as_mut() {
+        stream.rudp_sender = move_evidence_rudp_sender;
+    }
     start_default_move_light_worker(&options, Arc::clone(&suppressed_default_move_light_paths));
     start_odin_provider_lease_worker(&options);
 
@@ -1408,6 +1411,7 @@ struct ActiveMoveEvidenceStream {
     producer_peer_id: String,
     frame_counter: u64,
     snapshot_path: Option<PathBuf>,
+    rudp_sender: Option<mpsc::SyncSender<Vec<u8>>>,
 }
 
 fn activate(options: Options) -> Result<()> {
@@ -2808,34 +2812,53 @@ fn publish_runtime_boundary_records(
     let transport_input_streams = hid_controller_endpoint
         .as_ref()
         .map(|endpoint| {
-            json!([
-                {
-                    "stream_id": input_stream_id,
-                    "schema": "muninn.hid_controller_state.v1",
+            let mut streams = vec![json!({
+                "stream_id": input_stream_id,
+                "schema": "muninn.hid_controller_state.v1",
+                "transport": CULTNET_RUDP_PROTOCOL_ID,
+                "address": endpoint,
+                "connection_id": MUNINN_HID_CONTROLLER_RUDP_CONNECTION_ID,
+                "channel_id": "latest",
+                "producer": "Muninn IO daemon",
+                "devices": hid_controller_devices_snake
+            })];
+            if let Some(stream_id) = options.move_evidence_stream_id.as_ref() {
+                streams.push(json!({
+                    "stream_id": stream_id,
+                    "schema": "mimir.muninn_move_evidence_stream_frame.v1",
                     "transport": CULTNET_RUDP_PROTOCOL_ID,
                     "address": endpoint,
                     "connection_id": MUNINN_HID_CONTROLLER_RUDP_CONNECTION_ID,
-                    "channel_id": "latest",
-                    "producer": "Muninn IO daemon",
-                    "devices": hid_controller_devices_snake
-                }
-            ])
+                    "channel_id": "move-evidence",
+                    "producer": "Muninn Move evidence runtime"
+                }));
+            }
+            json!(streams)
         })
         .unwrap_or_else(|| json!([]));
     let provider_input_streams = hid_controller_endpoint
         .as_ref()
         .map(|endpoint| {
-            json!([
-                {
-                    "streamId": input_stream_id,
-                    "schema": "muninn.hid_controller_state.v1",
+            let mut streams = vec![json!({
+                "streamId": input_stream_id,
+                "schema": "muninn.hid_controller_state.v1",
+                "transport": CULTNET_RUDP_PROTOCOL_ID,
+                "address": endpoint,
+                "connectionId": MUNINN_HID_CONTROLLER_RUDP_CONNECTION_ID,
+                "channel": "latest",
+                "devices": hid_controller_devices_camel
+            })];
+            if let Some(stream_id) = options.move_evidence_stream_id.as_ref() {
+                streams.push(json!({
+                    "streamId": stream_id,
+                    "schema": "mimir.muninn_move_evidence_stream_frame.v1",
                     "transport": CULTNET_RUDP_PROTOCOL_ID,
                     "address": endpoint,
                     "connectionId": MUNINN_HID_CONTROLLER_RUDP_CONNECTION_ID,
-                    "channel": "latest",
-                    "devices": hid_controller_devices_camel
-                }
-            ])
+                    "channel": "move-evidence"
+                }));
+            }
+            json!(streams)
         })
         .unwrap_or_else(|| json!([]));
     let mut provider_endpoints = vec![json!({
@@ -2851,6 +2874,16 @@ fn publish_runtime_boundary_records(
             "connectionId": MUNINN_HID_CONTROLLER_RUDP_CONNECTION_ID,
             "channel": "latest"
         }));
+        if options.move_evidence_stream_id.is_some() {
+            provider_endpoints.push(json!({
+                "transport": CULTNET_RUDP_PROTOCOL_ID,
+                "role": "muninn.move_evidence_stream",
+                "schema": "mimir.muninn_move_evidence_stream_frame.v1",
+                "address": endpoint,
+                "connectionId": MUNINN_HID_CONTROLLER_RUDP_CONNECTION_ID,
+                "channel": "move-evidence"
+            }));
+        }
     }
     let media_profile = muninn_rudp_media_profile_for_options(options);
     let command_boundary = MuninnCommandBoundaryCompatRecord {
@@ -3299,6 +3332,7 @@ fn create_move_evidence_stream(options: &Options) -> Result<Option<ActiveMoveEvi
         producer_peer_id,
         frame_counter: 0,
         snapshot_path: options.move_evidence_snapshot_path.clone(),
+        rudp_sender: None,
     }))
 }
 
@@ -3332,6 +3366,9 @@ fn publish_move_evidence_stream_frame(
         ring.try_publish_copy(&payload, published_at_ns, 0)?
     };
     if let Some(handle) = handle {
+        if let Some(sender) = stream.rudp_sender.as_ref() {
+            let _ = sender.try_send(payload.clone());
+        }
         if let Some(path) = stream.snapshot_path.as_deref() {
             write_move_evidence_snapshot(
                 path,
@@ -4405,28 +4442,37 @@ struct HidControllerRudpSubscription {
     stream_id: Option<String>,
 }
 
-fn start_hid_controller_rudp_ingress(options: &Options) -> Result<()> {
+fn start_hid_controller_rudp_ingress(
+    options: &Options,
+) -> Result<Option<mpsc::SyncSender<Vec<u8>>>> {
     let Some(bind_address) = options.hid_controller_rudp_bind else {
-        return Ok(());
+        return Ok(None);
     };
     if live_move_state_sources(options).is_empty() {
-        return Ok(());
+        return Ok(None);
     }
     let socket = UdpSocket::bind(bind_address)
         .with_context(|| format!("binding Muninn HID controller RUDP stream at {bind_address}"))?;
     socket
         .set_read_timeout(Some(Duration::from_millis(1)))
         .with_context(|| format!("setting Muninn HID controller RUDP timeout at {bind_address}"))?;
+    let (move_evidence_tx, move_evidence_rx) = mpsc::sync_channel(4);
     let runtime_options = options.clone();
     thread::spawn(move || {
-        if let Err(error) = run_hid_controller_rudp_ingress(socket, runtime_options) {
+        if let Err(error) =
+            run_hid_controller_rudp_ingress(socket, runtime_options, move_evidence_rx)
+        {
             eprintln!("Muninn HID controller RUDP stream stopped: {error:#}");
         }
     });
-    Ok(())
+    Ok(Some(move_evidence_tx))
 }
 
-fn run_hid_controller_rudp_ingress(socket: UdpSocket, options: Options) -> Result<()> {
+fn run_hid_controller_rudp_ingress(
+    socket: UdpSocket,
+    options: Options,
+    move_evidence_rx: mpsc::Receiver<Vec<u8>>,
+) -> Result<()> {
     let local_addr = socket.local_addr()?;
     println!("Muninn HID controller RUDP stream listening at {local_addr}.");
     let mut transport =
@@ -4517,6 +4563,14 @@ fn run_hid_controller_rudp_ingress(socket: UdpSocket, options: Options) -> Resul
             }
             thread::sleep(Duration::from_millis(8));
             continue;
+        }
+        if transport.connected() {
+            while let Ok(payload) = move_evidence_rx.try_recv() {
+                if let Err(error) = transport.send("move-evidence", payload) {
+                    eprintln!("Muninn Move evidence RUDP send warning: {error:#}");
+                    break;
+                }
+            }
         }
         for source in &mut sources {
             if !hid_controller_source_matches_subscription(
@@ -11412,7 +11466,7 @@ Device 00:07:04:A8:00:D0 (public)
     }
 
     #[test]
-    fn runtime_boundary_advertises_live_hid_sources_not_move_evidence() {
+    fn runtime_boundary_advertises_hid_and_move_evidence_streams() {
         let store_path = std::env::temp_dir().join(format!(
             "muninn-boundary-hid-sources-{}.cc",
             timestamp_ns().unwrap()
@@ -11452,6 +11506,7 @@ Device 00:07:04:A8:00:D0 (public)
             .and_then(|value| value.as_array())
             .unwrap();
         let hid_stream = streams.first().unwrap();
+        assert_eq!(streams.len(), 2);
         assert_eq!(
             hid_stream.get("streamId").and_then(|value| value.as_str()),
             Some("muninn:starfire:hid-controller-state")
@@ -11477,6 +11532,19 @@ Device 00:07:04:A8:00:D0 (public)
                 .and_then(|device| device.get("deviceKind"))
                 .and_then(|value| value.as_str()),
             Some("ps3-navigation")
+        );
+        let evidence_stream = &streams[1];
+        assert_eq!(
+            evidence_stream
+                .get("streamId")
+                .and_then(|value| value.as_str()),
+            Some("muninn:nightwing:move-evidence")
+        );
+        assert_eq!(
+            evidence_stream
+                .get("channel")
+                .and_then(|value| value.as_str()),
+            Some("move-evidence")
         );
         let _ = fs::remove_file(store_path);
     }
@@ -11940,6 +12008,8 @@ Device 00:07:04:A8:00:D0 (public)
         let mut stream = create_move_evidence_stream(&options)
             .unwrap()
             .expect("move state source should create a stream");
+        let (rudp_tx, rudp_rx) = mpsc::sync_channel(1);
+        stream.rudp_sender = Some(rudp_tx);
 
         let handle = publish_move_evidence_stream_frame(&mut stream, &[], &[record.clone()])
             .unwrap()
@@ -11969,6 +12039,8 @@ Device 00:07:04:A8:00:D0 (public)
             .and_then(CultMeshSharedMemoryFrameRing::try_acquire_latest_read)
             .expect("latest frame should be readable");
         let decoded: DecodedMoveEvidenceStreamFrame = rmp_serde::from_slice(lease.bytes()).unwrap();
+        let remote_payload = rudp_rx.try_recv().expect("RUDP evidence copy");
+        assert_eq!(remote_payload, lease.bytes());
 
         assert_eq!(decoded.0, "muninn:nightwing:move-evidence:0");
         assert_eq!(decoded.1, "muninn:nightwing");
