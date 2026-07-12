@@ -5765,6 +5765,12 @@ fn start_default_move_light_worker(
         loop {
             let states = active_move_state_sources(serve_move_state_sources(&options, true));
             let targets = default_move_light_paths(&states, true);
+            let mut roster = targets
+                .iter()
+                .map(|target| target.identity.clone())
+                .collect::<Vec<_>>();
+            roster.sort();
+            roster.dedup();
             let suppressed = suppressed_paths
                 .lock()
                 .map(|paths| paths.clone())
@@ -5773,7 +5779,7 @@ fn start_default_move_light_worker(
                 if suppressed.contains(&target.path) {
                     continue;
                 }
-                let color = default_move_color_for_identity(&target.identity);
+                let color = golden_move_color_for_roster(&target.identity, &roster);
                 let report = default_move_light_report(color);
                 if let Err(error) = writer.write_report(&target.path, &report) {
                     let should_log = last_error_log_at
@@ -5842,6 +5848,15 @@ fn push_unique_light_target(
 fn default_move_color_for_identity(identity: &str) -> (u8, u8, u8) {
     let hue = (stable_u64_hash(identity) % 360) as f64;
     hsv_to_rgb(hue, 0.82, 1.0)
+}
+
+fn golden_move_color_for_roster(identity: &str, roster: &[String]) -> (u8, u8, u8) {
+    const GOLDEN_RATIO_CONJUGATE: f64 = 0.618_033_988_749_894_9;
+    let Some(index) = roster.iter().position(|candidate| candidate == identity) else {
+        return default_move_color_for_identity(identity);
+    };
+    let hue = ((index as f64 * GOLDEN_RATIO_CONJUGATE).fract() * 360.0 + 15.0) % 360.0;
+    hsv_to_rgb(hue, 1.0, 1.0)
 }
 
 fn hsv_to_rgb(hue_degrees: f64, saturation: f64, value: f64) -> (u8, u8, u8) {
@@ -10776,6 +10791,25 @@ mod tests {
         let colors = roster.map(default_move_color_for_identity);
         assert_eq!(colors.into_iter().collect::<HashSet<_>>().len(), roster.len());
         assert!(colors.into_iter().all(|color| color.0.max(color.1).max(color.2) == 255));
+    }
+
+    #[test]
+    fn golden_move_roster_spreads_neighboring_stable_ids_across_hue_space() {
+        let roster = vec![
+            "move-0006f523e2d1".to_string(),
+            "move-000704a39772".to_string(),
+            "move-000704a6be5f".to_string(),
+            "move-000704a800d0".to_string(),
+        ];
+        let colors = roster
+            .iter()
+            .map(|identity| golden_move_color_for_roster(identity, &roster))
+            .collect::<Vec<_>>();
+        assert_eq!(colors.iter().copied().collect::<HashSet<_>>().len(), 4);
+        assert!(colors.iter().all(|color| color.0.max(color.1).max(color.2) == 255));
+        assert!(colors.iter().any(|color| color.0 == 255 && color.1 < 100));
+        assert!(colors.iter().any(|color| color.1 == 255 && color.0 < 100));
+        assert!(colors.iter().any(|color| color.2 == 255 && color.0 < 100));
     }
 
     #[test]
