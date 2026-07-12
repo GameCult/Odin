@@ -4182,6 +4182,7 @@ fn publish_move_marker_camera_frames(
     let Some(stream) = move_evidence_stream else {
         return Ok(());
     };
+    let mut marker_candidates = Vec::new();
     for camera in active {
         camera.sequence = camera.sequence.saturating_add(1);
         let mut frame_source = camera.frame_source.clone();
@@ -4192,8 +4193,13 @@ fn publish_move_marker_camera_frames(
             continue;
         };
         let observed_at = timestamp()?;
-        let marker_candidates =
-            extract_move_marker_candidates_from_luma_frame(&frame_source, &frame, observed_at)?;
+        marker_candidates.extend(extract_move_marker_candidates_from_luma_frame(
+            &frame_source,
+            &frame,
+            observed_at,
+        )?);
+    }
+    if !marker_candidates.is_empty() || !latest_move_controller_states.is_empty() {
         publish_move_evidence_stream_frame(
             stream,
             &marker_candidates,
@@ -12107,6 +12113,8 @@ Device 00:07:04:A8:00:D0 (public)
                 "move-usb=/dev/input/js0",
                 "--move-marker-camera",
                 "ps3eye0=/dev/video0",
+                "--move-marker-camera",
+                "ps3eye1=/dev/video1",
                 "--move-evidence-stream",
                 "muninn:nightwing:move-evidence",
                 "--move-marker-width",
@@ -12130,7 +12138,7 @@ Device 00:07:04:A8:00:D0 (public)
         }
         let mut active_cameras = active_move_marker_camera_sources(&options);
         let mut reader = RecordingMoveMarkerCameraReader {
-            frames: vec![y8],
+            frames: vec![y8.clone(), y8],
             configs: Vec::new(),
         };
         let source = options.move_state_sources[0].clone();
@@ -12162,8 +12170,9 @@ Device 00:07:04:A8:00:D0 (public)
             .expect("latest bundled evidence frame should be readable");
         let decoded: DecodedMoveEvidenceStreamFrame = rmp_serde::from_slice(lease.bytes()).unwrap();
 
-        assert_eq!(decoded.3.len(), 1);
+        assert_eq!(decoded.3.len(), 2);
         assert_eq!(decoded.4.len(), 1);
+        assert_ne!(decoded.3[0].source_id_hash, decoded.3[1].source_id_hash);
         assert_eq!(decoded.4[0].move_id, "move-usb");
         assert_eq!(decoded.4[0].sequence, 7);
         assert_eq!(decoded.4[0].source_path, "/dev/input/js0");
