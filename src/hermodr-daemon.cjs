@@ -769,6 +769,7 @@ async function publishCommandDocument(options, definition, key, value, route, co
         key,
         value,
         {
+          bindHost: "0.0.0.0",
           sourceRuntimeId: "hermodr-browser-lowering",
           sourceRole: "browser-lowering",
           tags: ["hermodr", "browser", "command"],
