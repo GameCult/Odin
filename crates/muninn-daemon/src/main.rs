@@ -5631,15 +5631,6 @@ fn tick_move_light_commands(
     Ok(())
 }
 
-const DEFAULT_MOVE_LIGHT_COLORS: &[(u8, u8, u8)] = &[
-    (255, 48, 64),
-    (32, 160, 255),
-    (80, 255, 120),
-    (255, 208, 48),
-    (200, 80, 255),
-    (255, 128, 32),
-];
-
 fn start_default_move_light_worker(
     options: &Options,
     suppressed_paths: Arc<Mutex<HashSet<String>>>,
@@ -5735,8 +5726,28 @@ fn push_unique_light_target(
 }
 
 fn default_move_color_for_identity(identity: &str) -> (u8, u8, u8) {
-    let hash = stable_u64_hash(identity);
-    DEFAULT_MOVE_LIGHT_COLORS[hash as usize % DEFAULT_MOVE_LIGHT_COLORS.len()]
+    let hue = (stable_u64_hash(identity) % 360) as f64;
+    hsv_to_rgb(hue, 0.82, 1.0)
+}
+
+fn hsv_to_rgb(hue_degrees: f64, saturation: f64, value: f64) -> (u8, u8, u8) {
+    let chroma = value * saturation;
+    let hue_sector = (hue_degrees.rem_euclid(360.0)) / 60.0;
+    let secondary = chroma * (1.0 - ((hue_sector % 2.0) - 1.0).abs());
+    let (red, green, blue) = match hue_sector.floor() as u8 {
+        0 => (chroma, secondary, 0.0),
+        1 => (secondary, chroma, 0.0),
+        2 => (0.0, chroma, secondary),
+        3 => (0.0, secondary, chroma),
+        4 => (secondary, 0.0, chroma),
+        _ => (chroma, 0.0, secondary),
+    };
+    let floor = value - chroma;
+    (
+        ((red + floor) * 255.0).round() as u8,
+        ((green + floor) * 255.0).round() as u8,
+        ((blue + floor) * 255.0).round() as u8,
+    )
 }
 
 fn stable_u64_hash(value: &str) -> u64 {
@@ -10641,6 +10652,15 @@ mod tests {
             default_move_color_for_identity("move-0006f523e2d1"),
             default_move_color_for_identity("move-000704a6be5f")
         );
+        let roster = [
+            "move-0006f523e2d1",
+            "move-000704a39772",
+            "move-000704a6be5f",
+            "move-000704a800d0",
+        ];
+        let colors = roster.map(default_move_color_for_identity);
+        assert_eq!(colors.into_iter().collect::<HashSet<_>>().len(), roster.len());
+        assert!(colors.into_iter().all(|color| color.0.max(color.1).max(color.2) == 255));
     }
 
     #[test]
