@@ -719,7 +719,7 @@ async function publishEveCommand(options, body) {
   const target = typeof body.target === "string" ? body.target.trim() : "";
   const catalog = await readCatalog(options);
   const route = target.startsWith("cultmesh://")
-    ? target
+    ? { uri: target, publishEndpoint: target }
     : findProviderCommandRoute(catalog, body.providerId || body.provider_id || "");
   if (!route) {
     const error = new Error("No provider-advertised cultmesh:// command route was visible.");
@@ -732,13 +732,19 @@ async function publishEveCommand(options, body) {
     ...body,
     schema: "gamecult.eve.command.v1",
     commandId,
-    target: route || target || null,
+    target: route.uri,
     publishedBy: "hermodr-browser-lowering",
     publishedAt: new Date().toISOString(),
   };
-  const publication = await publishCommandDocument(options, HermodrCommandDefinition, commandId, command, route);
+  const publication = await publishCommandDocument(
+    options,
+    HermodrCommandDefinition,
+    commandId,
+    command,
+    route.publishEndpoint || route.uri,
+  );
   if (publication.routeError) {
-    const error = new Error(`CultMesh route publish failed for ${route}: ${publication.routeError}`);
+    const error = new Error(`CultMesh route publish failed for ${route.uri}: ${publication.routeError}`);
     error.statusCode = 502;
     throw error;
   }
@@ -746,13 +752,13 @@ async function publishEveCommand(options, body) {
     ok: true,
     schema: "gamecult.eve.command.v1",
     commandId,
-    target: route,
+    target: route.uri,
   };
 }
 
 async function publishCommandDocument(options, definition, key, value, route) {
   let routeError = null;
-  if (route && route.startsWith("cultmesh://")) {
+  if (route && (route.startsWith("cultmesh://") || route.startsWith("rudp://"))) {
     try {
       await CultMesh.publishRudpDocumentOnce(
         "hermodr-browser-lowering",
@@ -829,7 +835,15 @@ function findProviderCommandRoute(catalog, providerId) {
       const role = [endpoint.id, endpoint.role, ...(endpoint.tags || [])].join(" ").toLowerCase();
       return uri.startsWith("cultmesh://") && role.includes("command");
     });
-    if (route) return route.uri || route.endpoint || route.address;
+    if (route) {
+      const uri = route.uri || route.endpoint || route.address;
+      const address = String(route.address || "").trim();
+      return {
+        ...route,
+        uri,
+        publishEndpoint: address ? `rudp://${address}` : uri,
+      };
+    }
   }
   return "";
 }
