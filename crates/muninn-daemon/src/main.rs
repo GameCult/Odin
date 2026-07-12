@@ -37,7 +37,9 @@ use serde_json::json;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
 use std::fs;
-#[cfg(not(windows))]
+#[cfg(feature = "psmoveapi-tracker")]
+use std::io::BufReader;
+#[cfg(any(not(windows), feature = "psmoveapi-tracker"))]
 use std::io::Write;
 use std::io::{ErrorKind, Read};
 use std::net::{SocketAddr, UdpSocket};
@@ -132,6 +134,7 @@ enum Mode {
     MoveStateStatus,
     ClaimMoveHost,
     QuestAccessStatus,
+    MoveTrackerWorker,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -377,6 +380,7 @@ fn main() -> Result<()> {
         Mode::MoveStateStatus => move_state_status(options),
         Mode::ClaimMoveHost => claim_move_host(options),
         Mode::QuestAccessStatus => quest_access_status(options),
+        Mode::MoveTrackerWorker => run_move_tracker_worker(options),
         Mode::DryRun => {
             require_media_target_uri(&options)?;
             let plan = build_mux_plan(&options, "dry-run".to_string());
@@ -4617,49 +4621,6 @@ fn active_move_marker_camera_sources(
     options: &Options,
     _move_hue_program: Arc<Mutex<MuninnMoveHueProgramRecord>>,
 ) -> Vec<ActiveMoveMarkerCameraSource> {
-    let mut move_roster = serve_move_state_sources(options, true)
-        .into_iter()
-        .map(|source| source.move_id)
-        .collect::<Vec<_>>();
-    move_roster.sort();
-    move_roster.dedup();
-    #[cfg(feature = "psmoveapi-tracker")]
-    let now_ns = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos() as i128;
-    #[cfg(feature = "psmoveapi-tracker")]
-    let program = _move_hue_program
-        .lock()
-        .map(|program| program.clone())
-        .unwrap_or_else(|_| MuninnMoveHueProgramRecord {
-            program_id: move_hue_program_key(&options.host_id),
-            host_id: options.host_id.clone(),
-            mode: "animated".to_string(),
-            cycle_ms: options.move_hue_cycle_ms,
-            epoch_ns: 0,
-            hold_at_ns: 0,
-            requested_by: "tracker-bootstrap".to_string(),
-            updated_at: "unix-0".to_string(),
-            order_mode: "descending".to_string(),
-        });
-    #[cfg(feature = "psmoveapi-tracker")]
-    let program_timestamp_ns = move_hue_program_timestamp_ns(&program, now_ns);
-    #[cfg(feature = "psmoveapi-tracker")]
-    let move_colors = move_roster
-        .iter()
-        .filter_map(|identity| {
-            scheduled_golden_move_color_with_order(
-                identity,
-                &move_roster,
-                i128::from(program.epoch_ns),
-                i128::from(program.cycle_ms) * 1_000_000,
-                program_timestamp_ns,
-                &program.order_mode,
-            )
-            .map(|(color, _, _)| (identity.clone(), [color.0, color.1, color.2]))
-        })
-        .collect::<Vec<_>>();
     options
         .move_marker_camera_sources
         .iter()
@@ -4672,12 +4633,12 @@ fn active_move_marker_camera_sources(
             let (psmoveapi_observations, psmoveapi_health) = if options.move_psmoveapi_tracker {
                 video_device_index(&source.device_path).and_then(|camera_index| {
                     Some(start_psmoveapi_tracker_worker(
+                        options.store_path.clone(),
                         options.host_id.clone(),
                         source.camera_id.clone(),
                         camera_index,
                         options.move_tracker_exposure_milli as f32 / 1000.0,
-                        move_colors.clone(),
-                        Arc::clone(&_move_hue_program),
+                        serve_move_state_sources(options, true),
                     ))
                 }).map_or((None, None), |(observations, health)| (Some(observations), Some(health)))
             } else {
@@ -4781,108 +4742,160 @@ fn publish_move_marker_camera_frames(
 }
 
 #[cfg(feature = "psmoveapi-tracker")]
-static PSMOVE_API_TRACKER_AUTHORITY: Mutex<()> = Mutex::new(());
-
-#[cfg(feature = "psmoveapi-tracker")]
 fn start_psmoveapi_tracker_worker(
+    store_path: PathBuf,
     host_id: String,
     camera_id: String,
     camera_index: i32,
     exposure: f32,
-    colors: Vec<(String, [u8; 3])>,
-    move_hue_program: Arc<Mutex<MuninnMoveHueProgramRecord>>,
+    move_state_sources: Vec<MoveStateSource>,
 ) -> (mpsc::Receiver<Vec<muninn_psmoveapi_tracker::PsmoveApiObservation>>, mpsc::Receiver<MuninnMoveTrackerHealthRecord>) {
     let (sender, receiver) = mpsc::sync_channel(1);
     let (health_sender, health_receiver) = mpsc::sync_channel(1);
     thread::spawn(move || {
-        let _ = health_sender.try_send(MuninnMoveTrackerHealthRecord {
-            health_id: format!("muninn:{host_id}:{camera_id}:move-tracker-health"), host_id: host_id.clone(), camera_id: camera_id.clone(), camera_index,
-            state: "opening".to_string(), camera_name: String::new(), camera_api: String::new(), width: 0, height: 0, exposure,
-            calibrated_controller_count: 0, update_count: 0, observation_count: 0, latest_observation_count: 0,
-            last_observation_at: String::new(), detail: "waiting for PSMoveAPI tracker initialization".to_string(),
-            updated_at: timestamp().unwrap_or_else(|_| "unix-0".to_string()),
-        });
-        let mut tracker = match PSMOVE_API_TRACKER_AUTHORITY
-            .lock()
-            .map_err(|_| "PSMoveAPI tracker authority lock was poisoned".to_string())
-            .and_then(|_authority| {
-                muninn_psmoveapi_tracker::PsmoveApiTracker::open(
-                    camera_index,
-                    exposure,
-                    &colors,
-                )
-                .map_err(|error| error.to_string())
-            }) {
-            Ok(tracker) => tracker,
-            Err(error) => {
-                let _ = health_sender.try_send(MuninnMoveTrackerHealthRecord {
-                    health_id: format!("muninn:{host_id}:{camera_id}:move-tracker-health"), host_id: host_id.clone(), camera_id: camera_id.clone(), camera_index,
-                    state: "failed".to_string(), camera_name: String::new(), camera_api: String::new(), width: 0, height: 0, exposure,
-                    calibrated_controller_count: 0, update_count: 0, observation_count: 0, latest_observation_count: 0,
-                    last_observation_at: String::new(), detail: error.clone(), updated_at: timestamp().unwrap_or_else(|_| "unix-0".to_string()),
-                });
-                eprintln!("Muninn PSMoveAPI tracker failed camera={camera_id} index={camera_index}: {error}");
-                return;
-            }
-        };
-        let camera_info = tracker.camera_info().clone();
-        let mut last_calibration_at = Instant::now();
-        let mut update_count = 0u64;
-        let mut observation_count = 0u64;
-        let mut last_observation_at = String::new();
-        loop {
-            let Ok(_authority) = PSMOVE_API_TRACKER_AUTHORITY.lock() else {
-                eprintln!("Muninn PSMoveAPI tracker authority lock poisoned camera={camera_id}");
-                return;
-            };
-            if last_calibration_at.elapsed() >= Duration::from_secs(30) {
-                tracker.observe_connected();
-                last_calibration_at = Instant::now();
-            }
-            let mut roster = colors.iter().map(|(identity, _)| identity.clone()).collect::<Vec<_>>();
-            roster.sort();
-            let now_ns = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos() as i128;
-            let Some(program) = move_hue_program.lock().ok().map(|program| program.clone()) else {
-                continue;
-            };
-            let program_timestamp_ns = move_hue_program_timestamp_ns(&program, now_ns);
-            for identity in &roster {
-                if let Some((color, _, _)) = scheduled_golden_move_color_with_order(
-                    identity,
-                    &roster,
-                    i128::from(program.epoch_ns),
-                    i128::from(program.cycle_ms) * 1_000_000,
-                    program_timestamp_ns,
-                    &program.order_mode,
-                ) {
-                    tracker.set_expected_color(identity, [color.0, color.1, color.2]);
-                }
-            }
-            let observations = tracker.update();
-            update_count = update_count.saturating_add(1);
-            observation_count = observation_count.saturating_add(observations.len() as u64);
-            if !observations.is_empty() { last_observation_at = timestamp().unwrap_or_else(|_| "unix-0".to_string()); }
-            let health = MuninnMoveTrackerHealthRecord {
-                health_id: format!("muninn:{host_id}:{camera_id}:move-tracker-health"), host_id: host_id.clone(), camera_id: camera_id.clone(), camera_index,
-                state: "running".to_string(), camera_name: camera_info.name.clone(), camera_api: camera_info.api.clone(), width: camera_info.width,
-                height: camera_info.height, exposure: camera_info.exposure, calibrated_controller_count: tracker.tracked_controller_count() as u32,
-                update_count, observation_count, latest_observation_count: observations.len() as u32, last_observation_at: last_observation_at.clone(),
-                detail: String::new(), updated_at: timestamp().unwrap_or_else(|_| "unix-0".to_string()),
-            };
-            match health_sender.try_send(health) {
-                Ok(()) | Err(mpsc::TrySendError::Full(_)) => {}
-                Err(mpsc::TrySendError::Disconnected(_)) => return,
-            }
-            match sender.try_send(observations) {
-                Ok(()) | Err(mpsc::TrySendError::Full(_)) => {}
-                Err(mpsc::TrySendError::Disconnected(_)) => return,
-            }
+        let mut command = Command::new(env::current_exe().unwrap_or_else(|_| PathBuf::from("muninn")));
+        command.arg("move-tracker-worker")
+            .arg("--store").arg(store_path)
+            .arg("--host").arg(&host_id)
+            .arg("--move-marker-camera").arg(format!("{camera_id}=/dev/video{camera_index}"))
+            .arg("--move-tracker-exposure-milli").arg(((exposure * 1000.0).round() as u32).to_string());
+        for source in move_state_sources {
+            command.arg("--move-state").arg(format!("{}={}", source.move_id, source.hidraw_path));
         }
+        let child = command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::inherit()).spawn();
+        let Ok(mut child) = child else { return; };
+        let Some(stdout) = child.stdout.take() else { return; };
+        let mut reader = BufReader::new(stdout);
+        while let Ok(frame) = read_move_tracker_worker_frame(&mut reader) {
+            let observations = frame.observations.into_iter().map(|value| muninn_psmoveapi_tracker::PsmoveApiObservation {
+                move_id: value.move_id, center_x_px: value.center_x_px, center_y_px: value.center_y_px,
+                radius_px: value.radius_px, age_ms: value.age_ms,
+            }).collect();
+            let _ = health_sender.try_send(frame.health);
+            let _ = sender.try_send(observations);
+        }
+        let _ = child.wait();
     });
     (receiver, health_receiver)
+}
+
+#[cfg(feature = "psmoveapi-tracker")]
+fn read_move_tracker_worker_frame(reader: &mut impl Read) -> Result<MoveTrackerWorkerFrame> {
+    let mut length = [0u8; 4];
+    reader.read_exact(&mut length)?;
+    let length = u32::from_le_bytes(length) as usize;
+    if length > 1024 * 1024 { return Err(anyhow!("Move tracker worker frame exceeds 1 MiB")); }
+    let mut payload = vec![0u8; length];
+    reader.read_exact(&mut payload)?;
+    rmp_serde::from_slice(&payload).context("decoding Move tracker worker frame")
+}
+
+#[cfg(feature = "psmoveapi-tracker")]
+fn write_move_tracker_worker_frame(writer: &mut impl Write, frame: &MoveTrackerWorkerFrame) -> Result<()> {
+    let payload = rmp_serde::to_vec(frame)?;
+    writer.write_all(&(payload.len() as u32).to_le_bytes())?;
+    writer.write_all(&payload)?;
+    writer.flush()?;
+    Ok(())
+}
+
+#[cfg(feature = "psmoveapi-tracker")]
+fn run_move_tracker_worker(options: Options) -> Result<()> {
+    let source = options.move_marker_camera_sources.first()
+        .context("move-tracker-worker requires one --move-marker-camera")?;
+    if options.move_marker_camera_sources.len() != 1 {
+        return Err(anyhow!("move-tracker-worker accepts exactly one camera"));
+    }
+    let camera_index = video_device_index(&source.device_path)
+        .context("move-tracker-worker camera must be /dev/videoN")?;
+    let mut roster = serve_move_state_sources(&options, true).into_iter()
+        .map(|source| source.move_id).collect::<Vec<_>>();
+    roster.sort();
+    roster.dedup();
+    let mut program = open_node(&options, "muninn-move-tracker-worker")?
+        .get::<MuninnMoveHueProgramRecord>(&move_hue_program_key(&options.host_id))?
+        .unwrap_or_else(|| bootstrap_move_hue_program(&options));
+    let exposure = options.move_tracker_exposure_milli as f32 / 1000.0;
+    let colors = tracker_colors(&roster, &program);
+    let mut tracker = muninn_psmoveapi_tracker::PsmoveApiTracker::open(camera_index, exposure, &colors)?;
+    let camera_info = tracker.camera_info().clone();
+    let mut update_count = 0u64;
+    let mut observation_count = 0u64;
+    let mut last_observation_at = String::new();
+    let mut last_program_refresh = Instant::now();
+    let mut last_calibration = Instant::now();
+    let stdout = std::io::stdout();
+    let mut writer = stdout.lock();
+    loop {
+        if last_program_refresh.elapsed() >= Duration::from_secs(1) {
+            if let Ok(node) = open_node(&options, "muninn-move-tracker-worker") {
+                if let Ok(Some(latest)) = node.get::<MuninnMoveHueProgramRecord>(&move_hue_program_key(&options.host_id)) {
+                    program = latest;
+                }
+            }
+            last_program_refresh = Instant::now();
+        }
+        if last_calibration.elapsed() >= Duration::from_secs(30) {
+            tracker.observe_connected();
+            last_calibration = Instant::now();
+        }
+        for (identity, color) in tracker_colors(&roster, &program) {
+            tracker.set_expected_color(&identity, color);
+        }
+        let observations = tracker.update();
+        update_count = update_count.saturating_add(1);
+        observation_count = observation_count.saturating_add(observations.len() as u64);
+        if !observations.is_empty() { last_observation_at = timestamp()?; }
+        let health = MuninnMoveTrackerHealthRecord {
+            health_id: format!("muninn:{}:{}:move-tracker-health", options.host_id, source.camera_id),
+            host_id: options.host_id.clone(), camera_id: source.camera_id.clone(), camera_index,
+            state: "running".to_string(), camera_name: camera_info.name.clone(), camera_api: camera_info.api.clone(),
+            width: camera_info.width, height: camera_info.height, exposure: camera_info.exposure,
+            calibrated_controller_count: tracker.tracked_controller_count() as u32, update_count, observation_count,
+            latest_observation_count: observations.len() as u32, last_observation_at: last_observation_at.clone(),
+            detail: "private subprocess worker".to_string(), updated_at: timestamp()?,
+        };
+        let frame = MoveTrackerWorkerFrame {
+            health,
+            observations: observations.into_iter().map(|value| MoveTrackerWorkerObservation {
+                move_id: value.move_id, center_x_px: value.center_x_px, center_y_px: value.center_y_px,
+                radius_px: value.radius_px, age_ms: value.age_ms,
+            }).collect(),
+        };
+        write_move_tracker_worker_frame(&mut writer, &frame)?;
+    }
+}
+
+#[cfg(feature = "psmoveapi-tracker")]
+fn tracker_colors(roster: &[String], program: &MuninnMoveHueProgramRecord) -> Vec<(String, [u8; 3])> {
+    let now_ns = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos() as i128;
+    let timestamp_ns = move_hue_program_timestamp_ns(program, now_ns);
+    roster.iter().filter_map(|identity| scheduled_golden_move_color_with_order(
+        identity, roster, i128::from(program.epoch_ns), i128::from(program.cycle_ms) * 1_000_000,
+        timestamp_ns, &program.order_mode,
+    ).map(|(color, _, _)| (identity.clone(), [color.0, color.1, color.2]))).collect()
+}
+
+#[cfg(not(feature = "psmoveapi-tracker"))]
+fn run_move_tracker_worker(_options: Options) -> Result<()> {
+    Err(anyhow!("move-tracker-worker requires the psmoveapi-tracker feature"))
+}
+
+#[cfg(feature = "psmoveapi-tracker")]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct MoveTrackerWorkerObservation {
+    move_id: String,
+    center_x_px: f32,
+    center_y_px: f32,
+    radius_px: f32,
+    age_ms: i32,
+}
+
+#[cfg(feature = "psmoveapi-tracker")]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct MoveTrackerWorkerFrame {
+    health: MuninnMoveTrackerHealthRecord,
+    observations: Vec<MoveTrackerWorkerObservation>,
 }
 
 #[cfg(feature = "psmoveapi-tracker")]
@@ -9525,6 +9538,7 @@ impl Options {
                 "move-state-status" => options.mode = Mode::MoveStateStatus,
                 "claim-move-host" => options.mode = Mode::ClaimMoveHost,
                 "quest-access-status" => options.mode = Mode::QuestAccessStatus,
+                "move-tracker-worker" => options.mode = Mode::MoveTrackerWorker,
                 "--health" => options.mode = Mode::Health,
                 "--dry-run" => options.mode = Mode::DryRun,
                 "--store" => options.store_path = PathBuf::from(take_value(&mut args, "--store")?),
