@@ -391,6 +391,7 @@ fn serve(options: Options) -> Result<()> {
         start_default_move_light_worker(&options, Arc::clone(&suppressed_default_move_light_paths));
     }
     start_odin_provider_lease_worker(&options);
+    start_odin_capture_command_pull_worker(&options);
 
     loop {
         let live_move_sources = serve_move_state_sources(&options, move_runtime_enabled);
@@ -492,7 +493,6 @@ fn tick_capture_stream_commands(
         .cloned()
         .unwrap_or_else(|| options.store_path.clone());
     let mut node = open_node(&activation_options, "muninn-activation-controller")?;
-    pull_odin_capture_command_snapshot(&mut node, options);
     let mut commands = node.cache().get_all::<MuninnCaptureStreamCommandRecord>()?;
     commands.sort_by(|left, right| left.updated_at.cmp(&right.updated_at));
     let latest_command_by_stream = latest_capture_stream_command_ids(&commands, &options.host_id);
@@ -551,6 +551,25 @@ fn pull_odin_capture_command_snapshot(node: &mut cultmesh_rs::CultMeshNode, opti
     }) {
         eprintln!("Muninn could not pull capture commands from Odin: {error:#}");
     }
+}
+
+fn start_odin_capture_command_pull_worker(options: &Options) {
+    if resolve_odin_cultmesh_uri(options).is_none() {
+        return;
+    }
+    let mut worker_options = options.clone();
+    worker_options.store_path = options
+        .activation_store_path
+        .as_ref()
+        .cloned()
+        .unwrap_or_else(|| options.store_path.clone());
+    thread::spawn(move || loop {
+        match open_node(&worker_options, "muninn-capture-command-pull") {
+            Ok(mut node) => pull_odin_capture_command_snapshot(&mut node, &worker_options),
+            Err(error) => eprintln!("Muninn could not open capture-command store: {error:#}"),
+        }
+        thread::sleep(Duration::from_secs(5));
+    });
 }
 
 fn pull_odin_obs_catalog_snapshot(node: &mut cultmesh_rs::CultMeshNode, options: &Options) {
