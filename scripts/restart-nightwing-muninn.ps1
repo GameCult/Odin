@@ -154,7 +154,7 @@ set -- "`$@" \
 $odinCultMeshUriSetBlock
 $hidControllerRudpSetBlock
 $commandRudpSetBlock
-CULTMESH_URI_ODIN_RUDP='$OdinCultMeshRudpEndpoint' nohup '$MuninnExe' "`$@" \
+CULTNET_RUDP_TRACE=1 CULTMESH_URI_ODIN_RUDP='$OdinCultMeshRudpEndpoint' nohup '$MuninnExe' "`$@" \
   > '$LogRoot/muninn-serve.out.log' \
   2> '$LogRoot/muninn-serve.err.log' \
   < /dev/null &

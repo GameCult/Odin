@@ -1066,13 +1066,24 @@ impl CultNetRudpSocketTransportConnection {
 
         let packet = match decode_rudp_packet(&wire) {
             Ok(packet) => packet,
-            Err(_) => return Ok(None),
+            Err(error) => {
+                if std::env::var_os("CULTNET_RUDP_TRACE").is_some()
+                    && self.transport_id.as_deref() == Some("muninn-provider-command-rudp")
+                {
+                    eprintln!("RUDP muninn-provider-command-rudp rejected {} bytes from {remote_addr}: {error:#}", wire.len());
+                }
+                return Ok(None);
+            }
         };
         let trace_transport = std::env::var_os("CULTNET_RUDP_TRACE").is_some()
             && self
                 .transport_id
                 .as_deref()
-                .is_some_and(|id| id == "sleipnir-hid-rudp" || id == "muninn-hid-controller-rudp");
+                .is_some_and(|id| {
+                    id == "sleipnir-hid-rudp"
+                        || id == "muninn-hid-controller-rudp"
+                        || id == "muninn-provider-command-rudp"
+                });
         if trace_transport {
             eprintln!(
                 "RUDP {} recv {:?} channel={} seq={} ack={} reliable={} ordered={} sequenced={} bytes={} from {}",
