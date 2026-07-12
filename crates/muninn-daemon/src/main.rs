@@ -36,7 +36,6 @@ use std::fs;
 use std::io::Write;
 use std::io::{ErrorKind, Read};
 use std::net::{SocketAddr, UdpSocket};
-#[cfg(unix)]
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -181,6 +180,7 @@ struct Options {
     move_evidence_verse_id: String,
     move_evidence_ring_slots: usize,
     move_evidence_slot_bytes: usize,
+    move_evidence_snapshot_path: Option<PathBuf>,
     quest_adb: bool,
     quest_serial: Option<String>,
     quest_input_stream_id: Option<String>,
@@ -316,6 +316,17 @@ struct MuninnMoveEvidenceStreamFrame<'a>(
     i64,
     &'a [MuninnMoveMarkerCandidateRecord],
     &'a [MuninnMoveControllerStateRecord],
+);
+
+#[derive(Serialize)]
+struct MimirMoveProofEvidenceFrameSnapshot<'a>(
+    &'a str,
+    &'a str,
+    &'a str,
+    &'a str,
+    i64,
+    u64,
+    &'a [u8],
 );
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1382,6 +1393,7 @@ struct ActiveMoveEvidenceStream {
     stream_id: String,
     producer_peer_id: String,
     frame_counter: u64,
+    snapshot_path: Option<PathBuf>,
 }
 
 fn activate(options: Options) -> Result<()> {
@@ -3241,6 +3253,7 @@ fn create_move_evidence_stream(options: &Options) -> Result<Option<ActiveMoveEvi
         stream_id,
         producer_peer_id,
         frame_counter: 0,
+        snapshot_path: options.move_evidence_snapshot_path.clone(),
     }))
 }
 
@@ -3274,11 +3287,63 @@ fn publish_move_evidence_stream_frame(
         ring.try_publish_copy(&payload, published_at_ns, 0)?
     };
     if let Some(handle) = handle {
+        if let Some(path) = stream.snapshot_path.as_deref() {
+            write_move_evidence_snapshot(
+                path,
+                &stream.stream_id,
+                &frame_id,
+                &stream.producer_peer_id,
+                published_at_ns,
+                &payload,
+            )?;
+        }
         stream.catalog.publish_frame(handle.clone())?;
         Ok(Some(handle))
     } else {
         Ok(None)
     }
+}
+
+fn write_move_evidence_snapshot(
+    path: &Path,
+    stream_id: &str,
+    frame_id: &str,
+    producer_peer_id: &str,
+    published_at_ns: i64,
+    payload: &[u8],
+) -> Result<()> {
+    if payload.is_empty() {
+        return Err(anyhow!("cannot write empty Move evidence snapshot"));
+    }
+
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "creating Move evidence snapshot directory {}",
+                parent.display()
+            )
+        })?;
+    }
+
+    let captured_at_ns = u64::try_from(timestamp_ns()?)
+        .context("Move evidence snapshot capture timestamp does not fit u64")?;
+    let snapshot_id = format!("{frame_id}:snapshot");
+    let snapshot = MimirMoveProofEvidenceFrameSnapshot(
+        &snapshot_id,
+        stream_id,
+        frame_id,
+        producer_peer_id,
+        published_at_ns,
+        captured_at_ns,
+        payload,
+    );
+    let bytes =
+        rmp_serde::to_vec(&snapshot).context("encoding Mimir Move proof evidence snapshot")?;
+    fs::write(path, bytes)
+        .with_context(|| format!("writing Move proof evidence snapshot {}", path.display()))
 }
 
 fn publish_move_marker_candidates_from_luma_frame(
@@ -8438,6 +8503,7 @@ impl Options {
             move_evidence_verse_id: "mimir-live".to_string(),
             move_evidence_ring_slots: 4,
             move_evidence_slot_bytes: 8192,
+            move_evidence_snapshot_path: None,
             quest_adb: false,
             quest_serial: None,
             quest_input_stream_id: None,
@@ -8631,6 +8697,14 @@ impl Options {
                             .parse()
                             .context("--move-evidence-slot-bytes must be a positive integer")?
                 }
+                "--move-evidence-snapshot" => {
+                    let value = take_value(&mut args, "--move-evidence-snapshot")?;
+                    if value.trim().is_empty() {
+                        return Err(anyhow!("--move-evidence-snapshot must be non-empty"));
+                    }
+
+                    options.move_evidence_snapshot_path = Some(PathBuf::from(value));
+                }
                 "--quest-adb" => options.quest_adb = true,
                 "--quest-serial" => {
                     options.quest_serial = Some(take_value(&mut args, "--quest-serial")?)
@@ -8764,6 +8838,13 @@ impl Options {
             return Err(anyhow!(
                 "--move-evidence-slot-bytes must be greater than zero"
             ));
+        }
+        if options
+            .move_evidence_snapshot_path
+            .as_ref()
+            .is_some_and(|path| path.as_os_str().is_empty())
+        {
+            return Err(anyhow!("--move-evidence-snapshot must be non-empty"));
         }
         if options.move_marker_width == 0 {
             return Err(anyhow!("--move-marker-width must be greater than zero"));
@@ -8923,7 +9004,7 @@ fn parse_move_marker_camera_source(value: &str) -> Result<MoveMarkerCameraSource
 }
 
 fn help_text() -> &'static str {
-    "Usage: muninn [serve|activate|request-stream|capture-stream-status|obs-catalog-status|request-move-light|move-light-status|move-identity-status|move-source-status|move-state-status|claim-move-host|quest-access-status] [--store <path>] [--activate-store <path>] [--stream-action <start|stop>] [--target-host <cultmesh-uri>] [--media-transport <rudp>] [--media-packet-bytes <bytes>] [--rudp-video-bitrate-kbps <kbps>] [--rudp-latency-budget-ms <ms>] [--video-source <source-id=label>] [--audio-source <source-id=label>] [--audio-source-id <source-id>] [--no-video] [--no-audio] [--loopback-script <path>] [--ffmpeg <path>] [--odin-cultmesh-uri <cultmesh-uri>] [--move-state <move-id>=<hidraw-path>] [--move-marker-camera <camera-id>=<device-path>] [--move-marker-width <px>] [--move-marker-height <px>] [--move-marker-fps <fps>] [--move-host <bt-addr>] [--move-evidence-stream <stream-id>] [--move-evidence-verse <verse-id>] [--quest-adb] [--quest-serial <serial>] [--quest-input-stream <stream-id>] [--quest-pose-stream <stream-id>] [--quest-video-input-stream <stream-id>] [--idunn-rudp-health <addr>] [--idunn-daemon <id>] [--idunn-health-contract <contract>] [--dry-run] [--health]\n\nMuninn is Odin's portable telemetry Verse assembler. serve publishes cheap typed telemetry affordances, optional Quest USB access surfaces, and the explicitly configured Move runtime; when serve receives --move-state, --move-marker-camera, --move-host, or --move-evidence-stream it may publish source-local Move controller state, source-local optical marker candidates, typed Move identity records, a CultMesh Move evidence stream, and keep USB-attached PS Moves claimed to that explicit Bluetooth host; serve consumes typed capture stream commands from Odin/CultMesh plus its local activation store and owns the local ffmpeg/loopback activation child lifecycle, resolves media targets from Odin/CultMesh provider advertisements, and pays startup respect to Odin through --odin-cultmesh-uri by publishing its provider advertisement once; activate starts an explicitly requested local CultNet RUDP stream as a daemon child after resolving the cultmesh:// media target URI through Odin; request-stream publishes a typed capture stream command through Odin/CultMesh using --odin-cultmesh-uri; obs-catalog-status pulls Odin-owned muninn.obs_stream_catalog discovery into the local compatibility store for OBS; capture-stream-status reads typed capture stream command receipts; use --no-video or --no-audio to request one leg over the CultNet RUDP media lane; request-move-light publishes a typed Move light command for Muninn serve to execute; move-light-status reads typed command receipts; move-identity-status reads typed Move identity records; move-source-status prints live Move source discovery; move-state-status reads typed controller-state records; claim-move-host assigns USB-attached PS Moves to a Bluetooth host; quest-access-status reads typed Quest access state. In --health mode, the Idunn RUDP flags publish the same typed daemon health document to Idunn for explicit diagnostics."
+    "Usage: muninn [serve|activate|request-stream|capture-stream-status|obs-catalog-status|request-move-light|move-light-status|move-identity-status|move-source-status|move-state-status|claim-move-host|quest-access-status] [--store <path>] [--activate-store <path>] [--stream-action <start|stop>] [--target-host <cultmesh-uri>] [--media-transport <rudp>] [--media-packet-bytes <bytes>] [--rudp-video-bitrate-kbps <kbps>] [--rudp-latency-budget-ms <ms>] [--video-source <source-id=label>] [--audio-source <source-id=label>] [--audio-source-id <source-id>] [--no-video] [--no-audio] [--loopback-script <path>] [--ffmpeg <path>] [--odin-cultmesh-uri <cultmesh-uri>] [--move-state <move-id>=<hidraw-path>] [--move-marker-camera <camera-id>=<device-path>] [--move-marker-width <px>] [--move-marker-height <px>] [--move-marker-fps <fps>] [--move-host <bt-addr>] [--move-evidence-stream <stream-id>] [--move-evidence-verse <verse-id>] [--move-evidence-ring-slots <slots>] [--move-evidence-slot-bytes <bytes>] [--move-evidence-snapshot <path>] [--quest-adb] [--quest-serial <serial>] [--quest-input-stream <stream-id>] [--quest-pose-stream <stream-id>] [--quest-video-input-stream <stream-id>] [--idunn-rudp-health <addr>] [--idunn-daemon <id>] [--idunn-health-contract <contract>] [--dry-run] [--health]\n\nMuninn is Odin's portable telemetry Verse assembler. serve publishes cheap typed telemetry affordances, optional Quest USB access surfaces, and the explicitly configured Move runtime; when serve receives --move-state, --move-marker-camera, --move-host, or --move-evidence-stream it may publish source-local Move controller state, source-local optical marker candidates, typed Move identity records, a CultMesh Move evidence stream, optionally write a latest one-copy Move proof evidence snapshot for Mimir field capture/replay, and keep USB-attached PS Moves claimed to that explicit Bluetooth host; serve consumes typed capture stream commands from Odin/CultMesh plus its local activation store and owns the local ffmpeg/loopback activation child lifecycle, resolves media targets from Odin/CultMesh provider advertisements, and pays startup respect to Odin through --odin-cultmesh-uri by publishing its provider advertisement once; activate starts an explicitly requested local CultNet RUDP stream as a daemon child after resolving the cultmesh:// media target URI through Odin; request-stream publishes a typed capture stream command through Odin/CultMesh using --odin-cultmesh-uri; obs-catalog-status pulls Odin-owned muninn.obs_stream_catalog discovery into the local compatibility store for OBS; capture-stream-status reads typed capture stream command receipts; use --no-video or --no-audio to request one leg over the CultNet RUDP media lane; request-move-light publishes a typed Move light command for Muninn serve to execute; move-light-status reads typed command receipts; move-identity-status reads typed Move identity records; move-source-status prints live Move source discovery; move-state-status reads typed controller-state records; claim-move-host assigns USB-attached PS Moves to a Bluetooth host; quest-access-status reads typed Quest access state. In --health mode, the Idunn RUDP flags publish the same typed daemon health document to Idunn for explicit diagnostics."
 }
 
 fn parse_move_state_source(value: &str) -> Result<MoveStateSource> {
@@ -10969,6 +11050,17 @@ Device 00:07:04:A8:00:D0 (public)
     );
 
     #[derive(Deserialize)]
+    struct DecodedMimirMoveProofEvidenceFrameSnapshot(
+        String,
+        String,
+        String,
+        String,
+        i64,
+        u64,
+        Vec<u8>,
+    );
+
+    #[derive(Deserialize)]
     struct DecodedMarkerCandidate {
         stream_id: String,
         host_id: String,
@@ -11987,6 +12079,77 @@ Device 00:07:04:A8:00:D0 (public)
             decoded.3[0].source_id_hash,
             reader.configs[0].source_id_hash
         );
+    }
+
+    #[test]
+    fn move_evidence_snapshot_writes_mimir_compatible_frame_artifact() {
+        let snapshot_path = std::env::temp_dir().join(format!(
+            "muninn-move-evidence-snapshot-{}.mpack",
+            timestamp_ns().unwrap()
+        ));
+        let options = Options::parse(
+            [
+                "serve",
+                "--host",
+                "nightwing",
+                "--move-marker-camera",
+                "ps3eye0=/dev/video0",
+                "--move-evidence-stream",
+                "muninn:nightwing:move-evidence",
+                "--move-evidence-snapshot",
+                snapshot_path.to_str().unwrap(),
+                "--move-marker-width",
+                "32",
+                "--move-marker-height",
+                "32",
+                "--move-marker-threshold-min",
+                "180",
+                "--move-marker-min-area-px",
+                "4",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap();
+        let mut y8 = vec![0u8; 32 * 32];
+        for y in 8..12 {
+            for x in 10..14 {
+                y8[y * 32 + x] = 255;
+            }
+        }
+        let mut active = active_move_marker_camera_sources(&options);
+        let mut reader = RecordingMoveMarkerCameraReader {
+            frames: vec![y8],
+            configs: Vec::new(),
+        };
+        let mut stream = create_move_evidence_stream(&options)
+            .unwrap()
+            .expect("marker camera should create stream");
+
+        publish_move_marker_camera_frames(&mut active, &mut reader, Some(&mut stream)).unwrap();
+
+        let snapshot_bytes = fs::read(&snapshot_path).expect("snapshot should be written");
+        let snapshot: DecodedMimirMoveProofEvidenceFrameSnapshot =
+            rmp_serde::from_slice(&snapshot_bytes).unwrap();
+        let payload_frame: DecodedMoveEvidenceStreamFrame =
+            rmp_serde::from_slice(&snapshot.6).unwrap();
+
+        assert_eq!(snapshot.0, "muninn:nightwing:move-evidence:0:snapshot");
+        assert_eq!(snapshot.1, "muninn:nightwing:move-evidence");
+        assert_eq!(snapshot.2, "muninn:nightwing:move-evidence:0");
+        assert_eq!(snapshot.3, "muninn:nightwing");
+        assert!(snapshot.4 > 0);
+        assert!(snapshot.5 > 0);
+        assert_eq!(payload_frame.0, snapshot.2);
+        assert_eq!(payload_frame.1, snapshot.3);
+        assert_eq!(payload_frame.2, snapshot.4);
+        assert_eq!(payload_frame.3.len(), 1);
+        assert!(payload_frame.4.is_empty());
+        assert_eq!(
+            payload_frame.3[0].stream_id,
+            "muninn:nightwing:ps3eye0:move-marker-candidates"
+        );
+        let _ = fs::remove_file(snapshot_path);
     }
 
     #[test]
