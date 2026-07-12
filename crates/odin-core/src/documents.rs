@@ -46,7 +46,6 @@ pub const MUNINN_HID_CONTROLLER_STATE_SCHEMA: &str = "muninn.hid_controller_stat
 pub const MUNINN_MOVE_IDENTITY_SCHEMA: &str = "muninn.move_identity.v1";
 pub const MUNINN_MOVE_LIGHT_COMMAND_SCHEMA: &str = "muninn.move_light_command.v1";
 pub const MUNINN_MOVE_HUE_PROGRAM_SCHEMA: &str = "muninn.move_hue_program.v1";
-pub const MUNINN_MOVE_TRACKER_HEALTH_SCHEMA: &str = "muninn.move_tracker_health.v1";
 pub const MUNINN_QUEST_ACCESS_SCHEMA: &str = "muninn.quest_access.v1";
 pub const MUNINN_COMMAND_BOUNDARY_SCHEMA: &str = "muninn.command_boundary.v1";
 pub const MUNINN_TRANSPORT_PROFILE_SCHEMA: &str = "muninn.transport_profile.v1";
@@ -1196,48 +1195,6 @@ pub struct MuninnMoveHueProgramRecord {
     pub order_mode: String,
 }
 
-#[derive(Clone, Debug, PartialEq, DatabaseEntry)]
-#[cultcache(
-    type = "muninn.move_tracker_health",
-    schema = "muninn.move_tracker_health.v1"
-)]
-pub struct MuninnMoveTrackerHealthRecord {
-    #[cultcache(key = 0)]
-    pub health_id: String,
-    #[cultcache(key = 1)]
-    pub host_id: String,
-    #[cultcache(key = 2)]
-    pub camera_id: String,
-    #[cultcache(key = 3)]
-    pub camera_index: i32,
-    #[cultcache(key = 4)]
-    pub state: String,
-    #[cultcache(key = 5)]
-    pub camera_name: String,
-    #[cultcache(key = 6)]
-    pub camera_api: String,
-    #[cultcache(key = 7)]
-    pub width: u32,
-    #[cultcache(key = 8)]
-    pub height: u32,
-    #[cultcache(key = 9)]
-    pub exposure: f32,
-    #[cultcache(key = 10)]
-    pub calibrated_controller_count: u32,
-    #[cultcache(key = 11)]
-    pub update_count: u64,
-    #[cultcache(key = 12)]
-    pub observation_count: u64,
-    #[cultcache(key = 13)]
-    pub latest_observation_count: u32,
-    #[cultcache(key = 14)]
-    pub last_observation_at: String,
-    #[cultcache(key = 15)]
-    pub detail: String,
-    #[cultcache(key = 16)]
-    pub updated_at: String,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
 #[cultcache(type = "muninn.quest_access", schema = "muninn.quest_access.v1")]
 pub struct MuninnQuestAccessRecord {
@@ -1364,7 +1321,6 @@ cultmesh_rs::cultmesh_documents!(OdinDocuments {
     MuninnMoveIdentityRecord => MUNINN_MOVE_IDENTITY_SCHEMA,
     MuninnMoveLightCommandRecord => MUNINN_MOVE_LIGHT_COMMAND_SCHEMA,
     MuninnMoveHueProgramRecord => MUNINN_MOVE_HUE_PROGRAM_SCHEMA,
-    MuninnMoveTrackerHealthRecord => MUNINN_MOVE_TRACKER_HEALTH_SCHEMA,
     MuninnQuestAccessRecord => MUNINN_QUEST_ACCESS_SCHEMA,
     MuninnCommandBoundaryCompatRecord => MUNINN_COMMAND_BOUNDARY_SCHEMA,
     MuninnTransportProfileCompatRecord => MUNINN_TRANSPORT_PROFILE_SCHEMA,
