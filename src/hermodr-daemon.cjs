@@ -742,6 +742,7 @@ async function publishEveCommand(options, body) {
     commandId,
     command,
     route.publishEndpoint || route.uri,
+    route.connectionId,
   );
   if (publication.routeError) {
     const error = new Error(`CultMesh route publish failed for ${route.uri}: ${publication.routeError}`);
@@ -756,13 +757,13 @@ async function publishEveCommand(options, body) {
   };
 }
 
-async function publishCommandDocument(options, definition, key, value, route) {
+async function publishCommandDocument(options, definition, key, value, route, connectionId = 0xe1e00001) {
   let routeError = null;
   if (route && (route.startsWith("cultmesh://") || route.startsWith("rudp://"))) {
     try {
       await CultMesh.publishRudpDocumentOnce(
         "hermodr-browser-lowering",
-        0xe1e00001,
+        Number(connectionId),
         route,
         { definition },
         key,
