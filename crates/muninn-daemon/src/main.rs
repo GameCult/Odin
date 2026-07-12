@@ -15,7 +15,7 @@ use cultmesh_rs::{
 use cultnet_rs::{
     CultNetMessage, CultNetRawDocumentRecord, CultNetRawPayloadEncoding,
     CultNetRudpSocketTransportConnection, CultNetRudpSocketTransportOptions, CultNetTransportFrame,
-    CultNetWireContract, encode_cultnet_message_to_vec,
+    CultNetWireContract, decode_cultnet_message_from_slice, encode_cultnet_message_to_vec,
 };
 use odin_core::{
     EVE_PROVIDER_ADVERTISEMENT_SCHEMA, EveProviderAdvertisementRecord, EveSurfaceStateRecord,
@@ -63,6 +63,7 @@ const IDUNN_HEALTH_RUDP_CONNECTION_ID: u32 = 0x1d0d_0001;
 const MUNINN_MEDIA_RUDP_CONNECTION_ID: u32 = 0x6d75_0001;
 const MUNINN_AUDIO_RUDP_CONNECTION_ID: u32 = 0x6d75_0004;
 const MUNINN_HID_CONTROLLER_RUDP_CONNECTION_ID: u32 = 0x6d75_0005;
+const MUNINN_COMMAND_RUDP_CONNECTION_ID: u32 = 0xe1e0_0001;
 const MUNINN_RUDP_MEDIA_PROFILE_ID: &str = "muninn.rudp.low_latency_h264_lan.v1";
 const MUNINN_RUDP_MEDIA_VIDEO_BITRATE_KBPS: u32 = 12_000;
 const MUNINN_RUDP_MEDIA_VBV_FRAME_BUDGETS: u32 = 1;
@@ -203,6 +204,8 @@ struct Options {
     hid_controller_rudp_target: Option<SocketAddr>,
     hid_controller_rudp_bind: Option<SocketAddr>,
     hid_controller_rudp_advertise: Option<String>,
+    command_rudp_bind: Option<SocketAddr>,
+    command_rudp_advertise: Option<String>,
     hid_controller_receipt_retention_seconds: u64,
 }
 
@@ -405,6 +408,7 @@ fn serve(options: Options) -> Result<()> {
         Arc::clone(&move_hue_program),
     );
     start_move_hue_program_sync_worker(&options, Arc::clone(&move_hue_program));
+    start_provider_command_ingress(&options, Arc::clone(&move_hue_program))?;
     start_odin_provider_lease_worker(&options);
 
     loop {
@@ -605,6 +609,118 @@ fn start_move_hue_program_sync_worker(
         }
         thread::sleep(Duration::from_millis(250));
     });
+}
+
+fn start_provider_command_ingress(
+    options: &Options,
+    runtime_program: Arc<Mutex<MuninnMoveHueProgramRecord>>,
+) -> Result<()> {
+    let Some(bind) = options.command_rudp_bind else {
+        return Ok(());
+    };
+    let socket = UdpSocket::bind(bind)
+        .with_context(|| format!("binding Muninn provider command route at {bind}"))?;
+    socket.set_read_timeout(Some(Duration::from_millis(5)))?;
+    let options = options.clone();
+    thread::spawn(move || {
+        if let Err(error) = run_provider_command_ingress(socket, options, runtime_program) {
+            eprintln!("Muninn provider command ingress stopped: {error:#}");
+        }
+    });
+    Ok(())
+}
+
+fn run_provider_command_ingress(
+    socket: UdpSocket,
+    options: Options,
+    runtime_program: Arc<Mutex<MuninnMoveHueProgramRecord>>,
+) -> Result<()> {
+    let mut transport = CultNetRudpSocketTransportConnection::new(
+        CultNetRudpSocketTransportOptions {
+            runtime_id: format!("muninn-{}-command-ingress", options.host_id),
+            socket,
+            mode: cultnet_rs::CultNetRudpSocketMode::Server,
+            remote_addr: None,
+            connection_id: MUNINN_COMMAND_RUDP_CONNECTION_ID,
+            initial_sequence: 1,
+            resend_delay_ms: 15,
+            transport_id: Some("muninn-provider-command-rudp".to_string()),
+            max_payload_bytes: None,
+            max_fragment_bytes: Some(1200),
+            max_pending_reliable_packets: Some(64),
+            media_reliable_expire_after_ms: None,
+        },
+    )?;
+    loop {
+        if let Some(frame) = transport.receive_once()?
+            && frame.channel_id == "schema"
+        {
+            let message = decode_cultnet_message_from_slice(
+                &frame.payload,
+                CultNetWireContract::CultNetSchemaV0,
+            )?;
+            if let CultNetMessage::DocumentPutRaw { document, .. } = message {
+                apply_provider_command_document(&options, &runtime_program, document)?;
+            }
+        }
+        transport.poll_resends()?;
+    }
+}
+
+fn apply_provider_command_document(
+    options: &Options,
+    runtime_program: &Arc<Mutex<MuninnMoveHueProgramRecord>>,
+    document: CultNetRawDocumentRecord,
+) -> Result<()> {
+    if document.schema_id != "gamecult.eve.command.v1" {
+        return Ok(());
+    }
+    let value: serde_json::Value = match document.payload_encoding {
+        CultNetRawPayloadEncoding::Messagepack => rmp_serde::from_slice(&document.payload)?,
+    };
+    let command_type = value
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    if command_type != "muninn.set-move-hue-program" {
+        return Ok(());
+    }
+    let provider_id = value
+        .get("providerId")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    if provider_id != muninn_provider_id(options) {
+        return Err(anyhow!("Move hue command targets provider {provider_id}, not {}", muninn_provider_id(options)));
+    }
+    let mut program = runtime_program
+        .lock()
+        .map_err(|_| anyhow!("Move hue runtime program lock is poisoned"))?
+        .clone();
+    if let Some(mode) = value.get("mode").and_then(serde_json::Value::as_str) {
+        program.mode = mode.to_string();
+        if mode == "hold" {
+            program.hold_at_ns = timestamp_ns()?;
+        }
+    }
+    if let Some(order) = value.get("orderMode").and_then(serde_json::Value::as_str) {
+        program.order_mode = order.to_string();
+    }
+    if let Some(cycle_ms) = value.get("cycleMs").and_then(serde_json::Value::as_u64) {
+        program.cycle_ms = cycle_ms;
+    }
+    program.requested_by = value
+        .get("publishedBy")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("eve-command")
+        .to_string();
+    program.updated_at = timestamp()?;
+    validate_move_hue_program(&program)?;
+    let key = move_hue_program_key(&options.host_id);
+    open_node(options, "muninn-provider-command")?.put(&key, &program)?;
+    *runtime_program
+        .lock()
+        .map_err(|_| anyhow!("Move hue runtime program lock is poisoned"))? = program;
+    Ok(())
 }
 
 fn tick_capture_stream_commands(
@@ -3024,6 +3140,23 @@ fn publish_runtime_boundary_records(
             .clone()
             .unwrap_or_else(|| bind.to_string())
     });
+    let mut provider_routes = vec![json!({
+        "transport": "cultcache-store",
+        "address": options.store_path.display().to_string()
+    })];
+    if let Some(address) = options.command_rudp_advertise.as_deref() {
+        provider_routes.push(json!({
+            "id": "muninn.provider.command",
+            "role": "muninn provider command ingress",
+            "uri": format!("cultmesh://{address}/muninn/{}/commands", options.host_id),
+            "transport": CULTNET_RUDP_PROTOCOL_ID,
+            "address": address,
+            "connectionId": MUNINN_COMMAND_RUDP_CONNECTION_ID,
+            "channel": "schema",
+            "schema": "gamecult.eve.command.v1",
+            "tags": ["muninn", "command", "provider-owned"]
+        }));
+    }
     let hid_controller_devices_snake = live_move_sources
         .iter()
         .map(|source| {
@@ -3257,12 +3390,7 @@ fn publish_runtime_boundary_records(
             "capabilities": muninn_capabilities(options),
             "endpoints": provider_endpoints,
             "inputStreams": provider_input_streams,
-            "routes": [
-                {
-                    "transport": "cultcache-store",
-                    "address": options.store_path.display().to_string()
-                }
-            ],
+            "routes": provider_routes,
             "commandSurface": {
                 "commandBoundaryId": command_boundary_key,
                 "transportProfileId": transport_profile_key
@@ -9293,6 +9421,8 @@ impl Options {
             hid_controller_rudp_target: None,
             hid_controller_rudp_bind: None,
             hid_controller_rudp_advertise: None,
+            command_rudp_bind: None,
+            command_rudp_advertise: None,
             hid_controller_receipt_retention_seconds: 3_600,
         };
 
@@ -9546,6 +9676,17 @@ impl Options {
                 "--hid-controller-rudp-advertise" => {
                     options.hid_controller_rudp_advertise =
                         Some(take_value(&mut args, "--hid-controller-rudp-advertise")?)
+                }
+                "--command-rudp-bind" => {
+                    options.command_rudp_bind = Some(
+                        take_value(&mut args, "--command-rudp-bind")?
+                            .parse()
+                            .context("--command-rudp-bind must be a socket address")?,
+                    )
+                }
+                "--command-rudp-advertise" => {
+                    options.command_rudp_advertise =
+                        Some(take_value(&mut args, "--command-rudp-advertise")?)
                 }
                 "--hid-controller-receipt-retention-seconds" => {
                     options.hid_controller_receipt_retention_seconds = take_value(
