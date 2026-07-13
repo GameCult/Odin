@@ -406,7 +406,6 @@ fn serve(options: Options) -> Result<()> {
     start_daemon_health_worker(&options);
     let mut active_move_marker_cameras =
         active_move_marker_camera_sources(&options, Arc::clone(&move_hue_program));
-    let mut move_marker_camera_reader = PlatformMoveMarkerCameraFrameReader::default();
     let mut active_capture_streams = Vec::new();
     let move_evidence_rudp_sender = start_hid_controller_rudp_ingress(
         &options,
@@ -414,6 +413,20 @@ fn serve(options: Options) -> Result<()> {
     )?;
     if let Some(stream) = move_evidence_stream.as_mut() {
         stream.rudp_sender = move_evidence_rudp_sender;
+    }
+    let move_evidence_transport_health = move_evidence_stream.as_ref().map(|stream| {
+        MoveEvidenceTransportHealth {
+            stream_id: stream.stream_id.clone(),
+            counters: Arc::clone(&stream.counters),
+        }
+    });
+    let latest_move_controller_states = Arc::new(Mutex::new(Vec::new()));
+    if let Some(stream) = move_evidence_stream.take() {
+        start_move_evidence_aggregator(
+            stream,
+            move_evidence_camera_inputs(&active_move_marker_cameras),
+            Arc::clone(&latest_move_controller_states),
+        );
     }
     if !options.move_light_passive {
         start_default_move_light_worker(
@@ -454,22 +467,23 @@ fn serve(options: Options) -> Result<()> {
                 &options,
                 &mut active_move_states,
                 &mut HidMoveControllerStateReader,
-                move_evidence_stream.as_mut(),
+                None,
                 hid_controller_stream.as_mut(),
             )?;
-            let latest_move_controller_states: Vec<MuninnMoveControllerStateRecord> =
+            let controller_states: Vec<MuninnMoveControllerStateRecord> =
                 active_move_states
                     .iter()
                     .filter_map(|state| state.latest_move_record.clone())
                     .collect();
-            publish_move_marker_camera_frames(
-                &mut active_move_marker_cameras,
-                &mut move_marker_camera_reader,
-                &latest_move_controller_states,
-                move_evidence_stream.as_mut(),
-            )?;
+            if let Ok(mut latest) = latest_move_controller_states.lock() {
+                *latest = controller_states;
+            }
             publish_move_tracker_health(&mut node, &mut active_move_marker_cameras)?;
-            publish_move_evidence_transport_health(&mut node, &options, move_evidence_stream.as_ref())?;
+            publish_move_evidence_transport_health(
+                &mut node,
+                &options,
+                move_evidence_transport_health.as_ref(),
+            )?;
             publish_quest_access_if_requested(&mut node, &options)?;
             let state = if active_stream_ids.is_empty() {
                 "idle"
@@ -1656,6 +1670,12 @@ struct ActiveMoveEvidenceStream {
     rudp_sender: Option<Arc<Mutex<Option<Vec<u8>>>>>,
     counters: Arc<MoveEvidenceTransportCounters>,
     local_ring_enabled: bool,
+}
+
+#[derive(Clone)]
+struct MoveEvidenceTransportHealth {
+    stream_id: String,
+    counters: Arc<MoveEvidenceTransportCounters>,
 }
 
 #[derive(Default)]
@@ -4694,6 +4714,48 @@ fn active_move_marker_camera_sources(
         .collect()
 }
 
+fn move_evidence_camera_inputs(
+    active: &[ActiveMoveMarkerCameraSource],
+) -> Vec<ActiveMoveMarkerCameraSource> {
+    active
+        .iter()
+        .map(|camera| ActiveMoveMarkerCameraSource {
+            source: camera.source.clone(),
+            frame_source: camera.frame_source.clone(),
+            sequence: 0,
+            #[cfg(feature = "psmoveapi-tracker")]
+            psmoveapi_observations: camera.psmoveapi_observations.as_ref().map(Arc::clone),
+            #[cfg(feature = "psmoveapi-tracker")]
+            psmoveapi_health: None,
+        })
+        .collect()
+}
+
+fn start_move_evidence_aggregator(
+    mut stream: ActiveMoveEvidenceStream,
+    mut cameras: Vec<ActiveMoveMarkerCameraSource>,
+    latest_move_controller_states: Arc<Mutex<Vec<MuninnMoveControllerStateRecord>>>,
+) {
+    thread::spawn(move || {
+        let mut reader = PlatformMoveMarkerCameraFrameReader::default();
+        loop {
+            let controller_states = latest_move_controller_states
+                .lock()
+                .map(|states| states.clone())
+                .unwrap_or_default();
+            if let Err(error) = publish_move_marker_camera_frames(
+                &mut cameras,
+                &mut reader,
+                &controller_states,
+                Some(&mut stream),
+            ) {
+                eprintln!("Muninn Move evidence aggregator warning: {error:#}");
+            }
+            thread::sleep(Duration::from_millis(4));
+        }
+    });
+}
+
 fn publish_move_marker_camera_frames(
     active: &mut [ActiveMoveMarkerCameraSource],
     reader: &mut impl MoveMarkerCameraFrameReader,
@@ -5032,7 +5094,7 @@ fn publish_move_tracker_health(_node: &mut cultmesh_rs::CultMeshNode, _active: &
 fn publish_move_evidence_transport_health(
     node: &mut cultmesh_rs::CultMeshNode,
     options: &Options,
-    stream: Option<&ActiveMoveEvidenceStream>,
+    stream: Option<&MoveEvidenceTransportHealth>,
 ) -> Result<()> {
     let Some(stream) = stream else { return Ok(()); };
     let record = MuninnMoveEvidenceTransportHealthRecord {
