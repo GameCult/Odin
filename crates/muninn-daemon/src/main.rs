@@ -1658,6 +1658,7 @@ struct ActiveMoveEvidenceStream {
     snapshot_path: Option<PathBuf>,
     rudp_sender: Option<Arc<Mutex<Option<Vec<u8>>>>>,
     counters: Arc<MoveEvidenceTransportCounters>,
+    local_ring_enabled: bool,
 }
 
 #[derive(Default)]
@@ -3751,6 +3752,7 @@ fn create_move_evidence_stream(options: &Options) -> Result<Option<ActiveMoveEvi
         snapshot_path: options.move_evidence_snapshot_path.clone(),
         rudp_sender: None,
         counters: Arc::new(MoveEvidenceTransportCounters::default()),
+        local_ring_enabled: options.hid_controller_rudp_bind.is_none(),
     }))
 }
 
@@ -3790,13 +3792,13 @@ fn publish_move_evidence_stream_frame(
             &payload,
         )?;
     }
-    let handle = {
-        let ring: &mut CultMeshSharedMemoryFrameRing =
-            stream
-                .catalog
-                .ring_mut(&stream.stream_id)
-                .ok_or_else(|| anyhow!("missing Muninn Move evidence ring"))?;
+    let handle = if stream.local_ring_enabled {
+        let ring: &mut CultMeshSharedMemoryFrameRing = stream.catalog
+            .ring_mut(&stream.stream_id)
+            .ok_or_else(|| anyhow!("missing Muninn Move evidence ring"))?;
         ring.try_publish_copy(&payload, published_at_ns, 0)?
+    } else {
+        None
     };
     if let Some(handle) = handle {
         stream.counters.local_ring_admissions.fetch_add(1, Ordering::Relaxed);
