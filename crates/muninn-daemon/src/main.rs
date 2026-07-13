@@ -711,12 +711,17 @@ fn apply_provider_command_document(
         CultNetRawPayloadEncoding::Messagepack => rmp_serde::from_slice(&document.payload)?,
     };
     let command_type = value
-        .get("type")
+        .get("command")
+        .or_else(|| value.get("type"))
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default();
     if command_type != "muninn.set-move-hue-program" {
         return Ok(());
     }
+    let payload = value
+        .get("payload")
+        .filter(|payload| payload.is_object())
+        .unwrap_or(&value);
     let provider_id = value
         .get("providerId")
         .and_then(serde_json::Value::as_str)
@@ -728,16 +733,16 @@ fn apply_provider_command_document(
         .lock()
         .map_err(|_| anyhow!("Move hue runtime program lock is poisoned"))?
         .clone();
-    if let Some(mode) = value.get("mode").and_then(serde_json::Value::as_str) {
+    if let Some(mode) = payload.get("mode").and_then(serde_json::Value::as_str) {
         program.mode = mode.to_string();
         if mode == "hold" {
             program.hold_at_ns = timestamp_ns()?;
         }
     }
-    if let Some(order) = value.get("orderMode").and_then(serde_json::Value::as_str) {
+    if let Some(order) = payload.get("orderMode").and_then(serde_json::Value::as_str) {
         program.order_mode = order.to_string();
     }
-    if let Some(cycle_ms) = value.get("cycleMs").and_then(serde_json::Value::as_u64) {
+    if let Some(cycle_ms) = payload.get("cycleMs").and_then(serde_json::Value::as_u64) {
         program.cycle_ms = cycle_ms;
     }
     program.requested_by = value
@@ -11888,9 +11893,16 @@ mod tests {
         }
         assert!(client.connected(), "provider command RUDP handshake");
         let command = json!({
-            "type": "muninn.set-move-hue-program",
+            "type": "surface-command",
+            "schema": "gamecult.eve.command.v1",
             "providerId": "muninn.telemetry.nightwing",
-            "mode": "hold",
+            "command": "muninn.set-move-hue-program",
+            "payload": {
+                "type": "muninn.set-move-hue-program",
+                "mode": "hold",
+                "orderMode": "bounce",
+                "cycleMs": 1500
+            },
             "publishedBy": "provider-command-test"
         });
         let message = CultNetMessage::DocumentPutRaw {
@@ -11920,6 +11932,8 @@ mod tests {
             thread::sleep(Duration::from_millis(2));
         }
         assert_eq!(runtime_program.lock().unwrap().mode, "hold");
+        assert_eq!(runtime_program.lock().unwrap().order_mode, "bounce");
+        assert_eq!(runtime_program.lock().unwrap().cycle_ms, 1500);
         let _ = fs::remove_file(store_path);
     }
 
