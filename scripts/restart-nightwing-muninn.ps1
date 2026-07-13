@@ -12,6 +12,10 @@ param(
     "nightwing-eye-1=/dev/video3"
   ),
   [int] $MoveTrackerExposureMilli = 100,
+  [hashtable] $MoveTrackerCameraExposure = @{
+    "nightwing-eye-0" = 300
+    "nightwing-eye-1" = 100
+  },
   [int] $IntervalSeconds = 15,
   [string] $IdunnRudpHealth = $env:IDUNN_RUDP_HEALTH,
   [string] $IdunnDaemon = "nightwing-muninn",
@@ -113,6 +117,9 @@ if ($moveStateSpecs.Count -gt 0) {
     }
     $moveRuntimeSetLines += "set -- ""`$@"" --move-psmoveapi-tracker"
     $moveRuntimeSetLines += "set -- ""`$@"" --move-tracker-exposure-milli $(Quote-ShSingle ([string]$MoveTrackerExposureMilli))"
+    foreach ($cameraId in @($MoveTrackerCameraExposure.Keys | Sort-Object)) {
+      $moveRuntimeSetLines += "set -- ""`$@"" --move-tracker-camera-exposure $(Quote-ShSingle ("{0}={1}" -f $cameraId, $MoveTrackerCameraExposure[$cameraId]))"
+    }
   }
 }
 $moveRuntimeSetBlock = ($moveRuntimeSetLines -join "`n")

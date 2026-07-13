@@ -195,6 +195,7 @@ struct Options {
     move_psmoveapi_tracker: bool,
     move_light_passive: bool,
     move_tracker_exposure_milli: u32,
+    move_tracker_camera_exposure_milli: HashMap<String, u32>,
     move_evidence_stream_id: Option<String>,
     move_evidence_verse_id: String,
     move_evidence_ring_slots: usize,
@@ -4637,7 +4638,8 @@ fn active_move_marker_camera_sources(
                         options.host_id.clone(),
                         source.camera_id.clone(),
                         camera_index,
-                        options.move_tracker_exposure_milli as f32 / 1000.0,
+                        options.move_tracker_camera_exposure_milli.get(&source.camera_id)
+                            .copied().unwrap_or(options.move_tracker_exposure_milli) as f32 / 1000.0,
                         serve_move_state_sources(options, true),
                         Arc::clone(&_move_hue_program),
                     ))
@@ -9597,6 +9599,7 @@ impl Options {
             move_psmoveapi_tracker: false,
             move_light_passive: false,
             move_tracker_exposure_milli: 100,
+            move_tracker_camera_exposure_milli: HashMap::new(),
             move_evidence_stream_id: None,
             move_evidence_verse_id: "mimir-live".to_string(),
             move_evidence_ring_slots: 4,
@@ -9786,6 +9789,17 @@ impl Options {
                 "--move-tracker-exposure-milli" => {
                     options.move_tracker_exposure_milli =
                         take_value(&mut args, "--move-tracker-exposure-milli")?.parse()?
+                }
+                "--move-tracker-camera-exposure" => {
+                    let value = take_value(&mut args, "--move-tracker-camera-exposure")?;
+                    let (camera_id, exposure) = value.split_once('=')
+                        .context("--move-tracker-camera-exposure must be camera-id=0..1000")?;
+                    let exposure = exposure.parse::<u32>()
+                        .context("--move-tracker-camera-exposure must be camera-id=0..1000")?;
+                    if camera_id.trim().is_empty() || exposure > 1000 {
+                        return Err(anyhow!("--move-tracker-camera-exposure must be camera-id=0..1000"));
+                    }
+                    options.move_tracker_camera_exposure_milli.insert(camera_id.to_string(), exposure);
                 }
                 "--move-evidence-stream" => {
                     options.move_evidence_stream_id =
