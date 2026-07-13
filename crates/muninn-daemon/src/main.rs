@@ -8499,16 +8499,21 @@ fn run_daemon_health_publisher(options: &Options) -> Result<()> {
         .context("Muninn daemon health publisher requires Idunn RUDP options")?;
     let mut transport = connect_idunn_rudp_health(idunn)?;
     let cadence = Duration::from_secs(options.interval_seconds.unwrap_or(15).max(1));
+    let mut next_publish_at = Instant::now();
     loop {
-        let observed_at = idunn_timestamp()?;
-        let (state, detail) = match evaluate_health(options) {
-            Ok(detail) => ("active", detail),
-            Err(error) => ("failed", error.to_string()),
-        };
-        transport
-            .send("schema", idunn_health_payload(idunn, state, &detail, &observed_at)?)
-            .with_context(|| format!("sending Idunn health to {}", idunn.endpoint))?;
-        thread::sleep(cadence);
+        if Instant::now() >= next_publish_at {
+            let observed_at = idunn_timestamp()?;
+            let (state, detail) = match evaluate_health(options) {
+                Ok(detail) => ("active", detail),
+                Err(error) => ("failed", error.to_string()),
+            };
+            transport
+                .send("schema", idunn_health_payload(idunn, state, &detail, &observed_at)?)
+                .with_context(|| format!("sending Idunn health to {}", idunn.endpoint))?;
+            next_publish_at = Instant::now() + cadence;
+        }
+        let _ = transport.receive_once()?;
+        transport.poll_resends()?;
     }
 }
 
