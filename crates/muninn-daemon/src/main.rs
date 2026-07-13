@@ -1652,7 +1652,7 @@ struct ActiveMoveEvidenceStream {
     producer_peer_id: String,
     frame_counter: u64,
     snapshot_path: Option<PathBuf>,
-    rudp_sender: Option<mpsc::SyncSender<Vec<u8>>>,
+    rudp_sender: Option<Arc<Mutex<Option<Vec<u8>>>>>,
 }
 
 fn activate(options: Options) -> Result<()> {
@@ -3762,7 +3762,7 @@ fn publish_move_evidence_stream_frame(
     let payload =
         rmp_serde::to_vec(&frame).context("encoding Muninn Move evidence stream frame")?;
     if let Some(sender) = stream.rudp_sender.as_ref() {
-        let _ = sender.try_send(payload.clone());
+        if let Ok(mut latest) = sender.lock() { *latest = Some(payload.clone()); }
     }
     if let Some(path) = stream.snapshot_path.as_deref() {
         write_move_evidence_snapshot(
@@ -5208,7 +5208,7 @@ struct HidControllerRudpSubscription {
 
 fn start_hid_controller_rudp_ingress(
     options: &Options,
-) -> Result<Option<mpsc::SyncSender<Vec<u8>>>> {
+) -> Result<Option<Arc<Mutex<Option<Vec<u8>>>>>> {
     let Some(bind_address) = options.hid_controller_rudp_bind else {
         return Ok(None);
     };
@@ -5220,22 +5220,23 @@ fn start_hid_controller_rudp_ingress(
     socket
         .set_read_timeout(Some(Duration::from_millis(1)))
         .with_context(|| format!("setting Muninn HID controller RUDP timeout at {bind_address}"))?;
-    let (move_evidence_tx, move_evidence_rx) = mpsc::sync_channel(4);
+    let move_evidence_latest = Arc::new(Mutex::new(None));
+    let ingress_evidence = Arc::clone(&move_evidence_latest);
     let runtime_options = options.clone();
     thread::spawn(move || {
         if let Err(error) =
-            run_hid_controller_rudp_ingress(socket, runtime_options, move_evidence_rx)
+            run_hid_controller_rudp_ingress(socket, runtime_options, ingress_evidence)
         {
             eprintln!("Muninn HID controller RUDP stream stopped: {error:#}");
         }
     });
-    Ok(Some(move_evidence_tx))
+    Ok(Some(move_evidence_latest))
 }
 
 fn run_hid_controller_rudp_ingress(
     socket: UdpSocket,
     options: Options,
-    move_evidence_rx: mpsc::Receiver<Vec<u8>>,
+    move_evidence_latest: Arc<Mutex<Option<Vec<u8>>>>,
 ) -> Result<()> {
     let local_addr = socket.local_addr()?;
     println!("Muninn HID controller RUDP stream listening at {local_addr}.");
@@ -5322,10 +5323,10 @@ fn run_hid_controller_rudp_ingress(
             continue;
         }
         if transport.connected() {
-            while let Ok(payload) = move_evidence_rx.try_recv() {
+            let payload = move_evidence_latest.lock().ok().and_then(|mut latest| latest.take());
+            if let Some(payload) = payload {
                 if let Err(error) = transport.send("move-evidence", payload) {
                     eprintln!("Muninn Move evidence RUDP send warning: {error:#}");
-                    break;
                 }
             }
         }
@@ -13341,8 +13342,8 @@ Device 00:07:04:A8:00:D0 (public)
         let mut stream = create_move_evidence_stream(&options)
             .unwrap()
             .expect("move state source should create a stream");
-        let (rudp_tx, rudp_rx) = mpsc::sync_channel(1);
-        stream.rudp_sender = Some(rudp_tx);
+        let rudp_latest = Arc::new(Mutex::new(None));
+        stream.rudp_sender = Some(Arc::clone(&rudp_latest));
 
         let handle = publish_move_evidence_stream_frame(&mut stream, &[], &[record.clone()])
             .unwrap()
@@ -13372,7 +13373,7 @@ Device 00:07:04:A8:00:D0 (public)
             .and_then(CultMeshSharedMemoryFrameRing::try_acquire_latest_read)
             .expect("latest frame should be readable");
         let decoded: DecodedMoveEvidenceStreamFrame = rmp_serde::from_slice(lease.bytes()).unwrap();
-        let remote_payload = rudp_rx.try_recv().expect("RUDP evidence copy");
+        let remote_payload = rudp_latest.lock().unwrap().take().expect("RUDP evidence copy");
         assert_eq!(remote_payload, lease.bytes());
 
         assert_eq!(decoded.0, "muninn:nightwing:move-evidence:0");
