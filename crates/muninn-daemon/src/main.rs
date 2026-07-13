@@ -521,11 +521,8 @@ fn start_daemon_health_worker(options: &Options) {
     }
     let options = options.clone();
     thread::spawn(move || {
-        let mut last_publish_attempt_at = None;
         loop {
-            if let Err(error) =
-                publish_daemon_health_if_configured(&options, &mut last_publish_attempt_at)
-            {
+            if let Err(error) = run_daemon_health_publisher(&options) {
                 eprintln!("Muninn Idunn health publish failed: {error:#}");
             }
             thread::sleep(Duration::from_secs(5));
@@ -8482,44 +8479,45 @@ fn evaluate_health_from_node(
     ))
 }
 
-fn publish_daemon_health_if_configured(
-    options: &Options,
-    last_attempt_at: &mut Option<Instant>,
-) -> Result<()> {
-    let Some(idunn) = options.idunn_rudp_health.as_ref() else {
-        return Ok(());
-    };
-
-    let cadence = Duration::from_secs(options.interval_seconds.unwrap_or(15).max(1));
-    if last_attempt_at
-        .as_ref()
-        .is_some_and(|instant| instant.elapsed() < cadence)
-    {
-        return Ok(());
-    }
-
-    let observed_at = idunn_timestamp()?;
-    let health = evaluate_health(options);
-    let (state, detail) = match health {
-        Ok(detail) => ("active", detail),
-        Err(error) => ("failed", error.to_string()),
-    };
-    *last_attempt_at = Some(Instant::now());
-    if let Err(error) = publish_idunn_rudp_health(idunn, state, &detail, &observed_at) {
-        eprintln!(
-            "Muninn could not publish Idunn RUDP health for {} at {}: {error:#}",
-            options.host_id, observed_at
-        );
-    }
-    Ok(())
-}
-
 fn publish_idunn_rudp_health(
     options: &IdunnRudpHealthOptions,
     state: &str,
     detail: &str,
     observed_at: &str,
 ) -> Result<()> {
+    let mut transport = connect_idunn_rudp_health(options)?;
+    transport
+        .send("schema", idunn_health_payload(options, state, detail, observed_at)?)
+        .with_context(|| format!("sending Idunn health to {}", options.endpoint))?;
+    Ok(())
+}
+
+fn run_daemon_health_publisher(options: &Options) -> Result<()> {
+    let idunn = options
+        .idunn_rudp_health
+        .as_ref()
+        .context("Muninn daemon health publisher requires Idunn RUDP options")?;
+    let mut transport = connect_idunn_rudp_health(idunn)?;
+    let cadence = Duration::from_secs(options.interval_seconds.unwrap_or(15).max(1));
+    loop {
+        let observed_at = idunn_timestamp()?;
+        let (state, detail) = match evaluate_health(options) {
+            Ok(detail) => ("active", detail),
+            Err(error) => ("failed", error.to_string()),
+        };
+        transport
+            .send("schema", idunn_health_payload(idunn, state, &detail, &observed_at)?)
+            .with_context(|| format!("sending Idunn health to {}", idunn.endpoint))?;
+        thread::sleep(cadence);
+    }
+}
+
+fn idunn_health_payload(
+    options: &IdunnRudpHealthOptions,
+    state: &str,
+    detail: &str,
+    observed_at: &str,
+) -> Result<Vec<u8>> {
     let health = IdunnDaemonHealthRecord {
         daemon_id: options.daemon_id.clone(),
         state: state.to_string(),
@@ -8547,6 +8545,13 @@ fn publish_idunn_rudp_health(
             tags: Some(vec![CULTNET_RUDP_PROTOCOL_ID.to_string()]),
         },
     };
+    encode_cultnet_message_to_vec(&message, CultNetWireContract::CultNetSchemaV0)
+        .context("encoding Idunn health CultNet message")
+}
+
+fn connect_idunn_rudp_health(
+    options: &IdunnRudpHealthOptions,
+) -> Result<CultNetRudpSocketTransportConnection> {
     let bind_address = if options.endpoint.is_ipv4() {
         "0.0.0.0:0"
     } else {
@@ -8574,12 +8579,7 @@ fn publish_idunn_rudp_health(
             ));
         }
     }
-    let payload = encode_cultnet_message_to_vec(&message, CultNetWireContract::CultNetSchemaV0)
-        .context("encoding Idunn health CultNet message")?;
-    transport
-        .send("schema", payload)
-        .with_context(|| format!("sending Idunn health to {}", options.endpoint))?;
-    Ok(())
+    Ok(transport)
 }
 
 fn verify_move_sources_fresh(options: &Options, node: &cultmesh_rs::CultMeshNode) -> Result<()> {
