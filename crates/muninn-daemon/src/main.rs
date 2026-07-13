@@ -3761,6 +3761,19 @@ fn publish_move_evidence_stream_frame(
     );
     let payload =
         rmp_serde::to_vec(&frame).context("encoding Muninn Move evidence stream frame")?;
+    if let Some(sender) = stream.rudp_sender.as_ref() {
+        let _ = sender.try_send(payload.clone());
+    }
+    if let Some(path) = stream.snapshot_path.as_deref() {
+        write_move_evidence_snapshot(
+            path,
+            &stream.stream_id,
+            &frame_id,
+            &stream.producer_peer_id,
+            published_at_ns,
+            &payload,
+        )?;
+    }
     let handle = {
         let ring: &mut CultMeshSharedMemoryFrameRing =
             stream
@@ -3770,19 +3783,6 @@ fn publish_move_evidence_stream_frame(
         ring.try_publish_copy(&payload, published_at_ns, 0)?
     };
     if let Some(handle) = handle {
-        if let Some(sender) = stream.rudp_sender.as_ref() {
-            let _ = sender.try_send(payload.clone());
-        }
-        if let Some(path) = stream.snapshot_path.as_deref() {
-            write_move_evidence_snapshot(
-                path,
-                &stream.stream_id,
-                &frame_id,
-                &stream.producer_peer_id,
-                published_at_ns,
-                &payload,
-            )?;
-        }
         stream.catalog.publish_frame(handle.clone())?;
         Ok(Some(handle))
     } else {
