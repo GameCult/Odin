@@ -315,9 +315,9 @@ struct ActiveMoveMarkerCameraSource {
     frame_source: MoveMarkerFrameSource,
     sequence: u64,
     #[cfg(feature = "psmoveapi-tracker")]
-    psmoveapi_observations: Option<mpsc::Receiver<Vec<muninn_psmoveapi_tracker::PsmoveApiObservation>>>,
+    psmoveapi_observations: Option<Arc<Mutex<Option<Vec<muninn_psmoveapi_tracker::PsmoveApiObservation>>>>>,
     #[cfg(feature = "psmoveapi-tracker")]
-    psmoveapi_health: Option<mpsc::Receiver<MuninnMoveTrackerHealthRecord>>,
+    psmoveapi_health: Option<Arc<Mutex<Option<MuninnMoveTrackerHealthRecord>>>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -4693,13 +4693,10 @@ fn publish_move_marker_camera_frames(
         frame_source.tracker_config.source_id_hash =
             stable_marker_camera_source_hash(&frame_source);
         #[cfg(feature = "psmoveapi-tracker")]
-        if let Some(receiver) = camera.psmoveapi_observations.as_ref() {
+        if let Some(latest) = camera.psmoveapi_observations.as_ref() {
             let observed_at = timestamp()?;
-            let mut latest = None;
-            while let Ok(observations) = receiver.try_recv() {
-                latest = Some(observations);
-            }
-            marker_candidates.extend(latest.unwrap_or_default().into_iter().map(|observation| {
+            let observations = latest.lock().ok().and_then(|mut value| value.take()).unwrap_or_default();
+            marker_candidates.extend(observations.into_iter().map(|observation| {
                 let radius = observation.radius_px.max(0.0);
                 MuninnMoveMarkerCandidateRecord {
                     stream_id: frame_source.stream_id.clone(),
@@ -4751,9 +4748,11 @@ fn start_psmoveapi_tracker_worker(
     exposure: f32,
     move_state_sources: Vec<MoveStateSource>,
     move_hue_program: Arc<Mutex<MuninnMoveHueProgramRecord>>,
-) -> (mpsc::Receiver<Vec<muninn_psmoveapi_tracker::PsmoveApiObservation>>, mpsc::Receiver<MuninnMoveTrackerHealthRecord>) {
-    let (sender, receiver) = mpsc::sync_channel(1);
-    let (health_sender, health_receiver) = mpsc::sync_channel(1);
+) -> (Arc<Mutex<Option<Vec<muninn_psmoveapi_tracker::PsmoveApiObservation>>>>, Arc<Mutex<Option<MuninnMoveTrackerHealthRecord>>>) {
+    let observations_latest = Arc::new(Mutex::new(None));
+    let health_latest = Arc::new(Mutex::new(None));
+    let observations_output = Arc::clone(&observations_latest);
+    let health_output = Arc::clone(&health_latest);
     thread::spawn(move || {
         let mut command = Command::new(env::current_exe().unwrap_or_else(|_| PathBuf::from("muninn")));
         command.arg("move-tracker-worker")
@@ -4793,12 +4792,12 @@ fn start_psmoveapi_tracker_worker(
                 move_id: value.move_id, center_x_px: value.center_x_px, center_y_px: value.center_y_px,
                 radius_px: value.radius_px, age_ms: value.age_ms,
             }).collect();
-            let _ = health_sender.try_send(frame.health);
-            let _ = sender.try_send(observations);
+            if let Ok(mut latest) = health_output.lock() { *latest = Some(frame.health); }
+            if let Ok(mut latest) = observations_output.lock() { *latest = Some(observations); }
         }
         let _ = child.wait();
     });
-    (receiver, health_receiver)
+    (observations_latest, health_latest)
 }
 
 #[cfg(feature = "psmoveapi-tracker")]
@@ -4961,10 +4960,9 @@ struct MoveTrackerWorkerProgram {
 #[cfg(feature = "psmoveapi-tracker")]
 fn publish_move_tracker_health(node: &mut cultmesh_rs::CultMeshNode, active: &mut [ActiveMoveMarkerCameraSource]) -> Result<()> {
     for camera in active {
-        let Some(receiver) = camera.psmoveapi_health.as_ref() else { continue; };
-        let mut latest = None;
-        while let Ok(record) = receiver.try_recv() { latest = Some(record); }
-        if let Some(record) = latest { node.put(&record.health_id, &record)?; }
+        let Some(latest) = camera.psmoveapi_health.as_ref() else { continue; };
+        let record = latest.lock().ok().and_then(|mut value| value.take());
+        if let Some(record) = record { node.put(&record.health_id, &record)?; }
     }
     Ok(())
 }
