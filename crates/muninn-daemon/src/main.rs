@@ -4738,7 +4738,23 @@ fn start_move_evidence_aggregator(
 ) {
     thread::spawn(move || {
         let mut reader = PlatformMoveMarkerCameraFrameReader::default();
+        let fps = cameras
+            .iter()
+            .map(|camera| camera.frame_source.fps)
+            .max()
+            .unwrap_or(60)
+            .max(1);
+        let cadence = Duration::from_secs_f64(1.0 / f64::from(fps));
+        let mut next_tick_at = Instant::now();
         loop {
+            let now = Instant::now();
+            if now < next_tick_at {
+                thread::sleep(next_tick_at - now);
+            }
+            next_tick_at += cadence;
+            if next_tick_at < Instant::now() {
+                next_tick_at = Instant::now() + cadence;
+            }
             let controller_states = latest_move_controller_states
                 .lock()
                 .map(|states| states.clone())
@@ -4751,7 +4767,6 @@ fn start_move_evidence_aggregator(
             ) {
                 eprintln!("Muninn Move evidence aggregator warning: {error:#}");
             }
-            thread::sleep(Duration::from_millis(4));
         }
     });
 }
