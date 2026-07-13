@@ -4639,6 +4639,7 @@ fn active_move_marker_camera_sources(
                         camera_index,
                         options.move_tracker_exposure_milli as f32 / 1000.0,
                         serve_move_state_sources(options, true),
+                        Arc::clone(&_move_hue_program),
                     ))
                 }).map_or((None, None), |(observations, health)| (Some(observations), Some(health)))
             } else {
@@ -4749,6 +4750,7 @@ fn start_psmoveapi_tracker_worker(
     camera_index: i32,
     exposure: f32,
     move_state_sources: Vec<MoveStateSource>,
+    move_hue_program: Arc<Mutex<MuninnMoveHueProgramRecord>>,
 ) -> (mpsc::Receiver<Vec<muninn_psmoveapi_tracker::PsmoveApiObservation>>, mpsc::Receiver<MuninnMoveTrackerHealthRecord>) {
     let (sender, receiver) = mpsc::sync_channel(1);
     let (health_sender, health_receiver) = mpsc::sync_channel(1);
@@ -4762,8 +4764,21 @@ fn start_psmoveapi_tracker_worker(
         for source in move_state_sources {
             command.arg("--move-state").arg(format!("{}={}", source.move_id, source.hidraw_path));
         }
-        let child = command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::inherit()).spawn();
+        let child = command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit()).spawn();
         let Ok(mut child) = child else { return; };
+        let Some(mut stdin) = child.stdin.take() else { return; };
+        let program_source = Arc::clone(&move_hue_program);
+        thread::spawn(move || {
+            let mut previous = None;
+            loop {
+                let Some(program) = program_source.lock().ok().map(|value| MoveTrackerWorkerProgram::from(&*value)) else { return; };
+                if previous.as_ref() != Some(&program) {
+                    if write_length_framed_message(&mut stdin, &program).is_err() { return; }
+                    previous = Some(program);
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+        });
         let Some(stdout) = child.stdout.take() else { return; };
         let mut reader = BufReader::new(stdout);
         while let Ok(frame) = read_move_tracker_worker_frame(&mut reader) {
@@ -4781,22 +4796,49 @@ fn start_psmoveapi_tracker_worker(
 
 #[cfg(feature = "psmoveapi-tracker")]
 fn read_move_tracker_worker_frame(reader: &mut impl Read) -> Result<MoveTrackerWorkerFrame> {
+    read_length_framed_message(reader)
+}
+
+#[cfg(feature = "psmoveapi-tracker")]
+fn read_length_framed_message<T: for<'de> Deserialize<'de>>(reader: &mut impl Read) -> Result<T> {
     let mut length = [0u8; 4];
     reader.read_exact(&mut length)?;
     let length = u32::from_le_bytes(length) as usize;
     if length > 1024 * 1024 { return Err(anyhow!("Move tracker worker frame exceeds 1 MiB")); }
     let mut payload = vec![0u8; length];
     reader.read_exact(&mut payload)?;
-    rmp_serde::from_slice(&payload).context("decoding Move tracker worker frame")
+    rmp_serde::from_slice(&payload).context("decoding length-framed MessagePack")
 }
 
 #[cfg(feature = "psmoveapi-tracker")]
 fn write_move_tracker_worker_frame(writer: &mut impl Write, frame: &MoveTrackerWorkerFrame) -> Result<()> {
-    let payload = rmp_serde::to_vec(frame)?;
+    write_length_framed_message(writer, frame)
+}
+
+#[cfg(feature = "psmoveapi-tracker")]
+fn write_length_framed_message(writer: &mut impl Write, value: &impl Serialize) -> Result<()> {
+    let payload = rmp_serde::to_vec(value)?;
     writer.write_all(&(payload.len() as u32).to_le_bytes())?;
     writer.write_all(&payload)?;
     writer.flush()?;
     Ok(())
+}
+
+#[cfg(feature = "psmoveapi-tracker")]
+impl From<&MuninnMoveHueProgramRecord> for MoveTrackerWorkerProgram {
+    fn from(value: &MuninnMoveHueProgramRecord) -> Self {
+        Self { mode: value.mode.clone(), cycle_ms: value.cycle_ms, epoch_ns: value.epoch_ns,
+            hold_at_ns: value.hold_at_ns, order_mode: value.order_mode.clone() }
+    }
+}
+
+#[cfg(feature = "psmoveapi-tracker")]
+impl MoveTrackerWorkerProgram {
+    fn as_record(&self, host_id: &str) -> MuninnMoveHueProgramRecord {
+        MuninnMoveHueProgramRecord { program_id: move_hue_program_key(host_id), host_id: host_id.to_string(),
+            mode: self.mode.clone(), cycle_ms: self.cycle_ms, epoch_ns: self.epoch_ns, hold_at_ns: self.hold_at_ns,
+            requested_by: "parent-worker-pipe".to_string(), updated_at: "worker-live".to_string(), order_mode: self.order_mode.clone() }
+    }
 }
 
 #[cfg(feature = "psmoveapi-tracker")]
@@ -4812,9 +4854,18 @@ fn run_move_tracker_worker(options: Options) -> Result<()> {
         .map(|source| source.move_id).collect::<Vec<_>>();
     roster.sort();
     roster.dedup();
-    let mut program = open_node(&options, "muninn-move-tracker-worker")?
-        .get::<MuninnMoveHueProgramRecord>(&move_hue_program_key(&options.host_id))?
-        .unwrap_or_else(|| bootstrap_move_hue_program(&options));
+    let mut input = BufReader::new(std::io::stdin());
+    let initial: MoveTrackerWorkerProgram = read_length_framed_message(&mut input)?;
+    let mut program = initial.as_record(&options.host_id);
+    let (program_sender, program_receiver) = mpsc::sync_channel(1);
+    thread::spawn(move || {
+        while let Ok(program) = read_length_framed_message::<MoveTrackerWorkerProgram>(&mut input) {
+            match program_sender.try_send(program) {
+                Ok(()) | Err(mpsc::TrySendError::Full(_)) => {}
+                Err(mpsc::TrySendError::Disconnected(_)) => return,
+            }
+        }
+    });
     let exposure = options.move_tracker_exposure_milli as f32 / 1000.0;
     let colors = tracker_colors(&roster, &program);
     let mut tracker = muninn_psmoveapi_tracker::PsmoveApiTracker::open(camera_index, exposure, &colors)?;
@@ -4822,19 +4873,11 @@ fn run_move_tracker_worker(options: Options) -> Result<()> {
     let mut update_count = 0u64;
     let mut observation_count = 0u64;
     let mut last_observation_at = String::new();
-    let mut last_program_refresh = Instant::now();
     let mut last_calibration = Instant::now();
     let stdout = std::io::stdout();
     let mut writer = stdout.lock();
     loop {
-        if last_program_refresh.elapsed() >= Duration::from_secs(1) {
-            if let Ok(node) = open_node(&options, "muninn-move-tracker-worker") {
-                if let Ok(Some(latest)) = node.get::<MuninnMoveHueProgramRecord>(&move_hue_program_key(&options.host_id)) {
-                    program = latest;
-                }
-            }
-            last_program_refresh = Instant::now();
-        }
+        while let Ok(latest) = program_receiver.try_recv() { program = latest.as_record(&options.host_id); }
         if last_calibration.elapsed() >= Duration::from_secs(30) {
             tracker.observe_connected();
             last_calibration = Instant::now();
@@ -4896,6 +4939,16 @@ struct MoveTrackerWorkerObservation {
 struct MoveTrackerWorkerFrame {
     health: MuninnMoveTrackerHealthRecord,
     observations: Vec<MoveTrackerWorkerObservation>,
+}
+
+#[cfg(feature = "psmoveapi-tracker")]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct MoveTrackerWorkerProgram {
+    mode: String,
+    cycle_ms: u64,
+    epoch_ns: i64,
+    hold_at_ns: i64,
+    order_mode: String,
 }
 
 #[cfg(feature = "psmoveapi-tracker")]
