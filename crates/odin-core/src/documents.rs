@@ -1216,6 +1216,10 @@ pub struct MuninnMoveTrackerHealthRecord {
     #[cultcache(key = 14)] pub last_observation_at: String,
     #[cultcache(key = 15)] pub detail: String,
     #[cultcache(key = 16)] pub updated_at: String,
+    #[cultcache(key = 17, default)] pub image_mean_rgb: Vec<u32>,
+    #[cultcache(key = 18, default)] pub image_peak_rgb: Vec<u32>,
+    #[cultcache(key = 19, default)] pub color_evidence_move_ids: Vec<String>,
+    #[cultcache(key = 20, default)] pub color_evidence_pixel_counts: Vec<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]

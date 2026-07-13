@@ -4880,6 +4880,11 @@ fn run_move_tracker_worker(options: Options) -> Result<()> {
     let mut observation_count = 0u64;
     let mut last_observation_at = String::new();
     let mut last_calibration = Instant::now();
+    let mut last_image_evidence = Instant::now() - Duration::from_secs(1);
+    let mut image_mean_rgb = Vec::new();
+    let mut image_peak_rgb = Vec::new();
+    let mut color_evidence_move_ids = Vec::new();
+    let mut color_evidence_pixel_counts = Vec::new();
     let stdout = std::io::stdout();
     let mut writer = stdout.lock();
     loop {
@@ -4888,13 +4893,21 @@ fn run_move_tracker_worker(options: Options) -> Result<()> {
             tracker.observe_connected();
             last_calibration = Instant::now();
         }
-        for (identity, color) in tracker_colors(&roster, &program) {
-            tracker.set_expected_color(&identity, color);
+        let expected_colors = tracker_colors(&roster, &program);
+        for (identity, color) in &expected_colors {
+            tracker.set_expected_color(identity, *color);
         }
         let observations = tracker.update();
         update_count = update_count.saturating_add(1);
         observation_count = observation_count.saturating_add(observations.len() as u64);
         if !observations.is_empty() { last_observation_at = timestamp()?; }
+        if last_image_evidence.elapsed() >= Duration::from_millis(250) {
+            if let Some((_, _, rgb)) = tracker.rgb_image() {
+                (image_mean_rgb, image_peak_rgb, color_evidence_move_ids, color_evidence_pixel_counts) =
+                    summarize_tracker_rgb(&rgb, &expected_colors);
+            }
+            last_image_evidence = Instant::now();
+        }
         let health = MuninnMoveTrackerHealthRecord {
             health_id: format!("muninn:{}:{}:move-tracker-health", options.host_id, source.camera_id),
             host_id: options.host_id.clone(), camera_id: source.camera_id.clone(), camera_index,
@@ -4903,6 +4916,9 @@ fn run_move_tracker_worker(options: Options) -> Result<()> {
             calibrated_controller_count: tracker.tracked_controller_count() as u32, update_count, observation_count,
             latest_observation_count: observations.len() as u32, last_observation_at: last_observation_at.clone(),
             detail: "private subprocess worker".to_string(), updated_at: timestamp()?,
+            image_mean_rgb: image_mean_rgb.clone(), image_peak_rgb: image_peak_rgb.clone(),
+            color_evidence_move_ids: color_evidence_move_ids.clone(),
+            color_evidence_pixel_counts: color_evidence_pixel_counts.clone(),
         };
         let frame = MoveTrackerWorkerFrame {
             health,
@@ -4912,7 +4928,32 @@ fn run_move_tracker_worker(options: Options) -> Result<()> {
             }).collect(),
         };
         write_move_tracker_worker_frame(&mut writer, &frame)?;
+        thread::sleep(Duration::from_millis(4));
     }
+}
+
+#[cfg(feature = "psmoveapi-tracker")]
+fn summarize_tracker_rgb(rgb: &[u8], expected: &[(String, [u8; 3])]) -> (Vec<u32>, Vec<u32>, Vec<String>, Vec<u32>) {
+    let mut sums = [0u64; 3];
+    let mut peaks = [0u32; 3];
+    let mut counts = vec![0u32; expected.len()];
+    let pixels = rgb.len() / 3;
+    for pixel in rgb.chunks_exact(3) {
+        for channel in 0..3 { sums[channel] += u64::from(pixel[channel]); peaks[channel] = peaks[channel].max(u32::from(pixel[channel])); }
+        let max = *pixel.iter().max().unwrap_or(&0);
+        let min = *pixel.iter().min().unwrap_or(&0);
+        if max < 40 || max.saturating_sub(min) < 30 { continue; }
+        let pixel_norm = (pixel.iter().map(|value| f64::from(*value).powi(2)).sum::<f64>()).sqrt();
+        for (index, (_, color)) in expected.iter().enumerate() {
+            let color_norm = (color.iter().map(|value| f64::from(*value).powi(2)).sum::<f64>()).sqrt();
+            let dot = pixel.iter().zip(color).map(|(left, right)| f64::from(*left) * f64::from(*right)).sum::<f64>();
+            if pixel_norm > 0.0 && color_norm > 0.0 && dot / (pixel_norm * color_norm) >= 0.985 {
+                counts[index] = counts[index].saturating_add(1);
+            }
+        }
+    }
+    let means = if pixels == 0 { vec![0, 0, 0] } else { sums.iter().map(|sum| (*sum / pixels as u64) as u32).collect() };
+    (means, peaks.to_vec(), expected.iter().map(|(id, _)| id.clone()).collect(), counts)
 }
 
 #[cfg(feature = "psmoveapi-tracker")]

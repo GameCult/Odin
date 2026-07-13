@@ -43,6 +43,13 @@ mod linux {
         height: c_int,
     }
 
+    #[repr(C)]
+    struct TrackerRgbImage {
+        data: *const u8,
+        width: c_int,
+        height: c_int,
+    }
+
     #[link(name = "psmoveapi")]
     #[link(name = "psmoveapi_tracker")]
     unsafe extern "C" {
@@ -79,6 +86,7 @@ mod linux {
             radius: *mut c_float,
         ) -> c_int;
         fn psmove_tracker_get_camera_info(tracker: *mut c_void) -> *const CameraInfo;
+        fn psmove_tracker_get_image(tracker: *mut c_void) -> TrackerRgbImage;
     }
 
     struct Controller {
@@ -237,6 +245,18 @@ mod linux {
             }
             observations
         }
+
+        pub fn rgb_image(&self) -> Option<(u32, u32, Vec<u8>)> {
+            let image = unsafe { psmove_tracker_get_image(self.tracker) };
+            if image.data.is_null() || image.width <= 0 || image.height <= 0 {
+                return None;
+            }
+            let byte_len = (image.width as usize)
+                .checked_mul(image.height as usize)?
+                .checked_mul(3)?;
+            let bytes = unsafe { core::slice::from_raw_parts(image.data, byte_len) };
+            Some((image.width as u32, image.height as u32, bytes.to_vec()))
+        }
     }
 
     impl Drop for PsmoveApiTracker {
@@ -292,6 +312,9 @@ impl PsmoveApiTracker {
     pub fn update(&mut self) -> Vec<PsmoveApiObservation> {
         Vec::new()
     }
+
+
+    pub fn rgb_image(&self) -> Option<(u32, u32, Vec<u8>)> { None }
 }
 
 #[cfg(test)]
