@@ -6504,9 +6504,17 @@ fn start_default_move_light_worker(
         let mut writer = HidMoveLightWriter;
         let mut last_error_log_at = None::<Instant>;
         let mut written_color_by_target = HashMap::<String, (u8, u8, u8)>::new();
+        let mut targets = Vec::<DefaultMoveLightTarget>::new();
+        let mut last_target_refresh_at = None::<Instant>;
         loop {
-            let states = active_move_state_sources(serve_move_state_sources(&options, true));
-            let targets = default_move_light_paths(&states, true);
+            if targets.is_empty()
+                || last_target_refresh_at
+                    .is_none_or(|refreshed_at| refreshed_at.elapsed() >= Duration::from_millis(500))
+            {
+                let states = active_move_state_sources(serve_move_state_sources(&options, true));
+                targets = default_move_light_paths(&states, true);
+                last_target_refresh_at = Some(Instant::now());
+            }
             let mut roster = targets
                 .iter()
                 .map(|target| target.identity.clone())
@@ -6536,7 +6544,7 @@ fn start_default_move_light_worker(
                     order_mode: "descending".to_string(),
                 });
             let program_timestamp_ns = move_hue_program_timestamp_ns(&program, now_ns);
-            for target in targets {
+            for target in &targets {
                 if suppressed.contains(&target.path) {
                     continue;
                 }
