@@ -8554,7 +8554,7 @@ fn publish_idunn_rudp_health(
     };
     let socket = UdpSocket::bind(bind_address)
         .with_context(|| format!("binding Muninn RUDP sender at {bind_address}"))?;
-    socket.set_read_timeout(Some(Duration::from_millis(100)))?;
+    socket.set_read_timeout(Some(Duration::from_secs(1)))?;
     let mut transport =
         CultNetRudpSocketTransportConnection::new(CultNetRudpSocketTransportOptions::client(
             "muninn-daemon",
