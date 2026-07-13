@@ -6498,7 +6498,7 @@ fn start_default_move_light_worker(
     thread::spawn(move || {
         let mut writer = HidMoveLightWriter;
         let mut last_error_log_at = None::<Instant>;
-        let mut written_sequence_by_target = HashMap::<String, i128>::new();
+        let mut written_color_by_target = HashMap::<String, (u8, u8, u8)>::new();
         loop {
             let states = active_move_state_sources(serve_move_state_sources(&options, true));
             let targets = default_move_light_paths(&states, true);
@@ -6535,7 +6535,7 @@ fn start_default_move_light_worker(
                 if suppressed.contains(&target.path) {
                     continue;
                 }
-                let Some((color, sequence_index, _)) = scheduled_golden_move_color_with_order(
+                let Some((color, _, _)) = scheduled_golden_move_color_with_order(
                     &target.identity,
                     &roster,
                     i128::from(program.epoch_ns),
@@ -6546,7 +6546,7 @@ fn start_default_move_light_worker(
                     continue;
                 };
                 let target_key = format!("{}:{}", target.identity, target.path);
-                if written_sequence_by_target.get(&target_key) == Some(&sequence_index) {
+                if written_color_by_target.get(&target_key) == Some(&color) {
                     continue;
                 }
                 let report = default_move_light_report(color);
@@ -6561,16 +6561,15 @@ fn start_default_move_light_worker(
                         last_error_log_at = Some(Instant::now());
                     }
                 } else {
-                    written_sequence_by_target.insert(target_key, sequence_index);
+                    written_color_by_target.insert(target_key, color);
                 }
             }
-            let cycle_ns = u128::from(program.cycle_ms) * 1_000_000;
-            let subslot_ns = (cycle_ns / roster.len().max(1) as u128).max(1);
+            const MOVE_HUE_UPDATE_NS: u128 = 25_000_000;
             let current_ns = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_nanos();
-            let until_boundary_ns = subslot_ns - current_ns % subslot_ns;
+            let until_boundary_ns = MOVE_HUE_UPDATE_NS - current_ns % MOVE_HUE_UPDATE_NS;
             thread::sleep(Duration::from_nanos(
                 until_boundary_ns.min(u128::from(u64::MAX)) as u64,
             ));
@@ -6678,10 +6677,18 @@ fn scheduled_golden_move_color_with_order(
     let order_position = update_order.iter().position(|index| *index == identity_index as usize)? as i128;
     let advanced_in_cycle = i128::from(order_position < completed_in_cycle);
     let sequence_index = identity_index + completed_cycles + advanced_in_cycle;
-    let hue = ((sequence_index as f64 * GOLDEN_RATIO_CONJUGATE).fract() * 360.0)
-        .rem_euclid(360.0);
+    let source_hue = (sequence_index as f64 * GOLDEN_RATIO_CONJUGATE).fract();
+    let hue = if order_position == completed_in_cycle {
+        let subslot_ns = cycle_ns.div_euclid(roster_len).max(1);
+        let subslot_elapsed_ns = elapsed_ns.rem_euclid(subslot_ns);
+        let amount = smootherstep(subslot_elapsed_ns as f64 / subslot_ns as f64);
+        let target_hue = ((sequence_index + 1) as f64 * GOLDEN_RATIO_CONJUGATE).fract();
+        wrapped_hue_lerp(source_hue, target_hue, amount)
+    } else {
+        source_hue
+    };
     Some((
-        hsv_to_rgb(hue, 1.0, 1.0),
+        hsv_to_rgb(hue * 360.0, 1.0, 1.0),
         sequence_index,
         order_position == completed_in_cycle,
     ))
@@ -8567,6 +8574,16 @@ fn publish_idunn_rudp_health(
         .send("schema", idunn_health_payload(options, state, detail, observed_at)?)
         .with_context(|| format!("sending Idunn health to {}", options.endpoint))?;
     Ok(())
+}
+
+fn smootherstep(value: f64) -> f64 {
+    let t = value.clamp(0.0, 1.0);
+    t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+}
+
+fn wrapped_hue_lerp(source: f64, target: f64, amount: f64) -> f64 {
+    let delta = (target - source + 0.5).rem_euclid(1.0) - 0.5;
+    (source + delta * amount).rem_euclid(1.0)
 }
 
 fn run_daemon_health_publisher(options: &Options) -> Result<()> {
@@ -11995,6 +12012,30 @@ mod tests {
         assert_eq!(state(500), vec![(0, false), (1, true), (3, false), (4, false)]);
         assert_eq!(state(750), vec![(0, true), (2, false), (3, false), (4, false)]);
         assert_eq!(state(1_000), vec![(1, false), (2, false), (3, false), (4, true)]);
+    }
+
+    #[test]
+    fn scheduled_golden_color_smoothersteps_across_the_full_subslot() {
+        let roster = (0..4).map(|index| format!("move-{index}")).collect::<Vec<_>>();
+        let color_at = |millis: i128| {
+            scheduled_golden_move_color(
+                "move-3",
+                &roster,
+                0,
+                1_000_000_000,
+                millis * 1_000_000,
+            )
+            .unwrap()
+            .0
+        };
+
+        assert_eq!(color_at(0), hsv_to_rgb((3.0 * 0.618_033_988_749_894_9_f64).fract() * 360.0, 1.0, 1.0));
+        assert_eq!(color_at(125), hsv_to_rgb(wrapped_hue_lerp(
+            (3.0 * 0.618_033_988_749_894_9_f64).fract(),
+            (4.0 * 0.618_033_988_749_894_9_f64).fract(),
+            0.5,
+        ) * 360.0, 1.0, 1.0));
+        assert_eq!(color_at(250), hsv_to_rgb((4.0 * 0.618_033_988_749_894_9_f64).fract() * 360.0, 1.0, 1.0));
     }
 
     #[test]
