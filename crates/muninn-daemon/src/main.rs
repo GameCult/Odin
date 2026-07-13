@@ -24,7 +24,7 @@ use odin_core::{
     MUNINN_OBS_STREAM_CATALOG_SCHEMA,
     MuninnCaptureStreamCommandRecord, MuninnCaptureStreamRecord, MuninnCommandBoundaryCompatRecord,
     MuninnHidControllerStateRecord, MuninnMediaReceiverFeedbackRecord,
-    MuninnMoveControllerStateRecord, MuninnMoveHueProgramRecord, MuninnMoveIdentityRecord,
+    MuninnMoveControllerStateRecord, MuninnMoveEvidenceTransportHealthRecord, MuninnMoveHueProgramRecord, MuninnMoveIdentityRecord,
     MuninnMoveLightCommandRecord,
     MuninnMoveMarkerCandidateRecord, MuninnObsStreamCatalogRecord, MuninnQuestAccessRecord,
     MuninnTelemetrySurfaceRecord, MuninnTransportProfileCompatRecord, OdinDocuments,
@@ -46,7 +46,7 @@ use std::net::{SocketAddr, UdpSocket};
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex, atomic::{AtomicU64, Ordering}, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -408,7 +408,10 @@ fn serve(options: Options) -> Result<()> {
         active_move_marker_camera_sources(&options, Arc::clone(&move_hue_program));
     let mut move_marker_camera_reader = PlatformMoveMarkerCameraFrameReader::default();
     let mut active_capture_streams = Vec::new();
-    let move_evidence_rudp_sender = start_hid_controller_rudp_ingress(&options)?;
+    let move_evidence_rudp_sender = start_hid_controller_rudp_ingress(
+        &options,
+        move_evidence_stream.as_ref().map(|stream| Arc::clone(&stream.counters)),
+    )?;
     if let Some(stream) = move_evidence_stream.as_mut() {
         stream.rudp_sender = move_evidence_rudp_sender;
     }
@@ -466,6 +469,7 @@ fn serve(options: Options) -> Result<()> {
                 move_evidence_stream.as_mut(),
             )?;
             publish_move_tracker_health(&mut node, &mut active_move_marker_cameras)?;
+            publish_move_evidence_transport_health(&mut node, &options, move_evidence_stream.as_ref())?;
             publish_quest_access_if_requested(&mut node, &options)?;
             let state = if active_stream_ids.is_empty() {
                 "idle"
@@ -1653,6 +1657,15 @@ struct ActiveMoveEvidenceStream {
     frame_counter: u64,
     snapshot_path: Option<PathBuf>,
     rudp_sender: Option<Arc<Mutex<Option<Vec<u8>>>>>,
+    counters: Arc<MoveEvidenceTransportCounters>,
+}
+
+#[derive(Default)]
+struct MoveEvidenceTransportCounters {
+    produced_frames: AtomicU64,
+    local_ring_admissions: AtomicU64,
+    remote_handoffs: AtomicU64,
+    remote_sends: AtomicU64,
 }
 
 fn activate(options: Options) -> Result<()> {
@@ -3737,6 +3750,7 @@ fn create_move_evidence_stream(options: &Options) -> Result<Option<ActiveMoveEvi
         frame_counter: 0,
         snapshot_path: options.move_evidence_snapshot_path.clone(),
         rudp_sender: None,
+        counters: Arc::new(MoveEvidenceTransportCounters::default()),
     }))
 }
 
@@ -3752,6 +3766,7 @@ fn publish_move_evidence_stream_frame(
     let published_at_ns = timestamp_ns()?;
     let frame_id = format!("{}:{}", stream.stream_id, stream.frame_counter);
     stream.frame_counter = stream.frame_counter.saturating_add(1);
+    stream.counters.produced_frames.fetch_add(1, Ordering::Relaxed);
     let frame = MuninnMoveEvidenceStreamFrame(
         &frame_id,
         &stream.producer_peer_id,
@@ -3763,6 +3778,7 @@ fn publish_move_evidence_stream_frame(
         rmp_serde::to_vec(&frame).context("encoding Muninn Move evidence stream frame")?;
     if let Some(sender) = stream.rudp_sender.as_ref() {
         if let Ok(mut latest) = sender.lock() { *latest = Some(payload.clone()); }
+        stream.counters.remote_handoffs.fetch_add(1, Ordering::Relaxed);
     }
     if let Some(path) = stream.snapshot_path.as_deref() {
         write_move_evidence_snapshot(
@@ -3783,6 +3799,7 @@ fn publish_move_evidence_stream_frame(
         ring.try_publish_copy(&payload, published_at_ns, 0)?
     };
     if let Some(handle) = handle {
+        stream.counters.local_ring_admissions.fetch_add(1, Ordering::Relaxed);
         stream.catalog.publish_frame(handle.clone())?;
         Ok(Some(handle))
     } else {
@@ -5013,6 +5030,26 @@ fn publish_move_tracker_health(node: &mut cultmesh_rs::CultMeshNode, active: &mu
 #[cfg(not(feature = "psmoveapi-tracker"))]
 fn publish_move_tracker_health(_node: &mut cultmesh_rs::CultMeshNode, _active: &mut [ActiveMoveMarkerCameraSource]) -> Result<()> { Ok(()) }
 
+fn publish_move_evidence_transport_health(
+    node: &mut cultmesh_rs::CultMeshNode,
+    options: &Options,
+    stream: Option<&ActiveMoveEvidenceStream>,
+) -> Result<()> {
+    let Some(stream) = stream else { return Ok(()); };
+    let record = MuninnMoveEvidenceTransportHealthRecord {
+        health_id: format!("muninn:{}:move-evidence-transport-health", options.host_id),
+        host_id: options.host_id.clone(),
+        stream_id: stream.stream_id.clone(),
+        produced_frames: stream.counters.produced_frames.load(Ordering::Relaxed),
+        local_ring_admissions: stream.counters.local_ring_admissions.load(Ordering::Relaxed),
+        remote_handoffs: stream.counters.remote_handoffs.load(Ordering::Relaxed),
+        remote_sends: stream.counters.remote_sends.load(Ordering::Relaxed),
+        updated_at: timestamp()?,
+    };
+    node.put(&record.health_id, &record)?;
+    Ok(())
+}
+
 #[cfg(feature = "psmoveapi-tracker")]
 fn video_device_index(path: &Path) -> Option<i32> {
     path.file_name()?.to_str()?.strip_prefix("video")?.parse().ok()
@@ -5208,6 +5245,7 @@ struct HidControllerRudpSubscription {
 
 fn start_hid_controller_rudp_ingress(
     options: &Options,
+    counters: Option<Arc<MoveEvidenceTransportCounters>>,
 ) -> Result<Option<Arc<Mutex<Option<Vec<u8>>>>>> {
     let Some(bind_address) = options.hid_controller_rudp_bind else {
         return Ok(None);
@@ -5225,7 +5263,7 @@ fn start_hid_controller_rudp_ingress(
     let runtime_options = options.clone();
     thread::spawn(move || {
         if let Err(error) =
-            run_hid_controller_rudp_ingress(socket, runtime_options, ingress_evidence)
+            run_hid_controller_rudp_ingress(socket, runtime_options, ingress_evidence, counters)
         {
             eprintln!("Muninn HID controller RUDP stream stopped: {error:#}");
         }
@@ -5237,6 +5275,7 @@ fn run_hid_controller_rudp_ingress(
     socket: UdpSocket,
     options: Options,
     move_evidence_latest: Arc<Mutex<Option<Vec<u8>>>>,
+    counters: Option<Arc<MoveEvidenceTransportCounters>>,
 ) -> Result<()> {
     let local_addr = socket.local_addr()?;
     println!("Muninn HID controller RUDP stream listening at {local_addr}.");
@@ -5327,6 +5366,8 @@ fn run_hid_controller_rudp_ingress(
             if let Some(payload) = payload {
                 if let Err(error) = transport.send("move-evidence", payload) {
                     eprintln!("Muninn Move evidence RUDP send warning: {error:#}");
+                } else if let Some(counters) = counters.as_ref() {
+                    counters.remote_sends.fetch_add(1, Ordering::Relaxed);
                 }
             }
         }
