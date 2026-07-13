@@ -4809,7 +4809,7 @@ fn publish_move_marker_camera_frames(
             observed_at,
         )?);
     }
-    if !marker_candidates.is_empty() || !latest_move_controller_states.is_empty() {
+    if !marker_candidates.is_empty() {
         publish_move_evidence_stream_frame(
             stream,
             &marker_candidates,
