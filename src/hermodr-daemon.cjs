@@ -38,6 +38,15 @@ const HermodrCommandDefinition = defineDocumentType({
   name: (value) => value?.commandId || value?.command_id || "hermodr-command",
   schema: requireObject("Hermodr command document"),
 });
+const EveCommandReceiptDefinition = defineDocumentType({
+  type: "gamecult.eve.command_receipt",
+  schemaName: "gamecult.eve.command_receipt",
+  schemaId: "gamecult.eve.command_receipt.v1",
+  schemaVersion: "gamecult.eve.command_receipt.v1",
+  global: false,
+  name: (value) => value?.commandId || value?.receiptId || "command-receipt",
+  schema: requireObject("Eve command receipt document"),
+});
 
 async function main() {
   const options = parseOptions(process.argv.slice(2));
@@ -263,7 +272,7 @@ function createHermodrBridge(options) {
 
       if (request.method === "POST" && url.pathname === "/hermodr/commands/eve") {
         const body = await readJsonBody(request);
-        writeJson(response, 202, await publishEveCommand(options, body));
+        writeJson(response, 200, await publishEveCommand(options, body));
         return;
       }
 
@@ -743,43 +752,41 @@ async function publishEveCommand(options, body) {
     command,
     route.publishEndpoint || route.uri,
     route.connectionId,
+    EveCommandReceiptDefinition,
   );
   if (publication.routeError) {
     const error = new Error(`CultMesh route publish failed for ${route.uri}: ${publication.routeError}`);
     error.statusCode = 502;
     throw error;
   }
-  return {
-    ok: true,
-    schema: "gamecult.eve.command.v1",
-    commandId,
-    target: route.uri,
-  };
+  return { ok: true, ...publication.receipt, target: route.uri };
 }
 
-async function publishCommandDocument(options, definition, key, value, route, connectionId = 0xe1e00001) {
+async function publishCommandDocument(options, definition, key, value, route, connectionId = 0xe1e00001, receiptDefinition = null) {
   let routeError = null;
+  let receipt = null;
   if (route && (route.startsWith("cultmesh://") || route.startsWith("rudp://"))) {
     try {
-      await CultMesh.publishRudpDocumentOnce(
-        "hermodr-browser-lowering",
-        Number(connectionId),
-        route,
-        { definition },
-        key,
-        value,
-        {
-          bindHost: "0.0.0.0",
-          sourceRuntimeId: "hermodr-browser-lowering",
-          sourceRole: "browser-lowering",
-          tags: ["hermodr", "browser", "command"],
-        },
-      );
+      const publishOptions = {
+        bindHost: "0.0.0.0",
+        sourceRuntimeId: "hermodr-browser-lowering",
+        sourceRole: "browser-lowering",
+        tags: ["hermodr", "browser", "command"],
+        receiptTimeoutMs: 5_000,
+      };
+      receipt = receiptDefinition
+        ? await CultMesh.publishRudpDocumentAndWaitForReceipt(
+          "hermodr-browser-lowering", Number(connectionId), route, { definition }, key, value,
+          { definition: receiptDefinition }, publishOptions,
+        )
+        : await CultMesh.publishRudpDocumentOnce(
+          "hermodr-browser-lowering", Number(connectionId), route, { definition }, key, value, publishOptions,
+        );
     } catch (error) {
       routeError = error instanceof Error ? error.message : String(error);
     }
   }
-  return { routeError };
+  return { routeError, receipt };
 }
 
 async function readVisibleDocument(options, request) {
