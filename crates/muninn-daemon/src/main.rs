@@ -4781,7 +4781,14 @@ fn start_psmoveapi_tracker_worker(
         });
         let Some(stdout) = child.stdout.take() else { return; };
         let mut reader = BufReader::new(stdout);
-        while let Ok(frame) = read_move_tracker_worker_frame(&mut reader) {
+        loop {
+            let frame = match read_move_tracker_worker_frame(&mut reader) {
+                Ok(frame) => frame,
+                Err(error) => {
+                    eprintln!("Muninn Move tracker worker stream stopped camera={camera_id}: {error:#}");
+                    break;
+                }
+            };
             let observations = frame.observations.into_iter().map(|value| muninn_psmoveapi_tracker::PsmoveApiObservation {
                 move_id: value.move_id, center_x_px: value.center_x_px, center_y_px: value.center_y_px,
                 radius_px: value.radius_px, age_ms: value.age_ms,
