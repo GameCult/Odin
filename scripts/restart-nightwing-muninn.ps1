@@ -140,6 +140,9 @@ if [ -f '$LogRoot/muninn.pid' ] && kill -0 "`$(cat '$LogRoot/muninn.pid')" 2>/de
   kill "`$(cat '$LogRoot/muninn.pid')" 2>/dev/null || true
   sleep 1
 fi
+for pid in `$(pgrep -f '[m]uninn move-tracker-worker .*--host nightwing' 2>/dev/null || true); do
+  kill "`$pid" 2>/dev/null || true
+done
 for pid in `$(pgrep -f '[m]uninn serve .*--host nightwing' 2>/dev/null || true); do
   kill "`$pid" 2>/dev/null || true
 done
