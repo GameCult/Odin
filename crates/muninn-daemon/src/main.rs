@@ -4812,7 +4812,8 @@ fn publish_move_marker_camera_frames(
                     area_px: (std::f32::consts::PI * radius * radius).round() as u32,
                     mean_luma: 0.0,
                     peak_luma: 0,
-                    score: (1.0 - observation.age_ms.max(0) as f32 / 250.0).clamp(0.0, 1.0),
+                    // PSMoveAPI exposes position age, not optical fit quality.
+                    score: 0.5,
                     observed_at: observed_at.clone(),
                     move_id: observation.move_id,
                 }
@@ -4978,6 +4979,11 @@ fn run_move_tracker_worker(options: Options) -> Result<()> {
     let camera_info = tracker.camera_info().clone();
     let mut update_count = 0u64;
     let mut observation_count = 0u64;
+    let mut rejected_stale_count = 0u64;
+    let mut rejected_radius_count = 0u64;
+    let mut rejected_bounds_count = 0u64;
+    let mut rejected_continuity_count = 0u64;
+    let mut admitted = HashMap::<String, AdmittedMoveObservation>::new();
     let mut last_observation_at = String::new();
     let mut last_calibration = Instant::now();
     let mut last_image_evidence = Instant::now() - Duration::from_secs(1);
@@ -4997,7 +5003,17 @@ fn run_move_tracker_worker(options: Options) -> Result<()> {
         for (identity, color) in &expected_colors {
             tracker.set_expected_color(identity, *color);
         }
-        let observations = tracker.update();
+        let observed_now = Instant::now();
+        let observations = tracker.update().into_iter().filter(|observation| {
+            match admit_psmoveapi_observation(observation, camera_info.width, camera_info.height,
+                admitted.get(&observation.move_id), observed_now) {
+                Ok(next) => { admitted.insert(observation.move_id.clone(), next); true }
+                Err(PsmoveApiObservationRejection::Stale) => { rejected_stale_count = rejected_stale_count.saturating_add(1); false }
+                Err(PsmoveApiObservationRejection::Radius) => { rejected_radius_count = rejected_radius_count.saturating_add(1); false }
+                Err(PsmoveApiObservationRejection::Bounds) => { rejected_bounds_count = rejected_bounds_count.saturating_add(1); false }
+                Err(PsmoveApiObservationRejection::Continuity) => { rejected_continuity_count = rejected_continuity_count.saturating_add(1); false }
+            }
+        }).collect::<Vec<_>>();
         update_count = update_count.saturating_add(1);
         observation_count = observation_count.saturating_add(observations.len() as u64);
         if !observations.is_empty() { last_observation_at = timestamp()?; }
@@ -5019,6 +5035,7 @@ fn run_move_tracker_worker(options: Options) -> Result<()> {
             image_mean_rgb: image_mean_rgb.clone(), image_peak_rgb: image_peak_rgb.clone(),
             color_evidence_move_ids: color_evidence_move_ids.clone(),
             color_evidence_pixel_counts: color_evidence_pixel_counts.clone(),
+            rejected_stale_count, rejected_radius_count, rejected_bounds_count, rejected_continuity_count,
         };
         let frame = MoveTrackerWorkerFrame {
             health,
@@ -5029,6 +5046,60 @@ fn run_move_tracker_worker(options: Options) -> Result<()> {
         };
         write_move_tracker_worker_frame(&mut writer, &frame)?;
         thread::sleep(Duration::from_millis(4));
+    }
+}
+
+#[cfg(feature = "psmoveapi-tracker")]
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct AdmittedMoveObservation { center_x_px: f32, center_y_px: f32, radius_px: f32, admitted_at: Instant }
+
+#[cfg(feature = "psmoveapi-tracker")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PsmoveApiObservationRejection { Stale, Radius, Bounds, Continuity }
+
+#[cfg(feature = "psmoveapi-tracker")]
+fn admit_psmoveapi_observation(observation: &muninn_psmoveapi_tracker::PsmoveApiObservation, width: u32, height: u32,
+    previous: Option<&AdmittedMoveObservation>, now: Instant) -> std::result::Result<AdmittedMoveObservation, PsmoveApiObservationRejection> {
+    if observation.age_ms < 0 || observation.age_ms > 50 { return Err(PsmoveApiObservationRejection::Stale); }
+    if !observation.radius_px.is_finite() || observation.radius_px < 2.0 { return Err(PsmoveApiObservationRejection::Radius); }
+    if !observation.center_x_px.is_finite() || !observation.center_y_px.is_finite() || observation.center_x_px < 0.0
+        || observation.center_x_px >= width as f32 || observation.center_y_px < 0.0 || observation.center_y_px >= height as f32 {
+        return Err(PsmoveApiObservationRejection::Bounds);
+    }
+    if let Some(previous) = previous {
+        let elapsed = now.saturating_duration_since(previous.admitted_at).as_secs_f32();
+        let dx = observation.center_x_px - previous.center_x_px;
+        let dy = observation.center_y_px - previous.center_y_px;
+        let distance = (dx * dx + dy * dy).sqrt();
+        let radius_ratio = observation.radius_px / previous.radius_px;
+        if distance > 80.0 + 2_500.0 * elapsed.min(0.25) || !(0.25..=4.0).contains(&radius_ratio) {
+            return Err(PsmoveApiObservationRejection::Continuity);
+        }
+    }
+    Ok(AdmittedMoveObservation { center_x_px: observation.center_x_px, center_y_px: observation.center_y_px,
+        radius_px: observation.radius_px, admitted_at: now })
+}
+
+#[cfg(all(test, feature = "psmoveapi-tracker"))]
+mod psmoveapi_observation_admission_tests {
+    use super::*;
+    fn observation(x: f32, y: f32, radius: f32, age_ms: i32) -> muninn_psmoveapi_tracker::PsmoveApiObservation {
+        muninn_psmoveapi_tracker::PsmoveApiObservation { move_id: "move-test".to_string(), center_x_px: x, center_y_px: y, radius_px: radius, age_ms }
+    }
+    #[test]
+    fn rejects_stale_tiny_and_out_of_frame_positions() {
+        let now = Instant::now();
+        assert_eq!(Err(PsmoveApiObservationRejection::Stale), admit_psmoveapi_observation(&observation(100.0, 100.0, 8.0, 51), 640, 480, None, now));
+        assert_eq!(Err(PsmoveApiObservationRejection::Radius), admit_psmoveapi_observation(&observation(100.0, 100.0, 0.7, 1), 640, 480, None, now));
+        assert_eq!(Err(PsmoveApiObservationRejection::Bounds), admit_psmoveapi_observation(&observation(641.0, 100.0, 8.0, 1), 640, 480, None, now));
+    }
+    #[test]
+    fn rejects_fresh_teleport_without_calling_age_confidence() {
+        let now = Instant::now();
+        let previous = admit_psmoveapi_observation(&observation(100.0, 100.0, 8.0, 1), 640, 480, None, now).unwrap();
+        assert_eq!(Err(PsmoveApiObservationRejection::Continuity), admit_psmoveapi_observation(
+            &observation(500.0, 400.0, 8.0, 1), 640, 480, Some(&previous), now + Duration::from_millis(4)));
+        assert!(admit_psmoveapi_observation(&observation(108.0, 104.0, 8.3, 1), 640, 480, Some(&previous), now + Duration::from_millis(4)).is_ok());
     }
 }
 

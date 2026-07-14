@@ -248,3 +248,15 @@ fresh records from two faces of the same controller. The Nightwing health
 actuator requires the same configured Idunn RUDP endpoint, but that command is
 fallback proof only; the live keepalive contract is now published by the
 long-running Nightwing `serve` process.
+
+Each private PSMoveAPI Eye worker owns optical observation admission before the
+parent aggregates evidence. Positions older than 50 ms, blobs below 2 px,
+out-of-frame coordinates, implausible radius jumps, and frame-to-frame
+teleports are rejected locally. Typed `muninn.move_tracker_health.v1` records
+publish rejection counts by stale/radius/bounds/continuity reason.
+
+PSMoveAPI's position age is freshness, not optical confidence. The aggregate
+marker candidate therefore carries an explicit uncalibrated score of `0.5`
+until the observer exposes a real fit-quality measure. Consumers must not treat
+the thresholded color-blob radius as a calibrated physical sphere silhouette;
+per-Eye radius response belongs to Mimir's calibration evidence.
