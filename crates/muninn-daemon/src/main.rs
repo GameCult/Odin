@@ -577,6 +577,7 @@ fn bootstrap_move_hue_program(options: &Options) -> MuninnMoveHueProgramRecord {
         updated_at: timestamp().unwrap_or_else(|_| "unix-0".to_string()),
         order_mode: "descending".to_string(),
         transition_percent: 100,
+        transition_percent_explicit: true,
     }
 }
 
@@ -606,7 +607,7 @@ fn move_hue_program_timestamp_ns(program: &MuninnMoveHueProgramRecord, now_ns: i
 }
 
 fn effective_transition_percent(program: &MuninnMoveHueProgramRecord) -> u8 {
-    if program.transition_percent == 0 { 100 } else { program.transition_percent }
+    if program.transition_percent_explicit { program.transition_percent } else { 100 }
 }
 
 fn start_move_hue_program_sync_worker(
@@ -753,6 +754,7 @@ fn apply_provider_command_document(
     }
     if let Some(value) = payload.get("transitionPercent").and_then(serde_json::Value::as_u64) {
         program.transition_percent = u8::try_from(value).map_err(|_| anyhow!("Move hue transitionPercent must be at most 100"))?;
+        program.transition_percent_explicit = true;
     }
     program.requested_by = value
         .get("publishedBy")
@@ -3119,6 +3121,7 @@ fn publish_move_hue_eve_surface(
                         "kind": "pane",
                         "props": { "title": "Transition Duration" },
                         "children": [
+                            action("transition-0", "Off", None, None, None, Some(0)),
                             action("transition-10", "10%", None, None, None, Some(10)),
                             action("transition-25", "25%", None, None, None, Some(25)),
                             action("transition-50", "50%", None, None, None, Some(50)),
@@ -4958,7 +4961,8 @@ fn write_length_framed_message(writer: &mut impl Write, value: &impl Serialize) 
 impl From<&MuninnMoveHueProgramRecord> for MoveTrackerWorkerProgram {
     fn from(value: &MuninnMoveHueProgramRecord) -> Self {
         Self { mode: value.mode.clone(), cycle_ms: value.cycle_ms, epoch_ns: value.epoch_ns,
-            hold_at_ns: value.hold_at_ns, order_mode: value.order_mode.clone(), transition_percent: value.transition_percent }
+            hold_at_ns: value.hold_at_ns, order_mode: value.order_mode.clone(), transition_percent: value.transition_percent,
+            transition_percent_explicit: value.transition_percent_explicit }
     }
 }
 
@@ -4968,7 +4972,7 @@ impl MoveTrackerWorkerProgram {
         MuninnMoveHueProgramRecord { program_id: move_hue_program_key(host_id), host_id: host_id.to_string(),
             mode: self.mode.clone(), cycle_ms: self.cycle_ms, epoch_ns: self.epoch_ns, hold_at_ns: self.hold_at_ns,
             requested_by: "parent-worker-pipe".to_string(), updated_at: "worker-live".to_string(), order_mode: self.order_mode.clone(),
-            transition_percent: self.transition_percent }
+            transition_percent: self.transition_percent, transition_percent_explicit: self.transition_percent_explicit }
     }
 }
 
@@ -5192,6 +5196,7 @@ struct MoveTrackerWorkerProgram {
     hold_at_ns: i64,
     order_mode: String,
     transition_percent: u8,
+    transition_percent_explicit: bool,
 }
 
 #[cfg(feature = "psmoveapi-tracker")]
@@ -6639,6 +6644,7 @@ fn start_default_move_light_worker(
                     updated_at: "unix-0".to_string(),
                     order_mode: "descending".to_string(),
                     transition_percent: 100,
+                    transition_percent_explicit: true,
                 });
             let program_timestamp_ns = move_hue_program_timestamp_ns(&program, now_ns);
             for target in &targets {
@@ -6794,8 +6800,12 @@ fn scheduled_golden_move_color_with_order(
     let hue = if order_position == completed_in_cycle {
         let subslot_ns = cycle_ns.div_euclid(roster_len).max(1);
         let subslot_elapsed_ns = elapsed_ns.rem_euclid(subslot_ns);
-        let transition_ns = subslot_ns.saturating_mul(i128::from(transition_percent.clamp(1, 100))).div_euclid(100).max(1);
-        let amount = smootherstep((subslot_elapsed_ns as f64 / transition_ns as f64).min(1.0));
+        let amount = if transition_percent == 0 {
+            1.0
+        } else {
+            let transition_ns = subslot_ns.saturating_mul(i128::from(transition_percent.min(100))).div_euclid(100).max(1);
+            smootherstep((subslot_elapsed_ns as f64 / transition_ns as f64).min(1.0))
+        };
         let target_hue = ((sequence_index + 1) as f64 * GOLDEN_RATIO_CONJUGATE).fract();
         wrapped_hue_lerp(source_hue, target_hue, amount)
     } else {
@@ -12177,6 +12187,16 @@ mod tests {
         assert_ne!(color_at(31), hsv_to_rgb(target * 360.0, 1.0, 1.0));
         assert_eq!(color_at(63), hsv_to_rgb(target * 360.0, 1.0, 1.0));
         assert_eq!(color_at(200), hsv_to_rgb(target * 360.0, 1.0, 1.0));
+    }
+
+    #[test]
+    fn zero_percent_transition_hard_steps_at_subslot_boundary() {
+        let roster = (0..4).map(|index| format!("move-{index}")).collect::<Vec<_>>();
+        let color = scheduled_golden_move_color_with_order(
+            "move-3", &roster, 0, 1_000_000_000, 0, "descending", 0,
+        ).unwrap().0;
+        let target = (4.0 * 0.618_033_988_749_894_9_f64).fract();
+        assert_eq!(color, hsv_to_rgb(target * 360.0, 1.0, 1.0));
     }
 
     #[test]
