@@ -495,7 +495,8 @@ function normalizeRudpEndpoint(endpoint) {
 
 async function readProviderSurface(options, catalog, providerId, surfaceId = "") {
   const selectedSurfaceId = surfaceId || providerId;
-  const odinSurface = await readOdinProviderSurface(options, providerId, selectedSurfaceId);
+  const recordKeys = surfaceRecordKeys(catalog, providerId, selectedSurfaceId);
+  const odinSurface = await readOdinProviderSurface(options, providerId, selectedSurfaceId, recordKeys);
   if (odinSurface) {
     return odinSurface;
   }
@@ -506,7 +507,7 @@ async function readProviderSurface(options, catalog, providerId, surfaceId = "")
     const document = await requestProviderSnapshotFirstDocumentWithReconnect(
       route.endpoint,
       "gamecult.eve.surface_state.v1",
-      surfaceRecordKeys(catalog, providerId, selectedSurfaceId),
+      recordKeys,
       { timeoutMs: 4_000, messageIdPrefix: "hermodr-surface-state" },
     );
     const state = normalizeSurfaceState(decodeMessagePack(bufferFromPayload(document.payload)), document.recordKey);
@@ -528,13 +529,13 @@ async function readProviderSurface(options, catalog, providerId, surfaceId = "")
   const document = await requestProviderSnapshotFirstDocumentWithReconnect(
     route.endpoint,
     "gamecult.eve.surface.v1",
-    surfaceRecordKeys(catalog, providerId, selectedSurfaceId),
+    recordKeys,
     { timeoutMs: 4_000, messageIdPrefix: "hermodr-surface" },
   );
   return normalizeEveSurfaceDocument(decodeMessagePack(bufferFromPayload(document.payload)), providerId);
 }
 
-async function readOdinProviderSurface(options, providerId, surfaceId = providerId) {
+async function readOdinProviderSurface(options, providerId, surfaceId = providerId, recordKeys = []) {
   const peer = await CultMesh.createRudpPeer(
     "hermodr-browser-lowering-odin-provider-surface",
     odinRudpConnectionId,
@@ -547,26 +548,32 @@ async function readOdinProviderSurface(options, providerId, surfaceId = provider
     },
   );
   try {
-    const document = await requestCultNetRawSnapshotFirstDocument(
-      peer,
-      "gamecult.eve.surface_state.v1",
-      [surfaceId, `surface:${surfaceId}`, providerId, `surface:${providerId}`],
-      { timeoutMs: 4_000, messageIdPrefix: "hermodr-odin-provider-surface" },
-    );
-    const state = normalizeSurfaceState(decodeMessagePack(bufferFromPayload(document.payload)), document.recordKey);
-    if (!state?.surface?.root) {
-      return null;
+    const candidates = recordKeys.length ? recordKeys : [surfaceId, `surface:${surfaceId}`, providerId, `surface:${providerId}`];
+    for (const recordKey of candidates) {
+      try {
+        const document = await requestCultNetRawSnapshotFirstDocument(
+          peer,
+          "gamecult.eve.surface_state.v1",
+          [recordKey],
+          { timeoutMs: 4_000, messageIdPrefix: "hermodr-odin-provider-surface" },
+        );
+        const state = normalizeSurfaceState(decodeMessagePack(bufferFromPayload(document.payload)), document.recordKey);
+        if (!state?.surface?.root || state.surface.id !== surfaceId) continue;
+        return {
+          providerId,
+          documentProviderId: state.providerId,
+          providerKind: "odin-cultmesh-surface-state",
+          title: state.title || providerId,
+          version: state.version ?? 0,
+          updatedAt: state.updatedAt || null,
+          surface: normalizeEveSurfaceTree(state.surface),
+          commands: [],
+        };
+      } catch {
+        // Try the next provider-advertised alias.
+      }
     }
-    return {
-      providerId,
-      documentProviderId: state.providerId,
-      providerKind: "odin-cultmesh-surface-state",
-      title: state.title || providerId,
-      version: state.version ?? 0,
-      updatedAt: state.updatedAt || null,
-      surface: normalizeEveSurfaceTree(state.surface),
-      commands: [],
-    };
+    return null;
   } catch {
     return null;
   } finally {
