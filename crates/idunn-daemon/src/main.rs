@@ -131,7 +131,8 @@ fn main() -> Result<()> {
             let store_lock = Arc::new(Mutex::new(()));
             let now = timestamp()?;
             publish_runtime_transport_check(&options.common, &store_lock, &now)?;
-            run_target_cycle(target, &options.common, &store_lock)
+            let mut missing_since = None;
+            run_target_cycle(target, &options.common, &store_lock, &mut missing_since)
         }
         Mode::Swarm(swarm) => run_swarm(swarm, &options.common),
         Mode::LifecycleCommand(command) => publish_lifecycle_command(command, &options.common),
@@ -236,8 +237,9 @@ fn run_target_loop(
     options: CommonOptions,
     store_lock: Arc<Mutex<()>>,
 ) -> Result<()> {
+    let mut missing_since = None;
     loop {
-        if let Err(error) = run_target_cycle(&target, &options, &store_lock) {
+        if let Err(error) = run_target_cycle(&target, &options, &store_lock, &mut missing_since) {
             eprintln!(
                 "Idunn swarm target {} cycle failed: {}",
                 target.daemon_id, error
@@ -251,6 +253,7 @@ fn run_target_cycle(
     target: &DaemonTarget,
     options: &CommonOptions,
     store_lock: &Arc<Mutex<()>>,
+    missing_since: &mut Option<Instant>,
 ) -> Result<()> {
     let now = timestamp()?;
 
@@ -272,6 +275,7 @@ fn run_target_cycle(
 
     let (mut health_key, mut health) =
         evaluate_target_health(target, options, store_lock, &desired, &now)?;
+    apply_missing_publication_grace(target, &desired, &mut health, missing_since, Instant::now());
     let mut plan = plan_keepalive(&desired, &health, now.clone());
     if plan.restart_request.is_some() {
         let veto_now = timestamp()?;
@@ -281,6 +285,7 @@ fn run_target_cycle(
             if health_state_is_healthy(&fresh_health.state) {
                 health_key = desired.daemon_id.clone();
                 health = fresh_health;
+                *missing_since = None;
                 plan = plan_keepalive(&desired, &health, veto_now);
             }
         }
@@ -645,9 +650,41 @@ fn evaluate_target_health(
     }
 
     Ok((
-        desired.daemon_id.clone(),
+        supervisor_health_key(&desired.daemon_id),
         missing_daemon_published_health(target, desired, now),
     ))
+}
+
+fn supervisor_health_key(daemon_id: &str) -> String {
+    format!("observation:{daemon_id}")
+}
+
+fn apply_missing_publication_grace(
+    target: &DaemonTarget,
+    desired: &IdunnDesiredDaemonRecord,
+    health: &mut IdunnDaemonHealthRecord,
+    missing_since: &mut Option<Instant>,
+    now: Instant,
+) {
+    if health.publication_source == "daemon-published" {
+        *missing_since = None;
+        return;
+    }
+    if !target.health_contract.restart_on_missing_publication {
+        return;
+    }
+
+    let first_missing = missing_since.get_or_insert(now);
+    let missing_for = now.saturating_duration_since(*first_missing);
+    if missing_for < Duration::from_secs(desired.max_silence_seconds.into()) {
+        health.state = "degraded".to_string();
+        health.detail = format!(
+            "no fresh daemon-published {} record has arrived for {} seconds; Idunn is preserving the daemon-owned health key and waiting for the {} second continuity boundary",
+            desired.health_contract,
+            missing_for.as_secs(),
+            desired.max_silence_seconds
+        );
+    }
 }
 
 fn missing_daemon_published_health(
@@ -3927,7 +3964,7 @@ mod tests {
         let (health_key, selected) =
             evaluate_target_health(&target, &options, &store_lock, &desired, "unix:100").unwrap();
 
-        assert_eq!(health_key, "test-daemon");
+        assert_eq!(health_key, "observation:test-daemon");
         assert_eq!(selected.state, "dependency-unavailable");
         assert_eq!(selected.publication_source, "idunn-supervisor-observation");
         assert_eq!(selected.transport, "cultmesh.missing-daemon-publication");
@@ -3938,6 +3975,122 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(store_path);
+    }
+
+    #[test]
+    fn locally_supervised_health_waits_for_continuous_missing_boundary() {
+        let target = DaemonTarget {
+            daemon_id: "test-daemon".to_string(),
+            verse_id: "test.local".to_string(),
+            name: "Test daemon".to_string(),
+            health_contract: locally_supervised_health_contract(
+                "test.cultnet-rudp-health",
+                "failed",
+            ),
+            deploy_command: None,
+            restart_command: Some("restart test".to_string()),
+            release: None,
+            enabled: true,
+            interval_seconds: 30,
+        };
+        let desired = IdunnDesiredDaemonRecord {
+            daemon_id: target.daemon_id.clone(),
+            verse_id: target.verse_id.clone(),
+            name: target.name.clone(),
+            enabled: true,
+            health_command: None,
+            restart_command: target.restart_command.clone(),
+            deploy_command: None,
+            health_contract: target.health_contract.id.clone(),
+            transport_profile_id: transport_profile_id(&target),
+            command_boundary_id: command_boundary_id(&target),
+            authority: "idunn-supervisor-command".to_string(),
+            max_silence_seconds: 60,
+            observed_at: "unix:100".to_string(),
+        };
+        let now = Instant::now();
+        let mut missing_since = None;
+        let mut health = missing_daemon_published_health(&target, &desired, "unix:100");
+
+        apply_missing_publication_grace(&target, &desired, &mut health, &mut missing_since, now);
+
+        assert_eq!(health.state, "degraded");
+        assert!(missing_since.is_some());
+        assert!(
+            plan_keepalive(&desired, &health, "unix:100")
+                .restart_request
+                .is_none()
+        );
+
+        let mut health = missing_daemon_published_health(&target, &desired, "unix:161");
+        apply_missing_publication_grace(
+            &target,
+            &desired,
+            &mut health,
+            &mut missing_since,
+            now + Duration::from_secs(61),
+        );
+
+        assert_eq!(health.state, "failed");
+        assert!(
+            plan_keepalive(&desired, &health, "unix:161")
+                .restart_request
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn daemon_publication_resets_missing_continuity() {
+        let target = DaemonTarget {
+            daemon_id: "test-daemon".to_string(),
+            verse_id: "test.local".to_string(),
+            name: "Test daemon".to_string(),
+            health_contract: locally_supervised_health_contract(
+                "test.cultnet-rudp-health",
+                "failed",
+            ),
+            deploy_command: None,
+            restart_command: Some("restart test".to_string()),
+            release: None,
+            enabled: true,
+            interval_seconds: 30,
+        };
+        let desired = IdunnDesiredDaemonRecord {
+            daemon_id: target.daemon_id.clone(),
+            verse_id: target.verse_id.clone(),
+            name: target.name.clone(),
+            enabled: true,
+            health_command: None,
+            restart_command: target.restart_command.clone(),
+            deploy_command: None,
+            health_contract: target.health_contract.id.clone(),
+            transport_profile_id: transport_profile_id(&target),
+            command_boundary_id: command_boundary_id(&target),
+            authority: "idunn-supervisor-command".to_string(),
+            max_silence_seconds: 60,
+            observed_at: "unix:100".to_string(),
+        };
+        let mut health = IdunnDaemonHealthRecord {
+            daemon_id: target.daemon_id.clone(),
+            state: "active".to_string(),
+            detail: "daemon published".to_string(),
+            health_contract: target.health_contract.id.clone(),
+            publication_source: "daemon-published".to_string(),
+            transport: CULTNET_RUDP_PROTOCOL_ID.to_string(),
+            observed_at: "unix:100".to_string(),
+        };
+        let mut missing_since = Some(Instant::now() - Duration::from_secs(120));
+
+        apply_missing_publication_grace(
+            &target,
+            &desired,
+            &mut health,
+            &mut missing_since,
+            Instant::now(),
+        );
+
+        assert!(missing_since.is_none());
+        assert_eq!(health.state, "active");
     }
 
     #[test]
