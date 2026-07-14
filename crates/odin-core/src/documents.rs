@@ -1195,6 +1195,8 @@ pub struct MuninnMoveHueProgramRecord {
     pub updated_at: String,
     #[cultcache(key = 8, default)]
     pub order_mode: String,
+    #[cultcache(key = 9, default)]
+    pub transition_percent: u8,
 }
 
 #[derive(Clone, Debug, PartialEq, DatabaseEntry)]

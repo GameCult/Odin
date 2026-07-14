@@ -576,6 +576,7 @@ fn bootstrap_move_hue_program(options: &Options) -> MuninnMoveHueProgramRecord {
         requested_by: "muninn-bootstrap".to_string(),
         updated_at: timestamp().unwrap_or_else(|_| "unix-0".to_string()),
         order_mode: "descending".to_string(),
+        transition_percent: 100,
     }
 }
 
@@ -592,6 +593,7 @@ fn validate_move_hue_program(program: &MuninnMoveHueProgramRecord) -> Result<()>
     ) {
         return Err(anyhow!("unsupported Move hue order mode {}", program.order_mode));
     }
+    if program.transition_percent > 100 { return Err(anyhow!("Move hue transition_percent must be at most 100")); }
     Ok(())
 }
 
@@ -601,6 +603,10 @@ fn move_hue_program_timestamp_ns(program: &MuninnMoveHueProgramRecord, now_ns: i
         "static" => i128::from(program.epoch_ns),
         _ => now_ns,
     }
+}
+
+fn effective_transition_percent(program: &MuninnMoveHueProgramRecord) -> u8 {
+    if program.transition_percent == 0 { 100 } else { program.transition_percent }
 }
 
 fn start_move_hue_program_sync_worker(
@@ -744,6 +750,9 @@ fn apply_provider_command_document(
     }
     if let Some(cycle_ms) = payload.get("cycleMs").and_then(serde_json::Value::as_u64) {
         program.cycle_ms = cycle_ms;
+    }
+    if let Some(value) = payload.get("transitionPercent").and_then(serde_json::Value::as_u64) {
+        program.transition_percent = u8::try_from(value).map_err(|_| anyhow!("Move hue transitionPercent must be at most 100"))?;
     }
     program.requested_by = value
         .get("publishedBy")
@@ -3021,7 +3030,7 @@ fn publish_move_hue_eve_surface(
         .unwrap_or_else(|| bootstrap_move_hue_program(options));
     let provider_id = muninn_provider_id(options);
     let surface_key = move_hue_surface_key(&options.host_id);
-    let action = |id: &str, label: &str, mode: Option<&str>, order_mode: Option<&str>, cycle_ms: Option<u64>| {
+    let action = |id: &str, label: &str, mode: Option<&str>, order_mode: Option<&str>, cycle_ms: Option<u64>, transition_percent: Option<u8>| {
         json!({
             "id": format!("{provider_id}.move-hue.{id}"),
             "kind": "card",
@@ -3035,7 +3044,8 @@ fn publish_move_hue_eve_surface(
                     "schema": MUNINN_MOVE_HUE_PROGRAM_SCHEMA,
                     "mode": mode,
                     "orderMode": order_mode,
-                    "cycleMs": cycle_ms
+                    "cycleMs": cycle_ms,
+                    "transitionPercent": transition_percent
                 }
             },
             "children": []
@@ -3058,7 +3068,7 @@ fn publish_move_hue_eve_surface(
                 "kind": "dashboard",
                 "props": {
                     "title": "Move Hue Program",
-                    "summary": format!("{} / {} / {} ms", program.mode, program.order_mode, program.cycle_ms)
+                    "summary": format!("{} / {} / {} ms / {}% transition", program.mode, program.order_mode, program.cycle_ms, effective_transition_percent(&program))
                 },
                 "children": [
                     {
@@ -3068,7 +3078,8 @@ fn publish_move_hue_eve_surface(
                         "children": [
                             { "id": format!("{provider_id}.move-hue.state.mode"), "kind": "text", "props": { "text": format!("mode: {}", program.mode) } },
                             { "id": format!("{provider_id}.move-hue.state.order"), "kind": "text", "props": { "text": format!("order: {}", program.order_mode) } },
-                            { "id": format!("{provider_id}.move-hue.state.rate"), "kind": "text", "props": { "text": format!("cycle: {} ms", program.cycle_ms) } }
+                            { "id": format!("{provider_id}.move-hue.state.rate"), "kind": "text", "props": { "text": format!("cycle: {} ms", program.cycle_ms) } },
+                            { "id": format!("{provider_id}.move-hue.state.transition"), "kind": "text", "props": { "text": format!("transition: {}%", effective_transition_percent(&program)) } }
                         ]
                     },
                     {
@@ -3076,9 +3087,9 @@ fn publish_move_hue_eve_surface(
                         "kind": "pane",
                         "props": { "title": "Mode" },
                         "children": [
-                            action("mode-animated", "Animate", Some("animated"), None, None),
-                            action("mode-hold", "Hold Current Colors", Some("hold"), None, None),
-                            action("mode-static", "Static Palette", Some("static"), None, None)
+                            action("mode-animated", "Animate", Some("animated"), None, None, None),
+                            action("mode-hold", "Hold Current Colors", Some("hold"), None, None, None),
+                            action("mode-static", "Static Palette", Some("static"), None, None, None)
                         ]
                     },
                     {
@@ -3086,11 +3097,11 @@ fn publish_move_hue_eve_surface(
                         "kind": "pane",
                         "props": { "title": "Update Order" },
                         "children": [
-                            action("order-descending", "Descending", None, Some("descending"), None),
-                            action("order-ascending", "Ascending", None, Some("ascending"), None),
-                            action("order-bounce", "Bounce", None, Some("bounce"), None),
-                            action("order-rotating", "Rotating Lead", None, Some("rotating-lead"), None),
-                            action("order-golden", "Golden Permutation", None, Some("golden-permutation"), None)
+                            action("order-descending", "Descending", None, Some("descending"), None, None),
+                            action("order-ascending", "Ascending", None, Some("ascending"), None, None),
+                            action("order-bounce", "Bounce", None, Some("bounce"), None, None),
+                            action("order-rotating", "Rotating Lead", None, Some("rotating-lead"), None, None),
+                            action("order-golden", "Golden Permutation", None, Some("golden-permutation"), None, None)
                         ]
                     },
                     {
@@ -3098,9 +3109,21 @@ fn publish_move_hue_eve_surface(
                         "kind": "pane",
                         "props": { "title": "Cycle Rate" },
                         "children": [
-                            action("rate-500", "2 Hz", None, None, Some(500)),
-                            action("rate-1000", "1 Hz", None, None, Some(1000)),
-                            action("rate-2000", "0.5 Hz", None, None, Some(2000))
+                            action("rate-500", "2 Hz", None, None, Some(500), None),
+                            action("rate-1000", "1 Hz", None, None, Some(1000), None),
+                            action("rate-2000", "0.5 Hz", None, None, Some(2000), None)
+                        ]
+                    },
+                    {
+                        "id": format!("{provider_id}.move-hue.transition"),
+                        "kind": "pane",
+                        "props": { "title": "Transition Duration" },
+                        "children": [
+                            action("transition-10", "10%", None, None, None, Some(10)),
+                            action("transition-25", "25%", None, None, None, Some(25)),
+                            action("transition-50", "50%", None, None, None, Some(50)),
+                            action("transition-75", "75%", None, None, None, Some(75)),
+                            action("transition-100", "100%", None, None, None, Some(100))
                         ]
                     }
                 ]
@@ -4935,7 +4958,7 @@ fn write_length_framed_message(writer: &mut impl Write, value: &impl Serialize) 
 impl From<&MuninnMoveHueProgramRecord> for MoveTrackerWorkerProgram {
     fn from(value: &MuninnMoveHueProgramRecord) -> Self {
         Self { mode: value.mode.clone(), cycle_ms: value.cycle_ms, epoch_ns: value.epoch_ns,
-            hold_at_ns: value.hold_at_ns, order_mode: value.order_mode.clone() }
+            hold_at_ns: value.hold_at_ns, order_mode: value.order_mode.clone(), transition_percent: value.transition_percent }
     }
 }
 
@@ -4944,7 +4967,8 @@ impl MoveTrackerWorkerProgram {
     fn as_record(&self, host_id: &str) -> MuninnMoveHueProgramRecord {
         MuninnMoveHueProgramRecord { program_id: move_hue_program_key(host_id), host_id: host_id.to_string(),
             mode: self.mode.clone(), cycle_ms: self.cycle_ms, epoch_ns: self.epoch_ns, hold_at_ns: self.hold_at_ns,
-            requested_by: "parent-worker-pipe".to_string(), updated_at: "worker-live".to_string(), order_mode: self.order_mode.clone() }
+            requested_by: "parent-worker-pipe".to_string(), updated_at: "worker-live".to_string(), order_mode: self.order_mode.clone(),
+            transition_percent: self.transition_percent }
     }
 }
 
@@ -5133,7 +5157,7 @@ fn tracker_colors(roster: &[String], program: &MuninnMoveHueProgramRecord) -> Ve
     let timestamp_ns = move_hue_program_timestamp_ns(program, now_ns);
     roster.iter().filter_map(|identity| scheduled_golden_move_color_with_order(
         identity, roster, i128::from(program.epoch_ns), i128::from(program.cycle_ms) * 1_000_000,
-        timestamp_ns, &program.order_mode,
+        timestamp_ns, &program.order_mode, effective_transition_percent(program),
     ).map(|(color, _, _)| (identity.clone(), [color.0, color.1, color.2]))).collect()
 }
 
@@ -5167,6 +5191,7 @@ struct MoveTrackerWorkerProgram {
     epoch_ns: i64,
     hold_at_ns: i64,
     order_mode: String,
+    transition_percent: u8,
 }
 
 #[cfg(feature = "psmoveapi-tracker")]
@@ -6613,6 +6638,7 @@ fn start_default_move_light_worker(
                     requested_by: "poisoned-runtime-fallback".to_string(),
                     updated_at: "unix-0".to_string(),
                     order_mode: "descending".to_string(),
+                    transition_percent: 100,
                 });
             let program_timestamp_ns = move_hue_program_timestamp_ns(&program, now_ns);
             for target in &targets {
@@ -6626,6 +6652,7 @@ fn start_default_move_light_worker(
                     i128::from(program.cycle_ms) * 1_000_000,
                     program_timestamp_ns,
                     &program.order_mode,
+                    effective_transition_percent(&program),
                 ) else {
                     continue;
                 };
@@ -6736,6 +6763,7 @@ fn scheduled_golden_move_color(
         cycle_ns,
         timestamp_ns,
         "descending",
+        100,
     )
 }
 
@@ -6746,6 +6774,7 @@ fn scheduled_golden_move_color_with_order(
     cycle_ns: i128,
     timestamp_ns: i128,
     order_mode: &str,
+    transition_percent: u8,
 ) -> Option<((u8, u8, u8), i128, bool)> {
     const GOLDEN_RATIO_CONJUGATE: f64 = 0.618_033_988_749_894_9;
     if roster.is_empty() || cycle_ns <= 0 {
@@ -6765,7 +6794,8 @@ fn scheduled_golden_move_color_with_order(
     let hue = if order_position == completed_in_cycle {
         let subslot_ns = cycle_ns.div_euclid(roster_len).max(1);
         let subslot_elapsed_ns = elapsed_ns.rem_euclid(subslot_ns);
-        let amount = smootherstep(subslot_elapsed_ns as f64 / subslot_ns as f64);
+        let transition_ns = subslot_ns.saturating_mul(i128::from(transition_percent.clamp(1, 100))).div_euclid(100).max(1);
+        let amount = smootherstep((subslot_elapsed_ns as f64 / transition_ns as f64).min(1.0));
         let target_hue = ((sequence_index + 1) as f64 * GOLDEN_RATIO_CONJUGATE).fract();
         wrapped_hue_lerp(source_hue, target_hue, amount)
     } else {
@@ -11866,6 +11896,8 @@ mod tests {
         let encoded = surface.surface.to_string();
         assert!(encoded.contains("Hold Current Colors"));
         assert!(encoded.contains("golden-permutation"));
+        assert!(encoded.contains("Transition Duration"));
+        assert!(encoded.contains("transitionPercent"));
         assert!(encoded.contains(MUNINN_MOVE_HUE_PROGRAM_SCHEMA));
         drop(node);
         let _ = fs::remove_file(store_path);
@@ -11980,7 +12012,8 @@ mod tests {
                 "type": "muninn.set-move-hue-program",
                 "mode": "hold",
                 "orderMode": "bounce",
-                "cycleMs": 1500
+                "cycleMs": 1500,
+                "transitionPercent": 25
             },
             "publishedBy": "provider-command-test"
         });
@@ -12013,6 +12046,7 @@ mod tests {
         assert_eq!(runtime_program.lock().unwrap().mode, "hold");
         assert_eq!(runtime_program.lock().unwrap().order_mode, "bounce");
         assert_eq!(runtime_program.lock().unwrap().cycle_ms, 1500);
+        assert_eq!(runtime_program.lock().unwrap().transition_percent, 25);
         let _ = fs::remove_file(store_path);
     }
 
@@ -12129,6 +12163,20 @@ mod tests {
             0.5,
         ) * 360.0, 1.0, 1.0));
         assert_eq!(color_at(250), hsv_to_rgb((4.0 * 0.618_033_988_749_894_9_f64).fract() * 360.0, 1.0, 1.0));
+    }
+
+    #[test]
+    fn scheduled_golden_color_transition_uses_selected_subslot_percentage() {
+        let roster = (0..4).map(|index| format!("move-{index}")).collect::<Vec<_>>();
+        let color_at = |millis: i128| scheduled_golden_move_color_with_order(
+            "move-3", &roster, 0, 1_000_000_000, millis * 1_000_000, "descending", 25,
+        ).unwrap().0;
+        let source = (3.0 * 0.618_033_988_749_894_9_f64).fract();
+        let target = (4.0 * 0.618_033_988_749_894_9_f64).fract();
+        assert_ne!(color_at(31), hsv_to_rgb(source * 360.0, 1.0, 1.0));
+        assert_ne!(color_at(31), hsv_to_rgb(target * 360.0, 1.0, 1.0));
+        assert_eq!(color_at(63), hsv_to_rgb(target * 360.0, 1.0, 1.0));
+        assert_eq!(color_at(200), hsv_to_rgb(target * 360.0, 1.0, 1.0));
     }
 
     #[test]
