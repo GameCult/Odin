@@ -80,6 +80,13 @@ Idunn now shares Odin's Rust body:
   supplied.
 - `npm run idunn:start -- --swarm-profile starfire-local --repo-root E:\Projects\Odin --execute`
   runs the singular local swarm supervisor.
+- `--swarm-profile yggdrasil-local` is the Linux host-local supervisor for
+  Heimdall, Repixelizer, and StreamPixels. Its only command boundary is the
+  root-owned `/usr/local/libexec/idunn-yggdrasil` actuator. Restart commands
+  target the local Compose stack; deployment fails closed unless a root-owned
+  executable manifest exists for that service under
+  `/srv/odin/deploy-manifests`. It does not inherit Starfire paths, SSH keys,
+  ADB authority, or Windows process ownership.
 
 The current typed records are:
 

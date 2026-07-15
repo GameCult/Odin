@@ -2072,9 +2072,71 @@ fn daemon_surgery_plan(target: &DaemonTarget, updated_at: &str) -> IdunnDaemonSu
 fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
     let repo_root = options.repo_root.display().to_string();
     let script = |name: &str| format!(r"{}\scripts\{}", repo_root, name);
+    let yggdrasil_actuator = |action: &str, target: &str| {
+        format!("sudo -n /usr/local/libexec/idunn-yggdrasil {action} {target}")
+    };
     let project = |name: &str| PathBuf::from(format!(r"E:\Projects\{name}"));
 
     match options.profile.as_str() {
+        "yggdrasil-local" => Ok(vec![
+            DaemonTarget {
+                daemon_id: "yggdrasil-heimdall".to_string(),
+                verse_id: "yggdrasil.local".to_string(),
+                name: "Yggdrasil Heimdall".to_string(),
+                health_contract: health_contract("heimdall.cultnet-rudp-provider-health", "failed"),
+                deploy_command: Some(yggdrasil_actuator("deploy", "heimdall")),
+                restart_command: Some(yggdrasil_actuator("restart", "heimdall")),
+                release: Some(release_target(
+                    "Heimdall",
+                    PathBuf::from("/srv/build/Heimdall"),
+                    "restart-after-verified-build",
+                    None,
+                    "restart-required",
+                )),
+                enabled: true,
+                interval_seconds: 300,
+            },
+            DaemonTarget {
+                daemon_id: "yggdrasil-repixelizer".to_string(),
+                verse_id: "yggdrasil.local".to_string(),
+                name: "Yggdrasil Repixelizer".to_string(),
+                health_contract: health_contract(
+                    "repixelizer.cultnet-rudp-service-health",
+                    "failed",
+                ),
+                deploy_command: Some(yggdrasil_actuator("deploy", "repixelizer")),
+                restart_command: Some(yggdrasil_actuator("restart", "repixelizer")),
+                release: Some(release_target(
+                    "repixelizer",
+                    PathBuf::from("/srv/build/repixelizer"),
+                    "restart-after-verified-build",
+                    None,
+                    "restart-required",
+                )),
+                enabled: true,
+                interval_seconds: 300,
+            },
+            DaemonTarget {
+                daemon_id: "yggdrasil-streampixels".to_string(),
+                verse_id: "yggdrasil.local".to_string(),
+                name: "Yggdrasil StreamPixels".to_string(),
+                health_contract: health_contract(
+                    "streampixels.cultnet-rudp-service-health",
+                    "failed",
+                ),
+                deploy_command: Some(yggdrasil_actuator("deploy", "streampixels")),
+                restart_command: Some(yggdrasil_actuator("restart", "streampixels")),
+                release: Some(release_target(
+                    "StreamPixels",
+                    PathBuf::from("/srv/build/StreamPixels"),
+                    "restart-after-verified-build",
+                    None,
+                    "restart-required",
+                )),
+                enabled: true,
+                interval_seconds: 300,
+            },
+        ]),
         "starfire-local" => Ok(vec![
             DaemonTarget {
                 daemon_id: "odin".to_string(),
@@ -2992,7 +3054,7 @@ fn unix_epoch_millis() -> Result<u64> {
 }
 
 fn help_text() -> &'static str {
-    "Usage: idunn --daemon <id> [--name <name>] [--verse <verse>] [--store <path>] [--deploy-command <command>] [--restart-command <command>] [--operator-alarm-command <command>] [--rudp-health-bind <addr|none>] [--execute] [--interval-seconds <seconds>] [--command-timeout-seconds <seconds>] [--repo-root <path>] [--swarm-profile <profile>]\n       idunn restart --daemon <id> [--store <path>] [--requested-by <who>] [--detail <text>]\n       idunn redeploy --daemon <id> [--store <path>] [--requested-by <who>] [--detail <text>]\n\nIdunn supervises daemon-published CultNet/RUDP health with --daemon, or a built-in swarm supervisor with --swarm-profile starfire-local. RUDP health ingress is disabled unless --rudp-health-bind is supplied. The restart/redeploy verbs publish typed idunn.lifecycle_command.v1 records; the running supervisor claims them and executes only through its configured command boundary."
+    "Usage: idunn --daemon <id> [--name <name>] [--verse <verse>] [--store <path>] [--deploy-command <command>] [--restart-command <command>] [--operator-alarm-command <command>] [--rudp-health-bind <addr|none>] [--execute] [--interval-seconds <seconds>] [--command-timeout-seconds <seconds>] [--repo-root <path>] [--swarm-profile <profile>]\n       idunn restart --daemon <id> [--store <path>] [--requested-by <who>] [--detail <text>]\n       idunn redeploy --daemon <id> [--store <path>] [--requested-by <who>] [--detail <text>]\n\nIdunn supervises daemon-published CultNet/RUDP health with --daemon, or a built-in swarm supervisor with --swarm-profile starfire-local or yggdrasil-local. RUDP health ingress is disabled unless --rudp-health-bind is supplied. The restart/redeploy verbs publish typed idunn.lifecycle_command.v1 records; the running supervisor claims them and executes only through its configured command boundary."
 }
 
 #[cfg(test)]
