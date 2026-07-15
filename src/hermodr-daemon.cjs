@@ -9,6 +9,9 @@ const path = require("path");
 const { defineOdinDocuments } = require("./odin/documents.cjs");
 const { createIdunnRudpHealthPublisher, publishIdunnRudpHealth } = require("./odin/idunn-rudp.cjs");
 const { parseArgs } = require("./odin/utils.cjs");
+const { OdinLivePublicationSource } = require("./odin/live-publication-source.cjs");
+const { createProviderSessionIngress } = require("./odin/provider-session-ingress.cjs");
+const { HermodrStateStreamRegistry } = require("./hermodr-state-stream.cjs");
 
 const repoRoot = path.resolve(__dirname, "..");
 const projectsRoot = path.resolve(repoRoot, "..");
@@ -24,8 +27,10 @@ const defaultProviderCatalogKeys = [];
 const cultCacheRequire = createRequire(resolveCultCachePackagePath());
 const cultMeshRequire = createRequire(resolveCultMeshPackagePath());
 const { defineDocumentType } = cultCacheRequire(resolveCultCacheRuntimePath());
-const { CultMesh } = cultMeshRequire(resolveCultMeshRuntimePath());
+const cultMeshRuntime = cultMeshRequire(resolveCultMeshRuntimePath());
+const { CultMesh, CultMeshProviderSessionBroker, decodeProviderConnectEvidence } = cultMeshRuntime;
 const { decode: decodeMessagePack } = cultMeshRequire("@msgpack/msgpack");
+const { CultNetDocumentRegistry } = cultMeshRequire("cultnet-ts");
 
 const documents = defineOdinDocuments(defineDocumentType);
 const odinDocumentDefinitions = Object.values(documents).filter(Boolean);
@@ -56,7 +61,18 @@ async function main() {
     return;
   }
 
-  const bridge = createHermodrBridge(options);
+  const livePublicationSource = new OdinLivePublicationSource(payload => decodeMessagePack(bufferFromPayload(payload)));
+  const providerIngress = options.providerSessionBind ? createProviderSessionIngress({
+    runtime: { CultMesh, CultMeshProviderSessionBroker, decodeProviderConnectEvidence },
+    CultNetDocumentRegistry,
+    source: livePublicationSource,
+    runtimeId: "hermodr-provider-session-ingress",
+    ...parseBind(options.providerSessionBind),
+    sessionToken: options.providerSessionToken,
+    onError: error => console.error(`Hermodr provider-session ingress failed: ${error.message}`),
+  }) : null;
+  if (providerIngress) await providerIngress.start();
+  const bridge = createHermodrBridge(options, providerIngress ? livePublicationSource : null);
   const server = http.createServer((request, response) => {
     bridge.handle(request, response).catch((error) => {
       writeJson(response, error?.statusCode || 500, {
@@ -96,6 +112,7 @@ async function main() {
   const shutdown = () => {
     if (healthTimer) clearInterval(healthTimer);
     server.close(() => {});
+    providerIngress?.close();
     closeProviderRudpPeers();
   };
   process.once("SIGINT", shutdown);
@@ -124,6 +141,8 @@ function parseOptions(argv) {
       process.env.HERMODR_PROVIDER_CATALOG_KEYS,
       defaultProviderCatalogKeys,
     ),
+    providerSessionBind: stringOption(parsed.providerSessionBind || parsed["provider-session-bind"], process.env.HERMODR_PROVIDER_SESSION_BIND || ""),
+    providerSessionToken: stringOption(parsed.providerSessionToken || parsed["provider-session-token"], process.env.HERMODR_PROVIDER_SESSION_TOKEN || ""),
     sleipnirProviderId: stringOption(parsed.sleipnirProviderId, process.env.HERMODR_SLEIPNIR_PROVIDER_ID || "sleipnir.input-mirror.starfire"),
     idunnRudpHealth: idunnRudpHealthOptions(parsed),
     idunnHealthIntervalMs: Math.max(1_000, numberOption(
@@ -190,7 +209,8 @@ function rejectRemovedOptions(options) {
   }
 }
 
-function createHermodrBridge(options) {
+function createHermodrBridge(options, livePublicationSource) {
+  const stateStreams = livePublicationSource ? new HermodrStateStreamRegistry(livePublicationSource) : null;
   return {
     async handle(request, response) {
       const url = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
@@ -264,6 +284,24 @@ function createHermodrBridge(options) {
         return;
       }
 
+      if (request.method === "GET" && url.pathname.startsWith("/hermodr/state/")) {
+        const selection = normalizeStateBindingSource({
+          providerId: decodeURIComponent(url.pathname.slice("/hermodr/state/".length)),
+          sourceId: stringOption(url.searchParams.get("sourceId"), ""),
+          schemaId: stringOption(url.searchParams.get("schemaId"), ""),
+        });
+        if (!selection) {
+          writeJson(response, 400, { ok: false, error: "providerId, sourceId, and schemaId are required for a typed state stream." });
+          return;
+        }
+        if (!stateStreams) {
+          writeJson(response, 503, { ok: false, error: "Provider-session live publication ingress is unavailable." });
+          return;
+        }
+        openStateEventStream(request, response, stateStreams, selection);
+        return;
+      }
+
       if (request.method === "POST" && url.pathname === "/hermodr/commands/sleipnir/input-mapping") {
         const body = await readJsonBody(request);
         writeJson(response, 202, await publishSleipnirMapping(options, body));
@@ -289,6 +327,36 @@ function createHermodrBridge(options) {
       writeJson(response, 404, { ok: false, error: "not found" });
     },
   };
+}
+
+function normalizeStateBindingSource(value) {
+  const providerId = String(value?.providerId || "").trim();
+  const sourceId = String(value?.sourceId || "").trim();
+  const schemaId = String(value?.schemaId || "").trim();
+  if (!providerId || !sourceId || !schemaId) return null;
+  const prefix = `${schemaId.replace(/\.v\d+$/, "")}:`;
+  const recordKey = sourceId.startsWith(prefix) ? sourceId.slice(prefix.length) : sourceId;
+  return recordKey ? { providerId, sourceId, schemaId, recordKey } : null;
+}
+
+function openStateEventStream(request, response, registry, selection) {
+  writeCors(response, 200);
+  response.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  response.setHeader("Cache-Control", "no-cache, no-transform");
+  response.setHeader("Connection", "keep-alive");
+  response.flushHeaders?.();
+  const release = registry.acquire(selection, event => {
+    response.write(`id: ${event.sequence}\n`);
+    response.write(`event: ${event.type}\n`);
+    response.write(`data: ${JSON.stringify(event)}\n\n`);
+  });
+  request.once("close", release);
+  response.once("close", release);
+}
+
+function parseBind(value) {
+  const parsed = new URL(String(value).includes("://") ? value : `rudp://${value}`);
+  return { bindHost: parsed.hostname, bindPort: Number(parsed.port) };
 }
 
 async function readCatalog(options) {
@@ -1351,7 +1419,7 @@ function resolveCultCachePackagePath() {
 }
 
 function resolveCultMeshPackagePath() {
-  const candidate = path.resolve(projectsRoot, "CultLib", "packages", "cultmesh-ts", "package.json");
+  const candidate = path.resolve(process.env.CULTLIB_ROOT || path.resolve(projectsRoot, "CultLib"), "packages", "cultmesh-ts", "package.json");
   if (!fs.existsSync(candidate)) {
     throw new Error(`CultMesh TypeScript runtime is unavailable at ${candidate}`);
   }
@@ -1363,7 +1431,7 @@ function resolveCultCacheRuntimePath() {
 }
 
 function resolveCultMeshRuntimePath() {
-  return path.resolve(projectsRoot, "CultLib", "packages", "cultmesh-ts", "dist", "index.js");
+  return path.resolve(process.env.CULTLIB_ROOT || path.resolve(projectsRoot, "CultLib"), "packages", "cultmesh-ts", "dist", "index.js");
 }
 
 function printUsage() {
@@ -1371,7 +1439,9 @@ function printUsage() {
   node src/hermodr-daemon.cjs [--host 127.0.0.1] [--port 8798] [--odin-cultmesh-uri cultmesh://odin/rendezvous/provider-catalog]
 
 Hermodr is a browser lowering adapter over Odin/CultMesh state. It does not own
-provider discovery, daemon health, or raw command transport.
+provider discovery or daemon state. Live Eve state requires
+--provider-session-bind plus HERMODR_PROVIDER_SESSION_TOKEN and a CULTLIB_ROOT
+pointing at the CultLib reliability branch.
 `);
 }
 
@@ -1385,7 +1455,9 @@ if (require.main === module) {
 
 module.exports = {
   createBrowserCatalog,
+  createHermodrBridge,
   findProviderCdnRoute,
+  normalizeStateBindingSource,
   normalizeProviderAdvertisement,
   surfaceRecordKeys,
 };
