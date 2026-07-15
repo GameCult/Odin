@@ -409,7 +409,7 @@ async function readOdinSurfaceProviderCatalog(options) {
   const peer = await CultMesh.createRudpPeer(
     "hermodr-browser-lowering-odin-surface",
     odinRudpConnectionId,
-    options.odinCultMeshUri,
+    resolveHermodrRudpEndpoint(options.odinCultMeshUri, options),
     {
       connectTimeoutMs: 2_000,
       maxFragmentBytes: 1200,
@@ -444,7 +444,7 @@ async function readOdinProviderAdvertisements(options) {
   const peer = await CultMesh.createRudpPeer(
     "hermodr-browser-lowering-odin",
     odinRudpConnectionId,
-    options.odinCultMeshUri,
+    resolveHermodrRudpEndpoint(options.odinCultMeshUri, options),
     {
       connectTimeoutMs: 2_000,
       maxFragmentBytes: 1200,
@@ -607,7 +607,7 @@ async function readOdinProviderSurface(options, providerId, surfaceId = provider
   const peer = await CultMesh.createRudpPeer(
     "hermodr-browser-lowering-odin-provider-surface",
     odinRudpConnectionId,
-    options.odinCultMeshUri,
+    resolveHermodrRudpEndpoint(options.odinCultMeshUri, options),
     {
       connectTimeoutMs: 2_000,
       maxFragmentBytes: 1200,
