@@ -17,8 +17,7 @@ UMask=027
 PrivateTmp=yes
 ProtectHome=yes
 ProtectSystem=full
-ReadWritePaths=/var/lib/gamecult/idunn
+ReadWritePaths=/var/lib/gamecult/idunn /srv/build /srv/voidbot
 
 [Install]
 WantedBy=multi-user.target
-
