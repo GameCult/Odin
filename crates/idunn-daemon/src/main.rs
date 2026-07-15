@@ -51,6 +51,62 @@ struct ReleaseTarget {
     rollout_strategy: String,
     state_migration_command: Option<String>,
     zero_downtime_capability: String,
+    deployed_revision_witness: Option<PathBuf>,
+}
+
+trait ReleaseStatePort {
+    fn fetch(&self, release: &ReleaseTarget) -> Result<()>;
+    fn desired_revision(&self, release: &ReleaseTarget) -> Result<String>;
+    fn deployed_revision(&self, release: &ReleaseTarget) -> Result<String>;
+}
+
+struct SystemReleaseStatePort;
+
+impl ReleaseStatePort for SystemReleaseStatePort {
+    fn fetch(&self, release: &ReleaseTarget) -> Result<()> {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(&release.repo_path)
+            .arg("fetch")
+            .arg("--quiet")
+            .arg(&release.upstream_remote)
+            .arg(&release.upstream_branch)
+            .status()
+            .with_context(|| {
+                format!(
+                    "fetching {} {} in {}",
+                    release.upstream_remote,
+                    release.upstream_branch,
+                    release.repo_path.display()
+                )
+            })?;
+        if !status.success() {
+            return Err(anyhow!("git fetch exited with {status}"));
+        }
+        Ok(())
+    }
+
+    fn desired_revision(&self, release: &ReleaseTarget) -> Result<String> {
+        git_revision(
+            &release.repo_path,
+            &format!("{}/{}", release.upstream_remote, release.upstream_branch),
+        )
+        .ok_or_else(|| {
+            anyhow!(
+                "cannot resolve {}/{}",
+                release.upstream_remote,
+                release.upstream_branch
+            )
+        })
+    }
+
+    fn deployed_revision(&self, release: &ReleaseTarget) -> Result<String> {
+        let path = release
+            .deployed_revision_witness
+            .as_ref()
+            .ok_or_else(|| anyhow!("no deployed revision witness configured"))?;
+        read_deployed_revision_witness(path)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -326,7 +382,7 @@ fn run_target_cycle(
             let migration_failed = migration_result
                 .as_ref()
                 .is_some_and(|result| result.state != "succeeded" && result.state != "noop");
-            let result = if migration_failed {
+            let mut result = if migration_failed {
                 IdunnDeploymentResultRecord {
                     result_id: format!("result:{}", request.request_id),
                     request_id: request.request_id.clone(),
@@ -338,6 +394,16 @@ fn run_target_cycle(
             } else {
                 run_deployment(request, &now, options)
             };
+            if result.state == "succeeded"
+                && let Some(release) = target.release.as_ref()
+                && release.deployed_revision_witness.is_some()
+                && let Err(error) = verify_release_witness_current(release, &SystemReleaseStatePort)
+            {
+                result.state = "failed".to_string();
+                result.detail = format!(
+                    "deployment command exited successfully, but its deployed revision witness did not converge: {error:#}"
+                );
+            }
             let rollout_result = target.release.as_ref().map(|release| {
                 rollout_result_record(target, release, &result, migration_result.as_ref(), &now)
             });
@@ -643,6 +709,15 @@ fn evaluate_target_health(
     desired: &IdunnDesiredDaemonRecord,
     now: &str,
 ) -> Result<(String, IdunnDaemonHealthRecord)> {
+    if let Some(release) = &target.release {
+        if release.deployed_revision_witness.is_some() {
+            if let Some(health) =
+                evaluate_release_drift(target, desired, release, &SystemReleaseStatePort, now)
+            {
+                return Ok((supervisor_health_key(&desired.daemon_id), health));
+            }
+        }
+    }
     if let Some(health) =
         read_fresh_daemon_published_health(options, store_lock, desired, &timestamp()?)?
     {
@@ -653,6 +728,79 @@ fn evaluate_target_health(
         supervisor_health_key(&desired.daemon_id),
         missing_daemon_published_health(target, desired, now),
     ))
+}
+
+fn evaluate_release_drift(
+    target: &DaemonTarget,
+    desired: &IdunnDesiredDaemonRecord,
+    release: &ReleaseTarget,
+    port: &dyn ReleaseStatePort,
+    observed_at: &str,
+) -> Option<IdunnDaemonHealthRecord> {
+    let observation = (|| -> Result<(String, String)> {
+        port.fetch(release)?;
+        Ok((
+            port.desired_revision(release)?,
+            port.deployed_revision(release)?,
+        ))
+    })();
+
+    let (state, detail, transport) = match observation {
+        Ok((wanted, deployed)) if wanted != deployed => (
+            "stale-deployment",
+            format!(
+                "upstream {}/{} is {wanted}, but the deployed revision witness reports {deployed}",
+                release.upstream_remote, release.upstream_branch
+            ),
+            "idunn.release-revision-drift",
+        ),
+        Ok(_) => return None,
+        Err(error) => (
+            "dependency-unavailable",
+            format!(
+                "Idunn could not establish release freshness for {}: {error:#}",
+                release.repo
+            ),
+            "idunn.release-revision-unavailable",
+        ),
+    };
+
+    Some(IdunnDaemonHealthRecord {
+        daemon_id: target.daemon_id.clone(),
+        state: state.to_string(),
+        detail,
+        health_contract: desired.health_contract.clone(),
+        publication_source: "idunn-release-observation".to_string(),
+        transport: transport.to_string(),
+        observed_at: observed_at.to_string(),
+    })
+}
+
+fn verify_release_witness_current(
+    release: &ReleaseTarget,
+    port: &dyn ReleaseStatePort,
+) -> Result<()> {
+    port.fetch(release)?;
+    let desired = port.desired_revision(release)?;
+    let deployed = port.deployed_revision(release)?;
+    if desired != deployed {
+        return Err(anyhow!(
+            "desired revision {desired} does not match deployed revision {deployed}"
+        ));
+    }
+    Ok(())
+}
+
+fn read_deployed_revision_witness(path: &PathBuf) -> Result<String> {
+    let contents = fs::read_to_string(path)
+        .with_context(|| format!("reading deployed revision witness {}", path.display()))?;
+    let revision = contents
+        .lines()
+        .find_map(|line| line.strip_prefix("DEPLOYED_REVISION="))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("{} has no DEPLOYED_REVISION value", path.display()))?;
+    Ok(revision.to_string())
 }
 
 fn supervisor_health_key(daemon_id: &str) -> String {
@@ -1388,7 +1536,13 @@ fn release_target(
         rollout_strategy: rollout_strategy.to_string(),
         state_migration_command: state_migration_command.map(ToString::to_string),
         zero_downtime_capability: zero_downtime_capability.to_string(),
+        deployed_revision_witness: None,
     }
+}
+
+fn with_deployed_revision_witness(mut release: ReleaseTarget, path: PathBuf) -> ReleaseTarget {
+    release.deployed_revision_witness = Some(path);
+    release
 }
 
 fn release_target_record(
@@ -1396,11 +1550,27 @@ fn release_target_record(
     release: &ReleaseTarget,
     observed_at: &str,
 ) -> IdunnReleaseTargetRecord {
-    let desired_revision = git_revision(
-        &release.repo_path,
-        &format!("{}/{}", release.upstream_remote, release.upstream_branch),
-    )
-    .unwrap_or_else(|| "unknown".to_string());
+    let port = SystemReleaseStatePort;
+    let fetch_result = port.fetch(release);
+    let desired_revision = fetch_result
+        .as_ref()
+        .ok()
+        .and_then(|_| port.desired_revision(release).ok())
+        .unwrap_or_else(|| "unknown".to_string());
+    let deployed_revision = if release.deployed_revision_witness.is_some() {
+        port.deployed_revision(release)
+            .unwrap_or_else(|_| "unknown".to_string())
+    } else {
+        "untracked-no-witness".to_string()
+    };
+    let status = if fetch_result.is_ok()
+        && desired_revision != "unknown"
+        && (release.deployed_revision_witness.is_none() || deployed_revision != "unknown")
+    {
+        "tracked"
+    } else {
+        "release-state-unavailable"
+    };
 
     IdunnReleaseTargetRecord {
         target_id: release_target_id(target),
@@ -1410,7 +1580,7 @@ fn release_target_record(
         upstream_remote: release.upstream_remote.clone(),
         upstream_branch: release.upstream_branch.clone(),
         desired_revision,
-        deployed_revision: "from-deployment-manifest".to_string(),
+        deployed_revision,
         artifact_strategy: "source-archive-from-upstream-main".to_string(),
         rollout_strategy: release.rollout_strategy.clone(),
         state_migration_authority: if release.state_migration_command.is_some() {
@@ -1420,7 +1590,7 @@ fn release_target_record(
         }
         .to_string(),
         zero_downtime_capability: release.zero_downtime_capability.clone(),
-        status: "tracked".to_string(),
+        status: status.to_string(),
         observed_at: observed_at.to_string(),
     }
 }
@@ -2086,12 +2256,15 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 health_contract: health_contract("voidbot.cultnet-rudp-stack-health", "failed"),
                 deploy_command: Some(yggdrasil_actuator("deploy", "voidbot")),
                 restart_command: Some(yggdrasil_actuator("restart", "voidbot")),
-                release: Some(release_target(
-                    "VoidBot",
-                    PathBuf::from("/srv/build/VoidBot"),
-                    "restart-after-verified-build",
-                    None,
-                    "restart-required",
+                release: Some(with_deployed_revision_witness(
+                    release_target(
+                        "VoidBot",
+                        PathBuf::from("/srv/build/VoidBot"),
+                        "restart-after-verified-build",
+                        None,
+                        "restart-required",
+                    ),
+                    PathBuf::from("/srv/voidbot/deploy/deployment.env"),
                 )),
                 enabled: true,
                 interval_seconds: 300,
@@ -3067,6 +3240,7 @@ fn help_text() -> &'static str {
 mod tests {
     use super::*;
     use cultnet_rs::{CultNetRawDocumentRecord, CultNetRawPayloadEncoding};
+    use std::cell::RefCell;
 
     fn target(default_failure_state: &str, deploy_command: Option<&str>) -> DaemonTarget {
         DaemonTarget {
@@ -3852,8 +4026,168 @@ mod tests {
             repo_root: PathBuf::from("E:/Projects/Odin"),
         })
         .expect("starfire-local targets");
-        assert!(starfire.iter().all(|target| target.daemon_id != "voidbot"
-            && target.daemon_id != "yggdrasil-voidbot"));
+        assert!(
+            starfire
+                .iter()
+                .all(|target| target.daemon_id != "voidbot"
+                    && target.daemon_id != "yggdrasil-voidbot")
+        );
+    }
+
+    struct FakeReleaseStatePort {
+        fetch_error: Option<String>,
+        desired: std::result::Result<String, String>,
+        deployed: RefCell<std::result::Result<String, String>>,
+    }
+
+    impl ReleaseStatePort for FakeReleaseStatePort {
+        fn fetch(&self, _release: &ReleaseTarget) -> Result<()> {
+            self.fetch_error
+                .as_ref()
+                .map_or(Ok(()), |error| Err(anyhow!(error.clone())))
+        }
+
+        fn desired_revision(&self, _release: &ReleaseTarget) -> Result<String> {
+            self.desired.clone().map_err(|error| anyhow!(error))
+        }
+
+        fn deployed_revision(&self, _release: &ReleaseTarget) -> Result<String> {
+            self.deployed
+                .borrow()
+                .clone()
+                .map_err(|error| anyhow!(error))
+        }
+    }
+
+    fn release_desired(target: &DaemonTarget) -> IdunnDesiredDaemonRecord {
+        IdunnDesiredDaemonRecord {
+            daemon_id: target.daemon_id.clone(),
+            verse_id: target.verse_id.clone(),
+            name: target.name.clone(),
+            enabled: true,
+            health_command: None,
+            restart_command: target.restart_command.clone(),
+            deploy_command: target.deploy_command.clone(),
+            health_contract: target.health_contract.id.clone(),
+            transport_profile_id: transport_profile_id(target),
+            command_boundary_id: command_boundary_id(target),
+            authority: "idunn-supervisor-command".to_string(),
+            max_silence_seconds: 60,
+            observed_at: "unix:100".to_string(),
+        }
+    }
+
+    #[test]
+    fn matching_release_witness_does_not_override_daemon_health() {
+        let target = swarm_targets(&SwarmOptions {
+            profile: "yggdrasil-local".to_string(),
+            repo_root: PathBuf::from("/srv/odin/source"),
+        })
+        .unwrap()
+        .into_iter()
+        .find(|target| target.daemon_id == "yggdrasil-voidbot")
+        .unwrap();
+        let port = FakeReleaseStatePort {
+            fetch_error: None,
+            desired: Ok("abc123".to_string()),
+            deployed: RefCell::new(Ok("abc123".to_string())),
+        };
+
+        assert!(
+            evaluate_release_drift(
+                &target,
+                &release_desired(&target),
+                target.release.as_ref().unwrap(),
+                &port,
+                "unix:100"
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn release_drift_plans_one_deploy_then_matching_witness_stops_it() {
+        let target = swarm_targets(&SwarmOptions {
+            profile: "yggdrasil-local".to_string(),
+            repo_root: PathBuf::from("/srv/odin/source"),
+        })
+        .unwrap()
+        .into_iter()
+        .find(|target| target.daemon_id == "yggdrasil-voidbot")
+        .unwrap();
+        let desired = release_desired(&target);
+        let port = FakeReleaseStatePort {
+            fetch_error: None,
+            desired: Ok("new456".to_string()),
+            deployed: RefCell::new(Ok("old123".to_string())),
+        };
+        let stale = evaluate_release_drift(
+            &target,
+            &desired,
+            target.release.as_ref().unwrap(),
+            &port,
+            "unix:100",
+        )
+        .unwrap();
+        assert_eq!(stale.state, "stale-deployment");
+        assert!(
+            plan_keepalive(&desired, &stale, "unix:100")
+                .deployment_request
+                .is_some()
+        );
+        assert!(verify_release_witness_current(target.release.as_ref().unwrap(), &port).is_err());
+
+        *port.deployed.borrow_mut() = Ok("new456".to_string());
+        assert!(verify_release_witness_current(target.release.as_ref().unwrap(), &port).is_ok());
+        assert!(
+            evaluate_release_drift(
+                &target,
+                &desired,
+                target.release.as_ref().unwrap(),
+                &port,
+                "unix:101"
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn unavailable_fetch_or_witness_alarms_without_deploying() {
+        let target = swarm_targets(&SwarmOptions {
+            profile: "yggdrasil-local".to_string(),
+            repo_root: PathBuf::from("/srv/odin/source"),
+        })
+        .unwrap()
+        .into_iter()
+        .find(|target| target.daemon_id == "yggdrasil-voidbot")
+        .unwrap();
+        let desired = release_desired(&target);
+        let ports = [
+            FakeReleaseStatePort {
+                fetch_error: Some("network unavailable".to_string()),
+                desired: Ok("new456".to_string()),
+                deployed: RefCell::new(Ok("old123".to_string())),
+            },
+            FakeReleaseStatePort {
+                fetch_error: None,
+                desired: Ok("new456".to_string()),
+                deployed: RefCell::new(Err("witness missing".to_string())),
+            },
+        ];
+        for port in ports {
+            let unavailable = evaluate_release_drift(
+                &target,
+                &desired,
+                target.release.as_ref().unwrap(),
+                &port,
+                "unix:100",
+            )
+            .unwrap();
+            assert_eq!(unavailable.state, "dependency-unavailable");
+            let plan = plan_keepalive(&desired, &unavailable, "unix:100");
+            assert!(plan.deployment_request.is_none());
+            assert!(plan.operator_alarm.is_some());
+        }
     }
 
     #[test]

@@ -70,6 +70,12 @@ Idunn observes `/srv/build/VoidBot` and invokes only
 actuator delegates deploy and restart to the root-owned executable
 `/srv/odin/deploy-manifests/voidbot`. A developer checkout is not a deployment
 target and agents must not create a local keepalive or deploy path for VoidBot.
+Each cycle fetches `origin/main` in `/srv/build/VoidBot` and compares it with
+`DEPLOYED_REVISION` in `/srv/voidbot/deploy/deployment.env`. Drift owns the
+deployment decision. An unavailable fetch or witness raises an operator alarm
+instead of guessing. The privileged manifest must atomically update that
+witness only after the new release is verified; Idunn rejects an otherwise
+successful command when the witness has not converged.
 
 ```text
 scratch/idunn/idunn.keepalive.cc
