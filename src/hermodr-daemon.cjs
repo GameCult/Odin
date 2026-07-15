@@ -9,6 +9,7 @@ const path = require("path");
 const { defineOdinDocuments } = require("./odin/documents.cjs");
 const { createIdunnRudpHealthPublisher, publishIdunnRudpHealth } = require("./odin/idunn-rudp.cjs");
 const { parseArgs } = require("./odin/utils.cjs");
+const { HermodrStateStreamRegistry } = require("./hermodr-state-stream.cjs");
 
 const repoRoot = path.resolve(__dirname, "..");
 const projectsRoot = path.resolve(repoRoot, "..");
@@ -191,6 +192,10 @@ function rejectRemovedOptions(options) {
 }
 
 function createHermodrBridge(options) {
+  const stateStreams = new HermodrStateStreamRegistry({
+    pollIntervalMs: options.statePollIntervalMs ?? 1_000,
+    staleAfterMs: options.stateStaleAfterMs ?? 10_000,
+  });
   return {
     async handle(request, response) {
       const url = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
@@ -264,6 +269,24 @@ function createHermodrBridge(options) {
         return;
       }
 
+      if (request.method === "GET" && url.pathname.startsWith("/hermodr/state/")) {
+        const source = normalizeStateBindingSource({
+          providerId: decodeURIComponent(url.pathname.slice("/hermodr/state/".length)),
+          sourceId: stringOption(url.searchParams.get("sourceId"), ""),
+          schemaId: stringOption(url.searchParams.get("schemaId"), ""),
+        });
+        if (!source) {
+          writeJson(response, 400, { ok: false, error: "providerId, sourceId, and schemaId are required for a typed state stream." });
+          return;
+        }
+        openStateEventStream(request, response, stateStreams, source, async () => {
+          const resolved = await readVisibleDocument(options, source);
+          if (!resolved) throw new Error(`Provider '${source.providerId}' did not expose ${source.schemaId} at ${source.documentId}.`);
+          return resolved.document;
+        });
+        return;
+      }
+
       if (request.method === "POST" && url.pathname === "/hermodr/commands/sleipnir/input-mapping") {
         const body = await readJsonBody(request);
         writeJson(response, 202, await publishSleipnirMapping(options, body));
@@ -301,6 +324,34 @@ async function readCatalog(options) {
     ...providerSnapshots,
   ]);
   return createBrowserCatalog(providerAdvertisements, options);
+}
+
+function normalizeStateBindingSource(value) {
+  const providerId = String(value?.providerId || "").trim();
+  const sourceId = String(value?.sourceId || "").trim();
+  const schemaId = String(value?.schemaId || "").trim();
+  if (!providerId || !sourceId || !schemaId) return null;
+  const schemaName = schemaId.replace(/\.v\d+$/, "");
+  const prefix = `${schemaName}:`;
+  const documentId = sourceId.startsWith(prefix) ? sourceId.slice(prefix.length) : sourceId;
+  if (!documentId) return null;
+  return { providerId, sourceId, schemaId, documentId };
+}
+
+function openStateEventStream(request, response, registry, source, read) {
+  writeCors(response, 200);
+  response.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  response.setHeader("Cache-Control", "no-cache, no-transform");
+  response.setHeader("Connection", "keep-alive");
+  response.flushHeaders?.();
+  const release = registry.acquire(source, read, event => {
+    response.write(`id: ${event.sequence}\n`);
+    response.write(`event: ${event.type}\n`);
+    response.write(`data: ${JSON.stringify(event)}\n\n`);
+  });
+  const close = () => release();
+  request.once("close", close);
+  response.once("close", close);
 }
 
 function createBrowserCatalog(providerAdvertisements, options = {}) {
@@ -1385,7 +1436,9 @@ if (require.main === module) {
 
 module.exports = {
   createBrowserCatalog,
+  createHermodrBridge,
   findProviderCdnRoute,
+  normalizeStateBindingSource,
   normalizeProviderAdvertisement,
   surfaceRecordKeys,
 };

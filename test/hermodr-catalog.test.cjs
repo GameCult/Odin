@@ -7,6 +7,7 @@ const {
   createBrowserCatalog,
   findProviderCdnRoute,
   normalizeProviderAdvertisement,
+  normalizeStateBindingSource,
   surfaceRecordKeys,
 } = require("../src/hermodr-daemon.cjs");
 
@@ -41,4 +42,20 @@ test("CDN routing follows the asset URI provider instead of a product name", () 
   const route = findProviderCdnRoute(catalog, "cultmesh://fixture.game/assets/player");
   assert.equal(route.providerId, "fixture.game");
   assert.equal(route.endpoint, "rudp://127.0.0.1:3000");
+});
+
+test("state binding sources select typed records without interpreting pointer paths", () => {
+  assert.deepEqual(normalizeStateBindingSource({
+    providerId: "voidbot.swarm",
+    sourceId: "voidbot.swarm_state_snapshot:voidbot-swarm",
+    schemaId: "voidbot.swarm_state_snapshot.v1",
+    pointerId: "summary.globalHeat",
+  }), {
+    providerId: "voidbot.swarm",
+    sourceId: "voidbot.swarm_state_snapshot:voidbot-swarm",
+    schemaId: "voidbot.swarm_state_snapshot.v1",
+    documentId: "voidbot-swarm",
+  });
+  assert.equal(normalizeStateBindingSource({ providerId: "voidbot.swarm", sourceId: "", schemaId: "schema.v1" }), null);
+  assert.equal(normalizeStateBindingSource({ providerId: "voidbot.swarm", sourceId: "record", schemaId: "" }), null);
 });
