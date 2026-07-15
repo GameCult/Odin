@@ -12,14 +12,17 @@ $deployScriptsWithoutIdunnGuard = @(
   $IdunnDeploymentTargets |
     Where-Object { $_.Status -eq "enforced" -and -not [string]::IsNullOrWhiteSpace($_.Deploy) } |
     Where-Object {
+      if ($_.Deploy -match '^sudo -n /usr/local/libexec/idunn-yggdrasil deploy [a-z0-9-]+$') {
+        return $false
+      }
       -not (Test-Path -LiteralPath $_.Deploy) -or
-      -not ((Get-Content -Raw -LiteralPath $_.Deploy) -match 'IDUNN_ACTUATOR')
+        -not ((Get-Content -Raw -LiteralPath $_.Deploy) -match 'IDUNN_ACTUATOR')
     }
 )
 $knownActuatorPaths = @{}
 foreach ($target in $IdunnDeploymentTargets) {
   foreach ($path in @($target.Deploy, $target.Restart) + @($target.Aliases)) {
-    if (-not [string]::IsNullOrWhiteSpace($path)) {
+    if (-not [string]::IsNullOrWhiteSpace($path) -and (Test-Path -LiteralPath $path)) {
       $knownActuatorPaths[[System.IO.Path]::GetFullPath($path).ToLowerInvariant()] = $target.Id
     }
   }

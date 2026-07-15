@@ -20,6 +20,14 @@ case "$action:$target" in
   restart:streampixels)
     docker compose -f "$compose" restart streampixels-service streampixels-web
     ;;
+  deploy:voidbot|restart:voidbot)
+    manifest="/srv/odin/deploy-manifests/voidbot"
+    if [ ! -x "$manifest" ] || [ ! -O "$manifest" ]; then
+      echo "root-owned executable deploy manifest is not installed: $manifest" >&2
+      exit 1
+    fi
+    exec "$manifest" "$action"
+    ;;
   deploy:heimdall|deploy:repixelizer|deploy:streampixels)
     manifest="/srv/odin/deploy-manifests/$target"
     if [ ! -x "$manifest" ] || [ ! -O "$manifest" ]; then

@@ -2080,6 +2080,23 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
     match options.profile.as_str() {
         "yggdrasil-local" => Ok(vec![
             DaemonTarget {
+                daemon_id: "yggdrasil-voidbot".to_string(),
+                verse_id: "yggdrasil.local".to_string(),
+                name: "Yggdrasil VoidBot".to_string(),
+                health_contract: health_contract("voidbot.cultnet-rudp-stack-health", "failed"),
+                deploy_command: Some(yggdrasil_actuator("deploy", "voidbot")),
+                restart_command: Some(yggdrasil_actuator("restart", "voidbot")),
+                release: Some(release_target(
+                    "VoidBot",
+                    PathBuf::from("/srv/build/VoidBot"),
+                    "restart-after-verified-build",
+                    None,
+                    "restart-required",
+                )),
+                enabled: true,
+                interval_seconds: 300,
+            },
+            DaemonTarget {
                 daemon_id: "yggdrasil-heimdall".to_string(),
                 verse_id: "yggdrasil.local".to_string(),
                 name: "Yggdrasil Heimdall".to_string(),
@@ -2184,17 +2201,6 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 release: None,
                 enabled: true,
                 interval_seconds: 30,
-            },
-            DaemonTarget {
-                daemon_id: "voidbot".to_string(),
-                verse_id: "starfire.local".to_string(),
-                name: "VoidBot local stack".to_string(),
-                health_contract: health_contract("voidbot.cultnet-rudp-stack-health", "failed"),
-                deploy_command: None,
-                restart_command: Some(script("restart-voidbot.cmd")),
-                release: None,
-                enabled: true,
-                interval_seconds: 300,
             },
             DaemonTarget {
                 daemon_id: "weksa".to_string(),
@@ -3813,6 +3819,41 @@ mod tests {
                 .iter()
                 .any(|step| step.contains("CultLib cultcache-py snapshot"))
         );
+    }
+
+    #[test]
+    fn voidbot_release_authority_is_yggdrasil_local_only() {
+        let yggdrasil = swarm_targets(&SwarmOptions {
+            profile: "yggdrasil-local".to_string(),
+            repo_root: PathBuf::from("/srv/odin/source"),
+        })
+        .expect("yggdrasil-local targets");
+        let voidbot = yggdrasil
+            .iter()
+            .find(|target| target.daemon_id == "yggdrasil-voidbot")
+            .expect("Yggdrasil VoidBot target");
+
+        assert_eq!(voidbot.verse_id, "yggdrasil.local");
+        assert_eq!(
+            voidbot.deploy_command.as_deref(),
+            Some("sudo -n /usr/local/libexec/idunn-yggdrasil deploy voidbot")
+        );
+        assert_eq!(
+            voidbot.restart_command.as_deref(),
+            Some("sudo -n /usr/local/libexec/idunn-yggdrasil restart voidbot")
+        );
+        let release = voidbot.release.as_ref().expect("VoidBot release target");
+        assert_eq!(release.repo_path, PathBuf::from("/srv/build/VoidBot"));
+        assert_eq!(release.upstream_remote, "origin");
+        assert_eq!(release.upstream_branch, "main");
+
+        let starfire = swarm_targets(&SwarmOptions {
+            profile: "starfire-local".to_string(),
+            repo_root: PathBuf::from("E:/Projects/Odin"),
+        })
+        .expect("starfire-local targets");
+        assert!(starfire.iter().all(|target| target.daemon_id != "voidbot"
+            && target.daemon_id != "yggdrasil-voidbot"));
     }
 
     #[test]
