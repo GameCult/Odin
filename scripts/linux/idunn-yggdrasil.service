@@ -1,0 +1,24 @@
+[Unit]
+Description=Idunn Yggdrasil-local lifecycle coordinator
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=idunn
+Group=idunn
+ExecStart=/usr/local/bin/idunn --swarm-profile yggdrasil-local --repo-root /srv/odin/source --store /var/lib/gamecult/idunn/yggdrasil.keepalive.cc --rudp-health-bind 10.77.0.1:17870 --command-timeout-seconds 900 --execute
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+KillSignal=SIGINT
+UMask=027
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=full
+ReadWritePaths=/var/lib/gamecult/idunn
+
+[Install]
+WantedBy=multi-user.target
+
