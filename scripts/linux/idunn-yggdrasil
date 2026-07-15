@@ -1,0 +1,43 @@
+#!/bin/sh
+set -eu
+
+if [ "$(id -u)" -ne 0 ]; then
+  echo "idunn-yggdrasil must run through its narrow sudo boundary" >&2
+  exit 1
+fi
+
+action="${1:-}"
+target="${2:-}"
+compose=/srv/compose/yggdrasil-apps.yaml
+
+case "$action:$target" in
+  restart:heimdall)
+    exec docker compose -f "$compose" restart heimdall
+    ;;
+  restart:repixelizer)
+    exec docker compose -f "$compose" restart repixelizer
+    ;;
+  restart:streampixels)
+    docker compose -f "$compose" restart streampixels-service streampixels-web
+    ;;
+  deploy:voidbot|restart:voidbot)
+    manifest="/srv/odin/deploy-manifests/voidbot"
+    if [ ! -x "$manifest" ] || [ ! -O "$manifest" ]; then
+      echo "root-owned executable deploy manifest is not installed: $manifest" >&2
+      exit 1
+    fi
+    IDUNN_ACTUATOR=1 IDUNN_COMMAND_AUTHORITY=idunn-daemon exec "$manifest" "$action"
+    ;;
+  deploy:heimdall|deploy:repixelizer|deploy:streampixels)
+    manifest="/srv/odin/deploy-manifests/$target"
+    if [ ! -x "$manifest" ] || [ ! -O "$manifest" ]; then
+      echo "root-owned executable deploy manifest is not installed: $manifest" >&2
+      exit 1
+    fi
+    exec "$manifest"
+    ;;
+  *)
+    echo "unsupported Idunn Yggdrasil actuator request: $action $target" >&2
+    exit 2
+    ;;
+esac

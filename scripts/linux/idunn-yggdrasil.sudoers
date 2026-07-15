@@ -1,0 +1,1 @@
+idunn ALL=(root) NOPASSWD: /usr/local/libexec/idunn-yggdrasil *

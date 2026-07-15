@@ -71,19 +71,6 @@ $IdunnDeploymentTargets = @(
     Reason = "Weksa provider state and health are daemon-owned CultMesh/CultNet records; local restart is an Idunn actuator only."
   },
   [pscustomobject]@{
-    Id = "voidbot"
-    Repo = "VoidBot"
-    LocalPath = "E:\Projects\VoidBot"
-    Host = "starfire"
-    Service = "VoidBot local stack"
-    Status = "runtime-enforced"
-    Health = "daemon-published-rudp:voidbot.cultnet-rudp-stack-health"
-    Deploy = $null
-    Restart = "$repoRoot\scripts\restart-voidbot.cmd"
-    Aliases = @()
-    Reason = "VoidBot stack health and provider state publish through daemon-owned CultMesh/CultNet records; restart is an Idunn actuator only."
-  },
-  [pscustomobject]@{
     Id = "starfire-muninn"
     Repo = "Odin"
     LocalPath = "E:\Projects\Odin"
@@ -165,6 +152,24 @@ $IdunnDeploymentTargets = @(
     StateMigration = "daemon-owned-noop"
     ZeroDowntime = "restart-required"
     Reason = "Nightwing framebuffer compositor has a committed artifact manifest and automatic Idunn deploy lane."
+  },
+  [pscustomobject]@{
+    Id = "yggdrasil-voidbot"
+    Repo = "VoidBot"
+    LocalPath = "/srv/build/VoidBot"
+    Host = "yggdrasil"
+    Service = "voidbot.service"
+    Status = "enforced"
+    Health = "daemon-published-rudp:voidbot.cultnet-rudp-stack-health"
+    Deploy = "sudo -n /usr/local/libexec/idunn-yggdrasil deploy voidbot"
+    Restart = "sudo -n /usr/local/libexec/idunn-yggdrasil restart voidbot"
+    Aliases = @()
+    UpstreamRemote = "origin"
+    UpstreamBranch = "main"
+    RolloutStrategy = "restart-after-verified-build"
+    StateMigration = "daemon-owned-noop"
+    ZeroDowntime = "restart-required"
+    Reason = "Yggdrasil-local Idunn deploys upstream VoidBot releases through the narrow root-owned manifest; local checkouts have no deployment authority."
   },
   [pscustomobject]@{
     Id = "yggdrasil-bifrost"

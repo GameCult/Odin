@@ -52,16 +52,30 @@ instead of building one more private watchdog.
 
 ## Current State
 
-Idunn is a Rust daemon inside Odin's Cargo workspace. The live local runtime is
-one long-lived `idunn.exe` process that owns the whole Starfire-local swarm:
-Odin, local adjunct daemons, the Yggdrasil deploy lanes, and the Nightwing
-display services. Each target declares a daemon-owned health contract and keeps
+Idunn is a Rust daemon inside Odin's Cargo workspace. Starfire and Yggdrasil
+run separate host-local swarm profiles. Starfire owns its local adjunct daemons
+and remote display/telemetry lanes. Yggdrasil owns its hosted release targets,
+including VoidBot. Each target declares a daemon-owned health contract and keeps
 its own interval and deploy/restart authority. Daemon truth comes from typed
 CultNet/RUDP publication and daemon-owned boundary stores. Shell scripts remain
 deployment, restart, and manual diagnostic lowerings only; they do not satisfy
 health.
 The scheduler and continuity witness now belong to one Rust process instead of
 a PowerShell-herded pile of one-daemon workers.
+
+VoidBot deployment authority is deliberately absent from `starfire-local`.
+Pushing VoidBot's upstream `main` branch is the release input; Yggdrasil-local
+Idunn observes `/srv/build/VoidBot` and invokes only
+`sudo -n /usr/local/libexec/idunn-yggdrasil deploy voidbot`. The privileged
+actuator delegates deploy and restart to the root-owned executable
+`/srv/odin/deploy-manifests/voidbot`. A developer checkout is not a deployment
+target and agents must not create a local keepalive or deploy path for VoidBot.
+Each cycle fetches `origin/main` in `/srv/build/VoidBot` and compares it with
+`DEPLOYED_REVISION` in `/srv/voidbot/deploy/deployment.env`. Drift owns the
+deployment decision. An unavailable fetch or witness raises an operator alarm
+instead of guessing. The privileged manifest must atomically update that
+witness only after the new release is verified; Idunn rejects an otherwise
+successful command when the witness has not converged.
 
 ```text
 scratch/idunn/idunn.keepalive.cc
@@ -124,6 +138,12 @@ To run the built-in Starfire-local swarm profile directly:
 
 ```powershell
 npm run idunn:start -- --swarm-profile starfire-local --repo-root E:\Projects\Odin --execute
+```
+
+The Yggdrasil service runs the hosted profile directly:
+
+```sh
+/usr/local/bin/idunn --swarm-profile yggdrasil-local --repo-root /srv/odin/source --store /var/lib/gamecult/idunn/yggdrasil.keepalive.cc --rudp-health-bind 10.77.0.1:17870 --execute
 ```
 
 Optional store override:

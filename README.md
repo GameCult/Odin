@@ -61,8 +61,9 @@ Local package surfaces:
 - Rust daemon crate: `crates/idunn-daemon`
 - Rust lifecycle logic: `crates/odin-core/src/idunn.rs`
 - Runtime store: `scratch/idunn/idunn.keepalive.cc`
-- Local VoidBot keepalive: `scripts\health-voidbot.cmd` and
-  `scripts\restart-voidbot.cmd`
+- Hosted VoidBot release: upstream `main` -> Yggdrasil-local Idunn -> the
+  root-owned `/srv/odin/deploy-manifests/voidbot` actuator. Local checkouts are
+  development and diagnostics only; do not create a local deployment.
 - Operator escalation: Bifrost-owned CultMesh crossing; current compatibility
   delivery calls `scripts\notify-idunn-operator-alarm.ps1`, which asks Bifrost
   to publish a typed `gamecult.operator_dm_request.v1` CultMesh command document

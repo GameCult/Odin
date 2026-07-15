@@ -1,0 +1,77 @@
+#!/bin/sh
+set -eu
+
+if [ "$(id -u)" -ne 0 ]; then
+  echo "deploy-yggdrasil-heimdall must run as root through Idunn" >&2
+  exit 1
+fi
+
+source_tar=/srv/heimdall/heimdall-source.tar
+cultlib_tar=/srv/heimdall/heimdall-cultlib.tar
+releases=/srv/heimdall/app/releases
+current=/srv/heimdall/app/current
+shared_cultlib="$releases/CultLib"
+compose=/srv/compose/yggdrasil-apps.yaml
+
+for required in "$source_tar" "$cultlib_tar" "$compose"; do
+  if [ ! -f "$required" ]; then
+    echo "missing audited Heimdall deployment input: $required" >&2
+    exit 1
+  fi
+done
+
+artifact_sha=$(sha256sum "$source_tar" | awk '{print $1}')
+release="$releases/sha-${artifact_sha}"
+previous=$(readlink -f "$current" 2>/dev/null || true)
+
+if [ ! -f "$release/.idunn-build-complete" ]; then
+  staging="$release.staging.$$"
+  rm -rf "$staging"
+  install -d -o heimdall -g heimdall "$staging" "$shared_cultlib"
+  tar -xf "$source_tar" -C "$staging"
+  rm -rf "$shared_cultlib/packages/cultcache-ts" "$shared_cultlib/packages/cultnet-ts"
+  tar -xf "$cultlib_tar" -C "$shared_cultlib"
+
+  docker run --rm \
+    -v /srv/heimdall:/srv/heimdall \
+    -w "$staging" \
+    node:24.14.1-bookworm-slim@sha256:b506e7321f176aae77317f99d67a24b272c1f09f1d10f1761f2773447d8da26c \
+    sh -c 'corepack enable && pnpm install --frozen-lockfile && pnpm typecheck && pnpm test && pnpm build && pnpm prune --prod'
+
+  printf '%s\n' "$artifact_sha" > "$staging/.idunn-build-complete"
+  chown -R heimdall:heimdall "$staging" "$shared_cultlib"
+  mv "$staging" "$release"
+fi
+
+ln -sfn "$release" "$current"
+chown -h heimdall:heimdall "$current"
+
+if ! docker compose -f "$compose" up -d --force-recreate heimdall; then
+  if [ -n "$previous" ] && [ -d "$previous" ]; then
+    ln -sfn "$previous" "$current"
+    chown -h heimdall:heimdall "$current"
+    docker compose -f "$compose" up -d --force-recreate heimdall || true
+  fi
+  exit 1
+fi
+
+healthy=0
+for _ in $(seq 1 30); do
+  if curl -fsS http://127.0.0.1:4100/healthz >/dev/null; then
+    healthy=1
+    break
+  fi
+  sleep 2
+done
+
+if [ "$healthy" -ne 1 ]; then
+  echo "Heimdall failed health verification after deploying $artifact_sha" >&2
+  if [ -n "$previous" ] && [ -d "$previous" ]; then
+    ln -sfn "$previous" "$current"
+    chown -h heimdall:heimdall "$current"
+    docker compose -f "$compose" up -d --force-recreate heimdall || true
+  fi
+  exit 1
+fi
+
+echo "Heimdall deployed audited source artifact $artifact_sha"
