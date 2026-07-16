@@ -12,7 +12,7 @@ use odin_core::{
     IdunnDaemonHealthRecord, MUNINN_HID_CONTROLLER_STATE_SCHEMA, MuninnHidControllerStateRecord,
     OdinDocuments, OdinEndpointQuery, SleipnirInputMappingRecord, discover_provider_endpoints,
 };
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
@@ -62,6 +62,7 @@ struct ActiveRudpStream {
     last_frame_at: Option<Instant>,
     last_stale_log_at: Option<Instant>,
     last_subscription: Option<HidControllerRudpSubscription>,
+    received_edges: Vec<HidButtonEdge>,
     last_subscription_at: Option<Instant>,
 }
 
@@ -154,7 +155,77 @@ struct VirtualPadState {
 #[derive(Clone, Debug)]
 struct TimedHidRecord {
     record: MuninnHidControllerStateRecord,
+    epoch: u64,
+    state_sequence: u64,
     timing: HidRecordTiming,
+}
+
+#[derive(Clone, Debug)]
+struct HidLatestStateFrame {
+    epoch: u64,
+    state_sequence: u64,
+    record: MuninnHidControllerStateRecord,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct HidButtonEdge {
+    epoch: u64,
+    device_id: String,
+    edge_sequence: u64,
+    button: String,
+    pressed: bool,
+}
+
+fn decode_latest_state_frame(payload: &[u8]) -> Option<HidLatestStateFrame> {
+    let value: serde_json::Value = serde_json::from_slice(payload).ok()?;
+    Some(HidLatestStateFrame {
+        epoch: value.get("epoch")?.as_u64()?,
+        state_sequence: value.get("state_sequence")?.as_u64()?,
+        record: serde_json::from_value(value.get("record")?.clone()).ok()?,
+    })
+}
+
+fn decode_button_edge(payload: &[u8]) -> Option<HidButtonEdge> {
+    let value: serde_json::Value = serde_json::from_slice(payload).ok()?;
+    Some(HidButtonEdge {
+        epoch: value.get("epoch")?.as_u64()?,
+        device_id: value.get("device_id")?.as_str()?.to_string(),
+        edge_sequence: value.get("edge_sequence")?.as_u64()?,
+        button: value.get("button")?.as_str()?.to_string(),
+        pressed: value.get("pressed")?.as_bool()?,
+    })
+}
+
+#[derive(Default)]
+struct HidSemanticCursor {
+    epoch: u64,
+    state_sequence: u64,
+    edge_sequence: u64,
+    pending_edges: BTreeMap<u64, HidButtonEdge>,
+    retired_epochs: HashSet<u64>,
+}
+
+impl HidSemanticCursor {
+    fn accept_state(&mut self, epoch: u64, sequence: u64) -> bool {
+        if epoch == 0 && self.epoch != 0 { return false; }
+        if self.retired_epochs.contains(&epoch) || (epoch == self.epoch && sequence <= self.state_sequence) { return false; }
+        if epoch != self.epoch {
+            if self.epoch != 0 { self.retired_epochs.insert(self.epoch); }
+            self.epoch = epoch; self.state_sequence = 0; self.edge_sequence = 0; self.pending_edges.clear();
+        }
+        self.state_sequence = sequence;
+        true
+    }
+    fn push_edge(&mut self, edge: HidButtonEdge) -> Vec<HidButtonEdge> {
+        if edge.epoch != self.epoch || edge.edge_sequence <= self.edge_sequence { return Vec::new(); }
+        self.pending_edges.entry(edge.edge_sequence).or_insert(edge);
+        let mut ready = Vec::new();
+        while let Some(edge) = self.pending_edges.remove(&(self.edge_sequence + 1)) {
+            self.edge_sequence += 1;
+            ready.push(edge);
+        }
+        ready
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -344,7 +415,7 @@ fn main() -> Result<()> {
     let mut last_idunn_health_attempt_at = Instant::now() - Duration::from_secs(60);
     publish_idunn_health_if_configured(&options, &initial_state, &mut last_idunn_health_attempt_at);
 
-    let mut last_sequence_by_device = HashMap::<String, u64>::new();
+    let mut semantic_cursor = HidSemanticCursor::default();
     let mut ignored_stream_frames = 0u64;
     let mut last_surface_publish_at = Instant::now() - Duration::from_secs(60);
     let mut last_odin_catalog_pull_at = Instant::now() - Duration::from_secs(60);
@@ -352,7 +423,6 @@ fn main() -> Result<()> {
     let mut recent_input_latency: Option<SleipnirInputLatencySnapshot> = None;
     let mut output_is_neutral = true;
     let mut last_output_frame_at: Option<Instant> = None;
-    let mut last_output_source_timestamp_ns: Option<i64> = None;
     loop {
         let input_stream_needs_discovery = rudp_stream
             .as_ref()
@@ -387,11 +457,10 @@ fn main() -> Result<()> {
             backend.update(&VirtualPadState::default())?;
             output_is_neutral = true;
             last_output_frame_at = Some(Instant::now());
-            last_output_source_timestamp_ns = None;
             drop(rudp_stream.take());
             rudp_stream =
                 create_rudp_stream(options.rudp_bind, rediscovered_endpoint, options.trace)?;
-            last_sequence_by_device.clear();
+            semantic_cursor = HidSemanticCursor::default();
         }
         let mut last_applied_record: Option<MuninnHidControllerStateRecord> = None;
         if let Some(stream) = rudp_stream.as_mut() {
@@ -400,7 +469,7 @@ fn main() -> Result<()> {
                     backend.update(&VirtualPadState::default())?;
                     output_is_neutral = true;
                     last_output_frame_at = Some(Instant::now());
-                    last_output_source_timestamp_ns = None;
+                    semantic_cursor = HidSemanticCursor::default();
                     if options.trace {
                         eprintln!(
                             "Sleipnir neutralized virtual pad before recreating stale Muninn HID RUDP connection for filter={:?}",
@@ -431,6 +500,8 @@ fn main() -> Result<()> {
                 )?;
                 let records = receive_rudp_records(stream, options.trace)?;
                 for timed_record in records {
+                    let epoch = timed_record.epoch;
+                    let state_sequence = timed_record.state_sequence;
                     let record = timed_record.record;
                     let timing = timed_record.timing;
                     if record_matches_filter(&record, current_device_filter.as_deref()) {
@@ -443,13 +514,7 @@ fn main() -> Result<()> {
                                 desired_mapping = updated_mapping;
                             }
                         }
-                        let previous = last_sequence_by_device
-                            .insert(record.device_id.clone(), record.sequence)
-                            .unwrap_or_default();
-                        let has_new_sequence = record.sequence != previous || options.once;
-                        let has_new_source_timestamp = last_output_source_timestamp_ns
-                            .is_none_or(|last| record.source_timestamp_ns > last);
-                        if has_new_sequence && has_new_source_timestamp {
+                        if semantic_cursor.accept_state(epoch, state_sequence) || options.once {
                             let state = map_record_to_virtual_pad(&record, &desired_mapping);
                             let axis_classified_at = Instant::now();
                             let output_frame_at = Instant::now();
@@ -482,8 +547,6 @@ fn main() -> Result<()> {
                                     ));
                                     output_is_neutral = state == VirtualPadState::default();
                                     last_output_frame_at = Some(output_frame_at);
-                                    last_output_source_timestamp_ns =
-                                        Some(record.source_timestamp_ns);
                                     last_applied_record = Some(record);
                                 }
                                 Err(error) => {
@@ -514,6 +577,28 @@ fn main() -> Result<()> {
                                 options.device_filter
                             );
                         }
+                    }
+                }
+                let edges = std::mem::take(&mut stream.received_edges);
+                for edge in edges {
+                    let edge_epoch = edge.epoch;
+                    let edge_sequence = edge.edge_sequence;
+                    let edge_device = edge.device_id.clone();
+                    for applied in semantic_cursor.push_edge(edge) {
+                        let Some(record) = last_applied_record.as_mut().or(recent_applied_record.as_mut()) else { continue; };
+                        if applied.pressed {
+                            if !record.buttons.contains(&applied.button) { record.buttons.push(applied.button.clone()); }
+                        } else {
+                            record.buttons.retain(|button| button != &applied.button);
+                        }
+                        let state = map_record_to_virtual_pad(record, &desired_mapping);
+                        backend.update(&state)?;
+                        output_is_neutral = state == VirtualPadState::default();
+                        last_output_frame_at = Some(Instant::now());
+                    }
+                    if edge_epoch == semantic_cursor.epoch && edge_sequence <= semantic_cursor.edge_sequence {
+                        let ack = serde_json::json!({"epoch": edge_epoch, "device_id": edge_device, "edge_sequence": semantic_cursor.edge_sequence});
+                        stream.transport.send("hid.edge.ack", serde_json::to_vec(&ack)?)?;
                     }
                 }
                 if desired_mapping.enabled
@@ -2226,7 +2311,7 @@ fn create_rudp_stream(
                 max_payload_bytes: None,
                 max_fragment_bytes: Some(HID_RUDP_MAX_FRAGMENT_BYTES),
                 max_pending_reliable_packets: Some(256),
-                media_reliable_expire_after_ms: Some(25),
+                reconnect_policy: None,
             })?;
         transport.connect(Vec::new())?;
         return Ok(Some(ActiveRudpStream {
@@ -2238,6 +2323,7 @@ fn create_rudp_stream(
             last_stale_log_at: None,
             last_subscription: None,
             last_subscription_at: None,
+            received_edges: Vec::new(),
         }));
     }
     let Some(bind) = bind else {
@@ -2266,7 +2352,7 @@ fn create_rudp_stream(
             max_payload_bytes: None,
             max_fragment_bytes: Some(HID_RUDP_MAX_FRAGMENT_BYTES),
             max_pending_reliable_packets: Some(256),
-            media_reliable_expire_after_ms: Some(25),
+            reconnect_policy: None,
         })?,
         target: None,
         last_connect_attempt_at: None,
@@ -2275,6 +2361,7 @@ fn create_rudp_stream(
         last_stale_log_at: None,
         last_subscription: None,
         last_subscription_at: None,
+        received_edges: Vec::new(),
     }))
 }
 
@@ -2491,15 +2578,27 @@ fn receive_rudp_records(stream: &mut ActiveRudpStream, trace: bool) -> Result<Ve
                         frame.payload.len()
                     );
                 }
+                let decoded = decode_latest_state_frame(&frame.payload);
+                let record = match decoded.as_ref() {
+                    Some(frame) => frame.record.clone(),
+                    None => serde_json::from_slice(&frame.payload).context("decoding Sleipnir RUDP HID frame")?,
+                };
                 records.push(TimedHidRecord {
-                    record: serde_json::from_slice(&frame.payload)
-                        .context("decoding Sleipnir RUDP HID frame")?,
+                    state_sequence: decoded.as_ref().map_or(record.sequence, |frame| frame.state_sequence),
+                    epoch: decoded.as_ref().map_or(0, |frame| frame.epoch),
+                    record,
                     timing: HidRecordTiming {
                         frame_received_at,
                         frame_received_unix_ns,
                         buffer_ready_at: frame_received_at,
                     },
                 });
+            }
+            Ok(Some(frame)) if frame.channel_id == "hid.edge" => {
+                empty_polls = 0;
+                let edge = decode_button_edge(&frame.payload)
+                    .ok_or_else(|| anyhow!("decoding Sleipnir HID button edge"))?;
+                stream.received_edges.push(edge);
             }
             Ok(Some(frame)) => {
                 empty_polls = 0;
@@ -2973,6 +3072,38 @@ mod tests {
         assert_eq!(records[1].device_id, "nav");
         assert_eq!(records[1].sequence, 2);
         assert_eq!(records[1].axes[0], 0.0);
+    }
+
+    fn edge(epoch: u64, sequence: u64, button: &str, pressed: bool) -> HidButtonEdge {
+        HidButtonEdge { epoch, device_id: "pad".into(), edge_sequence: sequence, button: button.into(), pressed }
+    }
+
+    #[test]
+    fn ordered_edges_preserve_quick_tap_and_dedupe_reorder() {
+        let mut cursor = HidSemanticCursor::default();
+        assert!(cursor.accept_state(7, 1));
+        assert!(cursor.push_edge(edge(7, 2, "a", false)).is_empty());
+        let ready = cursor.push_edge(edge(7, 1, "a", true));
+        assert_eq!(ready.iter().map(|edge| (edge.pressed, edge.edge_sequence)).collect::<Vec<_>>(), vec![(true, 1), (false, 2)]);
+        assert!(cursor.push_edge(edge(7, 1, "a", true)).is_empty());
+    }
+
+    #[test]
+    fn latest_state_wins_without_wall_clock_ordering() {
+        let mut cursor = HidSemanticCursor::default();
+        assert!(cursor.accept_state(9, 4));
+        assert!(!cursor.accept_state(9, 3));
+        assert!(cursor.accept_state(9, 5)); // source wall clock may move backwards; it is irrelevant here.
+    }
+
+    #[test]
+    fn epoch_reset_rejects_stale_edges() {
+        let mut cursor = HidSemanticCursor::default();
+        assert!(cursor.accept_state(10, 8));
+        assert!(cursor.accept_state(11, 1));
+        assert!(cursor.push_edge(edge(10, 9, "a", true)).is_empty());
+        assert_eq!(cursor.push_edge(edge(11, 1, "b", true)).len(), 1);
+        assert!(!cursor.accept_state(10, 99));
     }
 
     #[test]

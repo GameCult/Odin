@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "cultnet.shard_catalog_response.v0",
+  "type": "object",
+  "required": ["schemaVersion", "messageId", "shards"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": "cultnet.shard_catalog_response.v0" },
+    "messageId": { "type": "string", "minLength": 1 },
+    "shards": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/shardDescriptor" }
+    }
+  },
+  "$defs": {
+    "shardDescriptor": {
+      "type": "object",
+      "required": ["shardId", "ownerRuntimeId", "epoch"],
+      "additionalProperties": false,
+      "properties": {
+        "shardId": { "type": "string", "minLength": 1 },
+        "ownerRuntimeId": { "type": "string", "minLength": 1 },
+        "epoch": { "type": "integer", "minimum": 0 },
+        "isPrimary": { "type": "boolean" },
+        "schemaIds": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "keyPrefix": { "type": "string", "minLength": 1 },
+        "primaryEndpoints": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "replicaEndpoints": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "readReplicaEndpoints": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "region": { "type": "string", "minLength": 1 },
+        "authorityLeaseId": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

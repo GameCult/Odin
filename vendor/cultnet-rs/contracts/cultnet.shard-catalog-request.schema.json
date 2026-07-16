@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "cultnet.shard_catalog_request.v0",
+  "type": "object",
+  "required": ["schemaVersion", "messageId"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": "cultnet.shard_catalog_request.v0" },
+    "messageId": { "type": "string", "minLength": 1 },
+    "schemaIds": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "recordKeys": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    }
+  }
+}

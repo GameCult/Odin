@@ -12,7 +12,10 @@ use odin_core::{
 use serde::{Serialize, de::DeserializeOwned};
 use std::collections::BTreeMap;
 
-pub const MUNINN_MEDIA_RUDP_CHANNEL: &str = "media";
+// Deadline-bound audio/video must use the experimental CultNet realtime lane.
+// The `media` lane is reliable without expiry and can accumulate corpses behind
+// loss; application-level parity/repair and playout deadlines own recovery.
+pub const MUNINN_MEDIA_RUDP_CHANNEL: &str = "realtime";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VideoAccessUnit {
@@ -817,6 +820,7 @@ pub struct ExpiredVideoFrame {
     pub key: VideoFrameKey,
     pub deadline_ticks: i64,
     pub missing_video_chunk_keys: Vec<String>,
+    pub decode_chain_invalidated: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -886,6 +890,13 @@ impl VideoFrameAssembly {
             .next()
             .map(|chunk| chunk.deadline_ticks)
             .unwrap_or_default()
+    }
+
+    pub fn invalidates_decode_chain(&self) -> bool {
+        self.chunks
+            .values()
+            .next()
+            .is_some_and(|chunk| chunk.keyframe || chunk.dependency_frame_id.is_some())
     }
 
     pub fn reassemble(&self) -> Result<VideoAccessUnit> {
@@ -1014,6 +1025,7 @@ impl VideoFrameAssemblySet {
                     key,
                     deadline_ticks: assembly.deadline_ticks(),
                     missing_video_chunk_keys: assembly.missing_video_chunk_keys(),
+                    decode_chain_invalidated: assembly.invalidates_decode_chain(),
                 })
             })
             .collect()
@@ -1573,10 +1585,6 @@ pub fn build_receiver_feedback(
     late_frame_ids.sort_unstable();
     late_frame_ids.dedup();
 
-    let requested_keyframe = options.requested_keyframe
-        || !missing_frame_ids.is_empty()
-        || !missing_video_chunk_keys.is_empty();
-
     Ok(MuninnMediaReceiverFeedbackRecord {
         stream_id: options.stream_id.to_string(),
         session_id: options.session_id.to_string(),
@@ -1584,7 +1592,7 @@ pub fn build_receiver_feedback(
         highest_decodable_frame_id: options.highest_decodable_frame_id,
         missing_frame_ids,
         late_frame_ids,
-        requested_keyframe,
+        requested_keyframe: options.requested_keyframe,
         jitter_us: options.jitter_us,
         decode_queue_us: options.decode_queue_us,
         observed_at: options.observed_at.to_string(),
@@ -1602,6 +1610,7 @@ pub fn build_feedback_for_expired_video_frames(
 
     let mut late_frame_ids = Vec::with_capacity(expired.len());
     let mut missing_video_chunk_keys = Vec::new();
+    let mut decode_chain_invalidated = false;
     for frame in expired {
         if frame.key.stream_id != first.key.stream_id
             || frame.key.session_id != first.key.session_id
@@ -1612,6 +1621,7 @@ pub fn build_feedback_for_expired_video_frames(
         }
         late_frame_ids.push(frame.key.frame_id);
         missing_video_chunk_keys.extend(frame.missing_video_chunk_keys.iter().cloned());
+        decode_chain_invalidated |= frame.decode_chain_invalidated;
     }
 
     build_receiver_feedback(ReceiverFeedbackOptions {
@@ -1622,7 +1632,7 @@ pub fn build_feedback_for_expired_video_frames(
         missing_frame_ids: Vec::new(),
         missing_video_chunk_keys,
         late_frame_ids,
-        requested_keyframe: true,
+        requested_keyframe: decode_chain_invalidated,
         jitter_us: options.jitter_us,
         decode_queue_us: options.decode_queue_us,
         observed_at: options.observed_at,
@@ -3056,7 +3066,7 @@ mod tests {
     }
 
     #[test]
-    fn builds_receiver_feedback_with_sorted_unique_damage_lists() -> Result<()> {
+    fn recoverable_receiver_damage_does_not_request_keyframe() -> Result<()> {
         let feedback = build_receiver_feedback(ReceiverFeedbackOptions {
             stream_id: "muninn.raven.av.rudp",
             session_id: "session-1",
@@ -3078,6 +3088,26 @@ mod tests {
         assert_eq!(feedback.missing_frame_ids, vec![42, 43]);
         assert_eq!(feedback.missing_video_chunk_keys, vec!["42:1", "43:2"]);
         assert_eq!(feedback.late_frame_ids, vec![38, 39]);
+        assert!(!feedback.requested_keyframe);
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_decode_chain_invalidation_requests_keyframe() -> Result<()> {
+        let feedback = build_receiver_feedback(ReceiverFeedbackOptions {
+            stream_id: "muninn.raven.av.rudp",
+            session_id: "session-1",
+            receiver_id: "starfire.obs",
+            highest_decodable_frame_id: Some(40),
+            missing_frame_ids: vec![41],
+            missing_video_chunk_keys: Vec::new(),
+            late_frame_ids: vec![41],
+            requested_keyframe: true,
+            jitter_us: 700,
+            decode_queue_us: 2_000,
+            observed_at: "2026-06-18T00:00:00Z",
+        })?;
+
         assert!(feedback.requested_keyframe);
         Ok(())
     }
@@ -3368,6 +3398,7 @@ mod tests {
                 },
                 deadline_ticks: 28_800,
                 missing_video_chunk_keys: vec![video_chunk_feedback_key(9, 1)],
+                decode_chain_invalidated: true,
             },
             ExpiredVideoFrame {
                 key: VideoFrameKey {
@@ -3377,6 +3408,7 @@ mod tests {
                 },
                 deadline_ticks: 31_800,
                 missing_video_chunk_keys: vec![video_chunk_feedback_key(10, 1)],
+                decode_chain_invalidated: true,
             },
         ];
 
@@ -3392,6 +3424,34 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("one stream_id/session_id"));
+    }
+
+    #[test]
+    fn expired_non_dependency_damage_does_not_request_keyframe() -> Result<()> {
+        let expired = vec![ExpiredVideoFrame {
+            key: VideoFrameKey {
+                stream_id: "muninn.raven.av.rudp".to_string(),
+                session_id: "session-1".to_string(),
+                frame_id: 9,
+            },
+            deadline_ticks: 28_800,
+            missing_video_chunk_keys: vec![video_chunk_feedback_key(9, 1)],
+            decode_chain_invalidated: false,
+        }];
+
+        let feedback = build_feedback_for_expired_video_frames(
+            &expired,
+            ExpiredVideoFrameFeedbackOptions {
+                receiver_id: "starfire.obs",
+                jitter_us: 700,
+                decode_queue_us: 2_000,
+                observed_at: "2026-06-18T00:00:00Z",
+            },
+        )?
+        .expect("expired damage should produce feedback");
+
+        assert!(!feedback.requested_keyframe);
+        Ok(())
     }
 
     #[test]

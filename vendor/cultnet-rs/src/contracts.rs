@@ -104,7 +104,21 @@ pub struct CultNetTransportDescriptor {
     pub discovery_group: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wire_contracts: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reconnect_policy: Option<CultNetReconnectPolicy>,
     pub channels: Vec<CultNetTransportChannel>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CultNetReconnectPolicy {
+    pub schema_version: String,
+    pub policy_id: String,
+    pub base_delay_ms: u64,
+    pub max_delay_ms: u64,
+    pub max_jitter_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_attempts: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,8 +142,6 @@ pub struct CultNetTransportChannel {
     pub max_fragment_bytes: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_pending_reliable_packets: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reliable_expire_after_ms: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -181,6 +193,53 @@ pub struct CultNetSchemaDescriptor {
     pub content_hash: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema_json: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CultNetShardDescriptor {
+    pub shard_id: String,
+    pub owner_runtime_id: String,
+    pub epoch: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_primary: Option<bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub schema_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_prefix: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub primary_endpoints: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub replica_endpoints: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub read_replica_endpoints: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority_lease_id: Option<String>,
+}
+
+impl CultNetShardDescriptor {
+    pub fn serves(&self, schema_id: Option<&str>, record_key: Option<&str>) -> bool {
+        if let Some(schema_id) = schema_id
+            && !self.schema_ids.is_empty()
+            && !self
+                .schema_ids
+                .iter()
+                .any(|candidate| candidate == schema_id)
+        {
+            return false;
+        }
+
+        if let Some(record_key) = record_key
+            && let Some(prefix) = self.key_prefix.as_deref()
+            && !record_key.starts_with(prefix)
+        {
+            return false;
+        }
+
+        true
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -282,6 +341,52 @@ pub enum CultNetMessage {
         message_id: String,
         schemas: Vec<CultNetSchemaDescriptor>,
     },
+    #[serde(rename = "cultnet.shard_catalog_request.v0", rename_all = "camelCase")]
+    ShardCatalogRequest {
+        message_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema_ids: Option<Vec<String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        record_keys: Option<Vec<String>>,
+    },
+    #[serde(rename = "cultnet.shard_catalog_response.v0", rename_all = "camelCase")]
+    ShardCatalogResponse {
+        message_id: String,
+        shards: Vec<CultNetShardDescriptor>,
+    },
+    #[serde(rename = "cultnet.operation_request.v0", rename_all = "camelCase")]
+    OperationRequest {
+        message_id: String,
+        service_id: String,
+        operation: String,
+        payload_schema: String,
+        #[serde(default = "messagepack_base64_encoding")]
+        payload_encoding: String,
+        payload: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_runtime_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_runtime_id: Option<String>,
+    },
+    #[serde(rename = "cultnet.operation_response.v0", rename_all = "camelCase")]
+    OperationResponse {
+        message_id: String,
+        service_id: String,
+        operation: String,
+        status: String,
+        payload_schema: String,
+        #[serde(default = "messagepack_base64_encoding")]
+        payload_encoding: String,
+        payload: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        diagnostics: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_runtime_id: Option<String>,
+    },
+}
+
+fn messagepack_base64_encoding() -> String {
+    "messagepack-base64".to_string()
 }
 
 pub fn parse_cultnet_message(
@@ -473,6 +578,60 @@ fn validate_message(message: &CultNetMessage) -> Result<()> {
                 validate_schema_descriptor(schema)?;
             }
         }
+        CultNetMessage::ShardCatalogRequest {
+            message_id,
+            schema_ids,
+            record_keys,
+        } => {
+            require_non_empty(message_id, "messageId")?;
+            require_optional_string_vec(schema_ids.as_deref(), "schemaIds")?;
+            require_optional_string_vec(record_keys.as_deref(), "recordKeys")?;
+        }
+        CultNetMessage::ShardCatalogResponse { message_id, shards } => {
+            require_non_empty(message_id, "messageId")?;
+            for shard in shards {
+                validate_shard_descriptor(shard)?;
+            }
+        }
+        CultNetMessage::OperationRequest {
+            message_id,
+            service_id,
+            operation,
+            payload_schema,
+            payload_encoding,
+            payload,
+            source_runtime_id,
+            target_runtime_id,
+        } => {
+            require_non_empty(message_id, "messageId")?;
+            require_non_empty(service_id, "serviceId")?;
+            require_non_empty(operation, "operation")?;
+            require_non_empty(payload_schema, "payloadSchema")?;
+            require_exact(payload_encoding, "messagepack-base64", "payloadEncoding")?;
+            require_non_empty(payload, "payload")?;
+            require_optional_non_empty(source_runtime_id.as_deref(), "sourceRuntimeId")?;
+            require_optional_non_empty(target_runtime_id.as_deref(), "targetRuntimeId")?;
+        }
+        CultNetMessage::OperationResponse {
+            message_id,
+            service_id,
+            operation,
+            status,
+            payload_schema,
+            payload_encoding,
+            payload,
+            diagnostics: _,
+            source_runtime_id,
+        } => {
+            require_non_empty(message_id, "messageId")?;
+            require_non_empty(service_id, "serviceId")?;
+            require_non_empty(operation, "operation")?;
+            require_non_empty(status, "status")?;
+            require_non_empty(payload_schema, "payloadSchema")?;
+            require_exact(payload_encoding, "messagepack-base64", "payloadEncoding")?;
+            require_non_empty(payload, "payload")?;
+            require_optional_non_empty(source_runtime_id.as_deref(), "sourceRuntimeId")?;
+        }
     }
     Ok(())
 }
@@ -545,9 +704,32 @@ fn validate_schema_descriptor(schema: &CultNetSchemaDescriptor) -> Result<()> {
     Ok(())
 }
 
+fn validate_shard_descriptor(shard: &CultNetShardDescriptor) -> Result<()> {
+    require_non_empty(&shard.shard_id, "shardId")?;
+    require_non_empty(&shard.owner_runtime_id, "ownerRuntimeId")?;
+    require_optional_string_vec(Some(shard.schema_ids.as_slice()), "schemaIds")?;
+    require_optional_non_empty(shard.key_prefix.as_deref(), "keyPrefix")?;
+    require_optional_string_vec(Some(shard.primary_endpoints.as_slice()), "primaryEndpoints")?;
+    require_optional_string_vec(Some(shard.replica_endpoints.as_slice()), "replicaEndpoints")?;
+    require_optional_string_vec(
+        Some(shard.read_replica_endpoints.as_slice()),
+        "readReplicaEndpoints",
+    )?;
+    require_optional_non_empty(shard.region.as_deref(), "region")?;
+    require_optional_non_empty(shard.authority_lease_id.as_deref(), "authorityLeaseId")?;
+    Ok(())
+}
+
 fn require_non_empty(value: &str, field: &str) -> Result<()> {
     if value.trim().is_empty() {
         return Err(anyhow!("CultNet field {field} must be non-empty"));
+    }
+    Ok(())
+}
+
+fn require_exact(value: &str, expected: &str, field: &str) -> Result<()> {
+    if value != expected {
+        return Err(anyhow!("{field} must be {expected}"));
     }
     Ok(())
 }

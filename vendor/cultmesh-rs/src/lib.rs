@@ -748,7 +748,7 @@ fn request_raw_snapshot_from_rudp_catalog(
             max_payload_bytes: None,
             max_fragment_bytes: Some(1200),
             max_pending_reliable_packets: None,
-            media_reliable_expire_after_ms: None,
+            reconnect_policy: None,
         },
     )?;
     client.connect(Vec::new())?;
@@ -844,7 +844,7 @@ fn publish_cultnet_message_to_rudp_catalog(
             max_payload_bytes: None,
             max_fragment_bytes: Some(1200),
             max_pending_reliable_packets: None,
-            media_reliable_expire_after_ms: None,
+            reconnect_policy: None,
         },
     )?;
     client.connect(Vec::new())?;
@@ -855,7 +855,6 @@ fn publish_cultnet_message_to_rudp_catalog(
         thread::sleep(options.poll_interval);
     }
     if !client.connected() {
-        client.assume_connected();
     }
 
     let payload = encode_cultnet_message_to_vec(message, CultNetWireContract::CultNetSchemaV0)?;

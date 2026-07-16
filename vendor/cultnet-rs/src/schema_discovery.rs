@@ -354,6 +354,20 @@ pub fn builtin_schema_registry() -> Result<CultNetSchemaRegistry> {
             None,
         )?,
         schema_registration(
+            include_str!("../contracts/cultnet.shard-catalog-request.schema.json"),
+            CultNetSchemaKind::WireMessage,
+            vec![CultNetWireContract::CultNetSchemaV0],
+            Some("cultnet.shard_catalog_request.v0"),
+            None,
+        )?,
+        schema_registration(
+            include_str!("../contracts/cultnet.shard-catalog-response.schema.json"),
+            CultNetSchemaKind::WireMessage,
+            vec![CultNetWireContract::CultNetSchemaV0],
+            Some("cultnet.shard_catalog_response.v0"),
+            None,
+        )?,
+        schema_registration(
             include_str!("../contracts/ghostlight.agent-state.schema.json"),
             CultNetSchemaKind::DocumentPayload,
             vec![CultNetWireContract::CultNetSchemaV0],

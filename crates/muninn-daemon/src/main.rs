@@ -80,7 +80,10 @@ const MUNINN_RUDP_MEDIA_MAX_FRAGMENT_BYTES: usize = MUNINN_RUDP_IPV4_UDP_PAYLOAD
     - MUNINN_RUDP_FIXED_HEADER_BYTES
     - crate::media_packetizer::MUNINN_MEDIA_RUDP_CHANNEL.len();
 const MUNINN_RUDP_MEDIA_RESEND_DELAY_MS: u64 = 5;
-const MUNINN_RUDP_MEDIA_RECEIVER_ASSEMBLY_DEADLINE_MS: u64 = 2_000;
+const MUNINN_RUDP_MEDIA_RECEIVER_ASSEMBLY_DEADLINE_MS: u64 = 100;
+const MUNINN_RUDP_MEDIA_PAYLOAD_CHANNEL_CAPACITY: usize = 512;
+const MUNINN_RUDP_MEDIA_PENDING_AUDIO_CAPACITY: usize = 256;
+const MUNINN_RUDP_MEDIA_PENDING_VIDEO_CAPACITY: usize = 512;
 const MUNINN_RUDP_MEDIA_RECEIVER_GAP_WAIT_MS: u64 = 16;
 const MUNINN_RUDP_MEDIA_REPAIR_CACHE_CHUNKS: usize = 16_384;
 const MUNINN_RUDP_MEDIA_REPAIR_BURST_CHUNKS: usize = 2_048;
@@ -259,7 +262,7 @@ struct MuninnRudpMediaProfile {
     video_rc_lookahead: u8,
     sender_queue_deadline_ms: u64,
     sender_resend_delay_ms: u64,
-    sender_reliable_expire_after_ms: u64,
+    sender_delivery_deadline_ms: u64,
     sender_pace_every_payloads: usize,
     sender_pace_sleep_us: u64,
     receiver_assembly_deadline_ms: u64,
@@ -687,7 +690,7 @@ fn run_provider_command_ingress(
             max_payload_bytes: None,
             max_fragment_bytes: Some(1200),
             max_pending_reliable_packets: Some(64),
-            media_reliable_expire_after_ms: None,
+            reconnect_policy: None,
         },
     )?;
     loop {
@@ -1946,7 +1949,10 @@ fn run_rudp_mux_once(
         )?;
         let mut last_stream_publish_at = Instant::now();
 
-        let (payload_tx, payload_rx) = mpsc::channel::<Result<QueuedMuninnMediaSendPayload>>();
+        let (payload_tx, payload_rx) =
+            mpsc::sync_channel::<Result<QueuedMuninnMediaSendPayload>>(
+                MUNINN_RUDP_MEDIA_PAYLOAD_CHANNEL_CAPACITY,
+            );
         video_sender = if let Some(stdout) = video_ffmpeg_stdout {
             Some(video_rudp_payload_reader(
                 payload_tx.clone(),
@@ -2105,7 +2111,11 @@ fn run_rudp_mux_once(
                 }
                 let payloads_dropped = payloads_queue_expired + payloads_send_expired;
                 if queued.kind == QueuedMuninnMediaKind::Video {
-                    repair_cache.remember(&queued.payload)?;
+                    repair_cache.remember(
+                        &queued.payload,
+                        Instant::now(),
+                        Duration::from_millis(media_profile.sender_queue_deadline_ms),
+                    )?;
                 }
                 poll_rudp_media_receiver_feedback(
                     &mut video_transport,
@@ -2254,8 +2264,18 @@ struct PendingMuninnMediaSendQueues {
 impl PendingMuninnMediaSendQueues {
     fn push(&mut self, payload: QueuedMuninnMediaSendPayload) {
         match payload.kind {
-            QueuedMuninnMediaKind::Audio => self.audio.push_back(payload),
-            QueuedMuninnMediaKind::Video => self.video.push_back(payload),
+            QueuedMuninnMediaKind::Audio => {
+                while self.audio.len() >= MUNINN_RUDP_MEDIA_PENDING_AUDIO_CAPACITY {
+                    self.audio.pop_front();
+                }
+                self.audio.push_back(payload);
+            }
+            QueuedMuninnMediaKind::Video => {
+                while self.video.len() >= MUNINN_RUDP_MEDIA_PENDING_VIDEO_CAPACITY {
+                    self.video.pop_front();
+                }
+                self.video.push_back(payload);
+            }
         }
     }
 
@@ -2378,7 +2398,13 @@ impl MuninnRudpRepairBudget {
 struct RecentVideoChunkRepairCache {
     max_entries: usize,
     order: VecDeque<String>,
-    entries: HashMap<String, MuninnMediaSendPayload>,
+    entries: HashMap<String, CachedVideoRepair>,
+}
+
+#[derive(Debug)]
+struct CachedVideoRepair {
+    payload: MuninnMediaSendPayload,
+    expires_at: Instant,
 }
 
 impl RecentVideoChunkRepairCache {
@@ -2390,16 +2416,25 @@ impl RecentVideoChunkRepairCache {
         }
     }
 
-    fn remember(&mut self, payload: &MuninnMediaSendPayload) -> Result<()> {
+    fn remember(
+        &mut self,
+        payload: &MuninnMediaSendPayload,
+        now: Instant,
+        lifetime: Duration,
+    ) -> Result<()> {
         let Some(key) = video_repair_cache_key_from_payload(payload)? else {
             return Ok(());
         };
+        let cached = CachedVideoRepair {
+            payload: payload.clone(),
+            expires_at: now + lifetime,
+        };
         if self.entries.contains_key(&key) {
-            self.entries.insert(key, payload.clone());
+            self.entries.insert(key, cached);
             return Ok(());
         }
         self.order.push_back(key.clone());
-        self.entries.insert(key, payload.clone());
+        self.entries.insert(key, cached);
         while self.entries.len() > self.max_entries {
             let Some(expired) = self.order.pop_front() else {
                 break;
@@ -2412,10 +2447,17 @@ impl RecentVideoChunkRepairCache {
     fn repair_payloads_for_feedback(
         &self,
         feedback: &MuninnMediaReceiverFeedbackRecord,
+        now: Instant,
     ) -> Vec<MuninnMediaSendPayload> {
         feedback
             .missing_video_chunk_keys
             .iter()
+            .filter(|chunk_key| {
+                chunk_key
+                    .split_once(':')
+                    .and_then(|(frame_id, _)| frame_id.parse::<u64>().ok())
+                    .is_none_or(|frame_id| !feedback.late_frame_ids.contains(&frame_id))
+            })
             .filter_map(|chunk_key| {
                 self.entries
                     .get(&video_repair_cache_key(
@@ -2423,7 +2465,8 @@ impl RecentVideoChunkRepairCache {
                         &feedback.session_id,
                         chunk_key,
                     ))
-                    .cloned()
+                    .filter(|cached| cached.expires_at > now)
+                    .map(|cached| cached.payload.clone())
             })
             .collect()
     }
@@ -2448,7 +2491,7 @@ fn video_repair_cache_key_from_payload(payload: &MuninnMediaSendPayload) -> Resu
 }
 
 fn queue_muninn_media_payload(
-    tx: &mpsc::Sender<Result<QueuedMuninnMediaSendPayload>>,
+    tx: &mpsc::SyncSender<Result<QueuedMuninnMediaSendPayload>>,
     payload: MuninnMediaSendPayload,
     kind: QueuedMuninnMediaKind,
 ) -> Result<()> {
@@ -2671,7 +2714,7 @@ fn record_rudp_media_receiver_feedback(
         return Ok(Vec::new());
     };
 
-    let repair_payloads = repair_cache.repair_payloads_for_feedback(&feedback);
+    let repair_payloads = repair_cache.repair_payloads_for_feedback(&feedback, Instant::now());
     stats.feedback_records = stats.feedback_records.saturating_add(1);
     if feedback.requested_keyframe {
         stats.requested_keyframes = stats.requested_keyframes.saturating_add(1);
@@ -2820,13 +2863,12 @@ fn muninn_media_rudp_options(
     endpoint: SocketAddr,
     media_profile: &MuninnRudpMediaProfile,
     connection_id: u32,
-    reliable_expire_after_ms: Option<u64>,
+    _reliable_expire_after_ms: Option<u64>,
 ) -> CultNetRudpSocketTransportOptions {
     let mut options =
         CultNetRudpSocketTransportOptions::client("muninn-media", socket, endpoint, connection_id);
     options.resend_delay_ms = media_profile.sender_resend_delay_ms;
     options.max_fragment_bytes = Some(media_profile.max_fragment_bytes as u32);
-    options.media_reliable_expire_after_ms = reliable_expire_after_ms;
     options
 }
 
@@ -2834,14 +2876,12 @@ fn reliable_packets_expired(
     video_transport: &CultNetRudpSocketTransportConnection,
     audio_transport: &CultNetRudpSocketTransportConnection,
 ) -> u64 {
-    video_transport
-        .stats()
-        .reliable_packets_expired
-        .saturating_add(audio_transport.stats().reliable_packets_expired)
+    let _ = (video_transport, audio_transport);
+    0
 }
 
 fn video_rudp_payload_reader<R>(
-    tx: mpsc::Sender<Result<QueuedMuninnMediaSendPayload>>,
+    tx: mpsc::SyncSender<Result<QueuedMuninnMediaSendPayload>>,
     mut reader: R,
     config: VideoAnnexBStreamSendConfig,
 ) -> thread::JoinHandle<()>
@@ -2856,7 +2896,7 @@ where
 }
 
 fn audio_rudp_payload_reader<R>(
-    tx: mpsc::Sender<Result<QueuedMuninnMediaSendPayload>>,
+    tx: mpsc::SyncSender<Result<QueuedMuninnMediaSendPayload>>,
     mut reader: R,
     config: AudioPcmStreamSendConfig,
 ) -> thread::JoinHandle<()>
@@ -2871,7 +2911,7 @@ where
 }
 
 fn read_video_rudp_payloads<R>(
-    tx: &mpsc::Sender<Result<QueuedMuninnMediaSendPayload>>,
+    tx: &mpsc::SyncSender<Result<QueuedMuninnMediaSendPayload>>,
     reader: &mut R,
     config: VideoAnnexBStreamSendConfig,
 ) -> Result<()>
@@ -2899,7 +2939,7 @@ where
 }
 
 fn read_audio_rudp_payloads<R>(
-    tx: &mpsc::Sender<Result<QueuedMuninnMediaSendPayload>>,
+    tx: &mpsc::SyncSender<Result<QueuedMuninnMediaSendPayload>>,
     reader: &mut R,
     config: AudioPcmStreamSendConfig,
 ) -> Result<()>
@@ -3438,7 +3478,7 @@ fn publish_runtime_boundary_records(
                 "video_rc_lookahead": media_profile.video_rc_lookahead,
                 "sender_queue_deadline_ms": media_profile.sender_queue_deadline_ms,
                 "sender_resend_delay_ms": media_profile.sender_resend_delay_ms,
-                "sender_reliable_expire_after_ms": media_profile.sender_reliable_expire_after_ms,
+                "sender_delivery_deadline_ms": media_profile.sender_delivery_deadline_ms,
                 "receiver_assembly_deadline_ms": media_profile.receiver_assembly_deadline_ms,
                 "receiver_gap_wait_ms": media_profile.receiver_gap_wait_ms,
                 "late_media_policy": "drop expired queued media; do not repair frames outside the latency budget",
@@ -5364,7 +5404,12 @@ struct ActiveHidControllerStream {
 
 struct ActiveHidControllerRudpSource {
     source: MoveStateSource,
+    epoch: u64,
     sequence: u64,
+    next_edge_sequence: u64,
+    pending_edges: VecDeque<HidButtonEdge>,
+    edge_buttons: Vec<String>,
+    last_edge_send_at: Option<Instant>,
     joystick_axes: [i16; 16],
     joystick_buttons: [bool; 32],
     latest_report: Option<LatestHidReport>,
@@ -5377,11 +5422,17 @@ struct ActiveHidControllerRudpSource {
 }
 
 fn active_hid_controller_rudp_source(source: MoveStateSource) -> ActiveHidControllerRudpSource {
+    let epoch = timestamp_ns().unwrap_or_default().max(0) as u64;
     ActiveHidControllerRudpSource {
         #[cfg(windows)]
         report_rx: start_windows_hid_report_reader_if_supported(&source.hidraw_path),
         source,
+        epoch,
         sequence: 0,
+        next_edge_sequence: 1,
+        pending_edges: VecDeque::new(),
+        edge_buttons: Vec::new(),
+        last_edge_send_at: None,
         joystick_axes: [0; 16],
         joystick_buttons: [false; 32],
         latest_report: None,
@@ -5390,6 +5441,42 @@ fn active_hid_controller_rudp_source(source: MoveStateSource) -> ActiveHidContro
         last_emitted_at: None,
         last_read_error_log_at: None,
     }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct HidButtonEdge {
+    epoch: u64,
+    device_id: String,
+    edge_sequence: u64,
+    button: String,
+    pressed: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct HidLatestStateFrame {
+    epoch: u64,
+    state_sequence: u64,
+    record: MuninnHidControllerStateRecord,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct HidEdgeAck {
+    epoch: u64,
+    device_id: String,
+    edge_sequence: u64,
+}
+
+fn capture_button_edges(active: &mut ActiveHidControllerRudpSource, buttons: &[String]) {
+    let previous = active.edge_buttons.clone();
+    for button in previous.iter().filter(|button| !buttons.contains(button)) {
+        active.pending_edges.push_back(HidButtonEdge { epoch: active.epoch.clone(), device_id: active.source.move_id.clone(), edge_sequence: active.next_edge_sequence, button: button.clone(), pressed: false });
+        active.next_edge_sequence = active.next_edge_sequence.saturating_add(1);
+    }
+    for button in buttons.iter().filter(|button| !previous.contains(button)) {
+        active.pending_edges.push_back(HidButtonEdge { epoch: active.epoch.clone(), device_id: active.source.move_id.clone(), edge_sequence: active.next_edge_sequence, button: button.clone(), pressed: true });
+        active.next_edge_sequence = active.next_edge_sequence.saturating_add(1);
+    }
+    active.edge_buttons = buttons.to_vec();
 }
 
 fn sync_hid_controller_rudp_sources(
@@ -5474,7 +5561,7 @@ fn run_hid_controller_rudp_ingress(
             max_payload_bytes: None,
             max_fragment_bytes: Some(HID_CONTROLLER_RUDP_MAX_FRAGMENT_BYTES),
             max_pending_reliable_packets: Some(256),
-            media_reliable_expire_after_ms: Some(25),
+            reconnect_policy: None,
         })?;
     let mut sources = live_move_state_sources(&options)
         .into_iter()
@@ -5519,6 +5606,15 @@ fn run_hid_controller_rudp_ingress(
                             eprintln!(
                                 "Muninn ignored invalid HID controller RUDP subscription: {error:#}"
                             );
+                        }
+                    }
+                }
+                Ok(Some(frame)) if frame.channel_id == "hid.edge.ack" => {
+                    if let Ok(ack) = serde_json::from_slice::<HidEdgeAck>(&frame.payload) {
+                        if let Some(source) = sources.iter_mut().find(|source| source.source.move_id == ack.device_id && source.epoch == ack.epoch) {
+                            while source.pending_edges.front().is_some_and(|edge| edge.edge_sequence <= ack.edge_sequence) {
+                                source.pending_edges.pop_front();
+                            }
                         }
                     }
                 }
@@ -5574,11 +5670,20 @@ fn run_hid_controller_rudp_ingress(
                 continue;
             }
             if transport.connected() {
-                let payload = serde_json::to_vec(&sanitize_hid_controller_record(record.clone()))
+                let payload = serde_json::to_vec(&HidLatestStateFrame { epoch: source.epoch.clone(), state_sequence: record.sequence, record: sanitize_hid_controller_record(record.clone()) })
                     .context("encoding Muninn HID controller stream record")?;
                 if let Err(error) = transport.send("latest", payload) {
                     eprintln!("Muninn HID controller RUDP send warning: {error:#}");
                     break;
+                }
+                if source.last_edge_send_at.is_none_or(|sent| sent.elapsed() >= Duration::from_millis(15)) {
+                  if let Some(edge) = source.pending_edges.front() {
+                    if let Err(error) = transport.send("hid.edge", serde_json::to_vec(edge)?) {
+                        eprintln!("Muninn HID edge send warning: {error:#}");
+                    } else {
+                        source.last_edge_send_at = Some(Instant::now());
+                    }
+                  }
                 }
                 sent_frames = sent_frames.saturating_add(1);
                 last_sent_at = Some(Instant::now());
@@ -5651,7 +5756,7 @@ fn read_hid_controller_state_for_stream(
     active: &mut ActiveHidControllerRudpSource,
     reader: &mut impl MoveControllerStateReader,
 ) -> Option<MuninnHidControllerStateRecord> {
-    let source = &active.source;
+    let source = active.source.clone();
     if is_joystick_path(&source.hidraw_path) {
         let events = match reader.read_joystick_events(&source.hidraw_path) {
             Ok(events) => {
@@ -5678,6 +5783,8 @@ fn read_hid_controller_state_for_stream(
                     if let Some(button) = active.joystick_buttons.get_mut(event.number as usize) {
                         *button = event.value != 0;
                     }
+                    let buttons = joystick_button_names(active.joystick_buttons);
+                    capture_button_edges(active, &buttons);
                 }
                 0x02 => {
                     if let Some(axis) = active.joystick_axes.get_mut(event.number as usize) {
@@ -5689,7 +5796,7 @@ fn read_hid_controller_state_for_stream(
         }
         let record = build_hid_controller_state_record_from_joystick(
             options,
-            source,
+            &source,
             active.sequence.saturating_add(1),
             active.joystick_axes,
             active.joystick_buttons,
@@ -5703,13 +5810,19 @@ fn read_hid_controller_state_for_stream(
         if let Some(rx) = active.report_rx.as_ref() {
             let mut saw_report = false;
             let mut drained_reports = 0usize;
+            let mut reports = Vec::new();
             for _ in 0..HID_CONTROLLER_RUDP_MAX_REPORT_DRAIN {
                 let Ok(report) = rx.try_recv() else {
                     break;
                 };
-                active.latest_report = Some(report);
+                reports.push(report);
                 saw_report = true;
                 drained_reports += 1;
+            }
+            for report in reports {
+                let buttons = hid_controller_button_names(&active.source, &report.bytes);
+                capture_button_edges(active, &buttons);
+                active.latest_report = Some(report);
             }
             if drained_reports == HID_CONTROLLER_RUDP_MAX_REPORT_DRAIN {
                 eprintln!(
@@ -5726,7 +5839,7 @@ fn read_hid_controller_state_for_stream(
             let report = active.latest_report.as_ref()?;
             let record = build_hid_controller_state_record_from_report(
                 options,
-                source,
+                &source,
                 active.sequence.saturating_add(1),
                 &report.bytes,
                 report.source_timestamp_ns,
@@ -5756,7 +5869,7 @@ fn read_hid_controller_state_for_stream(
         };
         let record = build_hid_controller_state_record_from_report(
             options,
-            source,
+            &source,
             active.sequence.saturating_add(1),
             &report,
             timestamp_ns().ok()?,
@@ -5790,7 +5903,7 @@ fn read_hid_controller_state_for_stream(
     };
     let record = build_hid_controller_state_record_from_xinput_gamepad(
         options,
-        source,
+        &source,
         active.sequence.saturating_add(1),
         &gamepad,
         timestamp_ns().ok()?,
@@ -5803,6 +5916,7 @@ fn emit_hid_controller_record_if_due(
     active: &mut ActiveHidControllerRudpSource,
     mut record: MuninnHidControllerStateRecord,
 ) -> Option<MuninnHidControllerStateRecord> {
+    capture_button_edges(active, &record.buttons);
     let axes_changed = active
         .last_emitted_axes
         .as_ref()
@@ -6018,7 +6132,7 @@ fn create_hid_controller_stream(options: &Options) -> Result<Option<ActiveHidCon
         max_payload_bytes: None,
         max_fragment_bytes: Some(HID_CONTROLLER_RUDP_MAX_FRAGMENT_BYTES),
         max_pending_reliable_packets: Some(256),
-        media_reliable_expire_after_ms: Some(25),
+        reconnect_policy: None,
     })?;
     Ok(Some(ActiveHidControllerStream {
         target,
@@ -9591,7 +9705,7 @@ fn muninn_rudp_media_profile_for_bitrate_and_latency(
         video_rc_lookahead: 0,
         sender_queue_deadline_ms: latency_budget_ms,
         sender_resend_delay_ms: MUNINN_RUDP_MEDIA_RESEND_DELAY_MS,
-        sender_reliable_expire_after_ms: latency_budget_ms,
+        sender_delivery_deadline_ms: latency_budget_ms,
         sender_pace_every_payloads: MUNINN_RUDP_MEDIA_SEND_PACE_EVERY_PAYLOADS,
         sender_pace_sleep_us: MUNINN_RUDP_MEDIA_SEND_PACE_SLEEP_US,
         receiver_assembly_deadline_ms: latency_budget_ms,
@@ -11525,7 +11639,7 @@ mod tests {
             options.max_fragment_bytes,
             Some(MUNINN_RUDP_MEDIA_MAX_FRAGMENT_BYTES as u32)
         );
-        assert_eq!(options.media_reliable_expire_after_ms, None);
+        assert_eq!(options.reconnect_policy, None);
         let transport = CultNetRudpSocketTransportConnection::new(options).unwrap();
         let channels = transport
             .profile
@@ -11536,17 +11650,18 @@ mod tests {
             .iter();
         let media_channel = channels
             .clone()
-            .find(|channel| channel.channel_id == "media")
+            .find(|channel| {
+                channel.channel_id == crate::media_packetizer::MUNINN_MEDIA_RUDP_CHANNEL
+            })
             .unwrap();
         assert_eq!(
             media_channel.delivery,
             cultnet_rs::CultNetTransportDelivery::Unreliable
         );
-        assert_eq!(media_channel.reliable_expire_after_ms, None);
     }
 
     #[test]
-    fn rudp_audio_transport_uses_separate_reliable_media_connection() {
+    fn rudp_audio_transport_uses_separate_realtime_connection() {
         let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
         let endpoint: SocketAddr = "127.0.0.1:5204".parse().unwrap();
         let profile = muninn_rudp_media_profile();
@@ -11560,10 +11675,7 @@ mod tests {
         );
 
         assert_eq!(options.connection_id, MUNINN_AUDIO_RUDP_CONNECTION_ID);
-        assert_eq!(
-            options.media_reliable_expire_after_ms,
-            Some(MUNINN_RUDP_MEDIA_RECEIVER_ASSEMBLY_DEADLINE_MS)
-        );
+        assert_eq!(options.reconnect_policy, None);
     }
 
     #[test]
@@ -11647,6 +11759,41 @@ mod tests {
     }
 
     #[test]
+    fn rudp_media_pending_queues_are_structurally_bounded() {
+        let queued_at = Instant::now();
+        let mut pending = PendingMuninnMediaSendQueues::default();
+        for index in 0..(MUNINN_RUDP_MEDIA_PENDING_AUDIO_CAPACITY + 32) {
+            pending.push(QueuedMuninnMediaSendPayload {
+                payload: MuninnMediaSendPayload {
+                    channel_id: crate::media_packetizer::MUNINN_MEDIA_RUDP_CHANNEL,
+                    payload: vec![(index % 251) as u8],
+                },
+                queued_at,
+                kind: QueuedMuninnMediaKind::Audio,
+            });
+        }
+        for index in 0..(MUNINN_RUDP_MEDIA_PENDING_VIDEO_CAPACITY + 32) {
+            pending.push(QueuedMuninnMediaSendPayload {
+                payload: MuninnMediaSendPayload {
+                    channel_id: crate::media_packetizer::MUNINN_MEDIA_RUDP_CHANNEL,
+                    payload: vec![(index % 251) as u8],
+                },
+                queued_at,
+                kind: QueuedMuninnMediaKind::Video,
+            });
+        }
+
+        assert_eq!(
+            pending.audio_len(),
+            MUNINN_RUDP_MEDIA_PENDING_AUDIO_CAPACITY
+        );
+        assert_eq!(
+            pending.video_len(),
+            MUNINN_RUDP_MEDIA_PENDING_VIDEO_CAPACITY
+        );
+    }
+
+    #[test]
     fn rudp_latency_budget_owns_sender_and_record_deadlines() {
         let options = Options::parse(
             [
@@ -11669,7 +11816,7 @@ mod tests {
         let profile = muninn_rudp_media_profile_for_options(&options);
 
         assert_eq!(profile.sender_queue_deadline_ms, 2000);
-        assert_eq!(profile.sender_reliable_expire_after_ms, 2000);
+        assert_eq!(profile.sender_delivery_deadline_ms, 2000);
         assert_eq!(
             profile.sender_pace_every_payloads,
             MUNINN_RUDP_MEDIA_SEND_PACE_EVERY_PAYLOADS
@@ -11848,7 +11995,7 @@ mod tests {
                 highest_decodable_frame_id: Some(41),
                 missing_frame_ids: Vec::new(),
                 missing_video_chunk_keys: vec!["42:3".to_string(), "42:4".to_string()],
-                late_frame_ids: vec![42],
+                late_frame_ids: Vec::new(),
                 requested_keyframe: true,
                 jitter_us: 500,
                 decode_queue_us: 2_000,
@@ -11858,10 +12005,80 @@ mod tests {
         .unwrap();
 
         let mut cache = RecentVideoChunkRepairCache::new(16);
-        cache.remember(&payload).unwrap();
-        let repairs = cache.repair_payloads_for_feedback(&feedback);
+        let now = Instant::now();
+        cache
+            .remember(&payload, now, Duration::from_millis(100))
+            .unwrap();
+        let repairs = cache.repair_payloads_for_feedback(&feedback, now);
 
         assert_eq!(repairs, vec![payload]);
+    }
+
+    #[test]
+    fn repair_cache_refuses_expired_and_receiver_late_chunks() {
+        let video = odin_core::MuninnMediaVideoAccessUnitRecord {
+            stream_id: "muninn.raven.av.rudp".to_string(),
+            session_id: "raven:session:video".to_string(),
+            frame_id: 42,
+            codec: "h264".to_string(),
+            pts_ticks: 126_000,
+            duration_ticks: 3_000,
+            timebase_num: 1,
+            timebase_den: 90_000,
+            keyframe: false,
+            dependency_frame_id: Some(41),
+            deadline_ticks: 127_800,
+            chunk_index: 3,
+            chunk_count: 5,
+            payload: vec![1, 2, 3, 4],
+        };
+        let payload = MuninnMediaSendPayload {
+            channel_id: crate::media_packetizer::MUNINN_MEDIA_RUDP_CHANNEL,
+            payload: crate::media_packetizer::encode_media_wire_record(
+                &crate::media_packetizer::MuninnMediaWireRecord::Video(video),
+                "unix:1000",
+                "muninn-test",
+                "repair-cache-expiry-test",
+            )
+            .unwrap(),
+        };
+        let feedback = |late_frame_ids| {
+            crate::media_packetizer::build_receiver_feedback(
+                crate::media_packetizer::ReceiverFeedbackOptions {
+                    stream_id: "muninn.raven.av.rudp",
+                    session_id: "raven:session:video",
+                    receiver_id: "starfire.obs",
+                    highest_decodable_frame_id: Some(41),
+                    missing_frame_ids: Vec::new(),
+                    missing_video_chunk_keys: vec!["42:3".to_string()],
+                    late_frame_ids,
+                    requested_keyframe: false,
+                    jitter_us: 500,
+                    decode_queue_us: 2_000,
+                    observed_at: "unix:1000",
+                },
+            )
+            .unwrap()
+        };
+        let now = Instant::now();
+        let mut cache = RecentVideoChunkRepairCache::new(16);
+        cache
+            .remember(&payload, now, Duration::from_millis(100))
+            .unwrap();
+
+        assert!(
+            cache
+                .repair_payloads_for_feedback(&feedback(vec![42]), now)
+                .is_empty()
+        );
+        assert!(
+            cache
+                .repair_payloads_for_feedback(
+                    &feedback(Vec::new()),
+                    now + Duration::from_millis(101),
+                )
+                .is_empty()
+        );
     }
 
     #[test]
@@ -12001,7 +12218,7 @@ mod tests {
                 max_payload_bytes: None,
                 max_fragment_bytes: Some(1200),
                 max_pending_reliable_packets: Some(64),
-                media_reliable_expire_after_ms: None,
+                reconnect_policy: None,
             },
         )
         .unwrap();
@@ -13047,7 +13264,7 @@ Device 00:07:04:A8:00:D0 (public)
         );
         assert_eq!(
             media_profile
-                .get("sender_reliable_expire_after_ms")
+                .get("sender_delivery_deadline_ms")
                 .and_then(|value| value.as_u64()),
             Some(MUNINN_RUDP_MEDIA_RECEIVER_ASSEMBLY_DEADLINE_MS)
         );
@@ -13547,6 +13764,21 @@ Device 00:07:04:A8:00:D0 (public)
         assert_eq!(record.axes[2], -1.0);
         assert_eq!(record.axes[5], 1.0);
         assert_eq!(record.buttons, vec!["up", "a", "b", "x", "y"]);
+    }
+
+    #[test]
+    fn hid_edge_capture_preserves_quick_tap_before_state_collapse() {
+        let mut active = active_hid_controller_rudp_source(MoveStateSource {
+            move_id: "pad".to_string(),
+            hidraw_path: "xinput://0".to_string(),
+        });
+        capture_button_edges(&mut active, &["a".to_string()]);
+        capture_button_edges(&mut active, &[]);
+        let edges = active.pending_edges.into_iter().collect::<Vec<_>>();
+        assert_eq!(edges.len(), 2);
+        assert_eq!((edges[0].button.as_str(), edges[0].pressed, edges[0].edge_sequence), ("a", true, 1));
+        assert_eq!((edges[1].button.as_str(), edges[1].pressed, edges[1].edge_sequence), ("a", false, 2));
+        assert_eq!(edges[0].epoch, edges[1].epoch);
     }
 
     #[test]

@@ -1,10 +1,9 @@
 use anyhow::Result;
 use anyhow::anyhow;
-use serde::Deserialize;
-use serde::Serialize;
 use std::io::Read;
 use std::io::Write;
 
+use crate::CultNetReconnectPolicy;
 use crate::CultNetTransportChannel;
 use crate::CultNetTransportDelivery;
 use crate::CultNetTransportDescriptor;
@@ -20,25 +19,12 @@ pub struct CultNetTransportStats {
     pub bytes_sent: u64,
     pub frames_received: u64,
     pub frames_sent: u64,
-    pub reliable_packets_expired: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CultNetTransportFrame {
     pub channel_id: String,
     pub payload: Vec<u8>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CultNetReconnectPolicy {
-    pub schema_version: String,
-    pub policy_id: String,
-    pub base_delay_ms: u64,
-    pub max_delay_ms: u64,
-    pub max_jitter_ms: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_attempts: Option<u32>,
 }
 
 #[derive(Clone, Debug)]
@@ -91,6 +77,96 @@ pub fn compute_reconnect_delay_ms(
     capped_base_delay + jitter_ms.min(policy.max_jitter_ms)
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CultNetReconnectDecision {
+    pub attempt: u32,
+    pub should_retry: bool,
+    pub delay_ms: u64,
+    pub next_attempt_at_ms: Option<u64>,
+    pub exhausted: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct CultNetReconnectController {
+    pub policy: CultNetReconnectPolicy,
+    attempt: u32,
+    next_attempt_at_ms: Option<u64>,
+    exhausted: bool,
+}
+
+impl Default for CultNetReconnectController {
+    fn default() -> Self {
+        Self::new(create_reconnect_policy(Default::default()))
+    }
+}
+
+impl CultNetReconnectController {
+    pub fn new(policy: CultNetReconnectPolicy) -> Self {
+        Self {
+            policy,
+            attempt: 0,
+            next_attempt_at_ms: None,
+            exhausted: false,
+        }
+    }
+
+    pub fn attempt(&self) -> u32 {
+        self.attempt
+    }
+
+    pub fn next_attempt_at_ms(&self) -> Option<u64> {
+        self.next_attempt_at_ms
+    }
+
+    pub fn exhausted(&self) -> bool {
+        self.exhausted
+    }
+
+    pub fn reset(&mut self) {
+        self.attempt = 0;
+        self.next_attempt_at_ms = None;
+        self.exhausted = false;
+    }
+
+    pub fn can_attempt(&self, now_ms: u64) -> bool {
+        !self.exhausted
+            && self
+                .next_attempt_at_ms
+                .is_none_or(|next_attempt_at_ms| now_ms >= next_attempt_at_ms)
+    }
+
+    pub fn record_failure(&mut self, now_ms: u64, jitter_ms: u64) -> CultNetReconnectDecision {
+        let next_attempt = self.attempt.saturating_add(1);
+        if self
+            .policy
+            .max_attempts
+            .is_some_and(|max_attempts| next_attempt > max_attempts)
+        {
+            self.exhausted = true;
+            self.next_attempt_at_ms = None;
+            return CultNetReconnectDecision {
+                attempt: self.attempt,
+                should_retry: false,
+                delay_ms: 0,
+                next_attempt_at_ms: None,
+                exhausted: true,
+            };
+        }
+
+        self.attempt = next_attempt;
+        let delay_ms = compute_reconnect_delay_ms(&self.policy, self.attempt, jitter_ms);
+        let next_attempt_at_ms = now_ms.saturating_add(delay_ms);
+        self.next_attempt_at_ms = Some(next_attempt_at_ms);
+        CultNetReconnectDecision {
+            attempt: self.attempt,
+            should_retry: true,
+            delay_ms,
+            next_attempt_at_ms: Some(next_attempt_at_ms),
+            exhausted: false,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct TcpFramedTransportProfileOptions {
     pub transport_id: Option<String>,
@@ -117,6 +193,7 @@ pub fn create_tcp_framed_transport_profile(
             path: None,
             discovery_group: None,
             wire_contracts: Some(vec!["cultnet.schema.v0".to_string()]),
+            reconnect_policy: None,
             channels: vec![CultNetTransportChannel {
                 channel_id: "schema".to_string(),
                 delivery: CultNetTransportDelivery::Reliable,
@@ -124,7 +201,6 @@ pub fn create_tcp_framed_transport_profile(
                 max_payload_bytes: options.max_payload_bytes,
                 max_fragment_bytes: options.max_fragment_bytes,
                 max_pending_reliable_packets: None,
-                reliable_expire_after_ms: None,
             }],
         }],
     }
