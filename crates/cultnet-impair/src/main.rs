@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::env;
 use std::fs::{self, File};
 use std::io::{self, Write};
@@ -8,6 +8,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const MAX_DATAGRAM: usize = 65_535;
+const MAX_CLIENT_FLOWS: usize = 64;
+const CLIENT_FLOW_IDLE_TIMEOUT_MS: u64 = 30_000;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Profile {
@@ -163,6 +165,60 @@ struct Stats {
     stalled: u64,
     queue_overflow: u64,
     max_queue: usize,
+    flow_evicted: u64,
+    max_flows: usize,
+}
+
+#[derive(Debug)]
+struct UpstreamFlow {
+    socket: UdpSocket,
+    last_activity_ms: u64,
+}
+
+fn open_upstream_flow(upstream: SocketAddr, now_ms: u64) -> io::Result<UpstreamFlow> {
+    let socket = UdpSocket::bind("0.0.0.0:0")?;
+    socket.connect(upstream)?;
+    socket.set_nonblocking(true)?;
+    Ok(UpstreamFlow {
+        socket,
+        last_activity_ms: now_ms,
+    })
+}
+
+fn ensure_upstream_flow(
+    flows: &mut HashMap<SocketAddr, UpstreamFlow>,
+    client: SocketAddr,
+    upstream: SocketAddr,
+    now_ms: u64,
+    stats: &mut Stats,
+) -> io::Result<()> {
+    if flows.contains_key(&client) {
+        return Ok(());
+    }
+    if flows.len() >= MAX_CLIENT_FLOWS
+        && let Some(oldest) = flows
+            .iter()
+            .min_by_key(|(_, flow)| flow.last_activity_ms)
+            .map(|(address, _)| *address)
+    {
+        flows.remove(&oldest);
+        stats.flow_evicted += 1;
+    }
+    flows.insert(client, open_upstream_flow(upstream, now_ms)?);
+    stats.max_flows = stats.max_flows.max(flows.len());
+    Ok(())
+}
+
+fn reap_idle_flows(
+    flows: &mut HashMap<SocketAddr, UpstreamFlow>,
+    now_ms: u64,
+    stats: &mut Stats,
+) {
+    let before = flows.len();
+    flows.retain(|_, flow| {
+        now_ms.saturating_sub(flow.last_activity_ms) < CLIENT_FLOW_IDLE_TIMEOUT_MS
+    });
+    stats.flow_evicted += (before - flows.len()) as u64;
 }
 
 impl Scheduler {
@@ -355,18 +411,18 @@ fn elapsed_ms(start: Instant) -> u64 {
     start.elapsed().as_millis().try_into().unwrap_or(u64::MAX)
 }
 
-fn write_metrics(path: &Path, stats: &Stats) -> io::Result<()> {
+fn write_metrics(path: &Path, stats: &Stats, active_flows: usize) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
     let mut file = File::create(path)?;
     writeln!(
         file,
-        "received,forwarded,dropped,duplicated,reordered,stalled,queue_overflow,max_queue"
+        "received,forwarded,dropped,duplicated,reordered,stalled,queue_overflow,max_queue,flow_evicted,max_flows,active_flows"
     )?;
     writeln!(
         file,
-        "{},{},{},{},{},{},{},{}",
+        "{},{},{},{},{},{},{},{},{},{},{}",
         stats.received,
         stats.forwarded,
         stats.dropped,
@@ -374,7 +430,10 @@ fn write_metrics(path: &Path, stats: &Stats) -> io::Result<()> {
         stats.reordered,
         stats.stalled,
         stats.queue_overflow,
-        stats.max_queue
+        stats.max_queue,
+        stats.flow_evicted,
+        stats.max_flows,
+        active_flows
     )
 }
 
@@ -382,15 +441,7 @@ fn run(options: Options) -> Result<(), String> {
     let profile = Profile::load(&options.profile)?;
     let client_socket = UdpSocket::bind(options.listen)
         .map_err(|error| format!("binding {}: {error}", options.listen))?;
-    let upstream_socket = UdpSocket::bind("0.0.0.0:0")
-        .map_err(|error| format!("binding upstream socket: {error}"))?;
-    upstream_socket
-        .connect(options.upstream)
-        .map_err(|error| format!("connecting {}: {error}", options.upstream))?;
     client_socket
-        .set_nonblocking(true)
-        .map_err(|error| error.to_string())?;
-    upstream_socket
         .set_nonblocking(true)
         .map_err(|error| error.to_string())?;
     println!(
@@ -402,30 +453,65 @@ fn run(options: Options) -> Result<(), String> {
     );
     let start = Instant::now();
     let mut scheduler = Scheduler::new(profile, options.seed);
-    let mut client = None;
+    let mut flows = HashMap::<SocketAddr, UpstreamFlow>::new();
+    let mut last_flow_reap_at = 0_u64;
     let mut buffer = vec![0; MAX_DATAGRAM];
     loop {
         let now = elapsed_ms(start);
-        match client_socket.recv_from(&mut buffer) {
-            Ok((size, address)) => {
-                client = Some(address);
-                scheduler.admit(now, Direction::ClientToUpstream, &buffer[..size], address);
+        loop {
+            match client_socket.recv_from(&mut buffer) {
+                Ok((size, address)) => {
+                    ensure_upstream_flow(
+                        &mut flows,
+                        address,
+                        options.upstream,
+                        now,
+                        &mut scheduler.stats,
+                    )
+                    .map_err(|error| format!("opening upstream flow for {address}: {error}"))?;
+                    if let Some(flow) = flows.get_mut(&address) {
+                        flow.last_activity_ms = now;
+                    }
+                    scheduler.admit(
+                        now,
+                        Direction::ClientToUpstream,
+                        &buffer[..size],
+                        address,
+                    );
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(error) => return Err(error.to_string()),
             }
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
-            Err(error) => return Err(error.to_string()),
         }
-        match upstream_socket.recv(&mut buffer) {
-            Ok(size) => {
-                if let Some(address) = client {
-                    scheduler.admit(now, Direction::UpstreamToClient, &buffer[..size], address);
+        for (address, flow) in &mut flows {
+            loop {
+                match flow.socket.recv(&mut buffer) {
+                    Ok(size) => {
+                        flow.last_activity_ms = now;
+                        scheduler.admit(
+                            now,
+                            Direction::UpstreamToClient,
+                            &buffer[..size],
+                            *address,
+                        );
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                    Err(error) => return Err(error.to_string()),
                 }
             }
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
-            Err(error) => return Err(error.to_string()),
         }
         while let Some(item) = scheduler.pop_due(now) {
             let result = match item.direction {
-                Direction::ClientToUpstream => upstream_socket.send(&item.bytes),
+                Direction::ClientToUpstream => match flows.get_mut(&item.client) {
+                    Some(flow) => {
+                        flow.last_activity_ms = now;
+                        flow.socket.send(&item.bytes)
+                    }
+                    None => {
+                        scheduler.stats.dropped += 1;
+                        continue;
+                    }
+                },
                 Direction::UpstreamToClient => client_socket.send_to(&item.bytes, item.client),
             };
             if result.is_ok() {
@@ -434,8 +520,12 @@ fn run(options: Options) -> Result<(), String> {
         }
         if let Some(path) = options.metrics.as_deref() {
             if now % 1000 == 0 {
-                let _ = write_metrics(path, &scheduler.stats);
+                let _ = write_metrics(path, &scheduler.stats, flows.len());
             }
+        }
+        if now.saturating_sub(last_flow_reap_at) >= 1_000 {
+            reap_idle_flows(&mut flows, now, &mut scheduler.stats);
+            last_flow_reap_at = now;
         }
         thread::sleep(Duration::from_millis(1));
     }
@@ -456,6 +546,50 @@ mod tests {
     use super::*;
     fn client() -> SocketAddr {
         "127.0.0.1:1234".parse().unwrap()
+    }
+
+    #[test]
+    fn independent_clients_keep_independent_upstream_udp_identities() {
+        let mut flows = HashMap::new();
+        let mut stats = Stats::default();
+        let upstream = "127.0.0.1:54321".parse().unwrap();
+        let first = "127.0.0.1:12001".parse().unwrap();
+        let second = "127.0.0.1:12002".parse().unwrap();
+
+        ensure_upstream_flow(&mut flows, first, upstream, 1, &mut stats).unwrap();
+        ensure_upstream_flow(&mut flows, second, upstream, 2, &mut stats).unwrap();
+
+        assert_eq!(flows.len(), 2);
+        assert_ne!(
+            flows[&first].socket.local_addr().unwrap(),
+            flows[&second].socket.local_addr().unwrap()
+        );
+        assert_eq!(stats.max_flows, 2);
+        assert_eq!(stats.flow_evicted, 0);
+    }
+
+    #[test]
+    fn idle_client_flows_are_reaped_without_touching_active_flows() {
+        let mut flows = HashMap::new();
+        let mut stats = Stats::default();
+        let upstream = "127.0.0.1:54321".parse().unwrap();
+        let idle = "127.0.0.1:12001".parse().unwrap();
+        let active = "127.0.0.1:12002".parse().unwrap();
+
+        ensure_upstream_flow(&mut flows, idle, upstream, 0, &mut stats).unwrap();
+        ensure_upstream_flow(
+            &mut flows,
+            active,
+            upstream,
+            CLIENT_FLOW_IDLE_TIMEOUT_MS - 1,
+            &mut stats,
+        )
+        .unwrap();
+        reap_idle_flows(&mut flows, CLIENT_FLOW_IDLE_TIMEOUT_MS, &mut stats);
+
+        assert!(!flows.contains_key(&idle));
+        assert!(flows.contains_key(&active));
+        assert_eq!(stats.flow_evicted, 1);
     }
 
     #[test]

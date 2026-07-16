@@ -81,7 +81,7 @@ const MUNINN_RUDP_MEDIA_MAX_FRAGMENT_BYTES: usize = MUNINN_RUDP_IPV4_UDP_PAYLOAD
     - crate::media_packetizer::MUNINN_MEDIA_RUDP_CHANNEL.len();
 const MUNINN_RUDP_MEDIA_RESEND_DELAY_MS: u64 = 5;
 const MUNINN_RUDP_MEDIA_RECEIVER_ASSEMBLY_DEADLINE_MS: u64 = 100;
-const MUNINN_RUDP_MEDIA_PAYLOAD_CHANNEL_CAPACITY: usize = 32;
+const MUNINN_RUDP_MEDIA_PAYLOAD_CHANNEL_CAPACITY: usize = 1;
 const MUNINN_RUDP_MEDIA_PENDING_AUDIO_CAPACITY: usize = 256;
 const MUNINN_RUDP_MEDIA_PENDING_VIDEO_CAPACITY: usize = 512;
 const MUNINN_RUDP_MEDIA_INGEST_BUDGET_PER_TURN: usize = 1;
@@ -1974,7 +1974,7 @@ fn run_rudp_mux_once(
         let mut last_stream_publish_at = Instant::now();
 
         let (payload_tx, payload_rx) =
-            mpsc::sync_channel::<Result<QueuedMuninnMediaSendPayload>>(
+            mpsc::sync_channel::<Result<Vec<QueuedMuninnMediaSendPayload>>>(
                 MUNINN_RUDP_MEDIA_PAYLOAD_CHANNEL_CAPACITY,
             );
         video_sender = if let Some(stdout) = video_ffmpeg_stdout {
@@ -2611,27 +2611,36 @@ fn video_repair_cache_key_from_payload(payload: &MuninnMediaSendPayload) -> Resu
     )))
 }
 
-fn queue_muninn_media_payload(
-    tx: &mpsc::SyncSender<Result<QueuedMuninnMediaSendPayload>>,
-    payload: MuninnMediaSendPayload,
+fn queue_muninn_media_payloads(
+    tx: &mpsc::SyncSender<Result<Vec<QueuedMuninnMediaSendPayload>>>,
+    payloads: Vec<MuninnMediaSendPayload>,
     kind: QueuedMuninnMediaKind,
 ) -> Result<()> {
-    tx.send(Ok(QueuedMuninnMediaSendPayload {
-        payload,
-        queued_at: Instant::now(),
-        kind,
-    }))
-    .context("queueing typed Muninn media payload")
+    if payloads.is_empty() {
+        return Ok(());
+    }
+    let queued_at = Instant::now();
+    tx.send(Ok(payloads
+        .into_iter()
+        .map(|payload| QueuedMuninnMediaSendPayload {
+            payload,
+            queued_at,
+            kind,
+        })
+        .collect()))
+        .context("queueing typed Muninn media payload group")
 }
 
 fn receive_pending_media_payloads(
-    rx: &mpsc::Receiver<Result<QueuedMuninnMediaSendPayload>>,
+    rx: &mpsc::Receiver<Result<Vec<QueuedMuninnMediaSendPayload>>>,
     pending: &mut PendingMuninnMediaSendQueues,
     timeout: Duration,
 ) -> Result<bool> {
     match rx.recv_timeout(timeout) {
-        Ok(Ok(payload)) => {
-            pending.push(payload);
+        Ok(Ok(payloads)) => {
+            for payload in payloads {
+                pending.push(payload);
+            }
             drain_available_media_payloads(rx, pending)
         }
         Ok(Err(error)) => Err(error),
@@ -2641,12 +2650,16 @@ fn receive_pending_media_payloads(
 }
 
 fn drain_available_media_payloads(
-    rx: &mpsc::Receiver<Result<QueuedMuninnMediaSendPayload>>,
+    rx: &mpsc::Receiver<Result<Vec<QueuedMuninnMediaSendPayload>>>,
     pending: &mut PendingMuninnMediaSendQueues,
 ) -> Result<bool> {
     for _ in 0..MUNINN_RUDP_MEDIA_INGEST_BUDGET_PER_TURN {
         match rx.try_recv() {
-            Ok(Ok(payload)) => pending.push(payload),
+            Ok(Ok(payloads)) => {
+                for payload in payloads {
+                    pending.push(payload);
+                }
+            }
             Ok(Err(error)) => return Err(error),
             Err(mpsc::TryRecvError::Empty) => return Ok(false),
             Err(mpsc::TryRecvError::Disconnected) => return Ok(true),
@@ -3050,7 +3063,7 @@ fn reliable_packets_expired(
 }
 
 fn video_rudp_payload_reader<R>(
-    tx: mpsc::SyncSender<Result<QueuedMuninnMediaSendPayload>>,
+    tx: mpsc::SyncSender<Result<Vec<QueuedMuninnMediaSendPayload>>>,
     mut reader: R,
     config: VideoAnnexBStreamSendConfig,
 ) -> thread::JoinHandle<()>
@@ -3065,7 +3078,7 @@ where
 }
 
 fn audio_rudp_payload_reader<R>(
-    tx: mpsc::SyncSender<Result<QueuedMuninnMediaSendPayload>>,
+    tx: mpsc::SyncSender<Result<Vec<QueuedMuninnMediaSendPayload>>>,
     mut reader: R,
     config: AudioPcmStreamSendConfig,
 ) -> thread::JoinHandle<()>
@@ -3080,7 +3093,7 @@ where
 }
 
 fn read_video_rudp_payloads<R>(
-    tx: &mpsc::SyncSender<Result<QueuedMuninnMediaSendPayload>>,
+    tx: &mpsc::SyncSender<Result<Vec<QueuedMuninnMediaSendPayload>>>,
     reader: &mut R,
     config: VideoAnnexBStreamSendConfig,
 ) -> Result<()>
@@ -3094,21 +3107,25 @@ where
             .read(&mut buffer)
             .context("reading encoded Annex B video from ffmpeg stdout")?;
         if read == 0 {
-            for payload in sender.finish(&timestamp()?)? {
-                queue_muninn_media_payload(tx, payload, QueuedMuninnMediaKind::Video)
-                    .context("queueing final typed video media payload")?;
-            }
+            queue_muninn_media_payloads(
+                tx,
+                sender.finish(&timestamp()?)?,
+                QueuedMuninnMediaKind::Video,
+            )
+            .context("queueing final typed video media payload group")?;
             return Ok(());
         }
-        for payload in sender.push(&timestamp()?, &buffer[..read])? {
-            queue_muninn_media_payload(tx, payload, QueuedMuninnMediaKind::Video)
-                .context("queueing typed video media payload")?;
-        }
+        queue_muninn_media_payloads(
+            tx,
+            sender.push(&timestamp()?, &buffer[..read])?,
+            QueuedMuninnMediaKind::Video,
+        )
+        .context("queueing typed video media payload group")?;
     }
 }
 
 fn read_audio_rudp_payloads<R>(
-    tx: &mpsc::SyncSender<Result<QueuedMuninnMediaSendPayload>>,
+    tx: &mpsc::SyncSender<Result<Vec<QueuedMuninnMediaSendPayload>>>,
     reader: &mut R,
     config: AudioPcmStreamSendConfig,
 ) -> Result<()>
@@ -3122,16 +3139,20 @@ where
             .read(&mut buffer)
             .context("reading PCM audio from ffmpeg stdout")?;
         if read == 0 {
-            for payload in sender.finish(&timestamp()?)? {
-                queue_muninn_media_payload(tx, payload, QueuedMuninnMediaKind::Audio)
-                    .context("queueing final typed audio media payload")?;
-            }
+            queue_muninn_media_payloads(
+                tx,
+                sender.finish(&timestamp()?)?,
+                QueuedMuninnMediaKind::Audio,
+            )
+            .context("queueing final typed audio media payload group")?;
             return Ok(());
         }
-        for payload in sender.push(&timestamp()?, &buffer[..read])? {
-            queue_muninn_media_payload(tx, payload, QueuedMuninnMediaKind::Audio)
-                .context("queueing typed audio media payload")?;
-        }
+        queue_muninn_media_payloads(
+            tx,
+            sender.push(&timestamp()?, &buffer[..read])?,
+            QueuedMuninnMediaKind::Audio,
+        )
+        .context("queueing typed audio media payload group")?;
     }
 }
 
@@ -12038,14 +12059,14 @@ mod tests {
     fn rudp_media_ingest_yields_to_send_after_a_bounded_turn() {
         let (tx, rx) = mpsc::sync_channel(MUNINN_RUDP_MEDIA_INGEST_BUDGET_PER_TURN * 2);
         for index in 0..(MUNINN_RUDP_MEDIA_INGEST_BUDGET_PER_TURN * 2) {
-            tx.try_send(Ok(QueuedMuninnMediaSendPayload {
+            tx.try_send(Ok(vec![QueuedMuninnMediaSendPayload {
                 payload: MuninnMediaSendPayload {
                     channel_id: crate::media_packetizer::MUNINN_MEDIA_RUDP_CHANNEL,
                     payload: vec![(index % 251) as u8],
                 },
                 queued_at: Instant::now(),
                 kind: QueuedMuninnMediaKind::Video,
-            }))
+            }]))
             .expect("test payload should fit the producer channel");
         }
         let mut pending = PendingMuninnMediaSendQueues::default();
@@ -12055,6 +12076,24 @@ mod tests {
         assert!(!disconnected);
         assert_eq!(pending.video_len(), MUNINN_RUDP_MEDIA_INGEST_BUDGET_PER_TURN);
         assert!(rx.try_recv().is_ok(), "producer backlog should remain for the next turn");
+    }
+
+    #[test]
+    fn video_access_unit_enters_handoff_as_one_bounded_group() {
+        let (tx, rx) = mpsc::sync_channel(MUNINN_RUDP_MEDIA_PAYLOAD_CHANNEL_CAPACITY);
+        let payloads = (0..64)
+            .map(|index| MuninnMediaSendPayload {
+                channel_id: crate::media_packetizer::MUNINN_MEDIA_RUDP_CHANNEL,
+                payload: vec![index],
+            })
+            .collect();
+
+        queue_muninn_media_payloads(&tx, payloads, QueuedMuninnMediaKind::Video).unwrap();
+        let group = rx.try_recv().unwrap().unwrap();
+
+        assert_eq!(group.len(), 64);
+        assert!(group.iter().all(|payload| payload.kind == QueuedMuninnMediaKind::Video));
+        assert!(group.windows(2).all(|pair| pair[0].queued_at == pair[1].queued_at));
     }
 
     #[test]
