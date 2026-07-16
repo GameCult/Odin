@@ -5461,6 +5461,8 @@ struct ActiveHidControllerRudpSource {
     last_read_error_log_at: Option<Instant>,
 }
 
+const MUNINN_HID_MAX_PENDING_EDGES: usize = 256;
+
 fn active_hid_controller_rudp_source(source: MoveStateSource) -> ActiveHidControllerRudpSource {
     let epoch = timestamp_ns().unwrap_or_default().max(0) as u64;
     ActiveHidControllerRudpSource {
@@ -5517,6 +5519,13 @@ fn capture_button_edges(active: &mut ActiveHidControllerRudpSource, buttons: &[S
         active.next_edge_sequence = active.next_edge_sequence.saturating_add(1);
     }
     active.edge_buttons = buttons.to_vec();
+    if active.pending_edges.len() > MUNINN_HID_MAX_PENDING_EDGES {
+        active.epoch = active.epoch.saturating_add(1).max(1);
+        active.sequence = 0;
+        active.next_edge_sequence = 1;
+        active.pending_edges.clear();
+        active.last_edge_send_at = None;
+    }
 }
 
 fn sync_hid_controller_rudp_sources(
@@ -13889,6 +13898,27 @@ Device 00:07:04:A8:00:D0 (public)
         assert_eq!((edges[0].button.as_str(), edges[0].pressed, edges[0].edge_sequence), ("a", true, 1));
         assert_eq!((edges[1].button.as_str(), edges[1].pressed, edges[1].edge_sequence), ("a", false, 2));
         assert_eq!(edges[0].epoch, edges[1].epoch);
+    }
+
+    #[test]
+    fn hid_edge_backlog_rotates_epoch_and_rebases_on_latest_state() {
+        let mut active = active_hid_controller_rudp_source(MoveStateSource {
+            move_id: "pad-1".to_string(),
+            hidraw_path: "test".to_string(),
+        });
+        let initial_epoch = active.epoch;
+        for index in 0..=MUNINN_HID_MAX_PENDING_EDGES {
+            let buttons = if index % 2 == 0 {
+                vec!["a".to_string()]
+            } else {
+                Vec::new()
+            };
+            capture_button_edges(&mut active, &buttons);
+        }
+        assert!(active.epoch > initial_epoch);
+        assert!(active.pending_edges.len() <= MUNINN_HID_MAX_PENDING_EDGES);
+        assert_eq!(active.next_edge_sequence, 1);
+        assert_eq!(active.edge_buttons, vec!["a".to_string()]);
     }
 
     #[test]

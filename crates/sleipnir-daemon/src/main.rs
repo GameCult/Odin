@@ -205,6 +205,8 @@ struct HidSemanticCursor {
     retired_epochs: HashSet<u64>,
 }
 
+const SLEIPNIR_HID_MAX_PENDING_EDGE_GAP: u64 = 256;
+
 impl HidSemanticCursor {
     fn accept_state(&mut self, epoch: u64, sequence: u64) -> bool {
         if epoch == 0 && self.epoch != 0 { return false; }
@@ -217,7 +219,12 @@ impl HidSemanticCursor {
         true
     }
     fn push_edge(&mut self, edge: HidButtonEdge) -> Vec<HidButtonEdge> {
-        if edge.epoch != self.epoch || edge.edge_sequence <= self.edge_sequence { return Vec::new(); }
+        if edge.epoch != self.epoch
+            || edge.edge_sequence <= self.edge_sequence
+            || edge.edge_sequence > self.edge_sequence.saturating_add(SLEIPNIR_HID_MAX_PENDING_EDGE_GAP)
+        {
+            return Vec::new();
+        }
         self.pending_edges.entry(edge.edge_sequence).or_insert(edge);
         let mut ready = Vec::new();
         while let Some(edge) = self.pending_edges.remove(&(self.edge_sequence + 1)) {
@@ -3107,7 +3114,18 @@ mod tests {
     }
 
     #[test]
+    fn sparse_future_edges_cannot_grow_receiver_memory_without_bound() {
+        let mut cursor = HidSemanticCursor::default();
+        assert!(cursor.accept_state(12, 1));
+        assert!(
+            cursor
+                .push_edge(edge(12, SLEIPNIR_HID_MAX_PENDING_EDGE_GAP + 1, "a", true))
+                .is_empty()
+        );
+        assert!(cursor.pending_edges.is_empty());
+    }
     fn coalesces_by_source_timestamp_not_arrival_order() {
+    #[test]
         let mut newer_nav = record(vec![0.0, 1.0, -1.0], Vec::new(), 10);
         newer_nav.device_id = "nav".to_string();
         newer_nav.source_timestamp_ns = 2_000;
