@@ -100,8 +100,10 @@ The machine is reliable when each class loses only what its contract permits.
   dependency-derived decode-chain invalidation requests a keyframe.
 
 Still open: real encoder keyframe actuation, bounded long-disconnect admission
-for unacknowledged HID edges, Opus audio FEC/PLC, adaptive bitrate/parity from
-receiver pressure, and a socket impairment timeline harness.
+for unacknowledged HID edges, adaptive bitrate/parity from receiver pressure,
+and field acceptance runs through the impairment harness. The current encoder
+still guarantees a scheduled IDR every quarter second, so missing dynamic IDR
+actuation has a hard recovery ceiling rather than an unbounded decoder stall.
 
 Receiver audit correction on 2026-07-16: the native Mimir/OBS receiver already
 contains production XOR parity reconstruction. Its early repair feedback was
@@ -112,4 +114,18 @@ fixture is decoded by the Rust packetizer test. The same audit found the sender
 emits 10 ms float PCM while the receiver launched FFmpeg as AAC. Mimir now uses
 the `f32le`, stereo, 48 kHz input contract, a 40 ms reorder budget, and bounded
 short-hole silence concealment. Opus FEC/PLC remains the target for
-Moonlight-grade lossy audio.
+Moonlight-grade variable-rate compressed audio.
+
+The audio continuity cut now emits two typed GF(256) parity shards for every
+four constant-size 10 ms PCM packets. The Mimir production receiver retains a
+bounded recent data window and can reconstruct every one- or two-packet erasure
+inside a block before its 40 ms reorder deadline; unrecoverable short holes use
+bounded silence concealment. Exhaustive Rust and C++ permutation tests prove
+the shared 4+2 matrix.
+
+`cultnet-impair` is now the deterministic socket impairment boundary. It runs
+between real bidirectional UDP endpoints and applies seeded iid loss, burst
+loss, delay/jitter, reorder, duplication, and stalls with a bounded scheduled
+queue and CSV evidence. Profiles live under `tests/realtime-impairment`; the
+tool's six deterministic policy tests and release build pass. It observes the
+transport without becoming a second transport authority.
