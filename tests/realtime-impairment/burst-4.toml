@@ -1,0 +1,3 @@
+burst_every = 200
+burst_length = 4
+max_scheduled = 4096

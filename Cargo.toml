@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/cultnet-impair",
     "crates/sleipnir-daemon",
     "crates/idunn-daemon",
     "crates/muninn-daemon",

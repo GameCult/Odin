@@ -1,0 +1,2 @@
+# No impairment. The proxy itself remains in the measured path.
+max_scheduled = 4096
