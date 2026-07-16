@@ -4,9 +4,10 @@ use cultnet_rs::{
     decode_cultnet_message_from_slice, encode_cultnet_message_to_vec,
 };
 use odin_core::{
-    MUNINN_MEDIA_AUDIO_PACKET_SCHEMA, MUNINN_MEDIA_RECEIVER_FEEDBACK_SCHEMA,
-    MUNINN_MEDIA_VIDEO_ACCESS_UNIT_SCHEMA, MUNINN_MEDIA_VIDEO_PARITY_SHARD_SCHEMA,
-    MuninnMediaAudioPacketRecord, MuninnMediaReceiverFeedbackRecord,
+    MUNINN_MEDIA_AUDIO_PACKET_SCHEMA, MUNINN_MEDIA_AUDIO_PARITY_SHARD_SCHEMA,
+    MUNINN_MEDIA_RECEIVER_FEEDBACK_SCHEMA, MUNINN_MEDIA_VIDEO_ACCESS_UNIT_SCHEMA,
+    MUNINN_MEDIA_VIDEO_PARITY_SHARD_SCHEMA, MuninnMediaAudioPacketRecord,
+    MuninnMediaAudioParityShardRecord, MuninnMediaReceiverFeedbackRecord,
     MuninnMediaVideoAccessUnitRecord, MuninnMediaVideoParityShardRecord,
 };
 use serde::{Serialize, de::DeserializeOwned};
@@ -270,6 +271,7 @@ pub enum MuninnMediaWireRecord {
     Video(MuninnMediaVideoAccessUnitRecord),
     VideoParity(MuninnMediaVideoParityShardRecord),
     Audio(MuninnMediaAudioPacketRecord),
+    AudioParity(MuninnMediaAudioParityShardRecord),
     Feedback(MuninnMediaReceiverFeedbackRecord),
 }
 
@@ -323,6 +325,24 @@ struct AudioPacketWirePayload<'a>(
     u32,
     u32,
     i64,
+    #[serde(with = "serde_bytes")] &'a [u8],
+);
+
+#[derive(Serialize)]
+struct AudioParityShardWirePayload<'a>(
+    &'a str,
+    &'a str,
+    u64,
+    &'a str,
+    i64,
+    u32,
+    u32,
+    u32,
+    i64,
+    u16,
+    u16,
+    u16,
+    u32,
     #[serde(with = "serde_bytes")] &'a [u8],
 );
 
@@ -630,6 +650,7 @@ pub struct AudioPcmStreamSendState {
     pending: Vec<u8>,
     next_packet_id: u64,
     next_pts_ticks: i64,
+    fec_block: Vec<MuninnMediaAudioPacketRecord>,
 }
 
 impl AudioPcmStreamSendState {
@@ -673,6 +694,7 @@ impl AudioPcmStreamSendState {
             next_pts_ticks: config.first_pts_ticks,
             config,
             pending: Vec::new(),
+            fec_block: Vec::with_capacity(AUDIO_FEC_DATA_SHARDS),
         })
     }
 
@@ -734,25 +756,36 @@ impl AudioPcmStreamSendState {
                 .next_pts_ticks
                 .checked_add(self.config.deadline_delay_ticks)
                 .ok_or_else(|| anyhow!("audio deadline_ticks overflow"))?;
-            payloads.push(audio_packet_send_payload(
-                AudioPacketWireOptions {
-                    packetize: AudioPacketizeOptions {
-                        stream_id: &self.config.stream_id,
-                        session_id: &self.config.session_id,
-                        codec: &self.config.codec,
-                        packet_id: self.next_packet_id,
-                        pts_ticks: self.next_pts_ticks,
-                        duration_ticks: self.config.packet_duration_ticks,
-                        timebase_num: self.config.timebase_num,
-                        timebase_den: self.config.timebase_den,
-                        deadline_ticks,
-                    },
-                    stored_at,
-                    source_runtime_id: &self.config.source_runtime_id,
-                    source_role: &self.config.source_role,
+            let record = packetize_audio_packet(
+                AudioPacketizeOptions {
+                    stream_id: &self.config.stream_id,
+                    session_id: &self.config.session_id,
+                    codec: &self.config.codec,
+                    packet_id: self.next_packet_id,
+                    pts_ticks: self.next_pts_ticks,
+                    duration_ticks: self.config.packet_duration_ticks,
+                    timebase_num: self.config.timebase_num,
+                    timebase_den: self.config.timebase_den,
+                    deadline_ticks,
                 },
                 &self.pending[start..end],
-            )?);
+            )?;
+            payloads.push(wire_payload_to_media_send(encode_media_wire_record(
+                &MuninnMediaWireRecord::Audio(record.clone()),
+                stored_at,
+                &self.config.source_runtime_id,
+                &self.config.source_role,
+            )?));
+            self.fec_block.push(record);
+            if self.fec_block.len() == AUDIO_FEC_DATA_SHARDS {
+                payloads.extend(audio_fec_parity_send_payloads(
+                    &self.fec_block,
+                    stored_at,
+                    &self.config.source_runtime_id,
+                    &self.config.source_role,
+                )?);
+                self.fec_block.clear();
+            }
             self.advance_packet_clock()?;
         }
 
@@ -1321,6 +1354,170 @@ pub fn packetize_audio_packet(
     })
 }
 
+pub const AUDIO_FEC_DATA_SHARDS: usize = 4;
+pub const AUDIO_FEC_PARITY_SHARDS: usize = 2;
+
+/// Builds the fixed 4+2 systematic audio code used on the realtime lane.
+/// P0 = D0+D1+D2+D3; P1 = D0+2D1+4D2+8D3 in GF(256), polynomial 0x11d.
+pub fn audio_fec_parity_records(
+    data: &[MuninnMediaAudioPacketRecord],
+) -> Result<[MuninnMediaAudioParityShardRecord; AUDIO_FEC_PARITY_SHARDS]> {
+    if data.len() != AUDIO_FEC_DATA_SHARDS {
+        return Err(anyhow!("audio FEC requires exactly 4 data shards"));
+    }
+    for record in data {
+        validate_audio_record(record)?;
+    }
+    let first = &data[0];
+    let shard_len = first.payload.len();
+    for (index, record) in data.iter().enumerate() {
+        let expected_packet_id = first
+            .packet_id
+            .checked_add(index as u64)
+            .ok_or_else(|| anyhow!("audio FEC packet_id overflow"))?;
+        let expected_pts = first
+            .pts_ticks
+            .checked_add(i64::from(first.duration_ticks) * index as i64)
+            .ok_or_else(|| anyhow!("audio FEC pts overflow"))?;
+        if record.stream_id != first.stream_id
+            || record.session_id != first.session_id
+            || record.codec != first.codec
+            || record.timebase_num != first.timebase_num
+            || record.timebase_den != first.timebase_den
+            || record.duration_ticks != first.duration_ticks
+            || record.packet_id != expected_packet_id
+            || record.pts_ticks != expected_pts
+            || record.payload.len() != shard_len
+        {
+            return Err(anyhow!(
+                "audio FEC data shards have mixed or non-contiguous metadata"
+            ));
+        }
+    }
+    let mut parity = [vec![0u8; shard_len], vec![0u8; shard_len]];
+    for (data_index, record) in data.iter().enumerate() {
+        let coefficient = [1u8, 2, 4, 8][data_index];
+        for (byte_index, &byte) in record.payload.iter().enumerate() {
+            parity[0][byte_index] ^= byte;
+            parity[1][byte_index] ^= gf256_mul(byte, coefficient);
+        }
+    }
+    let make = |parity_index: usize| MuninnMediaAudioParityShardRecord {
+        stream_id: first.stream_id.clone(),
+        session_id: first.session_id.clone(),
+        base_packet_id: first.packet_id,
+        codec: first.codec.clone(),
+        base_pts_ticks: first.pts_ticks,
+        packet_duration_ticks: first.duration_ticks,
+        timebase_num: first.timebase_num,
+        timebase_den: first.timebase_den,
+        deadline_ticks: data
+            .iter()
+            .map(|r| r.deadline_ticks)
+            .max()
+            .unwrap_or(first.deadline_ticks),
+        data_shard_count: 4,
+        parity_index: parity_index as u16,
+        parity_shard_count: 2,
+        shard_payload_bytes: shard_len as u32,
+        payload: parity[parity_index].clone(),
+    };
+    Ok([make(0), make(1)])
+}
+
+fn gf256_mul(mut a: u8, mut b: u8) -> u8 {
+    let mut product = 0u8;
+    while b != 0 {
+        if b & 1 != 0 {
+            product ^= a;
+        }
+        let carry = a & 0x80;
+        a <<= 1;
+        if carry != 0 {
+            a ^= 0x1d;
+        }
+        b >>= 1;
+    }
+    product
+}
+
+fn gf256_inv(value: u8) -> u8 {
+    debug_assert_ne!(value, 0);
+    let mut result = 1u8;
+    for _ in 0..254 {
+        result = gf256_mul(result, value);
+    }
+    result
+}
+
+/// Pure receiver-reference implementation. Shards 0..4 are data; 4..6 are parity.
+pub fn recover_audio_fec_data(mut shards: [Option<Vec<u8>>; 6]) -> Result<[Vec<u8>; 4]> {
+    let shard_len = shards
+        .iter()
+        .flatten()
+        .next()
+        .ok_or_else(|| anyhow!("audio FEC has no shards"))?
+        .len();
+    if shard_len == 0 || shards.iter().flatten().any(|s| s.len() != shard_len) {
+        return Err(anyhow!(
+            "audio FEC shards must have one non-zero constant size"
+        ));
+    }
+    let missing: Vec<usize> = (0..4).filter(|&i| shards[i].is_none()).collect();
+    if missing.len() > 2 {
+        return Err(anyhow!(
+            "audio FEC cannot recover more than two data shards"
+        ));
+    }
+    let coefficients = [[1u8, 1, 1, 1], [1u8, 2, 4, 8]];
+    let parity_rows: Vec<usize> = (0..2)
+        .filter(|&p| shards[4 + p].is_some())
+        .take(missing.len())
+        .collect();
+    if parity_rows.len() < missing.len() {
+        return Err(anyhow!("audio FEC has insufficient parity"));
+    }
+    for byte_index in 0..shard_len {
+        let mut matrix = vec![vec![0u8; missing.len() + 1]; missing.len()];
+        for (row, &p) in parity_rows.iter().enumerate() {
+            let mut rhs = shards[4 + p].as_ref().unwrap()[byte_index];
+            for data_index in 0..4 {
+                if let Some(data) = &shards[data_index] {
+                    rhs ^= gf256_mul(coefficients[p][data_index], data[byte_index]);
+                }
+            }
+            for (column, &data_index) in missing.iter().enumerate() {
+                matrix[row][column] = coefficients[p][data_index];
+            }
+            matrix[row][missing.len()] = rhs;
+        }
+        for column in 0..missing.len() {
+            let pivot = (column..missing.len())
+                .find(|&r| matrix[r][column] != 0)
+                .ok_or_else(|| anyhow!("audio FEC coefficient matrix is singular"))?;
+            matrix.swap(column, pivot);
+            let inv = gf256_inv(matrix[column][column]);
+            for c in column..=missing.len() {
+                matrix[column][c] = gf256_mul(matrix[column][c], inv);
+            }
+            for row in 0..missing.len() {
+                if row == column {
+                    continue;
+                }
+                let factor = matrix[row][column];
+                for c in column..=missing.len() {
+                    matrix[row][c] ^= gf256_mul(factor, matrix[column][c]);
+                }
+            }
+        }
+        for (row, &data_index) in missing.iter().enumerate() {
+            shards[data_index].get_or_insert_with(|| vec![0; shard_len])[byte_index] =
+                matrix[row][missing.len()];
+        }
+    }
+    Ok(std::array::from_fn(|i| shards[i].take().unwrap()))
+}
+
 #[derive(Default)]
 pub struct AudioPacketBuffer {
     stream_id: Option<String>,
@@ -1672,6 +1869,11 @@ pub fn encode_media_wire_record(
             audio_record_key(record),
             encode_audio_record_payload(record)?,
         ),
+        MuninnMediaWireRecord::AudioParity(record) => (
+            MUNINN_MEDIA_AUDIO_PARITY_SHARD_SCHEMA,
+            audio_parity_record_key(record),
+            encode_audio_parity_record_payload(record)?,
+        ),
         MuninnMediaWireRecord::Feedback(record) => (
             MUNINN_MEDIA_RECEIVER_FEEDBACK_SCHEMA,
             feedback_record_key(record),
@@ -1820,6 +2022,20 @@ pub fn decode_media_wire_record(payload: &[u8]) -> Result<MuninnMediaWireRecord>
             }
             Ok(MuninnMediaWireRecord::Audio(record))
         }
+        MUNINN_MEDIA_AUDIO_PARITY_SHARD_SCHEMA => {
+            let record: MuninnMediaAudioParityShardRecord =
+                decode_record_payload(&document.payload)?;
+            validate_audio_parity_record(&record)?;
+            let expected_key = audio_parity_record_key(&record);
+            if document.record_key != expected_key {
+                return Err(anyhow!(
+                    "Muninn audio parity record key mismatch: expected {}, received {}",
+                    expected_key,
+                    document.record_key
+                ));
+            }
+            Ok(MuninnMediaWireRecord::AudioParity(record))
+        }
         MUNINN_MEDIA_RECEIVER_FEEDBACK_SCHEMA => {
             let record: MuninnMediaReceiverFeedbackRecord =
                 decode_record_payload(&document.payload)?;
@@ -1896,6 +2112,49 @@ fn encode_audio_record_payload(record: &MuninnMediaAudioPacketRecord) -> Result<
         record.timebase_num,
         record.timebase_den,
         record.deadline_ticks,
+        &record.payload,
+    ))
+}
+
+pub fn audio_fec_parity_send_payloads(
+    data: &[MuninnMediaAudioPacketRecord],
+    stored_at: &str,
+    source_runtime_id: &str,
+    source_role: &str,
+) -> Result<Vec<MuninnMediaSendPayload>> {
+    let parity = audio_fec_parity_records(data)?;
+    parity
+        .into_iter()
+        .map(|record| {
+            encode_media_wire_record(
+                &MuninnMediaWireRecord::AudioParity(record),
+                stored_at,
+                source_runtime_id,
+                source_role,
+            )
+            .map(wire_payload_to_media_send)
+        })
+        .collect()
+}
+
+fn encode_audio_parity_record_payload(
+    record: &MuninnMediaAudioParityShardRecord,
+) -> Result<Vec<u8>> {
+    validate_audio_parity_record(record)?;
+    encode_record_payload(&AudioParityShardWirePayload(
+        &record.stream_id,
+        &record.session_id,
+        record.base_packet_id,
+        &record.codec,
+        record.base_pts_ticks,
+        record.packet_duration_ticks,
+        record.timebase_num,
+        record.timebase_den,
+        record.deadline_ticks,
+        record.data_shard_count,
+        record.parity_index,
+        record.parity_shard_count,
+        record.shard_payload_bytes,
         &record.payload,
     ))
 }
@@ -2039,6 +2298,30 @@ fn validate_audio_record(record: &MuninnMediaAudioPacketRecord) -> Result<()> {
     Ok(())
 }
 
+fn validate_audio_parity_record(record: &MuninnMediaAudioParityShardRecord) -> Result<()> {
+    if record.stream_id.is_empty() || record.session_id.is_empty() || record.codec.is_empty() {
+        return Err(anyhow!("audio parity identity metadata must be non-empty"));
+    }
+    if record.timebase_num == 0 || record.timebase_den == 0 || record.packet_duration_ticks == 0 {
+        return Err(anyhow!("audio parity timing metadata must be non-zero"));
+    }
+    if record.deadline_ticks < record.base_pts_ticks
+        || record.data_shard_count != 4
+        || record.parity_shard_count != 2
+        || record.parity_index >= 2
+    {
+        return Err(anyhow!("audio parity stripe metadata is invalid"));
+    }
+    if record.shard_payload_bytes == 0
+        || record.payload.len() != record.shard_payload_bytes as usize
+    {
+        return Err(anyhow!(
+            "audio parity payload does not match declared shard size"
+        ));
+    }
+    Ok(())
+}
+
 fn validate_feedback_record(record: &MuninnMediaReceiverFeedbackRecord) -> Result<()> {
     if record.stream_id.is_empty() {
         return Err(anyhow!(
@@ -2092,6 +2375,13 @@ fn audio_record_key(record: &MuninnMediaAudioPacketRecord) -> String {
     format!(
         "{}:{}:audio:{}",
         record.stream_id, record.session_id, record.packet_id
+    )
+}
+
+fn audio_parity_record_key(record: &MuninnMediaAudioParityShardRecord) -> String {
+    format!(
+        "{}:{}:audio-fec:{}:{}",
+        record.stream_id, record.session_id, record.base_packet_id, record.parity_index
     )
 }
 
@@ -4304,6 +4594,109 @@ mod tests {
             error
                 .to_string()
                 .contains("expected cultnet.document_put_raw.v0")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn audio_fec_recovers_every_one_and_two_erasure_permutation() -> Result<()> {
+        let data: [Vec<u8>; 4] = std::array::from_fn(|i| {
+            (0..37)
+                .map(|b| (b as u8).wrapping_mul(17).wrapping_add(i as u8 * 41))
+                .collect()
+        });
+        let records: Vec<_> = data
+            .iter()
+            .enumerate()
+            .map(|(i, payload)| {
+                packetize_audio_packet(
+                    AudioPacketizeOptions {
+                        stream_id: "audio",
+                        session_id: "s",
+                        codec: "pcm",
+                        packet_id: 10 + i as u64,
+                        pts_ticks: 480 * i as i64,
+                        duration_ticks: 480,
+                        timebase_num: 1,
+                        timebase_den: 48_000,
+                        deadline_ticks: 480 * i as i64 + 2400,
+                    },
+                    payload,
+                )
+            })
+            .collect::<Result<_>>()?;
+        let parity = audio_fec_parity_records(&records)?;
+        let all: [Vec<u8>; 6] = std::array::from_fn(|i| {
+            if i < 4 {
+                data[i].clone()
+            } else {
+                parity[i - 4].payload.clone()
+            }
+        });
+        for first in 0..6 {
+            let mut shards = std::array::from_fn(|i| Some(all[i].clone()));
+            shards[first] = None;
+            assert_eq!(recover_audio_fec_data(shards)?, data);
+            for second in first + 1..6 {
+                let mut shards = std::array::from_fn(|i| Some(all[i].clone()));
+                shards[first] = None;
+                shards[second] = None;
+                assert_eq!(
+                    recover_audio_fec_data(shards)?,
+                    data,
+                    "erasures {first},{second}"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn audio_fec_rejects_mixed_metadata_and_round_trips_parity_wire() -> Result<()> {
+        let mut records: Vec<_> = (0..4)
+            .map(|i| {
+                packetize_audio_packet(
+                    AudioPacketizeOptions {
+                        stream_id: "audio",
+                        session_id: "s",
+                        codec: "pcm",
+                        packet_id: i,
+                        pts_ticks: i as i64 * 480,
+                        duration_ticks: 480,
+                        timebase_num: 1,
+                        timebase_den: 48_000,
+                        deadline_ticks: 5000,
+                    },
+                    &[i as u8; 16],
+                )
+            })
+            .collect::<Result<_>>()?;
+        records[2].codec = "opus".into();
+        assert!(audio_fec_parity_records(&records).is_err());
+        records[2].codec = "pcm".into();
+        let parity = audio_fec_parity_records(&records)?;
+        for record in parity {
+            let wire = encode_media_wire_record(
+                &MuninnMediaWireRecord::AudioParity(record.clone()),
+                "now",
+                "muninn",
+                "sender",
+            )?;
+            assert_eq!(
+                decode_media_wire_record(&wire)?,
+                MuninnMediaWireRecord::AudioParity(record)
+            );
+        }
+        let mut invalid = audio_fec_parity_records(&records)?[0].clone();
+        invalid.data_shard_count = 3;
+        assert!(
+            encode_media_wire_record(
+                &MuninnMediaWireRecord::AudioParity(invalid),
+                "now",
+                "muninn",
+                "sender"
+            )
+            .is_err()
         );
         Ok(())
     }

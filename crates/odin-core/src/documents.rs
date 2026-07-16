@@ -38,6 +38,7 @@ pub const MUNINN_CAPTURE_STREAM_COMMAND_SCHEMA: &str = "muninn.capture_stream_co
 pub const MUNINN_MEDIA_VIDEO_ACCESS_UNIT_SCHEMA: &str = "muninn.media_video_access_unit.v1";
 pub const MUNINN_MEDIA_VIDEO_PARITY_SHARD_SCHEMA: &str = "muninn.media_video_parity_shard.v2";
 pub const MUNINN_MEDIA_AUDIO_PACKET_SCHEMA: &str = "muninn.media_audio_packet.v1";
+pub const MUNINN_MEDIA_AUDIO_PARITY_SHARD_SCHEMA: &str = "muninn.media_audio_parity_shard.v1";
 pub const MUNINN_MEDIA_RECEIVER_FEEDBACK_SCHEMA: &str = "muninn.media_receiver_feedback.v1";
 pub const MUNINN_OBS_STREAM_CATALOG_SCHEMA: &str = "muninn.obs_stream_catalog.v1";
 pub const MUNINN_MOVE_MARKER_CANDIDATE_SCHEMA: &str = "muninn.move_marker_candidate.v1";
@@ -47,7 +48,8 @@ pub const MUNINN_MOVE_IDENTITY_SCHEMA: &str = "muninn.move_identity.v1";
 pub const MUNINN_MOVE_LIGHT_COMMAND_SCHEMA: &str = "muninn.move_light_command.v1";
 pub const MUNINN_MOVE_HUE_PROGRAM_SCHEMA: &str = "muninn.move_hue_program.v1";
 pub const MUNINN_MOVE_TRACKER_HEALTH_SCHEMA: &str = "muninn.move_tracker_health.v1";
-pub const MUNINN_MOVE_EVIDENCE_TRANSPORT_HEALTH_SCHEMA: &str = "muninn.move_evidence_transport_health.v1";
+pub const MUNINN_MOVE_EVIDENCE_TRANSPORT_HEALTH_SCHEMA: &str =
+    "muninn.move_evidence_transport_health.v1";
 pub const MUNINN_QUEST_ACCESS_SCHEMA: &str = "muninn.quest_access.v1";
 pub const MUNINN_COMMAND_BOUNDARY_SCHEMA: &str = "muninn.command_boundary.v1";
 pub const MUNINN_TRANSPORT_PROFILE_SCHEMA: &str = "muninn.transport_profile.v1";
@@ -1201,47 +1203,122 @@ pub struct MuninnMoveHueProgramRecord {
     pub transition_percent_explicit: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(
+    type = "muninn.media_audio_parity_shard",
+    schema = "muninn.media_audio_parity_shard.v1"
+)]
+pub struct MuninnMediaAudioParityShardRecord {
+    #[cultcache(key = 0)]
+    pub stream_id: String,
+    #[cultcache(key = 1)]
+    pub session_id: String,
+    #[cultcache(key = 2)]
+    pub base_packet_id: u64,
+    #[cultcache(key = 3)]
+    pub codec: String,
+    #[cultcache(key = 4)]
+    pub base_pts_ticks: i64,
+    #[cultcache(key = 5)]
+    pub packet_duration_ticks: u32,
+    #[cultcache(key = 6)]
+    pub timebase_num: u32,
+    #[cultcache(key = 7)]
+    pub timebase_den: u32,
+    #[cultcache(key = 8)]
+    pub deadline_ticks: i64,
+    #[cultcache(key = 9)]
+    pub data_shard_count: u16,
+    #[cultcache(key = 10)]
+    pub parity_index: u16,
+    #[cultcache(key = 11)]
+    pub parity_shard_count: u16,
+    #[cultcache(key = 12)]
+    pub shard_payload_bytes: u32,
+    #[cultcache(key = 13)]
+    pub payload: Vec<u8>,
+}
+
 #[derive(Clone, Debug, PartialEq, DatabaseEntry)]
-#[cultcache(type = "muninn.move_tracker_health", schema = "muninn.move_tracker_health.v1")]
+#[cultcache(
+    type = "muninn.move_tracker_health",
+    schema = "muninn.move_tracker_health.v1"
+)]
 pub struct MuninnMoveTrackerHealthRecord {
-    #[cultcache(key = 0)] pub health_id: String,
-    #[cultcache(key = 1)] pub host_id: String,
-    #[cultcache(key = 2)] pub camera_id: String,
-    #[cultcache(key = 3)] pub camera_index: i32,
-    #[cultcache(key = 4)] pub state: String,
-    #[cultcache(key = 5)] pub camera_name: String,
-    #[cultcache(key = 6)] pub camera_api: String,
-    #[cultcache(key = 7)] pub width: u32,
-    #[cultcache(key = 8)] pub height: u32,
-    #[cultcache(key = 9)] pub exposure: f32,
-    #[cultcache(key = 10)] pub calibrated_controller_count: u32,
-    #[cultcache(key = 11)] pub update_count: u64,
-    #[cultcache(key = 12)] pub observation_count: u64,
-    #[cultcache(key = 13)] pub latest_observation_count: u32,
-    #[cultcache(key = 14)] pub last_observation_at: String,
-    #[cultcache(key = 15)] pub detail: String,
-    #[cultcache(key = 16)] pub updated_at: String,
-    #[cultcache(key = 17, default)] pub image_mean_rgb: Vec<u32>,
-    #[cultcache(key = 18, default)] pub image_peak_rgb: Vec<u32>,
-    #[cultcache(key = 19, default)] pub color_evidence_move_ids: Vec<String>,
-    #[cultcache(key = 20, default)] pub color_evidence_pixel_counts: Vec<u32>,
-    #[cultcache(key = 21, default)] pub rejected_stale_count: u64,
-    #[cultcache(key = 22, default)] pub rejected_radius_count: u64,
-    #[cultcache(key = 23, default)] pub rejected_bounds_count: u64,
-    #[cultcache(key = 24, default)] pub rejected_continuity_count: u64,
+    #[cultcache(key = 0)]
+    pub health_id: String,
+    #[cultcache(key = 1)]
+    pub host_id: String,
+    #[cultcache(key = 2)]
+    pub camera_id: String,
+    #[cultcache(key = 3)]
+    pub camera_index: i32,
+    #[cultcache(key = 4)]
+    pub state: String,
+    #[cultcache(key = 5)]
+    pub camera_name: String,
+    #[cultcache(key = 6)]
+    pub camera_api: String,
+    #[cultcache(key = 7)]
+    pub width: u32,
+    #[cultcache(key = 8)]
+    pub height: u32,
+    #[cultcache(key = 9)]
+    pub exposure: f32,
+    #[cultcache(key = 10)]
+    pub calibrated_controller_count: u32,
+    #[cultcache(key = 11)]
+    pub update_count: u64,
+    #[cultcache(key = 12)]
+    pub observation_count: u64,
+    #[cultcache(key = 13)]
+    pub latest_observation_count: u32,
+    #[cultcache(key = 14)]
+    pub last_observation_at: String,
+    #[cultcache(key = 15)]
+    pub detail: String,
+    #[cultcache(key = 16)]
+    pub updated_at: String,
+    #[cultcache(key = 17, default)]
+    pub image_mean_rgb: Vec<u32>,
+    #[cultcache(key = 18, default)]
+    pub image_peak_rgb: Vec<u32>,
+    #[cultcache(key = 19, default)]
+    pub color_evidence_move_ids: Vec<String>,
+    #[cultcache(key = 20, default)]
+    pub color_evidence_pixel_counts: Vec<u32>,
+    #[cultcache(key = 21, default)]
+    pub rejected_stale_count: u64,
+    #[cultcache(key = 22, default)]
+    pub rejected_radius_count: u64,
+    #[cultcache(key = 23, default)]
+    pub rejected_bounds_count: u64,
+    #[cultcache(key = 24, default)]
+    pub rejected_continuity_count: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
-#[cultcache(type = "muninn.move_evidence_transport_health", schema = "muninn.move_evidence_transport_health.v1")]
+#[cultcache(
+    type = "muninn.move_evidence_transport_health",
+    schema = "muninn.move_evidence_transport_health.v1"
+)]
 pub struct MuninnMoveEvidenceTransportHealthRecord {
-    #[cultcache(key = 0)] pub health_id: String,
-    #[cultcache(key = 1)] pub host_id: String,
-    #[cultcache(key = 2)] pub stream_id: String,
-    #[cultcache(key = 3)] pub produced_frames: u64,
-    #[cultcache(key = 4)] pub local_ring_admissions: u64,
-    #[cultcache(key = 5)] pub remote_handoffs: u64,
-    #[cultcache(key = 6)] pub remote_sends: u64,
-    #[cultcache(key = 7)] pub updated_at: String,
+    #[cultcache(key = 0)]
+    pub health_id: String,
+    #[cultcache(key = 1)]
+    pub host_id: String,
+    #[cultcache(key = 2)]
+    pub stream_id: String,
+    #[cultcache(key = 3)]
+    pub produced_frames: u64,
+    #[cultcache(key = 4)]
+    pub local_ring_admissions: u64,
+    #[cultcache(key = 5)]
+    pub remote_handoffs: u64,
+    #[cultcache(key = 6)]
+    pub remote_sends: u64,
+    #[cultcache(key = 7)]
+    pub updated_at: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
@@ -1362,6 +1439,7 @@ cultmesh_rs::cultmesh_documents!(OdinDocuments {
     MuninnMediaVideoAccessUnitRecord => MUNINN_MEDIA_VIDEO_ACCESS_UNIT_SCHEMA,
     MuninnMediaVideoParityShardRecord => MUNINN_MEDIA_VIDEO_PARITY_SHARD_SCHEMA,
     MuninnMediaAudioPacketRecord => MUNINN_MEDIA_AUDIO_PACKET_SCHEMA,
+    MuninnMediaAudioParityShardRecord => MUNINN_MEDIA_AUDIO_PARITY_SHARD_SCHEMA,
     MuninnMediaReceiverFeedbackRecord => MUNINN_MEDIA_RECEIVER_FEEDBACK_SCHEMA,
     MuninnObsStreamCatalogRecord => MUNINN_OBS_STREAM_CATALOG_SCHEMA,
     MuninnMoveMarkerCandidateRecord => MUNINN_MOVE_MARKER_CANDIDATE_SCHEMA,
