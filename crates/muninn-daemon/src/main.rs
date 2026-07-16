@@ -84,6 +84,7 @@ const MUNINN_RUDP_MEDIA_RECEIVER_ASSEMBLY_DEADLINE_MS: u64 = 100;
 const MUNINN_RUDP_MEDIA_PAYLOAD_CHANNEL_CAPACITY: usize = 512;
 const MUNINN_RUDP_MEDIA_PENDING_AUDIO_CAPACITY: usize = 256;
 const MUNINN_RUDP_MEDIA_PENDING_VIDEO_CAPACITY: usize = 512;
+const MUNINN_RUDP_MEDIA_INGEST_BUDGET_PER_TURN: usize = 1;
 const MUNINN_RUDP_MEDIA_RECEIVER_GAP_WAIT_MS: u64 = 16;
 const MUNINN_RUDP_MEDIA_REPAIR_CACHE_CHUNKS: usize = 16_384;
 const MUNINN_RUDP_MEDIA_REPAIR_BURST_CHUNKS: usize = 2_048;
@@ -1822,6 +1823,21 @@ fn run_rudp_mux_once(
     supervisor_pid: u32,
     restart_count: u32,
 ) -> Result<RudpMuxRestart> {
+    let media_profile = muninn_rudp_media_profile_for_options(options);
+    let mut video_transport = open_media_rudp_transport(
+        options,
+        node,
+        MUNINN_MEDIA_RUDP_CONNECTION_ID,
+        None,
+        "video",
+    )?;
+    let mut audio_transport = open_media_rudp_transport(
+        options,
+        node,
+        MUNINN_AUDIO_RUDP_CONNECTION_ID,
+        Some(media_profile.receiver_assembly_deadline_ms),
+        "audio",
+    )?;
     let timestamp = timestamp()?;
     let loopback_stderr = options
         .log_root
@@ -1942,21 +1958,6 @@ fn run_rudp_mux_once(
     let mut video_sender = None;
     let mut audio_sender = None;
     let result = (|| -> Result<RudpMuxRestart> {
-        let media_profile = muninn_rudp_media_profile_for_options(options);
-        let mut video_transport = open_media_rudp_transport(
-            options,
-            node,
-            MUNINN_MEDIA_RUDP_CONNECTION_ID,
-            None,
-            "video",
-        )?;
-        let mut audio_transport = open_media_rudp_transport(
-            options,
-            node,
-            MUNINN_AUDIO_RUDP_CONNECTION_ID,
-            Some(media_profile.receiver_assembly_deadline_ms),
-            "audio",
-        )?;
         publish_stream(
             node,
             options,
@@ -2037,6 +2038,10 @@ fn run_rudp_mux_once(
             media_profile.video_bitrate_kbps,
             Instant::now(),
         );
+        request_video_encoder_bitrate(
+            video_encoder_control.as_mut(),
+            video_bitrate_controller.current_kbps(),
+        )?;
         let mut repair_cache =
             RecentVideoChunkRepairCache::new(MUNINN_RUDP_MEDIA_REPAIR_CACHE_CHUNKS);
         let mut repair_budget = MuninnRudpRepairBudget::new(
@@ -2365,8 +2370,9 @@ struct MuninnVideoBitrateController {
 impl MuninnVideoBitrateController {
     fn new(max_kbps: u32, now: Instant) -> Self {
         let max_kbps = max_kbps.max(1_000);
+        let current_kbps = (max_kbps.saturating_mul(2) / 3).max(1_000);
         Self {
-            current_kbps: max_kbps,
+            current_kbps,
             min_kbps: (max_kbps / 4).max(1_000),
             max_kbps,
             last_late_frames: 0,
@@ -2408,14 +2414,18 @@ impl MuninnVideoBitrateController {
             self.current_kbps = (self.current_kbps.saturating_mul(85) / 100)
                 .max(self.min_kbps);
             self.stable_since = now;
-        } else if now.duration_since(self.stable_since) >= Duration::from_secs(2) {
+        } else if now.duration_since(self.stable_since) >= Duration::from_secs(10) {
             self.current_kbps = self
                 .current_kbps
-                .saturating_add((self.max_kbps / 20).max(250))
+                .saturating_add((self.max_kbps / 50).max(100))
                 .min(self.max_kbps);
             self.stable_since = now;
         }
         (self.current_kbps != previous).then_some(self.current_kbps)
+    }
+
+    fn current_kbps(&self) -> u32 {
+        self.current_kbps
     }
 }
 
@@ -2634,7 +2644,7 @@ fn drain_available_media_payloads(
     rx: &mpsc::Receiver<Result<QueuedMuninnMediaSendPayload>>,
     pending: &mut PendingMuninnMediaSendQueues,
 ) -> Result<bool> {
-    loop {
+    for _ in 0..MUNINN_RUDP_MEDIA_INGEST_BUDGET_PER_TURN {
         match rx.try_recv() {
             Ok(Ok(payload)) => pending.push(payload),
             Ok(Err(error)) => return Err(error),
@@ -2642,6 +2652,7 @@ fn drain_available_media_payloads(
             Err(mpsc::TryRecvError::Disconnected) => return Ok(true),
         }
     }
+    Ok(false)
 }
 
 fn media_payload_queue_age_exceeded(queued_at: Instant, now: Instant, max_age: Duration) -> bool {
@@ -12024,6 +12035,29 @@ mod tests {
     }
 
     #[test]
+    fn rudp_media_ingest_yields_to_send_after_a_bounded_turn() {
+        let (tx, rx) = mpsc::sync_channel(MUNINN_RUDP_MEDIA_INGEST_BUDGET_PER_TURN * 2);
+        for index in 0..(MUNINN_RUDP_MEDIA_INGEST_BUDGET_PER_TURN * 2) {
+            tx.try_send(Ok(QueuedMuninnMediaSendPayload {
+                payload: MuninnMediaSendPayload {
+                    channel_id: crate::media_packetizer::MUNINN_MEDIA_RUDP_CHANNEL,
+                    payload: vec![(index % 251) as u8],
+                },
+                queued_at: Instant::now(),
+                kind: QueuedMuninnMediaKind::Video,
+            }))
+            .expect("test payload should fit the producer channel");
+        }
+        let mut pending = PendingMuninnMediaSendQueues::default();
+
+        let disconnected = drain_available_media_payloads(&rx, &mut pending).unwrap();
+
+        assert!(!disconnected);
+        assert_eq!(pending.video_len(), MUNINN_RUDP_MEDIA_INGEST_BUDGET_PER_TURN);
+        assert!(rx.try_recv().is_ok(), "producer backlog should remain for the next turn");
+    }
+
+    #[test]
     fn rudp_latency_budget_owns_sender_and_record_deadlines() {
         let options = Options::parse(
             [
@@ -12161,7 +12195,7 @@ mod tests {
         feedback.late_frames = 1;
         assert_eq!(
             controller.observe(&feedback, 0, 100_000, start + Duration::from_millis(500)),
-            Some(10_200)
+            Some(6_800)
         );
         assert_eq!(
             controller.observe(&feedback, 0, 100_000, start + Duration::from_secs(1)),
@@ -12169,11 +12203,11 @@ mod tests {
         );
         assert_eq!(
             controller.observe(&feedback, 0, 100_000, start + Duration::from_millis(2500)),
-            Some(10_800)
+            None
         );
         assert_eq!(
-            controller.observe(&feedback, 0, 100_000, start + Duration::from_secs(3)),
-            None
+            controller.observe(&feedback, 0, 100_000, start + Duration::from_millis(10_500)),
+            Some(7_040)
         );
     }
 
@@ -12189,10 +12223,10 @@ mod tests {
         let adjusted = controller
             .observe(&feedback, 0, 100_000, start + Duration::from_millis(500))
             .unwrap();
-        assert_eq!(adjusted, 13_600);
+        assert_eq!(adjusted, 9_066);
         let mut commands = Vec::new();
         request_video_encoder_bitrate(Some(&mut commands), adjusted).unwrap();
-        assert_eq!(commands, b"BITRATE 13600\n");
+        assert_eq!(commands, b"BITRATE 9066\n");
     }
 
     #[test]
