@@ -1004,13 +1004,19 @@ impl CultNetRudpSocketTransportConnection {
             return Ok(Some(frame));
         }
 
+        self.poll_receive_once()?;
+        Ok(self.delivered_frames.pop_front())
+    }
+
+    pub fn poll_receive_once(&mut self) -> Result<bool> {
+
         let mut wire = vec![0_u8; 65_535];
         let (received, remote_addr) = match self.socket.recv_from(&mut wire) {
             Ok(value) => value,
             Err(error)
                 if error.kind() == ErrorKind::WouldBlock || error.kind() == ErrorKind::TimedOut =>
             {
-                return Ok(None);
+                return Ok(false);
             }
             Err(error) => return Err(error.into()),
         };
@@ -1025,14 +1031,14 @@ impl CultNetRudpSocketTransportConnection {
                 {
                     self.remote_addr = Some(remote_addr);
                 } else {
-                    return Ok(None);
+                    return Ok(true);
                 }
             }
         } else {
             if self.mode == CultNetRudpSocketMode::Server
                 && packet.packet_type != CultNetRudpPacketType::Connect
             {
-                return Ok(None);
+                return Ok(true);
             }
             self.remote_addr = Some(remote_addr);
         }
@@ -1042,7 +1048,7 @@ impl CultNetRudpSocketTransportConnection {
             self.session.reset_peer_state();
             let accept = self.session.accept_connect(&packet, now_ms(), Vec::new())?;
             self.send_packet(&accept)?;
-            return Ok(None);
+            return Ok(true);
         }
 
         let result = self.session.receive(&packet, now_ms())?;
@@ -1054,9 +1060,10 @@ impl CultNetRudpSocketTransportConnection {
         }
         if result.disconnected {
             self.disconnect_reason = Some(result.disconnect_reason);
-            return Ok(None);
+            return Ok(true);
         }
 
+        let delivered_any = !result.delivered.is_empty();
         for frame in result.delivered {
             self.delivered_frames.push_back(CultNetTransportFrame {
                 channel_id: frame.channel_id,
@@ -1064,12 +1071,11 @@ impl CultNetRudpSocketTransportConnection {
             });
             self.stats.frames_received += 1;
         }
-        let frame = self.delivered_frames.pop_front();
-        if packet.packet_type == CultNetRudpPacketType::Accept || frame.is_some() {
+        if packet.packet_type == CultNetRudpPacketType::Accept || delivered_any {
             let ack = self.session.create_ack();
             self.send_packet(&ack)?;
         }
-        Ok(frame)
+        Ok(true)
     }
 
     pub fn poll_resends(&mut self) -> Result<()> {

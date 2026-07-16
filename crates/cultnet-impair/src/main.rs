@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 const MAX_DATAGRAM: usize = 65_535;
 const MAX_CLIENT_FLOWS: usize = 64;
 const CLIENT_FLOW_IDLE_TIMEOUT_MS: u64 = 30_000;
+const MAX_DATAGRAMS_PER_FLOW_PER_TURN: usize = 16;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Profile {
@@ -458,9 +459,11 @@ fn run(options: Options) -> Result<(), String> {
     let mut buffer = vec![0; MAX_DATAGRAM];
     loop {
         let now = elapsed_ms(start);
-        loop {
+        let mut did_work = false;
+        for _ in 0..MAX_DATAGRAMS_PER_FLOW_PER_TURN {
             match client_socket.recv_from(&mut buffer) {
                 Ok((size, address)) => {
+                    did_work = true;
                     ensure_upstream_flow(
                         &mut flows,
                         address,
@@ -484,9 +487,10 @@ fn run(options: Options) -> Result<(), String> {
             }
         }
         for (address, flow) in &mut flows {
-            loop {
+            for _ in 0..MAX_DATAGRAMS_PER_FLOW_PER_TURN {
                 match flow.socket.recv(&mut buffer) {
                     Ok(size) => {
+                        did_work = true;
                         flow.last_activity_ms = now;
                         scheduler.admit(
                             now,
@@ -501,6 +505,7 @@ fn run(options: Options) -> Result<(), String> {
             }
         }
         while let Some(item) = scheduler.pop_due(now) {
+            did_work = true;
             let result = match item.direction {
                 Direction::ClientToUpstream => match flows.get_mut(&item.client) {
                     Some(flow) => {
@@ -527,7 +532,11 @@ fn run(options: Options) -> Result<(), String> {
             reap_idle_flows(&mut flows, now, &mut scheduler.stats);
             last_flow_reap_at = now;
         }
-        thread::sleep(Duration::from_millis(1));
+        if did_work {
+            thread::yield_now();
+        } else {
+            thread::sleep(Duration::from_millis(1));
+        }
     }
 }
 

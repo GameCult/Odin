@@ -79,7 +79,8 @@ const MUNINN_RUDP_FIXED_HEADER_BYTES: usize = 36;
 const MUNINN_RUDP_MEDIA_MAX_FRAGMENT_BYTES: usize = MUNINN_RUDP_IPV4_UDP_PAYLOAD_BYTES
     - MUNINN_RUDP_FIXED_HEADER_BYTES
     - crate::media_packetizer::MUNINN_MEDIA_RUDP_CHANNEL.len();
-const MUNINN_RUDP_MEDIA_RESEND_DELAY_MS: u64 = 5;
+const MUNINN_RUDP_MEDIA_RESEND_DELAY_MS: u64 = 8;
+const MUNINN_RUDP_MEDIA_MAX_PENDING_RELIABLE_PACKETS: u32 = 256;
 const MUNINN_RUDP_MEDIA_RECEIVER_ASSEMBLY_DEADLINE_MS: u64 = 100;
 const MUNINN_RUDP_MEDIA_PAYLOAD_CHANNEL_CAPACITY: usize = 1;
 const MUNINN_RUDP_MEDIA_PENDING_AUDIO_CAPACITY: usize = 256;
@@ -2301,42 +2302,75 @@ enum QueuedMuninnMediaKind {
 
 #[derive(Default)]
 struct PendingMuninnMediaSendQueues {
-    audio: VecDeque<QueuedMuninnMediaSendPayload>,
-    video: VecDeque<QueuedMuninnMediaSendPayload>,
+    active_audio: VecDeque<QueuedMuninnMediaSendPayload>,
+    audio: VecDeque<VecDeque<QueuedMuninnMediaSendPayload>>,
+    active_video: VecDeque<QueuedMuninnMediaSendPayload>,
+    video: VecDeque<VecDeque<QueuedMuninnMediaSendPayload>>,
 }
 
 impl PendingMuninnMediaSendQueues {
     fn push(&mut self, payload: QueuedMuninnMediaSendPayload) {
-        match payload.kind {
+        self.push_group(vec![payload]);
+    }
+
+    fn push_group(&mut self, payloads: Vec<QueuedMuninnMediaSendPayload>) {
+        let Some(kind) = payloads.first().map(|payload| payload.kind) else {
+            return;
+        };
+        debug_assert!(payloads.iter().all(|payload| payload.kind == kind));
+        let group = VecDeque::from(payloads);
+        match kind {
             QueuedMuninnMediaKind::Audio => {
-                while self.audio.len() >= MUNINN_RUDP_MEDIA_PENDING_AUDIO_CAPACITY {
+                while self.audio_len().saturating_add(group.len())
+                    > MUNINN_RUDP_MEDIA_PENDING_AUDIO_CAPACITY
+                    && !self.audio.is_empty()
+                {
                     self.audio.pop_front();
                 }
-                self.audio.push_back(payload);
+                self.audio.push_back(group);
             }
             QueuedMuninnMediaKind::Video => {
-                while self.video.len() >= MUNINN_RUDP_MEDIA_PENDING_VIDEO_CAPACITY {
+                while self.video_len().saturating_add(group.len())
+                    > MUNINN_RUDP_MEDIA_PENDING_VIDEO_CAPACITY
+                    && !self.video.is_empty()
+                {
                     self.video.pop_front();
                 }
-                self.video.push_back(payload);
+                self.video.push_back(group);
             }
         }
     }
 
     fn pop_next(&mut self) -> Option<QueuedMuninnMediaSendPayload> {
-        self.audio.pop_front().or_else(|| self.video.pop_front())
+        Self::pop_from(&mut self.active_audio, &mut self.audio)
+            .or_else(|| Self::pop_from(&mut self.active_video, &mut self.video))
+    }
+
+    fn pop_from(
+        active: &mut VecDeque<QueuedMuninnMediaSendPayload>,
+        queued: &mut VecDeque<VecDeque<QueuedMuninnMediaSendPayload>>,
+    ) -> Option<QueuedMuninnMediaSendPayload> {
+        if active.is_empty()
+            && let Some(group) = queued.pop_front()
+        {
+            *active = group;
+        }
+        active.pop_front()
     }
 
     fn is_empty(&self) -> bool {
-        self.audio.is_empty() && self.video.is_empty()
+        self.active_audio.is_empty()
+            && self.audio.is_empty()
+            && self.active_video.is_empty()
+            && self.video.is_empty()
     }
 
     fn audio_len(&self) -> usize {
-        self.audio.len()
+        self.active_audio.len() + self.audio.iter().map(VecDeque::len).sum::<usize>()
     }
 
     fn video_len(&self) -> usize {
-        self.video.len()
+        self.active_video.len() + self.video.iter().map(VecDeque::len).sum::<usize>()
     }
 }
 
@@ -2638,9 +2672,7 @@ fn receive_pending_media_payloads(
 ) -> Result<bool> {
     match rx.recv_timeout(timeout) {
         Ok(Ok(payloads)) => {
-            for payload in payloads {
-                pending.push(payload);
-            }
+            pending.push_group(payloads);
             drain_available_media_payloads(rx, pending)
         }
         Ok(Err(error)) => Err(error),
@@ -2655,11 +2687,7 @@ fn drain_available_media_payloads(
 ) -> Result<bool> {
     for _ in 0..MUNINN_RUDP_MEDIA_INGEST_BUDGET_PER_TURN {
         match rx.try_recv() {
-            Ok(Ok(payloads)) => {
-                for payload in payloads {
-                    pending.push(payload);
-                }
-            }
+            Ok(Ok(payloads)) => pending.push_group(payloads),
             Ok(Err(error)) => return Err(error),
             Err(mpsc::TryRecvError::Empty) => return Ok(false),
             Err(mpsc::TryRecvError::Disconnected) => return Ok(true),
@@ -2698,6 +2726,11 @@ fn send_rudp_media_payload_with_backpressure(
             Err(error) if is_would_block_error(&error) => {
                 if media_payload_queue_age_exceeded(queued_at, Instant::now(), max_age) {
                     return Ok(false);
+                }
+                for _ in 0..MUNINN_RUDP_MEDIA_MAX_PENDING_RELIABLE_PACKETS {
+                    if !transport.poll_receive_once()? {
+                        break;
+                    }
                 }
                 poll_rudp_resends_with_backpressure(transport)?;
                 thread::sleep(Duration::from_millis(1));
@@ -3051,6 +3084,7 @@ fn muninn_media_rudp_options(
         CultNetRudpSocketTransportOptions::client("muninn-media", socket, endpoint, connection_id);
     options.resend_delay_ms = media_profile.sender_resend_delay_ms;
     options.max_fragment_bytes = Some(media_profile.max_fragment_bytes as u32);
+    options.max_pending_reliable_packets = Some(MUNINN_RUDP_MEDIA_MAX_PENDING_RELIABLE_PACKETS);
     options
 }
 
@@ -11901,6 +11935,10 @@ mod tests {
             options.max_fragment_bytes,
             Some(MUNINN_RUDP_MEDIA_MAX_FRAGMENT_BYTES as u32)
         );
+        assert_eq!(
+            options.max_pending_reliable_packets,
+            Some(MUNINN_RUDP_MEDIA_MAX_PENDING_RELIABLE_PACKETS)
+        );
         assert_eq!(options.reconnect_policy, None);
         let transport = CultNetRudpSocketTransportConnection::new(options).unwrap();
         let channels = transport
@@ -12053,6 +12091,33 @@ mod tests {
             pending.video_len(),
             MUNINN_RUDP_MEDIA_PENDING_VIDEO_CAPACITY
         );
+    }
+
+    #[test]
+    fn started_video_access_unit_cannot_be_partially_evicted() {
+        let queued_at = Instant::now();
+        let video_group = |marker: u8, count: usize| {
+            (0..count)
+                .map(|_| QueuedMuninnMediaSendPayload {
+                    payload: MuninnMediaSendPayload {
+                        channel_id: crate::media_packetizer::MUNINN_MEDIA_RUDP_CHANNEL,
+                        payload: vec![marker],
+                    },
+                    queued_at,
+                    kind: QueuedMuninnMediaKind::Video,
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut pending = PendingMuninnMediaSendQueues::default();
+        pending.push_group(video_group(1, 64));
+        assert_eq!(pending.pop_next().unwrap().payload.payload, vec![1]);
+
+        pending.push_group(video_group(2, MUNINN_RUDP_MEDIA_PENDING_VIDEO_CAPACITY));
+
+        for _ in 1..64 {
+            assert_eq!(pending.pop_next().unwrap().payload.payload, vec![1]);
+        }
+        assert_eq!(pending.pop_next().unwrap().payload.payload, vec![2]);
     }
 
     #[test]
