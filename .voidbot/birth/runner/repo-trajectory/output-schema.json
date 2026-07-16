@@ -1,0 +1,97 @@
+{
+  "additionalProperties": true,
+  "properties": {
+    "antiGoals": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "confidence": {
+      "type": "number"
+    },
+    "doNotMutate": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "implicitGoals": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "initializationRecord": {
+      "type": "object"
+    },
+    "nextSafeMove": {
+      "type": "string"
+    },
+    "roleBiases": {
+      "items": {
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "selfImage": {
+      "type": "string"
+    },
+    "selfPatchCandidates": {
+      "items": {
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "summary": {
+      "type": "string"
+    },
+    "trajectoryNarrative": {
+      "type": "string"
+    },
+    "verdict": {
+      "enum": [
+        "ready-for-review",
+        "needs-more-history",
+        "reject"
+      ],
+      "type": "string"
+    }
+  },
+  "required": [
+    "verdict",
+    "summary",
+    "confidence",
+    "selfImage",
+    "trajectoryNarrative",
+    "implicitGoals",
+    "antiGoals",
+    "roleBiases",
+    "selfPatchCandidates",
+    "initializationRecord",
+    "doNotMutate",
+    "nextSafeMove"
+  ],
+  "type": "object",
+  "xEpiphanyExpectedOutput": {
+    "antiGoals": [],
+    "confidence": "0.0..1.0",
+    "doNotMutate": [],
+    "implicitGoals": [],
+    "initializationRecord": {
+      "acceptedOnce": true,
+      "distillerKind": "repo-trajectory",
+      "profileSchemaVersion": "epiphany.repo_personality_profile.v0",
+      "repoId": "odin",
+      "terrainSchemaVersion": "epiphany.repo_terrain_report.v0",
+      "trajectorySchemaVersion": "epiphany.repo_trajectory_report.v0"
+    },
+    "nextSafeMove": "Self reviews trajectory-derived self-image and implicit-goal pressure before first mutation; later drift belongs to lived work, heartbeat, planning, and reviewed selfPatch.",
+    "roleBiases": [],
+    "selfImage": "how the repo understands its own becoming",
+    "selfPatchCandidates": [],
+    "summary": "short repo trajectory summary",
+    "trajectoryNarrative": "how the repo has been moving over time",
+    "verdict": "ready-for-review | needs-more-history | reject"
+  }
+}

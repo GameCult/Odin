@@ -1,0 +1,69 @@
+{
+  "additionalProperties": true,
+  "properties": {
+    "confidence": {
+      "type": "number"
+    },
+    "doNotMutate": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "initializationRecord": {
+      "type": "object"
+    },
+    "nextSafeMove": {
+      "type": "string"
+    },
+    "roleQuirks": {
+      "items": {
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "selfPatchCandidates": {
+      "items": {
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "summary": {
+      "type": "string"
+    },
+    "verdict": {
+      "enum": [
+        "ready-for-review",
+        "needs-more-terrain",
+        "reject"
+      ],
+      "type": "string"
+    }
+  },
+  "required": [
+    "verdict",
+    "summary",
+    "confidence",
+    "roleQuirks",
+    "selfPatchCandidates",
+    "initializationRecord",
+    "doNotMutate",
+    "nextSafeMove"
+  ],
+  "type": "object",
+  "xEpiphanyExpectedOutput": {
+    "confidence": "0.0..1.0",
+    "doNotMutate": [],
+    "initializationRecord": {
+      "acceptedOnce": true,
+      "profileSchemaVersion": "epiphany.repo_personality_profile.v0",
+      "repoId": "odin",
+      "terrainSchemaVersion": "epiphany.repo_terrain_report.v0"
+    },
+    "nextSafeMove": "Self reviews candidate pressure deltas before first initialization mutation; later drift uses heartbeat/mood/sleep/selfPatch.",
+    "roleQuirks": [],
+    "selfPatchCandidates": [],
+    "summary": "short repo personality pressure summary",
+    "verdict": "ready-for-review | needs-more-terrain | reject"
+  }
+}

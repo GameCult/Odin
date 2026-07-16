@@ -1,0 +1,69 @@
+{
+  "additionalProperties": true,
+  "properties": {
+    "confidence": {
+      "type": "number"
+    },
+    "doNotMutate": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "globalMemoryCandidates": {
+      "items": {
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "initializationRecord": {
+      "type": "object"
+    },
+    "nextSafeMove": {
+      "type": "string"
+    },
+    "roleMemoryPatches": {
+      "items": {
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "summary": {
+      "type": "string"
+    },
+    "verdict": {
+      "enum": [
+        "ready-for-review",
+        "needs-more-terrain",
+        "reject"
+      ],
+      "type": "string"
+    }
+  },
+  "required": [
+    "verdict",
+    "summary",
+    "confidence",
+    "roleMemoryPatches",
+    "initializationRecord",
+    "doNotMutate",
+    "nextSafeMove"
+  ],
+  "type": "object",
+  "xEpiphanyExpectedOutput": {
+    "confidence": "0.0..1.0",
+    "doNotMutate": [],
+    "globalMemoryCandidates": [],
+    "initializationRecord": {
+      "acceptedOnce": true,
+      "distillerKind": "repo-memory",
+      "profileSchemaVersion": "epiphany.repo_personality_profile.v0",
+      "repoId": "odin",
+      "terrainSchemaVersion": "epiphany.repo_terrain_report.v0"
+    },
+    "nextSafeMove": "Self reviews role-specific memory patches before first initialization mutation; later memory growth uses heartbeat, evidence, rumination, sleep, and reviewed selfPatch.",
+    "roleMemoryPatches": [],
+    "summary": "short newborn memory initialization summary",
+    "verdict": "ready-for-review | needs-more-source | reject"
+  }
+}

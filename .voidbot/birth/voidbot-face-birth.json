@@ -1,0 +1,11 @@
+{
+  "status": "failed",
+  "identityId": "odin",
+  "repoPath": "E:\\Projects\\Odin",
+  "artifactDir": "E:\\Projects\\Odin\\.voidbot\\birth",
+  "logPath": "E:\\Projects\\Odin\\.voidbot\\logs\\voidbot-face-birth.log",
+  "error": "cargo exited with 4294967295",
+  "startedAt": "2026-07-15T00:47:50.873Z",
+  "failedAt": "2026-07-15T01:08:46.803Z",
+  "updatedAt": "2026-07-15T01:08:46.803Z"
+}

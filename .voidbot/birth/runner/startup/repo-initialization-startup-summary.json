@@ -1,0 +1,56 @@
+{
+  "acceptedKinds": [],
+  "action": "reviewInitializationPackets",
+  "artifactDir": "E:\\Projects\\Odin\\.voidbot\\birth\\runner\\startup",
+  "baseline": "E:\\Projects\\Odin\\.voidbot\\birth\\terrain\\baseline.msgpack",
+  "generatedPackets": [
+    {
+      "birthOnly": true,
+      "contract": "Startup-only specialist packet. Do not register as a heartbeat lane; accept-init may apply reviewed role selfPatch requests only after Self review.",
+      "executionOwner": "repo-initialization-startup-runner",
+      "heartbeatParticipant": null,
+      "kind": "repo-trajectory",
+      "packetPath": "E:\\Projects\\Odin\\.voidbot\\birth\\runner\\startup\\repo-trajectory\\repo-trajectory-distiller-packet.json",
+      "promptPath": "E:\\Projects\\Odin\\.voidbot\\birth\\runner\\startup\\repo-trajectory\\repo-trajectory-distiller-prompt.md",
+      "summaryPath": "E:\\Projects\\Odin\\.voidbot\\birth\\runner\\startup\\repo-trajectory\\repo-trajectory-distiller-packet.md"
+    },
+    {
+      "birthOnly": true,
+      "contract": "Startup-only specialist packet. Do not register as a heartbeat lane; accept-init may stamp the newborn trait lattice and seed heartbeat physiology only after Self review.",
+      "executionOwner": "repo-initialization-startup-runner",
+      "heartbeatParticipant": null,
+      "kind": "repo-personality",
+      "packetPath": "E:\\Projects\\Odin\\.voidbot\\birth\\runner\\startup\\repo-personality\\repo-personality-distiller-packet.json",
+      "promptPath": "E:\\Projects\\Odin\\.voidbot\\birth\\runner\\startup\\repo-personality\\repo-personality-distiller-prompt.md",
+      "summaryPath": "E:\\Projects\\Odin\\.voidbot\\birth\\runner\\startup\\repo-personality\\repo-personality-distiller-packet.md"
+    },
+    {
+      "birthOnly": true,
+      "contract": "Startup-only specialist packet. Do not register as a heartbeat lane; accept-init may apply reviewed role selfPatch requests only after Self review.",
+      "executionOwner": "repo-initialization-startup-runner",
+      "heartbeatParticipant": null,
+      "kind": "repo-memory",
+      "packetPath": "E:\\Projects\\Odin\\.voidbot\\birth\\runner\\startup\\repo-memory\\repo-memory-distiller-packet.json",
+      "promptPath": "E:\\Projects\\Odin\\.voidbot\\birth\\runner\\startup\\repo-memory\\repo-memory-distiller-prompt.md",
+      "summaryPath": "E:\\Projects\\Odin\\.voidbot\\birth\\runner\\startup\\repo-memory\\repo-memory-distiller-packet.md"
+    }
+  ],
+  "initStore": "E:\\Projects\\Odin\\.voidbot\\state\\repo-initialization.msgpack",
+  "missingKinds": [
+    "repo-trajectory",
+    "repo-personality",
+    "repo-memory"
+  ],
+  "mode": "startup",
+  "nextSafeMove": "Self reviews generated birth packets, runs the startup-only distiller specialists outside the heartbeat lane system, applies accepted selfPatch candidates, trait-lattice seeds, and heartbeat seeds through accept-init, then records each completed birth rite.",
+  "projectionStore": "E:\\Projects\\Odin\\.voidbot\\birth\\runner\\startup\\projection\\projection.msgpack",
+  "repo": "E:\\Projects\\Odin",
+  "repoId": "odin",
+  "requiredActions": [
+    "reviewRepoTrajectoryInitialization",
+    "reviewRepoPersonalityInitialization",
+    "reviewRepoMemoryInitialization"
+  ],
+  "requiresReview": true,
+  "schemaVersion": "epiphany.repo_personality_artifacts.v0"
+}

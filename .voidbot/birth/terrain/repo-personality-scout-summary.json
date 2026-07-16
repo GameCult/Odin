@@ -1,0 +1,33 @@
+{
+  "artifactDir": "E:\\Projects\\Odin\\.voidbot\\birth\\terrain",
+  "mode": "scout",
+  "profileCount": 1,
+  "repoCount": 1,
+  "repos": [
+    {
+      "confidence": 0.85,
+      "dominantAxes": [
+        "burstiness:1.00",
+        "contract_strictness:1.00",
+        "boundary_severity:0.96",
+        "content_canon_bias:0.90",
+        "protocol_intolerance:0.85"
+      ],
+      "families": [
+        "cult_protocol_storage",
+        "gamecult_web_lore_ops",
+        "service_product_app"
+      ],
+      "name": "Odin",
+      "path": "\\\\?\\E:\\Projects\\Odin",
+      "repoId": "odin",
+      "warnings": [
+        "No AGENTS.md or instruction surface found."
+      ]
+    }
+  ],
+  "root": "E:\\Projects\\Odin",
+  "schemaVersion": "epiphany.repo_personality_artifacts.v0",
+  "store": "E:\\Projects\\Odin\\.voidbot\\birth\\terrain\\baseline.msgpack",
+  "trajectoryCount": 1
+}
