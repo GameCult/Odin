@@ -99,7 +99,17 @@ The machine is reliable when each class loses only what its contract permits.
 - Recoverable missing video chunks remain repair/FEC damage. Only explicit or
   dependency-derived decode-chain invalidation requests a keyframe.
 
-Still open: real encoder keyframe actuation, receiver-side production parity
-reconstruction, bounded long-disconnect admission for unacknowledged HID edges,
-audio FEC/concealment, adaptive bitrate/parity from receiver pressure, and a
-socket impairment timeline harness.
+Still open: real encoder keyframe actuation, bounded long-disconnect admission
+for unacknowledged HID edges, Opus audio FEC/PLC, adaptive bitrate/parity from
+receiver pressure, and a socket impairment timeline harness.
+
+Receiver audit correction on 2026-07-16: the native Mimir/OBS receiver already
+contains production XOR parity reconstruction. Its early repair feedback was
+incorrectly placing the still-live frame in `late_frame_ids`, causing Odin's
+deadline guard to refuse every repair. The native feedback contract now keeps
+early damage live and names the frame late only at assembly expiry; a C++-emitted
+fixture is decoded by the Rust packetizer test. The same audit found the sender
+emits 10 ms float PCM while the receiver launched FFmpeg as AAC. Mimir now uses
+the `f32le`, stereo, 48 kHz input contract, a 40 ms reorder budget, and bounded
+short-hole silence concealment. Opus FEC/PLC remains the target for
+Moonlight-grade lossy audio.
