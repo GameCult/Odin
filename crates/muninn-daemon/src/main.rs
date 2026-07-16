@@ -171,6 +171,7 @@ struct Options {
     audio_sample_rate: u32,
     audio_channels: u32,
     ffmpeg_path: String,
+    video_encoder_path: Option<PathBuf>,
     loopback_script: PathBuf,
     log_root: PathBuf,
     interval_seconds: Option<u64>,
@@ -1217,6 +1218,10 @@ fn spawn_capture_stream_activation(
         "--log-root".to_string(),
         options.log_root.display().to_string(),
     ]);
+    if let Some(path) = &options.video_encoder_path {
+        args.push("--video-encoder".to_string());
+        args.push(path.display().to_string());
+    }
     Command::new(exe)
         .args(args)
         .stdin(Stdio::null())
@@ -1857,15 +1862,33 @@ fn run_rudp_mux_once(
     };
 
     let mut video_ffmpeg = if options.capture_video {
+        let (program, args, controllable) = if let Some(path) = &options.video_encoder_path {
+            (
+                path.as_os_str(),
+                muninn_controllable_video_encoder_args(options),
+                true,
+            )
+        } else {
+            (
+                std::ffi::OsStr::new(&options.ffmpeg_path),
+                rudp_video_ffmpeg_args(options),
+                false,
+            )
+        };
         Some(
-            Command::new(&options.ffmpeg_path)
-                .args(rudp_video_ffmpeg_args(options))
-                .stdin(Stdio::null())
+            Command::new(program)
+                .args(args)
+                .stdin(if controllable { Stdio::piped() } else { Stdio::null() })
                 .stdout(Stdio::piped())
                 .stderr(fs::File::create(&video_ffmpeg_stderr)?)
                 .spawn()
-                .with_context(|| format!("starting {} video encoder", options.ffmpeg_path))?,
+                .with_context(|| format!("starting {} video encoder", program.to_string_lossy()))?,
         )
+    } else {
+        None
+    };
+    let mut video_encoder_control = if options.video_encoder_path.is_some() {
+        video_ffmpeg.as_mut().and_then(|process| process.stdin.take())
     } else {
         None
     };
@@ -2052,10 +2075,12 @@ fn run_rudp_mux_once(
                         &mut video_send_pacer,
                         payloads_dropped,
                     )?;
-                    record_receiver_keyframe_pressure(
+                    if record_receiver_keyframe_pressure(
                         &receiver_feedback,
                         &mut handled_keyframe_requests,
-                    );
+                    ) {
+                        request_video_encoder_idr(video_encoder_control.as_mut())?;
+                    }
                     poll_rudp_resends_with_backpressure(&mut video_transport)?;
                     poll_rudp_resends_with_backpressure(&mut audio_transport)?;
                     republish_running_stream_if_due(
@@ -2126,10 +2151,12 @@ fn run_rudp_mux_once(
                     &mut video_send_pacer,
                     payloads_dropped,
                 )?;
-                record_receiver_keyframe_pressure(
+                if record_receiver_keyframe_pressure(
                     &receiver_feedback,
                     &mut handled_keyframe_requests,
-                );
+                ) {
+                    request_video_encoder_idr(video_encoder_control.as_mut())?;
+                }
                 poll_rudp_resends_with_backpressure(&mut video_transport)?;
                 poll_rudp_resends_with_backpressure(&mut audio_transport)?;
                 republish_running_stream_if_due(
@@ -2196,10 +2223,12 @@ fn run_rudp_mux_once(
                     &mut video_send_pacer,
                     payloads_dropped,
                 )?;
-                record_receiver_keyframe_pressure(
+                if record_receiver_keyframe_pressure(
                     &receiver_feedback,
                     &mut handled_keyframe_requests,
-                );
+                ) {
+                    request_video_encoder_idr(video_encoder_control.as_mut())?;
+                }
                 poll_rudp_resends_with_backpressure(&mut video_transport)?;
                 poll_rudp_resends_with_backpressure(&mut audio_transport)?;
                 republish_running_stream_if_due(
@@ -2619,14 +2648,25 @@ fn default_rudp_mux_restart_delay(restart_count: u32) -> Duration {
 fn record_receiver_keyframe_pressure(
     receiver_feedback: &MuninnRudpReceiverFeedbackStats,
     handled_keyframe_requests: &mut u64,
-) {
+) -> bool {
     if receiver_feedback.requested_keyframes <= *handled_keyframe_requests {
-        return;
+        return false;
     }
     *handled_keyframe_requests = receiver_feedback.requested_keyframes;
-    eprintln!(
-        "Muninn RUDP receiver requested a fresh keyframe; continuing current low-latency encoder session until explicit encoder control exists."
-    );
+    true
+}
+
+fn request_video_encoder_idr<W: std::io::Write + ?Sized>(control: Option<&mut W>) -> Result<()> {
+    if let Some(control) = control {
+        control.write_all(b"IDR\n")?;
+        control.flush()?;
+        eprintln!("Muninn RUDP receiver invalidated the decode chain; requested next-frame IDR.");
+    } else {
+        eprintln!(
+            "Muninn RUDP receiver invalidated the decode chain; scheduled quarter-second IDR remains the recovery ceiling because the configured FFmpeg CLI has no live encoder command surface."
+        );
+    }
+    Ok(())
 }
 
 fn rudp_media_progress_detail(
@@ -9840,6 +9880,22 @@ fn rudp_video_ffmpeg_args(options: &Options) -> Vec<String> {
     ]
 }
 
+fn muninn_controllable_video_encoder_args(options: &Options) -> Vec<String> {
+    vec![
+        "--input".to_string(),
+        format!(
+            "ddagrab=framerate={}:output_idx={}:draw_mouse=1",
+            options.framerate, options.ddagrab_output_index
+        ),
+        "--framerate".to_string(),
+        options.framerate.max(1).to_string(),
+        "--bitrate-kbps".to_string(),
+        options.rudp_video_bitrate_kbps.to_string(),
+        "--gop-frames".to_string(),
+        muninn_rudp_video_gop_frames(options).to_string(),
+    ]
+}
+
 fn rudp_audio_ffmpeg_args(options: &Options) -> Vec<String> {
     vec![
         "-hide_banner".to_string(),
@@ -9953,6 +10009,7 @@ impl Options {
             audio_sample_rate: 48000,
             audio_channels: 2,
             ffmpeg_path: "ffmpeg".to_string(),
+            video_encoder_path: None,
             loopback_script: PathBuf::from("scripts/wasapi-loopback-capture.ps1"),
             log_root: PathBuf::from("C:/Meta/Odin/logs/muninn"),
             interval_seconds: None,
@@ -10106,6 +10163,12 @@ impl Options {
                     options.audio_channels = take_value(&mut args, "--audio-channels")?.parse()?
                 }
                 "--ffmpeg" => options.ffmpeg_path = take_value(&mut args, "--ffmpeg")?,
+                "--video-encoder" => {
+                    options.video_encoder_path = Some(PathBuf::from(take_value(
+                        &mut args,
+                        "--video-encoder",
+                    )?))
+                }
                 "--loopback-script" => {
                     options.loopback_script =
                         PathBuf::from(take_value(&mut args, "--loopback-script")?)
@@ -11536,6 +11599,46 @@ mod tests {
     }
 
     #[test]
+    fn controllable_video_encoder_owns_capture_and_recovery_shape() {
+        let options = Options::parse(
+            [
+                "activate",
+                "--media-transport",
+                "rudp",
+                "--framerate",
+                "60",
+                "--rudp-video-bitrate-kbps",
+                "16000",
+                "--ddagrab-output-index",
+                "1",
+                "--video-encoder",
+                "C:/GameCult/muninn-video-encoder.exe",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap();
+
+        assert_eq!(
+            options.video_encoder_path,
+            Some(PathBuf::from("C:/GameCult/muninn-video-encoder.exe"))
+        );
+        assert_eq!(
+            muninn_controllable_video_encoder_args(&options),
+            vec![
+                "--input",
+                "ddagrab=framerate=60:output_idx=1:draw_mouse=1",
+                "--framerate",
+                "60",
+                "--bitrate-kbps",
+                "16000",
+                "--gop-frames",
+                "15",
+            ]
+        );
+    }
+
+    #[test]
     fn default_rudp_media_packet_size_keeps_late_typed_video_wire_under_udp_mtu() {
         let mut access_unit = Vec::new();
         access_unit.extend_from_slice(&[0, 0, 0, 1, 0x65]);
@@ -11897,22 +12000,29 @@ mod tests {
     }
 
     #[test]
-    fn receiver_feedback_keyframe_requests_are_recorded_without_encoder_restart() {
+    fn receiver_feedback_keyframe_requests_are_edge_triggered() {
         let mut handled = 0;
         let mut receiver_feedback = MuninnRudpReceiverFeedbackStats::default();
 
-        record_receiver_keyframe_pressure(&receiver_feedback, &mut handled);
+        assert!(!record_receiver_keyframe_pressure(&receiver_feedback, &mut handled));
         assert_eq!(handled, 0);
 
         receiver_feedback.requested_keyframes = 1;
-        record_receiver_keyframe_pressure(&receiver_feedback, &mut handled);
+        assert!(record_receiver_keyframe_pressure(&receiver_feedback, &mut handled));
         assert_eq!(handled, 1);
-        record_receiver_keyframe_pressure(&receiver_feedback, &mut handled);
+        assert!(!record_receiver_keyframe_pressure(&receiver_feedback, &mut handled));
         assert_eq!(handled, 1);
 
         receiver_feedback.requested_keyframes = 2;
-        record_receiver_keyframe_pressure(&receiver_feedback, &mut handled);
+        assert!(record_receiver_keyframe_pressure(&receiver_feedback, &mut handled));
         assert_eq!(handled, 2);
+    }
+
+    #[test]
+    fn receiver_keyframe_pressure_writes_live_encoder_idr_command() {
+        let mut commands = Vec::new();
+        request_video_encoder_idr(Some(&mut commands)).unwrap();
+        assert_eq!(commands, b"IDR\n");
     }
 
     #[test]

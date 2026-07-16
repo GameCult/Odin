@@ -99,11 +99,10 @@ The machine is reliable when each class loses only what its contract permits.
 - Recoverable missing video chunks remain repair/FEC damage. Only explicit or
   dependency-derived decode-chain invalidation requests a keyframe.
 
-Still open: real encoder keyframe actuation, bounded long-disconnect admission
-for unacknowledged HID edges, adaptive bitrate/parity from receiver pressure,
-and field acceptance runs through the impairment harness. The current encoder
-still guarantees a scheduled IDR every quarter second, so missing dynamic IDR
-actuation has a hard recovery ceiling rather than an unbounded decoder stall.
+Still open: bounded long-disconnect admission for unacknowledged HID edges,
+adaptive bitrate/parity from receiver pressure, packaging the controllable
+encoder on each capture body, and field acceptance runs through the impairment
+harness. The scheduled IDR every quarter second remains a fallback ceiling.
 
 Receiver audit correction on 2026-07-16: the native Mimir/OBS receiver already
 contains production XOR parity reconstruction. Its early repair feedback was
@@ -129,3 +128,13 @@ loss, delay/jitter, reorder, duplication, and stalls with a bounded scheduled
 queue and CSV evidence. Profiles live under `tests/realtime-impairment`; the
 tool's six deterministic policy tests and release build pass. It observes the
 transport without becoming a second transport authority.
+
+The encoder command loop is now closed. `native/muninn-video-encoder` owns the
+long-lived libavdevice desktop capture and `h264_nvenc` context. Muninn retains
+the receiver-feedback decision and writes one `IDR` command only when a new
+decode-chain invalidation edge arrives. The encoder marks the next submitted
+`AVFrame` intra with NVENC `forced-idr=1`; it does not restart video, audio, or
+CultNet. A live 2560x1440 D3D11 desktop run with a 600-frame scheduled GOP
+received `IDR` over stdin and emitted a second cleanly decoded IDR at frame 22.
+The synthetic 640x360 verification emitted IDRs at frames 0 and 10 and decoded
+without errors. The quarter-second scheduled GOP stays as independent fallback.
