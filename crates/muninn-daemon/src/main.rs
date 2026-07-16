@@ -2033,6 +2033,10 @@ fn run_rudp_mux_once(
         let mut payloads_send_expired = 0_u64;
         let mut receiver_feedback = MuninnRudpReceiverFeedbackStats::default();
         let mut handled_keyframe_requests = 0_u64;
+        let mut video_bitrate_controller = MuninnVideoBitrateController::new(
+            media_profile.video_bitrate_kbps,
+            Instant::now(),
+        );
         let mut repair_cache =
             RecentVideoChunkRepairCache::new(MUNINN_RUDP_MEDIA_REPAIR_CACHE_CHUNKS);
         let mut repair_budget = MuninnRudpRepairBudget::new(
@@ -2075,12 +2079,14 @@ fn run_rudp_mux_once(
                         &mut video_send_pacer,
                         payloads_dropped,
                     )?;
-                    if record_receiver_keyframe_pressure(
+                    apply_video_encoder_feedback_control(
                         &receiver_feedback,
                         &mut handled_keyframe_requests,
-                    ) {
-                        request_video_encoder_idr(video_encoder_control.as_mut())?;
-                    }
+                        &mut video_bitrate_controller,
+                        video_encoder_control.as_mut(),
+                        payloads_dropped,
+                        media_profile.receiver_assembly_deadline_ms,
+                    )?;
                     poll_rudp_resends_with_backpressure(&mut video_transport)?;
                     poll_rudp_resends_with_backpressure(&mut audio_transport)?;
                     republish_running_stream_if_due(
@@ -2151,12 +2157,14 @@ fn run_rudp_mux_once(
                     &mut video_send_pacer,
                     payloads_dropped,
                 )?;
-                if record_receiver_keyframe_pressure(
+                apply_video_encoder_feedback_control(
                     &receiver_feedback,
                     &mut handled_keyframe_requests,
-                ) {
-                    request_video_encoder_idr(video_encoder_control.as_mut())?;
-                }
+                    &mut video_bitrate_controller,
+                    video_encoder_control.as_mut(),
+                    payloads_dropped,
+                    media_profile.receiver_assembly_deadline_ms,
+                )?;
                 poll_rudp_resends_with_backpressure(&mut video_transport)?;
                 poll_rudp_resends_with_backpressure(&mut audio_transport)?;
                 republish_running_stream_if_due(
@@ -2223,12 +2231,14 @@ fn run_rudp_mux_once(
                     &mut video_send_pacer,
                     payloads_dropped,
                 )?;
-                if record_receiver_keyframe_pressure(
+                apply_video_encoder_feedback_control(
                     &receiver_feedback,
                     &mut handled_keyframe_requests,
-                ) {
-                    request_video_encoder_idr(video_encoder_control.as_mut())?;
-                }
+                    &mut video_bitrate_controller,
+                    video_encoder_control.as_mut(),
+                    payloads_dropped,
+                    media_profile.receiver_assembly_deadline_ms,
+                )?;
                 poll_rudp_resends_with_backpressure(&mut video_transport)?;
                 poll_rudp_resends_with_backpressure(&mut audio_transport)?;
                 republish_running_stream_if_due(
@@ -2335,6 +2345,78 @@ struct MuninnRudpReceiverFeedbackStats {
     deferred_repair_chunks: u64,
     repair_chunks_per_second: usize,
     highest_decodable_frame_id: Option<u64>,
+    latest_jitter_us: u64,
+    latest_decode_queue_us: u64,
+}
+
+#[derive(Debug)]
+struct MuninnVideoBitrateController {
+    current_kbps: u32,
+    min_kbps: u32,
+    max_kbps: u32,
+    last_late_frames: u64,
+    last_keyframes: u64,
+    last_deferred_repairs: u64,
+    last_queue_dropped: u64,
+    last_sample_at: Instant,
+    stable_since: Instant,
+}
+
+impl MuninnVideoBitrateController {
+    fn new(max_kbps: u32, now: Instant) -> Self {
+        let max_kbps = max_kbps.max(1_000);
+        Self {
+            current_kbps: max_kbps,
+            min_kbps: (max_kbps / 4).max(1_000),
+            max_kbps,
+            last_late_frames: 0,
+            last_keyframes: 0,
+            last_deferred_repairs: 0,
+            last_queue_dropped: 0,
+            last_sample_at: now,
+            stable_since: now,
+        }
+    }
+
+    fn observe(
+        &mut self,
+        feedback: &MuninnRudpReceiverFeedbackStats,
+        queue_dropped: u64,
+        deadline_us: u64,
+        now: Instant,
+    ) -> Option<u32> {
+        if now.duration_since(self.last_sample_at) < Duration::from_millis(500) {
+            return None;
+        }
+        self.last_sample_at = now;
+        let receiver_pressure = feedback
+            .latest_jitter_us
+            .saturating_add(feedback.latest_decode_queue_us)
+            >= deadline_us.saturating_mul(3) / 4;
+        let damaged = feedback.late_frames > self.last_late_frames
+            || feedback.requested_keyframes > self.last_keyframes
+            || feedback.deferred_repair_chunks > self.last_deferred_repairs
+            || queue_dropped > self.last_queue_dropped
+            || receiver_pressure;
+        self.last_late_frames = feedback.late_frames;
+        self.last_keyframes = feedback.requested_keyframes;
+        self.last_deferred_repairs = feedback.deferred_repair_chunks;
+        self.last_queue_dropped = queue_dropped;
+
+        let previous = self.current_kbps;
+        if damaged {
+            self.current_kbps = (self.current_kbps.saturating_mul(85) / 100)
+                .max(self.min_kbps);
+            self.stable_since = now;
+        } else if now.duration_since(self.stable_since) >= Duration::from_secs(2) {
+            self.current_kbps = self
+                .current_kbps
+                .saturating_add((self.max_kbps / 20).max(250))
+                .min(self.max_kbps);
+            self.stable_since = now;
+        }
+        (self.current_kbps != previous).then_some(self.current_kbps)
+    }
 }
 
 #[derive(Debug)]
@@ -2669,6 +2751,40 @@ fn request_video_encoder_idr<W: std::io::Write + ?Sized>(control: Option<&mut W>
     Ok(())
 }
 
+fn request_video_encoder_bitrate<W: std::io::Write + ?Sized>(
+    control: Option<&mut W>,
+    bitrate_kbps: u32,
+) -> Result<()> {
+    if let Some(control) = control {
+        writeln!(control, "BITRATE {bitrate_kbps}")?;
+        control.flush()?;
+        eprintln!("Muninn adjusted live NVENC bitrate to {bitrate_kbps} kbps.");
+    }
+    Ok(())
+}
+
+fn apply_video_encoder_feedback_control(
+    feedback: &MuninnRudpReceiverFeedbackStats,
+    handled_keyframe_requests: &mut u64,
+    bitrate: &mut MuninnVideoBitrateController,
+    mut control: Option<&mut std::process::ChildStdin>,
+    queue_dropped: u64,
+    deadline_ms: u64,
+) -> Result<()> {
+    if record_receiver_keyframe_pressure(feedback, handled_keyframe_requests) {
+        request_video_encoder_idr(control.as_deref_mut())?;
+    }
+    if let Some(kbps) = bitrate.observe(
+        feedback,
+        queue_dropped,
+        deadline_ms.saturating_mul(1_000),
+        Instant::now(),
+    ) {
+        request_video_encoder_bitrate(control.as_deref_mut(), kbps)?;
+    }
+    Ok(())
+}
+
 fn rudp_media_progress_detail(
     sent: u64,
     queue_dropped: u64,
@@ -2765,6 +2881,8 @@ fn record_rudp_media_receiver_feedback(
     stats.missing_video_chunks = stats
         .missing_video_chunks
         .saturating_add(feedback.missing_video_chunk_keys.len() as u64);
+    stats.latest_jitter_us = feedback.jitter_us.max(0) as u64;
+    stats.latest_decode_queue_us = feedback.decode_queue_us.max(0) as u64;
     if let Some(frame_id) = feedback.highest_decodable_frame_id {
         stats.highest_decodable_frame_id = Some(
             stats
@@ -11957,6 +12075,7 @@ mod tests {
             deferred_repair_chunks: 5,
             repair_chunks_per_second: 64,
             highest_decodable_frame_id: Some(88),
+            ..Default::default()
         };
 
         assert_eq!(
@@ -12032,6 +12151,48 @@ mod tests {
         let mut commands = Vec::new();
         request_video_encoder_idr(Some(&mut commands)).unwrap();
         assert_eq!(commands, b"IDR\n");
+    }
+
+    #[test]
+    fn video_bitrate_controller_backs_off_fast_and_recovers_slowly() {
+        let start = Instant::now();
+        let mut controller = MuninnVideoBitrateController::new(12_000, start);
+        let mut feedback = MuninnRudpReceiverFeedbackStats::default();
+        feedback.late_frames = 1;
+        assert_eq!(
+            controller.observe(&feedback, 0, 100_000, start + Duration::from_millis(500)),
+            Some(10_200)
+        );
+        assert_eq!(
+            controller.observe(&feedback, 0, 100_000, start + Duration::from_secs(1)),
+            None
+        );
+        assert_eq!(
+            controller.observe(&feedback, 0, 100_000, start + Duration::from_millis(2500)),
+            Some(10_800)
+        );
+        assert_eq!(
+            controller.observe(&feedback, 0, 100_000, start + Duration::from_secs(3)),
+            None
+        );
+    }
+
+    #[test]
+    fn receiver_decode_pressure_drives_bitrate_and_command_shape() {
+        let start = Instant::now();
+        let mut controller = MuninnVideoBitrateController::new(16_000, start);
+        let feedback = MuninnRudpReceiverFeedbackStats {
+            latest_jitter_us: 30_000,
+            latest_decode_queue_us: 50_000,
+            ..Default::default()
+        };
+        let adjusted = controller
+            .observe(&feedback, 0, 100_000, start + Duration::from_millis(500))
+            .unwrap();
+        assert_eq!(adjusted, 13_600);
+        let mut commands = Vec::new();
+        request_video_encoder_bitrate(Some(&mut commands), adjusted).unwrap();
+        assert_eq!(commands, b"BITRATE 13600\n");
     }
 
     #[test]

@@ -1,4 +1,5 @@
 #include <atomic>
+#include <charconv>
 #include <cerrno>
 #include <cstdint>
 #include <cstdio>
@@ -153,11 +154,20 @@ int main(int argc, char **argv)
     if (!input_packet || !output_packet || !frame) fail("allocating frame pipeline");
 
     std::atomic_bool force_next_idr{false};
+    std::atomic_uint64_t requested_bitrate_kbps{0};
     std::atomic_bool quit{false};
     std::thread command_reader([&] {
         std::string command;
         while (std::getline(std::cin, command)) {
             if (command == "IDR") force_next_idr.store(true, std::memory_order_release);
+            else if (command.starts_with("BITRATE ")) {
+                std::uint64_t bitrate = 0;
+                const auto value = std::string_view(command).substr(8);
+                const auto parsed = std::from_chars(value.data(), value.data() + value.size(), bitrate);
+                if (parsed.ec == std::errc{} && parsed.ptr == value.data() + value.size() &&
+                    bitrate >= 250 && bitrate <= 100'000)
+                    requested_bitrate_kbps.store(bitrate, std::memory_order_release);
+            }
             else if (command == "QUIT") { quit.store(true, std::memory_order_release); break; }
         }
     });
@@ -217,6 +227,17 @@ int main(int argc, char **argv)
             }
 
             const bool scheduled = options.force_idr_frame == frame_number;
+            const std::uint64_t requested_bitrate =
+                requested_bitrate_kbps.exchange(0, std::memory_order_acq_rel);
+            if (requested_bitrate > 0 &&
+                encoder->bit_rate != static_cast<int64_t>(requested_bitrate * 1000)) {
+                encoder->bit_rate = static_cast<int64_t>(requested_bitrate * 1000);
+                encoder->rc_max_rate = encoder->bit_rate;
+                encoder->rc_buffer_size = static_cast<int>(
+                    encoder->bit_rate / options.framerate * 2);
+                std::cerr << "muninn-video-encoder: bitrate=" << requested_bitrate
+                          << "kbps frame=" << frame_number << '\n';
+            }
             if (scheduled || force_next_idr.exchange(false, std::memory_order_acq_rel))
                 frame->pict_type = AV_PICTURE_TYPE_I;
             else

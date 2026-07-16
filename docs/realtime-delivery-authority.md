@@ -99,10 +99,11 @@ The machine is reliable when each class loses only what its contract permits.
 - Recoverable missing video chunks remain repair/FEC damage. Only explicit or
   dependency-derived decode-chain invalidation requests a keyframe.
 
-Still open: adaptive bitrate/parity from receiver pressure, installing the
-controllable encoder bundle on each capture body, and field acceptance runs
-through the impairment harness. The scheduled IDR every quarter second remains
-a fallback ceiling.
+Still open: installing the controllable encoder bundle on each capture body and
+field acceptance runs through the impairment harness. The scheduled IDR every
+quarter second remains a fallback ceiling. Video parity is already fixed at up
+to 16 interleaved stripes per frame; field evidence must decide whether making
+that overhead adaptive would improve the visible timeline or merely add churn.
 
 Receiver audit correction on 2026-07-16: the native Mimir/OBS receiver already
 contains production XOR parity reconstruction. Its early repair feedback was
@@ -138,6 +139,16 @@ CultNet. A live 2560x1440 D3D11 desktop run with a 600-frame scheduled GOP
 received `IDR` over stdin and emitted a second cleanly decoded IDR at frame 22.
 The synthetic 640x360 verification emitted IDRs at frames 0 and 10 and decoded
 without errors. The quarter-second scheduled GOP stays as independent fallback.
+
+Receiver pressure also controls the live NVENC rate without restarting the
+session. Muninn samples at 500 ms, backs bitrate off multiplicatively to 85%
+when late frames, keyframe recovery, deferred repairs, sender queue drops, or
+75%-of-deadline jitter/decode pressure appear, and adds only 5% of the configured
+ceiling after each two stable seconds. The floor is one quarter of the requested
+rate or 1 Mbps. `BITRATE <kbps>` changes `AVCodecContext` average/max bitrate and
+two-frame VBV; FFmpeg's NVENC backend reconfigures the existing encoder and
+forces an IDR. A live 2560x1440 D3D11 run changed 12 Mbps to 6 Mbps at frame 35,
+emitted the reconfiguration IDR at that same frame, and decoded cleanly.
 
 Disconnected input edge admission is now structurally bounded. Muninn retains
 at most 256 unacknowledged button edges per controller. Crossing that boundary

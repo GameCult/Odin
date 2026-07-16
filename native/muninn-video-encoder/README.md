@@ -7,6 +7,9 @@ one command per line:
 - `IDR` marks the next submitted frame `AV_PICTURE_TYPE_I`. With NVENC
   `forced-idr=1`, FFmpeg lowers that request to an IDR rather than an ordinary
   intra frame.
+- `BITRATE <kbps>` reconfigures average/max bitrate and the two-frame VBV on
+  the next submitted frame. FFmpeg's NVENC backend performs an in-session
+  `nvEncReconfigureEncoder` and forces an IDR for the rate transition.
 - `QUIT` ends capture cleanly.
 
 The process does not own transport, audio, packetization, deadlines, or repair.
