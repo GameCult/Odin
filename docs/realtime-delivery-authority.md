@@ -99,10 +99,10 @@ The machine is reliable when each class loses only what its contract permits.
 - Recoverable missing video chunks remain repair/FEC damage. Only explicit or
   dependency-derived decode-chain invalidation requests a keyframe.
 
-Still open: bounded long-disconnect admission for unacknowledged HID edges,
-adaptive bitrate/parity from receiver pressure, packaging the controllable
-encoder on each capture body, and field acceptance runs through the impairment
-harness. The scheduled IDR every quarter second remains a fallback ceiling.
+Still open: adaptive bitrate/parity from receiver pressure, installing the
+controllable encoder bundle on each capture body, and field acceptance runs
+through the impairment harness. The scheduled IDR every quarter second remains
+a fallback ceiling.
 
 Receiver audit correction on 2026-07-16: the native Mimir/OBS receiver already
 contains production XOR parity reconstruction. Its early repair feedback was
@@ -138,3 +138,11 @@ CultNet. A live 2560x1440 D3D11 desktop run with a 600-frame scheduled GOP
 received `IDR` over stdin and emitted a second cleanly decoded IDR at frame 22.
 The synthetic 640x360 verification emitted IDRs at frames 0 and 10 and decoded
 without errors. The quarter-second scheduled GOP stays as independent fallback.
+
+Disconnected input edge admission is now structurally bounded. Muninn retains
+at most 256 unacknowledged button edges per controller. Crossing that boundary
+rotates the source epoch, discards obsolete transition history, and rebases on
+the next full latest-state frame; Sleipnir replaces its virtual-pad state from
+that frame and retires the old epoch. Sleipnir also rejects any sparse future
+edge more than 256 positions beyond its applied cursor, so a missing or hostile
+sequence cannot grow receiver memory without limit.
