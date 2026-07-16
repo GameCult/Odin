@@ -8,7 +8,56 @@ fi
 
 action="${1:-}"
 target="${2:-}"
+source_commit="${3:-}"
+repository_full_name="${4:-}"
+upstream_ref="${5:-}"
+release_authority_id="${6:-}"
+release_authority_sha256="${7:-}"
+deployment_request_id="${8:-}"
+requires_bifrost_authority="${9:-false}"
 compose=/srv/compose/yggdrasil-apps.yaml
+
+require_release_lineage() {
+  case "$target" in
+    epiphany) target_requires_bifrost_authority=true ;;
+    voidbot|heimdall|repixelizer|streampixels) target_requires_bifrost_authority=false ;;
+    *) echo "deployment target has no release-authority policy: $target" >&2; exit 1 ;;
+  esac
+  if [ "$requires_bifrost_authority" != "$target_requires_bifrost_authority" ]; then
+    echo "caller release-authority mode does not match root policy for $target" >&2
+    exit 1
+  fi
+  requires_bifrost_authority="$target_requires_bifrost_authority"
+  case "$source_commit" in
+    *[!0-9a-f]*|'') echo "invalid or missing IDUNN_SOURCE_COMMIT" >&2; exit 1 ;;
+  esac
+  [ "${#source_commit}" -eq 40 ] || { echo "IDUNN_SOURCE_COMMIT must be 40 hex characters" >&2; exit 1; }
+  [ -n "$repository_full_name" ] || { echo "missing repository identity" >&2; exit 1; }
+  [ -n "$upstream_ref" ] || { echo "missing upstream ref" >&2; exit 1; }
+  [ -n "$deployment_request_id" ] || { echo "missing Idunn deployment request id" >&2; exit 1; }
+  case "$requires_bifrost_authority" in
+    true)
+      [ -n "$release_authority_id" ] || { echo "missing Bifrost release authority id" >&2; exit 1; }
+      case "$release_authority_sha256" in
+        *[!0-9a-f]*|'') echo "invalid or missing Bifrost release authority digest" >&2; exit 1 ;;
+      esac
+      [ "${#release_authority_sha256}" -eq 64 ] || { echo "Bifrost release authority digest must be 64 hex characters" >&2; exit 1; }
+      /usr/local/bin/idunn validate-release-authority \
+        --store /var/lib/gamecult/idunn/yggdrasil.keepalive.cc \
+        --release-authority-store /srv/bifrost/state/repository-release-authority.cc \
+        --repository-full-name "$repository_full_name" \
+        --upstream-ref "$upstream_ref" \
+        --source-revision "$source_commit" \
+        --release-authority-id "$release_authority_id" \
+        --release-authority-sha256 "$release_authority_sha256"
+      ;;
+    false)
+      [ -z "$release_authority_id" ] || { echo "legacy release cannot claim Bifrost authority id" >&2; exit 1; }
+      [ -z "$release_authority_sha256" ] || { echo "legacy release cannot claim Bifrost authority digest" >&2; exit 1; }
+      ;;
+    *) echo "invalid Bifrost authority requirement mode" >&2; exit 1 ;;
+  esac
+}
 
 case "$action:$target" in
   restart:heimdall)
@@ -20,13 +69,24 @@ case "$action:$target" in
   restart:streampixels)
     docker compose -f "$compose" restart streampixels-service streampixels-web
     ;;
-  deploy:voidbot|restart:voidbot)
-    manifest="/srv/odin/deploy-manifests/voidbot"
+  deploy:voidbot|restart:voidbot|deploy:epiphany|restart:epiphany)
+    manifest="/srv/odin/deploy-manifests/$target"
     if [ ! -x "$manifest" ] || [ ! -O "$manifest" ]; then
       echo "root-owned executable deploy manifest is not installed: $manifest" >&2
       exit 1
     fi
-    IDUNN_ACTUATOR=1 IDUNN_COMMAND_AUTHORITY=idunn-daemon exec "$manifest" "$action"
+    if [ "$action" = deploy ]; then
+      require_release_lineage
+    fi
+    IDUNN_ACTUATOR=1 IDUNN_COMMAND_AUTHORITY=idunn-daemon \
+      IDUNN_SOURCE_COMMIT="$source_commit" \
+      IDUNN_REPOSITORY_FULL_NAME="$repository_full_name" \
+      IDUNN_UPSTREAM_REF="$upstream_ref" \
+      BIFROST_RELEASE_AUTHORITY_ID="$release_authority_id" \
+      BIFROST_RELEASE_AUTHORITY_SHA256="$release_authority_sha256" \
+      IDUNN_DEPLOYMENT_REQUEST_ID="$deployment_request_id" \
+      IDUNN_REQUIRES_BIFROST_AUTHORITY="$requires_bifrost_authority" \
+      exec "$manifest" "$action"
     ;;
   deploy:heimdall|deploy:repixelizer|deploy:streampixels)
     manifest="/srv/odin/deploy-manifests/$target"
@@ -34,7 +94,16 @@ case "$action:$target" in
       echo "root-owned executable deploy manifest is not installed: $manifest" >&2
       exit 1
     fi
-    exec "$manifest"
+    require_release_lineage
+    IDUNN_ACTUATOR=1 IDUNN_COMMAND_AUTHORITY=idunn-daemon \
+      IDUNN_SOURCE_COMMIT="$source_commit" \
+      IDUNN_REPOSITORY_FULL_NAME="$repository_full_name" \
+      IDUNN_UPSTREAM_REF="$upstream_ref" \
+      BIFROST_RELEASE_AUTHORITY_ID="$release_authority_id" \
+      BIFROST_RELEASE_AUTHORITY_SHA256="$release_authority_sha256" \
+      IDUNN_DEPLOYMENT_REQUEST_ID="$deployment_request_id" \
+      IDUNN_REQUIRES_BIFROST_AUTHORITY="$requires_bifrost_authority" \
+      exec "$manifest"
     ;;
   *)
     echo "unsupported Idunn Yggdrasil actuator request: $action $target" >&2

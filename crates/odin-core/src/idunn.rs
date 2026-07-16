@@ -78,6 +78,12 @@ pub fn plan_keepalive(
                     command: command.to_string(),
                     authority: desired.authority.clone(),
                     requested_at: now,
+                    repository_full_name: String::new(),
+                    upstream_ref: String::new(),
+                    source_revision: String::new(),
+                    release_authority_id: String::new(),
+                    release_authority_envelope_sha256: String::new(),
+                    requires_bifrost_authority: false,
                 }),
                 restart_request: None,
                 operator_alarm: None,
@@ -416,6 +422,13 @@ mod tests {
             zero_downtime_capability: "restart-required".to_string(),
             status: "tracked".to_string(),
             observed_at: "2026-06-04T00:00:02Z".to_string(),
+            repository_full_name: "GameCult/VoidBot".to_string(),
+            upstream_ref: "refs/heads/main".to_string(),
+            release_authority_id: "release:GameCult/VoidBot:refs/heads/main:abc123".to_string(),
+            release_authority_envelope_sha256: "authority-sha".to_string(),
+            release_authority_status: "authorized".to_string(),
+            requires_bifrost_authority: true,
+            observed_upstream_revision: "abc123".to_string(),
         };
         let artifact = IdunnDeploymentArtifactRecord {
             artifact_id: "artifact:voidbot:main".to_string(),
@@ -427,6 +440,10 @@ mod tests {
             artifact_uri: "built-by-deploy-command".to_string(),
             sha256: "pending-deploy-command".to_string(),
             built_at: "2026-06-04T00:00:02Z".to_string(),
+            release_authority_id: release_target.release_authority_id.clone(),
+            release_authority_envelope_sha256: release_target
+                .release_authority_envelope_sha256
+                .clone(),
         };
         let migration_plan = IdunnStateMigrationPlanRecord {
             plan_id: "migration:voidbot:main".to_string(),

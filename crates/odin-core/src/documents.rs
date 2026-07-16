@@ -16,11 +16,13 @@ pub const IDUNN_DAEMON_HEALTH_SCHEMA: &str = "idunn.daemon_health.v1";
 pub const IDUNN_KEEPALIVE_DECISION_SCHEMA: &str = "idunn.keepalive_decision.v1";
 pub const IDUNN_RESTART_REQUEST_SCHEMA: &str = "idunn.restart_request.v1";
 pub const IDUNN_RESTART_RESULT_SCHEMA: &str = "idunn.restart_result.v1";
-pub const IDUNN_DEPLOYMENT_REQUEST_SCHEMA: &str = "idunn.deployment_request.v1";
+pub const IDUNN_DEPLOYMENT_REQUEST_SCHEMA: &str = "idunn.deployment_request.v2";
 pub const IDUNN_DEPLOYMENT_RESULT_SCHEMA: &str = "idunn.deployment_result.v1";
 pub const IDUNN_LIFECYCLE_COMMAND_SCHEMA: &str = "idunn.lifecycle_command.v1";
-pub const IDUNN_RELEASE_TARGET_SCHEMA: &str = "idunn.release_target.v1";
-pub const IDUNN_DEPLOYMENT_ARTIFACT_SCHEMA: &str = "idunn.deployment_artifact.v1";
+pub const IDUNN_RELEASE_TARGET_SCHEMA: &str = "idunn.release_target.v2";
+pub const IDUNN_DEPLOYMENT_ARTIFACT_SCHEMA: &str = "idunn.deployment_artifact.v2";
+pub const BIFROST_REPOSITORY_RELEASE_AUTHORITY_SCHEMA: &str =
+    "bifrost.repository_release_authority.v1";
 pub const IDUNN_STATE_MIGRATION_PLAN_SCHEMA: &str = "idunn.state_migration_plan.v1";
 pub const IDUNN_STATE_MIGRATION_RESULT_SCHEMA: &str = "idunn.state_migration_result.v1";
 pub const IDUNN_ROLLOUT_PLAN_SCHEMA: &str = "idunn.rollout_plan.v1";
@@ -323,7 +325,7 @@ pub struct IdunnRestartResultRecord {
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
 #[cultcache(
     type = "idunn.deployment_request",
-    schema = "idunn.deployment_request.v1"
+    schema = "idunn.deployment_request.v2"
 )]
 pub struct IdunnDeploymentRequestRecord {
     #[cultcache(key = 0)]
@@ -336,6 +338,18 @@ pub struct IdunnDeploymentRequestRecord {
     pub authority: String,
     #[cultcache(key = 4)]
     pub requested_at: String,
+    #[cultcache(key = 5, default)]
+    pub repository_full_name: String,
+    #[cultcache(key = 6, default)]
+    pub upstream_ref: String,
+    #[cultcache(key = 7, default)]
+    pub source_revision: String,
+    #[cultcache(key = 8, default)]
+    pub release_authority_id: String,
+    #[cultcache(key = 9, default)]
+    pub release_authority_envelope_sha256: String,
+    #[cultcache(key = 10, default)]
+    pub requires_bifrost_authority: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
@@ -385,7 +399,7 @@ pub struct IdunnLifecycleCommandRecord {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
-#[cultcache(type = "idunn.release_target", schema = "idunn.release_target.v1")]
+#[cultcache(type = "idunn.release_target", schema = "idunn.release_target.v2")]
 pub struct IdunnReleaseTargetRecord {
     #[cultcache(key = 0)]
     pub target_id: String,
@@ -415,12 +429,26 @@ pub struct IdunnReleaseTargetRecord {
     pub status: String,
     #[cultcache(key = 13)]
     pub observed_at: String,
+    #[cultcache(key = 14, default)]
+    pub repository_full_name: String,
+    #[cultcache(key = 15, default)]
+    pub upstream_ref: String,
+    #[cultcache(key = 16, default)]
+    pub release_authority_id: String,
+    #[cultcache(key = 17, default)]
+    pub release_authority_envelope_sha256: String,
+    #[cultcache(key = 18, default)]
+    pub release_authority_status: String,
+    #[cultcache(key = 19, default)]
+    pub requires_bifrost_authority: bool,
+    #[cultcache(key = 20, default)]
+    pub observed_upstream_revision: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
 #[cultcache(
     type = "idunn.deployment_artifact",
-    schema = "idunn.deployment_artifact.v1"
+    schema = "idunn.deployment_artifact.v2"
 )]
 pub struct IdunnDeploymentArtifactRecord {
     #[cultcache(key = 0)]
@@ -441,6 +469,62 @@ pub struct IdunnDeploymentArtifactRecord {
     pub sha256: String,
     #[cultcache(key = 8)]
     pub built_at: String,
+    #[cultcache(key = 9, default)]
+    pub release_authority_id: String,
+    #[cultcache(key = 10, default)]
+    pub release_authority_envelope_sha256: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(
+    type = "bifrost.repository_release_authority",
+    schema = "bifrost.repository_release_authority.v1"
+)]
+pub struct BifrostRepositoryReleaseAuthorityRecord {
+    #[cultcache(key = 0)]
+    pub authority_id: String,
+    #[cultcache(key = 1)]
+    pub command_id: String,
+    #[cultcache(key = 2)]
+    pub crossing_receipt_id: String,
+    #[cultcache(key = 3)]
+    pub repository_full_name: String,
+    #[cultcache(key = 4)]
+    pub upstream_ref: String,
+    #[cultcache(key = 5)]
+    pub commit_sha: String,
+    #[cultcache(key = 6)]
+    pub decision: String,
+    #[cultcache(key = 7)]
+    pub status: String,
+    #[cultcache(key = 8)]
+    pub policy_decision_id: String,
+    #[cultcache(key = 9)]
+    pub authority_reference: String,
+    #[cultcache(key = 10)]
+    pub actor_identity: String,
+    #[cultcache(key = 11)]
+    pub source_kind: String,
+    #[cultcache(key = 12)]
+    pub source_id: String,
+    #[cultcache(key = 13, default)]
+    pub epiphany_run_id: String,
+    #[cultcache(key = 14, default)]
+    pub epiphany_lane_id: String,
+    #[cultcache(key = 15, default)]
+    pub epiphany_agent_identity: String,
+    #[cultcache(key = 16)]
+    pub external_receipt_url: String,
+    #[cultcache(key = 17)]
+    pub external_receipt_id: String,
+    #[cultcache(key = 18)]
+    pub authorized_at: String,
+    #[cultcache(key = 19, default)]
+    pub expires_at: String,
+    #[cultcache(key = 20, default)]
+    pub revoked_at: String,
+    #[cultcache(key = 21, default)]
+    pub revocation_reason: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
@@ -1345,6 +1429,7 @@ cultmesh_rs::cultmesh_documents!(OdinDocuments {
     IdunnLifecycleCommandRecord => IDUNN_LIFECYCLE_COMMAND_SCHEMA,
     IdunnReleaseTargetRecord => IDUNN_RELEASE_TARGET_SCHEMA,
     IdunnDeploymentArtifactRecord => IDUNN_DEPLOYMENT_ARTIFACT_SCHEMA,
+    BifrostRepositoryReleaseAuthorityRecord => BIFROST_REPOSITORY_RELEASE_AUTHORITY_SCHEMA,
     IdunnStateMigrationPlanRecord => IDUNN_STATE_MIGRATION_PLAN_SCHEMA,
     IdunnStateMigrationResultRecord => IDUNN_STATE_MIGRATION_RESULT_SCHEMA,
     IdunnRolloutPlanRecord => IDUNN_ROLLOUT_PLAN_SCHEMA,

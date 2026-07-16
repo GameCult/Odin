@@ -421,10 +421,14 @@ name = "idunn-daemon"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
+ "cultcache-rs",
  "cultmesh-rs",
  "cultnet-rs",
  "odin-core",
  "rmp-serde",
+ "serde",
+ "sha2",
 ]
 
 [[package]]

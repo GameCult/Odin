@@ -81,12 +81,29 @@ Idunn now shares Odin's Rust body:
 - `npm run idunn:start -- --swarm-profile starfire-local --repo-root E:\Projects\Odin --execute`
   runs the singular local swarm supervisor.
 - `--swarm-profile yggdrasil-local` is the Linux host-local supervisor for
-  Heimdall, Repixelizer, and StreamPixels. Its only command boundary is the
+  Epiphany, Heimdall, Repixelizer, StreamPixels, and VoidBot. Its only command boundary is the
   root-owned `/usr/local/libexec/idunn-yggdrasil` actuator. Restart commands
   target the local Compose stack; deployment fails closed unless a root-owned
   executable manifest exists for that service under
   `/srv/odin/deploy-manifests`. It does not inherit Starfire paths, SSH keys,
   ADB authority, or Windows process ownership.
+- Release authorization is adopted per target. Epiphany requires an exact
+  `bifrost.repository_release_authority.v1` receipt from the explicitly
+  configured Bifrost store before migration or deployment; its request,
+  artifact, and remote manifest lineage freeze that authorized commit. The
+  older Yggdrasil targets remain marked `legacy-unmigrated` until Bifrost
+  authorities are issued for them, so installing the Epiphany gate does not
+  silently disable their existing lifecycle paths. Git branch position alone
+  never satisfies the Epiphany gate.
+- For Epiphany, Bifrost's one current authorized record for
+  `GameCult/Epiphany` and `refs/heads/main` selects the release commit. The
+  current remote branch head is observed separately and may advance without
+  changing an already authorized deployment. Zero or multiple current
+  authorities fail closed. Idunn freezes the selected SHA and receipt digest
+  into the deployment request, then the root Yggdrasil actuator invokes
+  Idunn's narrow `validate-release-authority` posture against the live Bifrost
+  store immediately before the service manifest executes. Environment values
+  carry lineage across sudo; they do not grant it.
 
 The current typed records are:
 

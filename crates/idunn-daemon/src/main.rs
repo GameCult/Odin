@@ -1,4 +1,9 @@
 use anyhow::{Context, Result, anyhow};
+#[cfg(test)]
+use cultcache_rs::CacheBackingStore;
+use cultcache_rs::{
+    CultCache, CultCacheEnvelope, DatabaseEntry, SingleFileMessagePackBackingStore,
+};
 use cultmesh_rs::{CultMesh, CultMeshNode, CultMeshNodeOptions};
 use cultnet_rs::{
     CultNetMessage, CultNetRawPayloadEncoding, CultNetRudpPacketType, CultNetRudpSession,
@@ -7,20 +12,23 @@ use cultnet_rs::{
     decode_rudp_packet, encode_cultnet_message_to_vec, encode_rudp_packet,
 };
 use odin_core::{
-    IdunnCommandBoundaryRecord, IdunnDaemonHealthRecord, IdunnDaemonSurgeryPlanRecord,
-    IdunnDaemonTransportProfileRecord, IdunnDeploymentArtifactRecord, IdunnDeploymentRequestRecord,
-    IdunnDeploymentResultRecord, IdunnDesiredDaemonRecord, IdunnLifecycleCommandRecord,
-    IdunnOperatorAlarmRecord, IdunnReleaseTargetRecord, IdunnRestartRequestRecord,
-    IdunnRestartResultRecord, IdunnRolloutPlanRecord, IdunnRolloutResultRecord,
-    IdunnRudpHealthIngressRecord, IdunnRuntimeTransportCheckRecord, IdunnStateMigrationPlanRecord,
-    IdunnStateMigrationResultRecord, IdunnSwarmSurgeryPlanRecord, OdinDocuments, plan_keepalive,
+    BifrostRepositoryReleaseAuthorityRecord, IdunnCommandBoundaryRecord, IdunnDaemonHealthRecord,
+    IdunnDaemonSurgeryPlanRecord, IdunnDaemonTransportProfileRecord, IdunnDeploymentArtifactRecord,
+    IdunnDeploymentRequestRecord, IdunnDeploymentResultRecord, IdunnDesiredDaemonRecord,
+    IdunnLifecycleCommandRecord, IdunnOperatorAlarmRecord, IdunnReleaseTargetRecord,
+    IdunnRestartRequestRecord, IdunnRestartResultRecord, IdunnRolloutPlanRecord,
+    IdunnRolloutResultRecord, IdunnRudpHealthIngressRecord, IdunnRuntimeTransportCheckRecord,
+    IdunnStateMigrationPlanRecord, IdunnStateMigrationResultRecord, IdunnSwarmSurgeryPlanRecord,
+    OdinDocuments, plan_keepalive,
 };
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::env;
 use std::fs::{self, File};
 use std::net::{SocketAddr, UdpSocket};
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -28,6 +36,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 const CULTNET_RUDP_PROTOCOL_ID: &str = "cultnet.transport.rudp.v0";
 const IDUNN_HEALTH_RUDP_CONNECTION_ID: u32 = 0x1d0d_0001;
+static RELEASE_AUTHORITY_SNAPSHOT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug)]
 struct DaemonTarget {
@@ -45,6 +54,7 @@ struct DaemonTarget {
 #[derive(Clone, Debug)]
 struct ReleaseTarget {
     repo: String,
+    repository_full_name: String,
     repo_path: PathBuf,
     upstream_remote: String,
     upstream_branch: String,
@@ -52,6 +62,262 @@ struct ReleaseTarget {
     state_migration_command: Option<String>,
     zero_downtime_capability: String,
     deployed_revision_witness: Option<PathBuf>,
+    requires_bifrost_authority: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ReleaseAuthorization {
+    repository_full_name: String,
+    upstream_ref: String,
+    source_revision: String,
+    authority_id: String,
+    envelope_sha256: String,
+    requires_bifrost_authority: bool,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BifrostReleaseAuthorityWire {
+    authority_id: String,
+    command_id: String,
+    crossing_receipt_id: String,
+    repository_full_name: String,
+    upstream_ref: String,
+    commit_sha: String,
+    decision: String,
+    status: String,
+    policy_decision_id: String,
+    authority_reference: String,
+    actor_identity: String,
+    source_kind: String,
+    source_id: String,
+    epiphany_run_id: String,
+    epiphany_lane_id: String,
+    epiphany_agent_identity: String,
+    external_receipt_url: String,
+    external_receipt_id: String,
+    authorized_at: String,
+    expires_at: String,
+    revoked_at: String,
+    revocation_reason: String,
+}
+
+impl From<BifrostReleaseAuthorityWire> for BifrostRepositoryReleaseAuthorityRecord {
+    fn from(value: BifrostReleaseAuthorityWire) -> Self {
+        Self {
+            authority_id: value.authority_id,
+            command_id: value.command_id,
+            crossing_receipt_id: value.crossing_receipt_id,
+            repository_full_name: value.repository_full_name,
+            upstream_ref: value.upstream_ref,
+            commit_sha: value.commit_sha,
+            decision: value.decision,
+            status: value.status,
+            policy_decision_id: value.policy_decision_id,
+            authority_reference: value.authority_reference,
+            actor_identity: value.actor_identity,
+            source_kind: value.source_kind,
+            source_id: value.source_id,
+            epiphany_run_id: value.epiphany_run_id,
+            epiphany_lane_id: value.epiphany_lane_id,
+            epiphany_agent_identity: value.epiphany_agent_identity,
+            external_receipt_url: value.external_receipt_url,
+            external_receipt_id: value.external_receipt_id,
+            authorized_at: value.authorized_at,
+            expires_at: value.expires_at,
+            revoked_at: value.revoked_at,
+            revocation_reason: value.revocation_reason,
+        }
+    }
+}
+
+impl From<&BifrostRepositoryReleaseAuthorityRecord> for BifrostReleaseAuthorityWire {
+    fn from(value: &BifrostRepositoryReleaseAuthorityRecord) -> Self {
+        Self {
+            authority_id: value.authority_id.clone(),
+            command_id: value.command_id.clone(),
+            crossing_receipt_id: value.crossing_receipt_id.clone(),
+            repository_full_name: value.repository_full_name.clone(),
+            upstream_ref: value.upstream_ref.clone(),
+            commit_sha: value.commit_sha.clone(),
+            decision: value.decision.clone(),
+            status: value.status.clone(),
+            policy_decision_id: value.policy_decision_id.clone(),
+            authority_reference: value.authority_reference.clone(),
+            actor_identity: value.actor_identity.clone(),
+            source_kind: value.source_kind.clone(),
+            source_id: value.source_id.clone(),
+            epiphany_run_id: value.epiphany_run_id.clone(),
+            epiphany_lane_id: value.epiphany_lane_id.clone(),
+            epiphany_agent_identity: value.epiphany_agent_identity.clone(),
+            external_receipt_url: value.external_receipt_url.clone(),
+            external_receipt_id: value.external_receipt_id.clone(),
+            authorized_at: value.authorized_at.clone(),
+            expires_at: value.expires_at.clone(),
+            revoked_at: value.revoked_at.clone(),
+            revocation_reason: value.revocation_reason.clone(),
+        }
+    }
+}
+
+trait ReleaseAuthorityPort {
+    fn select(
+        &self,
+        repository_full_name: &str,
+        upstream_ref: &str,
+        now: &str,
+    ) -> Result<ReleaseAuthorization>;
+
+    fn authorize(
+        &self,
+        repository_full_name: &str,
+        upstream_ref: &str,
+        source_revision: &str,
+        now: &str,
+    ) -> Result<ReleaseAuthorization>;
+}
+
+struct CultCacheReleaseAuthorityPort<'a> {
+    store_path: &'a std::path::Path,
+}
+
+impl ReleaseAuthorityPort for CultCacheReleaseAuthorityPort<'_> {
+    fn select(
+        &self,
+        repository_full_name: &str,
+        upstream_ref: &str,
+        now: &str,
+    ) -> Result<ReleaseAuthorization> {
+        let mut candidates = read_release_authority_snapshot(self.store_path)?
+            .into_iter()
+            .filter(|(receipt, _, _)| {
+                receipt.repository_full_name == repository_full_name
+                    && receipt.upstream_ref == upstream_ref
+                    && receipt.decision == "authorize"
+                    && receipt.status == "authorized"
+            })
+            .filter_map(|(receipt, envelope, digest)| {
+                let expected_id =
+                    release_authority_id(repository_full_name, upstream_ref, &receipt.commit_sha);
+                validate_release_authority_receipt(
+                    &receipt,
+                    &expected_id,
+                    repository_full_name,
+                    upstream_ref,
+                    &receipt.commit_sha,
+                    now,
+                )
+                .ok()
+                .map(|_| (receipt, envelope, digest))
+            })
+            .collect::<Vec<_>>();
+        if candidates.len() != 1 {
+            return Err(anyhow!(
+                "Bifrost release selection requires exactly one current authorized receipt for {repository_full_name} {upstream_ref}; found {}",
+                candidates.len()
+            ));
+        }
+        let (receipt, _envelope, envelope_sha256) = candidates.pop().expect("one candidate");
+        Ok(ReleaseAuthorization {
+            repository_full_name: repository_full_name.to_string(),
+            upstream_ref: upstream_ref.to_string(),
+            source_revision: receipt.commit_sha,
+            authority_id: receipt.authority_id,
+            envelope_sha256,
+            requires_bifrost_authority: true,
+        })
+    }
+
+    fn authorize(
+        &self,
+        repository_full_name: &str,
+        upstream_ref: &str,
+        source_revision: &str,
+        now: &str,
+    ) -> Result<ReleaseAuthorization> {
+        validate_commit_sha(source_revision)?;
+        let authority_id =
+            release_authority_id(repository_full_name, upstream_ref, source_revision);
+        let result = read_release_authority_snapshot(self.store_path)?
+            .into_iter()
+            .find(|(receipt, _, _)| receipt.authority_id == authority_id)
+            .ok_or_else(|| anyhow!("Bifrost release authority is missing: {authority_id}"))?;
+        let (receipt, _envelope, envelope_sha256) = result;
+        validate_release_authority_receipt(
+            &receipt,
+            &authority_id,
+            repository_full_name,
+            upstream_ref,
+            source_revision,
+            now,
+        )?;
+        Ok(ReleaseAuthorization {
+            repository_full_name: repository_full_name.to_string(),
+            upstream_ref: upstream_ref.to_string(),
+            source_revision: source_revision.to_string(),
+            authority_id,
+            envelope_sha256,
+            requires_bifrost_authority: true,
+        })
+    }
+}
+
+fn read_release_authority_snapshot(
+    store_path: &std::path::Path,
+) -> Result<
+    Vec<(
+        BifrostRepositoryReleaseAuthorityRecord,
+        CultCacheEnvelope,
+        String,
+    )>,
+> {
+    if !store_path.is_file() {
+        return Err(anyhow!(
+            "Bifrost release authority store is unavailable: {}",
+            store_path.display()
+        ));
+    }
+    let snapshot_path = env::temp_dir().join(format!(
+        "idunn-release-authority-snapshot-{}-{}.cc",
+        std::process::id(),
+        RELEASE_AUTHORITY_SNAPSHOT_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::copy(store_path, &snapshot_path).with_context(|| {
+        format!(
+            "copying Bifrost release authority snapshot {}",
+            store_path.display()
+        )
+    })?;
+    let result = (|| {
+        let mut cache = CultCache::new();
+        cache.register_entry_type::<BifrostRepositoryReleaseAuthorityRecord>()?;
+        cache.add_backing_store(
+            SingleFileMessagePackBackingStore::new(&snapshot_path),
+            [BifrostRepositoryReleaseAuthorityRecord::TYPE],
+        );
+        cache.pull_all_backing_stores()?;
+        cache
+            .snapshot()
+            .into_iter()
+            .filter(|envelope| envelope.r#type == BifrostRepositoryReleaseAuthorityRecord::TYPE)
+            .map(|envelope| {
+                if envelope.schema_id.as_deref()
+                    != Some(odin_core::BIFROST_REPOSITORY_RELEASE_AUTHORITY_SCHEMA)
+                {
+                    return Err(anyhow!("unsupported Bifrost release authority schema"));
+                }
+                let receipt =
+                    rmp_serde::from_slice::<BifrostReleaseAuthorityWire>(&envelope.payload)
+                        .context("decode Bifrost camelCase release-authority payload")?
+                        .into();
+                let digest = format!("{:x}", Sha256::digest(rmp_serde::to_vec_named(&envelope)?));
+                Ok((receipt, envelope, digest))
+            })
+            .collect()
+    })();
+    let _ = fs::remove_file(&snapshot_path);
+    let _ = fs::remove_file(snapshot_path.with_extension("cc.lock"));
+    result
 }
 
 trait ReleaseStatePort {
@@ -135,6 +401,7 @@ fn locally_supervised_health_contract(id: &str, default_failure_state: &str) -> 
 #[derive(Clone, Debug)]
 struct CommonOptions {
     store_path: PathBuf,
+    release_authority_store_path: Option<PathBuf>,
     operator_alarm_command: Option<String>,
     rudp_health_bind: Option<SocketAddr>,
     execute: bool,
@@ -146,6 +413,7 @@ enum Mode {
     Single(DaemonTarget),
     Swarm(SwarmOptions),
     LifecycleCommand(LifecycleCommandOptions),
+    ReleaseAuthorityValidation(ReleaseAuthorityValidationOptions),
 }
 
 #[derive(Clone, Debug)]
@@ -174,6 +442,16 @@ struct LifecycleCommandOptions {
     detail: String,
 }
 
+#[derive(Clone, Debug)]
+struct ReleaseAuthorityValidationOptions {
+    store_path: PathBuf,
+    repository_full_name: String,
+    upstream_ref: String,
+    source_revision: String,
+    authority_id: String,
+    envelope_sha256: String,
+}
+
 fn main() -> Result<()> {
     let options = Options::parse(env::args().skip(1))?;
 
@@ -192,7 +470,33 @@ fn main() -> Result<()> {
         }
         Mode::Swarm(swarm) => run_swarm(swarm, &options.common),
         Mode::LifecycleCommand(command) => publish_lifecycle_command(command, &options.common),
+        Mode::ReleaseAuthorityValidation(validation) => {
+            validate_release_authority_at_privileged_boundary(validation)
+        }
     }
+}
+
+fn validate_release_authority_at_privileged_boundary(
+    options: &ReleaseAuthorityValidationOptions,
+) -> Result<()> {
+    let current = CultCacheReleaseAuthorityPort {
+        store_path: &options.store_path,
+    }
+    .authorize(
+        &options.repository_full_name,
+        &options.upstream_ref,
+        &options.source_revision,
+        &timestamp()?,
+    )?;
+    if current.authority_id != options.authority_id
+        || current.envelope_sha256 != options.envelope_sha256
+    {
+        return Err(anyhow!(
+            "privileged deployment boundary received stale or substituted Bifrost authority"
+        ));
+    }
+    println!("Bifrost release authority validated for privileged deployment boundary.");
+    Ok(())
 }
 
 fn run_swarm(options: &SwarmOptions, common: &CommonOptions) -> Result<()> {
@@ -346,6 +650,25 @@ fn run_target_cycle(
             }
         }
     }
+    if let Some(request) = plan.deployment_request.as_mut() {
+        match authorize_release(target, options, store_lock) {
+            Ok(authorization) => apply_release_authorization(request, &authorization),
+            Err(error) => {
+                let reason = format!("deployment refused: {error:#}");
+                plan.deployment_request = None;
+                plan.decision.action = "alarm".to_string();
+                plan.decision.reason = reason.clone();
+                plan.operator_alarm = Some(IdunnOperatorAlarmRecord {
+                    alarm_id: format!("alarm:{}:{}", target.daemon_id, now),
+                    daemon_id: target.daemon_id.clone(),
+                    severity: "operator-action-required".to_string(),
+                    reason,
+                    escalation_target: "bifrost.operator-notification".to_string(),
+                    raised_at: now.clone(),
+                });
+            }
+        }
+    }
 
     with_store_node(options, store_lock, |node| {
         let transport_profile = daemon_transport_profile(target, &now);
@@ -369,10 +692,15 @@ fn run_target_cycle(
 
     if let Some(request) = &plan.deployment_request {
         if options.execute {
-            let migration_result = target
-                .release
-                .as_ref()
-                .and_then(|release| run_state_migration(target, release, &now, options));
+            let authority_error = revalidate_deployment_request(request, options, store_lock).err();
+            let migration_result = if authority_error.is_none() {
+                target
+                    .release
+                    .as_ref()
+                    .and_then(|release| run_state_migration(target, release, &now, options))
+            } else {
+                None
+            };
             if let Some(result) = &migration_result {
                 with_store_node(options, store_lock, |node| {
                     node.put(&result.result_id, result)?;
@@ -382,7 +710,18 @@ fn run_target_cycle(
             let migration_failed = migration_result
                 .as_ref()
                 .is_some_and(|result| result.state != "succeeded" && result.state != "noop");
-            let mut result = if migration_failed {
+            let mut result = if let Some(error) = authority_error {
+                IdunnDeploymentResultRecord {
+                    result_id: format!("result:{}", request.request_id),
+                    request_id: request.request_id.clone(),
+                    daemon_id: request.daemon_id.clone(),
+                    state: "failed".to_string(),
+                    detail: format!(
+                        "deployment authority revalidation failed before migration: {error:#}"
+                    ),
+                    completed_at: now.clone(),
+                }
+            } else if migration_failed {
                 IdunnDeploymentResultRecord {
                     result_id: format!("result:{}", request.request_id),
                     request_id: request.request_id.clone(),
@@ -392,7 +731,7 @@ fn run_target_cycle(
                     completed_at: now.clone(),
                 }
             } else {
-                run_deployment(request, &now, options)
+                run_deployment(request, &now, options, store_lock)
             };
             if result.state == "succeeded"
                 && let Some(release) = target.release.as_ref()
@@ -585,7 +924,20 @@ fn process_lifecycle_command(
                 )?;
                 return Ok(());
             };
-            let request = IdunnDeploymentRequestRecord {
+            let authorization = match authorize_release(target, options, store_lock) {
+                Ok(value) => value,
+                Err(error) => {
+                    reject_lifecycle_command(
+                        options,
+                        store_lock,
+                        command,
+                        &claimed_at,
+                        &format!("redeploy authority refused: {error:#}"),
+                    )?;
+                    return Ok(());
+                }
+            };
+            let mut request = IdunnDeploymentRequestRecord {
                 request_id: format!(
                     "manual:redeploy:{}:{}",
                     target.daemon_id, command.command_id
@@ -594,7 +946,14 @@ fn process_lifecycle_command(
                 command: shell_command.to_string(),
                 authority: "idunn-supervisor-command.manual".to_string(),
                 requested_at: claimed_at.clone(),
+                repository_full_name: String::new(),
+                upstream_ref: String::new(),
+                source_revision: String::new(),
+                release_authority_id: String::new(),
+                release_authority_envelope_sha256: String::new(),
+                requires_bifrost_authority: false,
             };
+            apply_release_authorization(&mut request, &authorization);
             with_store_node(options, store_lock, |node| {
                 let mut running = command.clone();
                 running.state = "running".to_string();
@@ -604,7 +963,7 @@ fn process_lifecycle_command(
                 Ok(())
             })?;
             let result = if options.execute {
-                run_deployment(&request, &claimed_at, options)
+                run_deployment(&request, &claimed_at, options, store_lock)
             } else {
                 IdunnDeploymentResultRecord {
                     result_id: format!("result:{}", request.request_id),
@@ -682,6 +1041,197 @@ where
         },
     )?;
     write(&mut node)
+}
+
+fn release_authority_id(
+    repository_full_name: &str,
+    upstream_ref: &str,
+    commit_sha: &str,
+) -> String {
+    format!("release:{repository_full_name}:{upstream_ref}:{commit_sha}")
+}
+
+fn validate_commit_sha(value: &str) -> Result<()> {
+    if value.len() != 40
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(anyhow!(
+            "release source revision must be a lowercase 40-hex Git commit"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_release_authority_receipt(
+    receipt: &BifrostRepositoryReleaseAuthorityRecord,
+    expected_id: &str,
+    repository_full_name: &str,
+    upstream_ref: &str,
+    source_revision: &str,
+    now: &str,
+) -> Result<()> {
+    if receipt.authority_id != expected_id
+        || receipt.repository_full_name != repository_full_name
+        || receipt.upstream_ref != upstream_ref
+        || receipt.commit_sha != source_revision
+    {
+        return Err(anyhow!(
+            "Bifrost release authority identity/repository/ref/commit mismatch"
+        ));
+    }
+    if receipt.decision != "authorize" || receipt.status != "authorized" {
+        return Err(anyhow!(
+            "Bifrost release authority is not currently authorized"
+        ));
+    }
+    if receipt.command_id.trim().is_empty()
+        || receipt.crossing_receipt_id.trim().is_empty()
+        || receipt.policy_decision_id.trim().is_empty()
+        || receipt.authority_reference.trim().is_empty()
+        || receipt.actor_identity.trim().is_empty()
+        || receipt.source_kind.trim().is_empty()
+        || receipt.source_id.trim().is_empty()
+        || receipt.external_receipt_url.trim().is_empty()
+        || receipt.external_receipt_id.trim().is_empty()
+        || receipt.authorized_at.trim().is_empty()
+    {
+        return Err(anyhow!(
+            "Bifrost release authority provenance is incomplete"
+        ));
+    }
+    if !receipt.revoked_at.trim().is_empty() || !receipt.revocation_reason.trim().is_empty() {
+        return Err(anyhow!(
+            "Bifrost release authority carries revocation facts"
+        ));
+    }
+    let expected_external_url =
+        format!("https://github.com/{repository_full_name}/commit/{source_revision}");
+    if receipt.external_receipt_id != source_revision
+        || receipt.external_receipt_url != expected_external_url
+    {
+        return Err(anyhow!(
+            "Bifrost release authority external GitHub proof does not bind the exact commit"
+        ));
+    }
+    chrono::DateTime::parse_from_rfc3339(&receipt.authorized_at)
+        .context("Bifrost release authority authorizedAt must be RFC3339")?;
+    if !receipt.expires_at.trim().is_empty() {
+        let expires = chrono::DateTime::parse_from_rfc3339(&receipt.expires_at)
+            .context("Bifrost release authority expiresAt must be RFC3339")?
+            .timestamp();
+        let now_seconds = now
+            .strip_prefix("unix:")
+            .ok_or_else(|| anyhow!("Idunn authority clock is not unix-seconds"))?
+            .parse::<i64>()
+            .context("Idunn authority clock is invalid")?;
+        if expires <= now_seconds {
+            return Err(anyhow!("Bifrost release authority has expired"));
+        }
+    }
+    Ok(())
+}
+
+fn authorize_release(
+    target: &DaemonTarget,
+    options: &CommonOptions,
+    store_lock: &Arc<Mutex<()>>,
+) -> Result<ReleaseAuthorization> {
+    let release = target
+        .release
+        .as_ref()
+        .ok_or_else(|| anyhow!("deployment target has no release declaration"))?;
+    let state = SystemReleaseStatePort;
+    state.fetch(release)?;
+    let observed_upstream_revision = state.desired_revision(release)?;
+    let upstream_ref = format!("refs/heads/{}", release.upstream_branch);
+    if !release.requires_bifrost_authority {
+        validate_commit_sha(&observed_upstream_revision)?;
+        return Ok(ReleaseAuthorization {
+            repository_full_name: release.repository_full_name.clone(),
+            upstream_ref,
+            source_revision: observed_upstream_revision,
+            authority_id: String::new(),
+            envelope_sha256: String::new(),
+            requires_bifrost_authority: false,
+        });
+    }
+    let now = timestamp()?;
+    let _store_guard = store_lock
+        .lock()
+        .map_err(|_| anyhow!("Idunn store lock is poisoned"))?;
+    let authority_store = options
+        .release_authority_store_path
+        .as_deref()
+        .ok_or_else(|| anyhow!("--release-authority-store is required for deployment authority"))?;
+    let selected = CultCacheReleaseAuthorityPort {
+        store_path: authority_store,
+    }
+    .select(&release.repository_full_name, &upstream_ref, &now)?;
+    if git_revision(&release.repo_path, &selected.source_revision).as_deref()
+        != Some(selected.source_revision.as_str())
+    {
+        return Err(anyhow!(
+            "authorized Bifrost release commit is absent from fetched repository: {}",
+            selected.source_revision
+        ));
+    }
+    Ok(selected)
+}
+
+fn apply_release_authorization(
+    request: &mut IdunnDeploymentRequestRecord,
+    authorization: &ReleaseAuthorization,
+) {
+    request.repository_full_name = authorization.repository_full_name.clone();
+    request.upstream_ref = authorization.upstream_ref.clone();
+    request.source_revision = authorization.source_revision.clone();
+    request.release_authority_id = authorization.authority_id.clone();
+    request.release_authority_envelope_sha256 = authorization.envelope_sha256.clone();
+    request.requires_bifrost_authority = authorization.requires_bifrost_authority;
+}
+
+fn revalidate_deployment_request(
+    request: &IdunnDeploymentRequestRecord,
+    options: &CommonOptions,
+    store_lock: &Arc<Mutex<()>>,
+) -> Result<()> {
+    validate_commit_sha(&request.source_revision)?;
+    if !request.requires_bifrost_authority {
+        if !request.release_authority_id.is_empty()
+            || !request.release_authority_envelope_sha256.is_empty()
+        {
+            return Err(anyhow!(
+                "legacy release request cannot carry Bifrost authority claims"
+            ));
+        }
+        return Ok(());
+    }
+    let _store_guard = store_lock
+        .lock()
+        .map_err(|_| anyhow!("Idunn store lock is poisoned"))?;
+    let authority_store = options
+        .release_authority_store_path
+        .as_deref()
+        .ok_or_else(|| anyhow!("--release-authority-store is required for deployment authority"))?;
+    let current = CultCacheReleaseAuthorityPort {
+        store_path: authority_store,
+    }
+    .authorize(
+        &request.repository_full_name,
+        &request.upstream_ref,
+        &request.source_revision,
+        &timestamp()?,
+    )?;
+    if current.authority_id != request.release_authority_id
+        || current.envelope_sha256 != request.release_authority_envelope_sha256
+    {
+        return Err(anyhow!(
+            "deployment request release authority changed after planning"
+        ));
+    }
+    Ok(())
 }
 
 fn read_fresh_daemon_published_health(
@@ -1204,9 +1754,15 @@ fn run_rudp_health_ingress_loop(
                                             health.daemon_id, source, error
                                         );
                                     } else {
+                                        let bounded_detail =
+                                            health.detail.replace('\r', " ").replace('\n', " ");
                                         println!(
-                                            "Idunn accepted RUDP health for {} from {} over {}.",
-                                            health.daemon_id, source, frame.channel_id
+                                            "Idunn accepted RUDP health for {} from {} over {} state={} detail={}",
+                                            health.daemon_id,
+                                            source,
+                                            frame.channel_id,
+                                            health.state,
+                                            bounded_detail
                                         );
                                     }
                                 }
@@ -1396,7 +1952,12 @@ fn publish_surgery_plans(
             node.put(&transport_profile.profile_id, &transport_profile)?;
             node.put(&command_boundary.boundary_id, &command_boundary)?;
             if let Some(release) = &target.release {
-                let release_record = release_target_record(target, release, updated_at);
+                let release_record = release_target_record(
+                    target,
+                    release,
+                    updated_at,
+                    options.release_authority_store_path.as_deref(),
+                );
                 let artifact = deployment_artifact_record(target, &release_record, updated_at);
                 let migration_plan =
                     state_migration_plan_record(target, release, &release_record, updated_at);
@@ -1530,6 +2091,7 @@ fn release_target(
 ) -> ReleaseTarget {
     ReleaseTarget {
         repo: repo.to_string(),
+        repository_full_name: format!("GameCult/{repo}"),
         repo_path,
         upstream_remote: "origin".to_string(),
         upstream_branch: "main".to_string(),
@@ -1537,7 +2099,13 @@ fn release_target(
         state_migration_command: state_migration_command.map(ToString::to_string),
         zero_downtime_capability: zero_downtime_capability.to_string(),
         deployed_revision_witness: None,
+        requires_bifrost_authority: false,
     }
+}
+
+fn requiring_bifrost_authority(mut release: ReleaseTarget) -> ReleaseTarget {
+    release.requires_bifrost_authority = true;
+    release
 }
 
 fn with_deployed_revision_witness(mut release: ReleaseTarget, path: PathBuf) -> ReleaseTarget {
@@ -1549,10 +2117,11 @@ fn release_target_record(
     target: &DaemonTarget,
     release: &ReleaseTarget,
     observed_at: &str,
+    authority_store_path: Option<&std::path::Path>,
 ) -> IdunnReleaseTargetRecord {
     let port = SystemReleaseStatePort;
     let fetch_result = port.fetch(release);
-    let desired_revision = fetch_result
+    let observed_upstream_revision = fetch_result
         .as_ref()
         .ok()
         .and_then(|_| port.desired_revision(release).ok())
@@ -1563,13 +2132,36 @@ fn release_target_record(
     } else {
         "untracked-no-witness".to_string()
     };
-    let status = if fetch_result.is_ok()
-        && desired_revision != "unknown"
-        && (release.deployed_revision_witness.is_none() || deployed_revision != "unknown")
-    {
-        "tracked"
+    let authorization = if release.requires_bifrost_authority && fetch_result.is_ok() {
+        let upstream_ref = format!("refs/heads/{}", release.upstream_branch);
+        authority_store_path.and_then(|store_path| {
+            CultCacheReleaseAuthorityPort { store_path }
+                .select(&release.repository_full_name, &upstream_ref, observed_at)
+                .ok()
+                .filter(|selected| {
+                    git_revision(&release.repo_path, &selected.source_revision).as_deref()
+                        == Some(selected.source_revision.as_str())
+                })
+        })
     } else {
-        "release-state-unavailable"
+        None
+    };
+    let desired_revision = authorization
+        .as_ref()
+        .map(|value| value.source_revision.clone())
+        .unwrap_or_else(|| observed_upstream_revision.clone());
+    let status = if fetch_result.is_ok()
+        && observed_upstream_revision != "unknown"
+        && (release.deployed_revision_witness.is_none() || deployed_revision != "unknown")
+        && (!release.requires_bifrost_authority || authorization.is_some())
+    {
+        if release.requires_bifrost_authority {
+            "tracked-authorized"
+        } else {
+            "tracked-legacy-authority"
+        }
+    } else {
+        "release-authority-unavailable"
     };
 
     IdunnReleaseTargetRecord {
@@ -1592,6 +2184,26 @@ fn release_target_record(
         zero_downtime_capability: release.zero_downtime_capability.clone(),
         status: status.to_string(),
         observed_at: observed_at.to_string(),
+        repository_full_name: release.repository_full_name.clone(),
+        upstream_ref: format!("refs/heads/{}", release.upstream_branch),
+        release_authority_id: authorization
+            .as_ref()
+            .map(|value| value.authority_id.clone())
+            .unwrap_or_default(),
+        release_authority_envelope_sha256: authorization
+            .as_ref()
+            .map(|value| value.envelope_sha256.clone())
+            .unwrap_or_default(),
+        release_authority_status: if authorization.is_some() {
+            "authorized"
+        } else if !release.requires_bifrost_authority {
+            "legacy-unmigrated"
+        } else {
+            "unavailable"
+        }
+        .to_string(),
+        requires_bifrost_authority: release.requires_bifrost_authority,
+        observed_upstream_revision,
     }
 }
 
@@ -1610,6 +2222,8 @@ fn deployment_artifact_record(
         artifact_uri: "built-by-deploy-command".to_string(),
         sha256: "pending-deploy-command".to_string(),
         built_at: built_at.to_string(),
+        release_authority_id: release.release_authority_id.clone(),
+        release_authority_envelope_sha256: release.release_authority_envelope_sha256.clone(),
     }
 }
 
@@ -2243,7 +2857,13 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
     let repo_root = options.repo_root.display().to_string();
     let script = |name: &str| format!(r"{}\scripts\{}", repo_root, name);
     let yggdrasil_actuator = |action: &str, target: &str| {
-        format!("sudo -n /usr/local/libexec/idunn-yggdrasil {action} {target}")
+        if action == "deploy" {
+            format!(
+                "sudo -n /usr/local/libexec/idunn-yggdrasil deploy {target} \"$IDUNN_SOURCE_COMMIT\" \"$IDUNN_REPOSITORY_FULL_NAME\" \"$IDUNN_UPSTREAM_REF\" \"$BIFROST_RELEASE_AUTHORITY_ID\" \"$BIFROST_RELEASE_AUTHORITY_SHA256\" \"$IDUNN_DEPLOYMENT_REQUEST_ID\" \"$IDUNN_REQUIRES_BIFROST_AUTHORITY\""
+            )
+        } else {
+            format!("sudo -n /usr/local/libexec/idunn-yggdrasil {action} {target}")
+        }
     };
     let project = |name: &str| PathBuf::from(format!(r"E:\Projects\{name}"));
 
@@ -2283,6 +2903,26 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                     None,
                     "restart-required",
                 )),
+                enabled: true,
+                interval_seconds: 300,
+            },
+            DaemonTarget {
+                daemon_id: "yggdrasil-epiphany".to_string(),
+                verse_id: "yggdrasil.local".to_string(),
+                name: "Yggdrasil Epiphany".to_string(),
+                health_contract: health_contract("epiphany.cultnet-rudp-runtime-health", "failed"),
+                deploy_command: Some(yggdrasil_actuator("deploy", "epiphany")),
+                restart_command: Some(yggdrasil_actuator("restart", "epiphany")),
+                release: Some(requiring_bifrost_authority(with_deployed_revision_witness(
+                    release_target(
+                        "Epiphany",
+                        PathBuf::from("/srv/build/Epiphany"),
+                        "restart-after-verified-build",
+                        None,
+                        "restart-required",
+                    ),
+                    PathBuf::from("/srv/epiphany/deploy/deployment.env"),
+                ))),
                 enabled: true,
                 interval_seconds: 300,
             },
@@ -2611,6 +3251,9 @@ fn deployment_failure_alarm(
 impl Options {
     fn parse(args: impl Iterator<Item = String>) -> Result<Self> {
         let args: Vec<String> = args.collect();
+        let release_authority_validation = args
+            .first()
+            .is_some_and(|arg| arg == "validate-release-authority");
         let lifecycle_action = args.first().and_then(|arg| match arg.as_str() {
             "restart" | "request-restart" => Some(LifecycleAction::Restart),
             "redeploy" | "request-redeploy" | "deploy" | "request-deploy" => {
@@ -2619,6 +3262,7 @@ impl Options {
             _ => None,
         });
         let mut store_path = PathBuf::from("scratch/idunn/idunn.keepalive.cc");
+        let mut release_authority_store_path = None;
         let mut operator_alarm_command = None;
         let mut rudp_health_bind = None;
         let mut execute = false;
@@ -2636,14 +3280,42 @@ impl Options {
             .or_else(|_| env::var("USER"))
             .unwrap_or_else(|_| "operator".to_string());
         let mut command_detail = String::new();
+        let mut validation_repository_full_name = None;
+        let mut validation_upstream_ref = None;
+        let mut validation_source_revision = None;
+        let mut validation_authority_id = None;
+        let mut validation_envelope_sha256 = None;
 
         let mut args = args.into_iter().peekable();
-        if lifecycle_action.is_some() {
+        if lifecycle_action.is_some() || release_authority_validation {
             let _ = args.next();
         }
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--store" => store_path = PathBuf::from(take_value(&mut args, "--store")?),
+                "--release-authority-store" => {
+                    release_authority_store_path = Some(PathBuf::from(take_value(
+                        &mut args,
+                        "--release-authority-store",
+                    )?))
+                }
+                "--repository-full-name" => {
+                    validation_repository_full_name =
+                        Some(take_value(&mut args, "--repository-full-name")?)
+                }
+                "--upstream-ref" => {
+                    validation_upstream_ref = Some(take_value(&mut args, "--upstream-ref")?)
+                }
+                "--source-revision" => {
+                    validation_source_revision = Some(take_value(&mut args, "--source-revision")?)
+                }
+                "--release-authority-id" => {
+                    validation_authority_id = Some(take_value(&mut args, "--release-authority-id")?)
+                }
+                "--release-authority-sha256" => {
+                    validation_envelope_sha256 =
+                        Some(take_value(&mut args, "--release-authority-sha256")?)
+                }
                 "--daemon" => daemon_id = Some(take_value(&mut args, "--daemon")?),
                 "--verse" => verse_id = take_value(&mut args, "--verse")?,
                 "--name" => name = Some(take_value(&mut args, "--name")?),
@@ -2714,11 +3386,47 @@ impl Options {
 
         let common = CommonOptions {
             store_path,
+            release_authority_store_path,
             operator_alarm_command,
             rudp_health_bind,
             execute,
             command_timeout_seconds,
         };
+
+        if release_authority_validation {
+            let store_path = common.release_authority_store_path.clone().ok_or_else(|| {
+                anyhow!("release authority validation requires --release-authority-store")
+            })?;
+            return Ok(Self {
+                common,
+                mode: Mode::ReleaseAuthorityValidation(ReleaseAuthorityValidationOptions {
+                    store_path,
+                    repository_full_name: validation_repository_full_name.ok_or_else(|| {
+                        anyhow!("release authority validation requires --repository-full-name")
+                    })?,
+                    upstream_ref: validation_upstream_ref.ok_or_else(|| {
+                        anyhow!("release authority validation requires --upstream-ref")
+                    })?,
+                    source_revision: validation_source_revision.ok_or_else(|| {
+                        anyhow!("release authority validation requires --source-revision")
+                    })?,
+                    authority_id: validation_authority_id.ok_or_else(|| {
+                        anyhow!("release authority validation requires --release-authority-id")
+                    })?,
+                    envelope_sha256: validation_envelope_sha256.ok_or_else(|| {
+                        anyhow!("release authority validation requires --release-authority-sha256")
+                    })?,
+                }),
+            });
+        }
+
+        if swarm_profile.as_deref() == Some("yggdrasil-local")
+            && common.release_authority_store_path.is_none()
+        {
+            return Err(anyhow!(
+                "--release-authority-store is required for yggdrasil-local release targets"
+            ));
+        }
 
         if let Some(action) = lifecycle_action {
             if swarm_profile.is_some() {
@@ -2824,7 +3532,7 @@ fn run_restart(
     options: &CommonOptions,
 ) -> IdunnRestartResultRecord {
     let result_id = format!("result:{}", request.request_id);
-    match run_shell(&request.command, options) {
+    match run_shell(&request.command, options, None) {
         Ok(output) if output.status.success() => IdunnRestartResultRecord {
             result_id,
             request_id: request.request_id.clone(),
@@ -2859,9 +3567,20 @@ fn run_deployment(
     request: &odin_core::IdunnDeploymentRequestRecord,
     requested_at: &str,
     options: &CommonOptions,
+    store_lock: &Arc<Mutex<()>>,
 ) -> IdunnDeploymentResultRecord {
     let result_id = format!("result:{}", request.request_id);
-    match run_shell(&request.command, options) {
+    if let Err(error) = revalidate_deployment_request(request, options, store_lock) {
+        return IdunnDeploymentResultRecord {
+            result_id,
+            request_id: request.request_id.clone(),
+            daemon_id: request.daemon_id.clone(),
+            state: "failed".to_string(),
+            detail: format!("deployment authority revalidation failed: {error:#}"),
+            completed_at: requested_at.to_string(),
+        };
+    }
+    match run_shell(&request.command, options, Some(request)) {
         Ok(output) if output.status.success() => IdunnDeploymentResultRecord {
             result_id,
             request_id: request.request_id.clone(),
@@ -2937,7 +3656,7 @@ fn run_state_migration(
             completed_at: requested_at.to_string(),
         });
     };
-    match run_shell(command, options) {
+    match run_shell(command, options, None) {
         Ok(output) if output.status.success() => Some(IdunnStateMigrationResultRecord {
             result_id,
             plan_id,
@@ -2996,7 +3715,11 @@ fn rollout_result_record(
     }
 }
 
-fn run_shell(command: &str, options: &CommonOptions) -> Result<std::process::Output> {
+fn run_shell(
+    command: &str,
+    options: &CommonOptions,
+    deployment: Option<&IdunnDeploymentRequestRecord>,
+) -> Result<std::process::Output> {
     let mut process = if cfg!(windows) {
         let path = windows_command_path();
         let command = format!(r#"set "PATH={path}" && set "Path={path}" && {command}"#);
@@ -3013,6 +3736,29 @@ fn run_shell(command: &str, options: &CommonOptions) -> Result<std::process::Out
     process
         .env("IDUNN_ACTUATOR", "1")
         .env("IDUNN_COMMAND_AUTHORITY", "idunn-daemon");
+    if let Some(request) = deployment {
+        process
+            .env("IDUNN_SOURCE_COMMIT", &request.source_revision)
+            .env("IDUNN_REPOSITORY_FULL_NAME", &request.repository_full_name)
+            .env("IDUNN_UPSTREAM_REF", &request.upstream_ref)
+            .env(
+                "BIFROST_RELEASE_AUTHORITY_ID",
+                &request.release_authority_id,
+            )
+            .env(
+                "BIFROST_RELEASE_AUTHORITY_SHA256",
+                &request.release_authority_envelope_sha256,
+            )
+            .env("IDUNN_DEPLOYMENT_REQUEST_ID", &request.request_id);
+        process.env(
+            "IDUNN_REQUIRES_BIFROST_AUTHORITY",
+            if request.requires_bifrost_authority {
+                "true"
+            } else {
+                "false"
+            },
+        );
+    }
     if let Some(endpoint) = actuator_idunn_rudp_health_endpoint(options) {
         process
             .env("IDUNN_RUDP_HEALTH", &endpoint)
@@ -3233,7 +3979,7 @@ fn unix_epoch_millis() -> Result<u64> {
 }
 
 fn help_text() -> &'static str {
-    "Usage: idunn --daemon <id> [--name <name>] [--verse <verse>] [--store <path>] [--deploy-command <command>] [--restart-command <command>] [--operator-alarm-command <command>] [--rudp-health-bind <addr|none>] [--execute] [--interval-seconds <seconds>] [--command-timeout-seconds <seconds>] [--repo-root <path>] [--swarm-profile <profile>]\n       idunn restart --daemon <id> [--store <path>] [--requested-by <who>] [--detail <text>]\n       idunn redeploy --daemon <id> [--store <path>] [--requested-by <who>] [--detail <text>]\n\nIdunn supervises daemon-published CultNet/RUDP health with --daemon, or a built-in swarm supervisor with --swarm-profile starfire-local or yggdrasil-local. RUDP health ingress is disabled unless --rudp-health-bind is supplied. The restart/redeploy verbs publish typed idunn.lifecycle_command.v1 records; the running supervisor claims them and executes only through its configured command boundary."
+    "Usage: idunn --daemon <id> [--name <name>] [--verse <verse>] [--store <path>] [--release-authority-store <path>] [--deploy-command <command>] [--restart-command <command>] [--operator-alarm-command <command>] [--rudp-health-bind <addr|none>] [--execute] [--interval-seconds <seconds>] [--command-timeout-seconds <seconds>] [--repo-root <path>] [--swarm-profile <profile>]\n       idunn restart --daemon <id> [--store <path>] [--requested-by <who>] [--detail <text>]\n       idunn redeploy --daemon <id> [--store <path>] [--requested-by <who>] [--detail <text>]\n\nIdunn supervises daemon-published CultNet/RUDP health with --daemon, or a built-in swarm supervisor with --swarm-profile starfire-local or yggdrasil-local. Yggdrasil release targets require an explicit Bifrost CultCache path via --release-authority-store. RUDP health ingress is disabled unless --rudp-health-bind is supplied. The restart/redeploy verbs publish typed idunn.lifecycle_command.v1 records; the running supervisor claims them and executes only through its configured command boundary."
 }
 
 #[cfg(test)]
@@ -3241,6 +3987,301 @@ mod tests {
     use super::*;
     use cultnet_rs::{CultNetRawDocumentRecord, CultNetRawPayloadEncoding};
     use std::cell::RefCell;
+
+    const EPIPHANY_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    fn authority_record(status: &str) -> BifrostRepositoryReleaseAuthorityRecord {
+        let repository = "GameCult/Epiphany";
+        let upstream_ref = "refs/heads/main";
+        BifrostRepositoryReleaseAuthorityRecord {
+            authority_id: release_authority_id(repository, upstream_ref, EPIPHANY_SHA),
+            command_id: "cultmesh-command-epiphany-release".to_string(),
+            crossing_receipt_id: "crossing_epiphany_release".to_string(),
+            repository_full_name: repository.to_string(),
+            upstream_ref: upstream_ref.to_string(),
+            commit_sha: EPIPHANY_SHA.to_string(),
+            decision: "authorize".to_string(),
+            status: status.to_string(),
+            policy_decision_id: "policy-epiphany-release".to_string(),
+            authority_reference: "bifrost:release:epiphany".to_string(),
+            actor_identity: "metacrat".to_string(),
+            source_kind: "bifrost.governance.topic".to_string(),
+            source_id: "topic-epiphany-release".to_string(),
+            epiphany_run_id: "run-epiphany-release".to_string(),
+            epiphany_lane_id: "hands-publication".to_string(),
+            epiphany_agent_identity: "epiphany".to_string(),
+            external_receipt_url: "https://github.com/GameCult/Epiphany/commit/0123456789abcdef0123456789abcdef01234567".to_string(),
+            external_receipt_id: EPIPHANY_SHA.to_string(),
+            authorized_at: "2026-07-16T00:00:00Z".to_string(),
+            expires_at: String::new(),
+            revoked_at: if status == "revoked" { "2026-07-16T01:00:00Z".to_string() } else { String::new() },
+            revocation_reason: if status == "revoked" { "operator revoked release".to_string() } else { String::new() },
+        }
+    }
+
+    fn authority_store(record: &BifrostRepositoryReleaseAuthorityRecord) -> PathBuf {
+        let path = env::temp_dir().join(format!(
+            "idunn-bifrost-authority-{}-{}.cc",
+            std::process::id(),
+            RELEASE_AUTHORITY_SNAPSHOT_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        write_authority_store(&path, record);
+        path
+    }
+
+    fn write_authority_store(
+        path: &std::path::Path,
+        record: &BifrostRepositoryReleaseAuthorityRecord,
+    ) {
+        let mut backing = SingleFileMessagePackBackingStore::new(path);
+        backing
+            .push(&CultCacheEnvelope {
+                key: record.authority_id.clone(),
+                r#type: BifrostRepositoryReleaseAuthorityRecord::TYPE.to_string(),
+                payload: rmp_serde::to_vec_named(&BifrostReleaseAuthorityWire::from(record))
+                    .unwrap(),
+                stored_at: "2026-07-16T00:00:00Z".to_string(),
+                schema_id: Some(odin_core::BIFROST_REPOSITORY_RELEASE_AUTHORITY_SCHEMA.to_string()),
+            })
+            .unwrap();
+    }
+
+    fn decode_hex_fixture(value: &str) -> Vec<u8> {
+        let bytes = value.trim().as_bytes();
+        assert_eq!(bytes.len() % 2, 0);
+        bytes
+            .chunks_exact(2)
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn bifrost_release_authority_golden_contract_decodes_and_seals() {
+        let record = authority_record("authorized");
+        let path = env::temp_dir().join(format!(
+            "idunn-bifrost-typescript-golden-{}-{}.cc",
+            std::process::id(),
+            RELEASE_AUTHORITY_SNAPSHOT_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let payload = decode_hex_fixture(include_str!(
+            "../tests/fixtures/bifrost-release-authority-v1.payload.hex"
+        ));
+        let decoded: BifrostReleaseAuthorityWire = rmp_serde::from_slice(&payload).unwrap();
+        assert_eq!(decoded.authority_id, record.authority_id);
+        let mut backing = SingleFileMessagePackBackingStore::new(&path);
+        backing
+            .push(&CultCacheEnvelope {
+                key: record.authority_id.clone(),
+                r#type: BifrostRepositoryReleaseAuthorityRecord::TYPE.to_string(),
+                payload,
+                stored_at: "2026-07-16T16:56:33.727Z".to_string(),
+                schema_id: Some(odin_core::BIFROST_REPOSITORY_RELEASE_AUTHORITY_SCHEMA.to_string()),
+            })
+            .unwrap();
+        let authorization = CultCacheReleaseAuthorityPort { store_path: &path }
+            .authorize(
+                "GameCult/Epiphany",
+                "refs/heads/main",
+                EPIPHANY_SHA,
+                "unix:1784246400",
+            )
+            .unwrap();
+
+        assert_eq!(
+            authorization.authority_id,
+            format!("release:GameCult/Epiphany:refs/heads/main:{EPIPHANY_SHA}")
+        );
+        assert_eq!(authorization.envelope_sha256.len(), 64);
+        assert!(
+            authorization
+                .envelope_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        );
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn revoked_bifrost_release_authority_fails_closed() {
+        let record = authority_record("revoked");
+        let path = authority_store(&record);
+        let error = CultCacheReleaseAuthorityPort { store_path: &path }
+            .authorize(
+                "GameCult/Epiphany",
+                "refs/heads/main",
+                EPIPHANY_SHA,
+                "unix:1784246400",
+            )
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("not currently authorized"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn bifrost_receipt_selects_release_independently_of_newer_upstream_head() {
+        let record = authority_record("authorized");
+        let path = authority_store(&record);
+        let selected = CultCacheReleaseAuthorityPort { store_path: &path }
+            .select("GameCult/Epiphany", "refs/heads/main", "unix:1784246400")
+            .unwrap();
+
+        assert_eq!(selected.source_revision, EPIPHANY_SHA);
+        assert_ne!(
+            selected.source_revision, "ffffffffffffffffffffffffffffffffffffffff",
+            "a newer observed main must not replace the authorized release"
+        );
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn multiple_current_bifrost_authorities_fail_release_selection() {
+        let first = authority_record("authorized");
+        let path = authority_store(&first);
+        let mut second = first.clone();
+        second.commit_sha = "fedcba9876543210fedcba9876543210fedcba98".to_string();
+        second.authority_id = release_authority_id(
+            &second.repository_full_name,
+            &second.upstream_ref,
+            &second.commit_sha,
+        );
+        second.external_receipt_id = second.commit_sha.clone();
+        second.external_receipt_url = format!(
+            "https://github.com/{}/commit/{}",
+            second.repository_full_name, second.commit_sha
+        );
+        write_authority_store(&path, &second);
+
+        let error = CultCacheReleaseAuthorityPort { store_path: &path }
+            .select("GameCult/Epiphany", "refs/heads/main", "unix:1784246400")
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("exactly one current authorized receipt"));
+        assert!(error.contains("found 2"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn bifrost_external_proof_must_bind_exact_commit() {
+        let mut record = authority_record("authorized");
+        record.external_receipt_id = "ffffffffffffffffffffffffffffffffffffffff".to_string();
+        let path = authority_store(&record);
+        let error = CultCacheReleaseAuthorityPort { store_path: &path }
+            .authorize(
+                "GameCult/Epiphany",
+                "refs/heads/main",
+                EPIPHANY_SHA,
+                "unix:1784246400",
+            )
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("external GitHub proof"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn pre_actuation_revalidation_observes_bifrost_revocation() {
+        let authorized = authority_record("authorized");
+        let path = authority_store(&authorized);
+        let authorization = CultCacheReleaseAuthorityPort { store_path: &path }
+            .authorize(
+                "GameCult/Epiphany",
+                "refs/heads/main",
+                EPIPHANY_SHA,
+                "unix:1784246400",
+            )
+            .unwrap();
+        let mut request = IdunnDeploymentRequestRecord {
+            request_id: "deploy:yggdrasil-epiphany:test".to_string(),
+            daemon_id: "yggdrasil-epiphany".to_string(),
+            command: "must-not-run".to_string(),
+            authority: "idunn-supervisor-command.manual".to_string(),
+            requested_at: "unix:1784246400".to_string(),
+            repository_full_name: String::new(),
+            upstream_ref: String::new(),
+            source_revision: String::new(),
+            release_authority_id: String::new(),
+            release_authority_envelope_sha256: String::new(),
+            requires_bifrost_authority: false,
+        };
+        apply_release_authorization(&mut request, &authorization);
+        write_authority_store(&path, &authority_record("revoked"));
+        let options = CommonOptions {
+            store_path: env::temp_dir().join("unused-idunn-store.cc"),
+            release_authority_store_path: Some(path.clone()),
+            operator_alarm_command: None,
+            rudp_health_bind: None,
+            execute: true,
+            command_timeout_seconds: 1,
+        };
+
+        let error = revalidate_deployment_request(&request, &options, &Arc::new(Mutex::new(())))
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("not currently authorized"));
+        let privileged_error =
+            validate_release_authority_at_privileged_boundary(&ReleaseAuthorityValidationOptions {
+                store_path: path.clone(),
+                repository_full_name: request.repository_full_name.clone(),
+                upstream_ref: request.upstream_ref.clone(),
+                source_revision: request.source_revision.clone(),
+                authority_id: request.release_authority_id.clone(),
+                envelope_sha256: request.release_authority_envelope_sha256.clone(),
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(privileged_error.contains("not currently authorized"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn yggdrasil_profile_requires_explicit_bifrost_authority_store() {
+        let error = Options::parse(
+            ["--swarm-profile", "yggdrasil-local"]
+                .into_iter()
+                .map(ToString::to_string),
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("--release-authority-store is required"));
+    }
+
+    #[test]
+    fn privileged_authority_validator_requires_exact_frozen_lineage() {
+        let authority_id = format!("release:GameCult/Epiphany:refs/heads/main:{EPIPHANY_SHA}");
+        let options = Options::parse(
+            [
+                "validate-release-authority",
+                "--release-authority-store",
+                "C:/authority.cc",
+                "--repository-full-name",
+                "GameCult/Epiphany",
+                "--upstream-ref",
+                "refs/heads/main",
+                "--source-revision",
+                EPIPHANY_SHA,
+                "--release-authority-id",
+                &authority_id,
+                "--release-authority-sha256",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ]
+            .into_iter()
+            .map(ToString::to_string),
+        )
+        .unwrap();
+
+        let Mode::ReleaseAuthorityValidation(validation) = options.mode else {
+            panic!("expected privileged release-authority validation posture");
+        };
+        assert_eq!(validation.repository_full_name, "GameCult/Epiphany");
+        assert_eq!(validation.source_revision, EPIPHANY_SHA);
+        assert_eq!(validation.authority_id, authority_id);
+    }
 
     fn target(default_failure_state: &str, deploy_command: Option<&str>) -> DaemonTarget {
         DaemonTarget {
@@ -4008,10 +5049,14 @@ mod tests {
             .expect("Yggdrasil VoidBot target");
 
         assert_eq!(voidbot.verse_id, "yggdrasil.local");
-        assert_eq!(
-            voidbot.deploy_command.as_deref(),
-            Some("sudo -n /usr/local/libexec/idunn-yggdrasil deploy voidbot")
-        );
+        let deploy = voidbot
+            .deploy_command
+            .as_deref()
+            .expect("VoidBot deploy command");
+        assert!(deploy.starts_with("sudo -n /usr/local/libexec/idunn-yggdrasil deploy voidbot"));
+        assert!(deploy.contains("$IDUNN_SOURCE_COMMIT"));
+        assert!(deploy.contains("$BIFROST_RELEASE_AUTHORITY_SHA256"));
+        assert!(deploy.contains("$IDUNN_DEPLOYMENT_REQUEST_ID"));
         assert_eq!(
             voidbot.restart_command.as_deref(),
             Some("sudo -n /usr/local/libexec/idunn-yggdrasil restart voidbot")
@@ -4020,6 +5065,7 @@ mod tests {
         assert_eq!(release.repo_path, PathBuf::from("/srv/build/VoidBot"));
         assert_eq!(release.upstream_remote, "origin");
         assert_eq!(release.upstream_branch, "main");
+        assert!(!release.requires_bifrost_authority);
 
         let starfire = swarm_targets(&SwarmOptions {
             profile: "starfire-local".to_string(),
@@ -4031,6 +5077,103 @@ mod tests {
                 .iter()
                 .all(|target| target.daemon_id != "voidbot"
                     && target.daemon_id != "yggdrasil-voidbot")
+        );
+    }
+
+    #[test]
+    fn epiphany_yggdrasil_target_requires_bifrost_authority_and_exact_witness() {
+        let yggdrasil = swarm_targets(&SwarmOptions {
+            profile: "yggdrasil-local".to_string(),
+            repo_root: PathBuf::from("/srv/odin/source"),
+        })
+        .expect("yggdrasil-local targets");
+        let epiphany = yggdrasil
+            .iter()
+            .find(|target| target.daemon_id == "yggdrasil-epiphany")
+            .expect("Yggdrasil Epiphany target");
+
+        assert_eq!(epiphany.verse_id, "yggdrasil.local");
+        assert_eq!(
+            epiphany.health_contract.id,
+            "epiphany.cultnet-rudp-runtime-health"
+        );
+        assert_eq!(epiphany.health_contract.default_failure_state, "failed");
+        assert_eq!(epiphany.interval_seconds, 300);
+        assert_eq!(
+            epiphany.restart_command.as_deref(),
+            Some("sudo -n /usr/local/libexec/idunn-yggdrasil restart epiphany")
+        );
+        let deploy = epiphany
+            .deploy_command
+            .as_deref()
+            .expect("Epiphany deploy command");
+        assert!(deploy.starts_with("sudo -n /usr/local/libexec/idunn-yggdrasil deploy epiphany"));
+        assert!(deploy.contains("$IDUNN_SOURCE_COMMIT"));
+        assert!(deploy.contains("$IDUNN_REQUIRES_BIFROST_AUTHORITY"));
+
+        let release = epiphany.release.as_ref().expect("Epiphany release target");
+        assert_eq!(release.repo, "Epiphany");
+        assert_eq!(release.repository_full_name, "GameCult/Epiphany");
+        assert_eq!(release.repo_path, PathBuf::from("/srv/build/Epiphany"));
+        assert_eq!(release.upstream_remote, "origin");
+        assert_eq!(release.upstream_branch, "main");
+        assert_eq!(release.rollout_strategy, "restart-after-verified-build");
+        assert_eq!(release.state_migration_command, None);
+        assert_eq!(release.zero_downtime_capability, "restart-required");
+        assert_eq!(
+            release.deployed_revision_witness,
+            Some(PathBuf::from("/srv/epiphany/deploy/deployment.env"))
+        );
+        assert!(release.requires_bifrost_authority);
+
+        for legacy in yggdrasil
+            .iter()
+            .filter(|target| target.daemon_id != "yggdrasil-epiphany")
+            .filter_map(|target| target.release.as_ref())
+        {
+            assert!(
+                !legacy.requires_bifrost_authority,
+                "{} must stay on its explicit legacy authority posture",
+                legacy.repo
+            );
+        }
+    }
+
+    #[test]
+    fn yggdrasil_service_and_root_actuator_advertise_epiphany_release_boundary() {
+        let unit = include_str!("../../../scripts/linux/idunn-yggdrasil.service");
+        let actuator = include_str!("../../../scripts/linux/idunn-yggdrasil");
+
+        assert!(unit.contains(
+            "--release-authority-store /srv/bifrost/state/repository-release-authority.cc"
+        ));
+        assert!(unit.contains("--command-timeout-seconds 3600"));
+        assert!(actuator.contains("deploy:epiphany|restart:epiphany"));
+        assert!(actuator.contains("/usr/local/bin/idunn validate-release-authority"));
+        assert!(actuator.contains("epiphany) target_requires_bifrost_authority=true"));
+        assert!(actuator.contains(
+            "voidbot|heimdall|repixelizer|streampixels) target_requires_bifrost_authority=false"
+        ));
+        assert!(
+            actuator
+                .contains("caller release-authority mode does not match root policy for $target")
+        );
+        let policy_derivation = actuator
+            .find("target_requires_bifrost_authority=true")
+            .expect("root target policy");
+        let caller_mode_branch = actuator
+            .find("case \"$requires_bifrost_authority\" in")
+            .expect("authority mode branch");
+        assert!(
+            policy_derivation < caller_mode_branch,
+            "root target policy must be derived before the authority mode is trusted"
+        );
+        assert!(actuator.contains("IDUNN_SOURCE_COMMIT=\"$source_commit\""));
+        assert!(
+            actuator.contains("BIFROST_RELEASE_AUTHORITY_SHA256=\"$release_authority_sha256\"")
+        );
+        assert!(
+            actuator.contains("IDUNN_REQUIRES_BIFROST_AUTHORITY=\"$requires_bifrost_authority\"")
         );
     }
 
@@ -4297,6 +5440,7 @@ mod tests {
         ));
         let options = CommonOptions {
             store_path: store_path.clone(),
+            release_authority_store_path: None,
             operator_alarm_command: None,
             rudp_health_bind: None,
             execute: false,
@@ -4365,6 +5509,7 @@ mod tests {
         ));
         let options = CommonOptions {
             store_path: store_path.clone(),
+            release_authority_store_path: None,
             operator_alarm_command: None,
             rudp_health_bind: None,
             execute: false,
