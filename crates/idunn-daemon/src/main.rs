@@ -3629,13 +3629,23 @@ fn command_output_detail(prefix: &str, output: &std::process::Output) -> String 
 }
 
 fn truncate_detail(value: &str, max_chars: usize) -> String {
-    let mut chars = value.chars();
-    let truncated: String = chars.by_ref().take(max_chars).collect();
-    if chars.next().is_some() {
-        format!("{truncated}...")
-    } else {
-        truncated
+    let chars: Vec<char> = value.chars().collect();
+    if chars.len() <= max_chars {
+        return value.to_string();
     }
+
+    let separator = "...<truncated>...";
+    let separator_len = separator.chars().count();
+    if max_chars <= separator_len {
+        return chars.into_iter().take(max_chars).collect();
+    }
+
+    let retained = max_chars - separator_len;
+    let head_len = retained / 3;
+    let tail_len = retained - head_len;
+    let head: String = chars.iter().take(head_len).collect();
+    let tail: String = chars.iter().skip(chars.len() - tail_len).collect();
+    format!("{head}{separator}{tail}")
 }
 
 fn run_state_migration(
@@ -3989,6 +3999,22 @@ mod tests {
     use std::cell::RefCell;
 
     const EPIPHANY_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    #[test]
+    fn truncated_command_detail_preserves_failure_tail() {
+        let value = format!("{}fatal: promotion failed", "compiler noise\n".repeat(100));
+        let detail = truncate_detail(&value, 120);
+
+        assert_eq!(detail.chars().count(), 120);
+        assert!(detail.starts_with("compiler noise"));
+        assert!(detail.contains("...<truncated>..."));
+        assert!(detail.ends_with("fatal: promotion failed"));
+    }
+
+    #[test]
+    fn short_command_detail_is_unchanged() {
+        assert_eq!(truncate_detail("precise failure", 120), "precise failure");
+    }
 
     fn authority_record(status: &str) -> BifrostRepositoryReleaseAuthorityRecord {
         let repository = "GameCult/Epiphany";
