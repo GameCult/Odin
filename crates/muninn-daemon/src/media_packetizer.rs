@@ -1132,7 +1132,12 @@ pub fn packetize_video_access_unit(
     Ok(records)
 }
 
-const MUNINN_VIDEO_PARITY_STRIPES: u16 = 16;
+const MUNINN_VIDEO_PARITY_SHARDS: u16 = 16;
+
+fn video_fec_coefficient(parity_index: u16, parity_count: u16, data_index: u16) -> u8 {
+    debug_assert!(u32::from(parity_count) + u32::from(data_index) <= 255);
+    gf256_inv((parity_index as u8) ^ ((parity_count + data_index) as u8))
+}
 
 pub fn build_video_parity_shards(
     chunks: &[MuninnMediaVideoAccessUnitRecord],
@@ -1192,22 +1197,18 @@ pub fn build_video_parity_shards(
     }
     let chunk_payload_bytes = u32::try_from(chunk_payload_len)
         .context("video parity chunk payload length exceeds u32")?;
-    let parity_count = first.chunk_count.min(MUNINN_VIDEO_PARITY_STRIPES);
+    let parity_count = first
+        .chunk_count
+        .min(MUNINN_VIDEO_PARITY_SHARDS)
+        .min(256_u16.saturating_sub(first.chunk_count));
     let mut records = Vec::with_capacity(parity_count as usize);
     for parity_index in 0..parity_count {
-        let mut parity_len = 0_usize;
-        for index in (parity_index..first.chunk_count).step_by(parity_count as usize) {
+        let mut parity = vec![0_u8; chunk_payload_len];
+        for index in 0..first.chunk_count {
             let chunk = by_index.get(&index).expect("chunk index was checked above");
-            parity_len = parity_len.max(chunk.payload.len());
-        }
-        if parity_len == 0 {
-            continue;
-        }
-        let mut parity = vec![0_u8; parity_len];
-        for index in (parity_index..first.chunk_count).step_by(parity_count as usize) {
-            let chunk = by_index.get(&index).expect("chunk index was checked above");
+            let coefficient = video_fec_coefficient(parity_index, parity_count, index);
             for (offset, byte) in chunk.payload.iter().enumerate() {
-                parity[offset] ^= *byte;
+                parity[offset] ^= gf256_mul(*byte, coefficient);
             }
         }
         records.push(MuninnMediaVideoParityShardRecord {
@@ -2856,29 +2857,29 @@ mod tests {
         );
         assert!(parity.iter().all(|shard| shard.chunk_payload_bytes == 2));
 
-        let mut recovered_tail = Vec::new();
-        for missing_index in 16_u16..20 {
-            let shard = parity
-                .iter()
-                .find(|shard| shard.parity_index == missing_index % shard.parity_count)
-                .expect("tail chunk stripe exists");
-            let mut recovered = shard.payload.clone();
-            for chunk in records.iter().filter(|chunk| {
-                chunk.chunk_index != missing_index
-                    && chunk.chunk_index % shard.parity_count == shard.parity_index
-            }) {
-                for (offset, byte) in chunk.payload.iter().enumerate() {
-                    recovered[offset] ^= *byte;
-                }
+        let missing_index = 18_u16;
+        let shard = &parity[7];
+        let mut recovered = shard.payload.clone();
+        for chunk in records.iter().filter(|chunk| chunk.chunk_index != missing_index) {
+            let coefficient = video_fec_coefficient(
+                shard.parity_index,
+                shard.parity_count,
+                chunk.chunk_index,
+            );
+            for (offset, byte) in chunk.payload.iter().enumerate() {
+                recovered[offset] ^= gf256_mul(*byte, coefficient);
             }
-            recovered.truncate(records[missing_index as usize].payload.len());
-            recovered_tail.extend(recovered);
         }
-        let expected_tail: Vec<u8> = records[16..20]
-            .iter()
-            .flat_map(|record| record.payload.iter().copied())
-            .collect();
-        assert_eq!(recovered_tail, expected_tail);
+        let inverse = gf256_inv(video_fec_coefficient(
+            shard.parity_index,
+            shard.parity_count,
+            missing_index,
+        ));
+        for byte in &mut recovered {
+            *byte = gf256_mul(*byte, inverse);
+        }
+        recovered.truncate(records[missing_index as usize].payload.len());
+        assert_eq!(recovered, records[missing_index as usize].payload);
         Ok(())
     }
 

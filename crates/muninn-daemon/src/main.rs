@@ -46,7 +46,7 @@ use std::net::{SocketAddr, UdpSocket};
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex, atomic::{AtomicU64, Ordering}, mpsc};
+use std::sync::{Arc, Mutex, atomic::{AtomicBool, AtomicU64, Ordering}, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -97,8 +97,8 @@ const MUNINN_RUDP_MEDIA_REPAIR_RECOVERY_INTERVAL_MS: u64 = 2_000;
 const MUNINN_RUDP_MEDIA_REPAIR_MAX_FEEDBACK_PER_POLL: usize = 32;
 const MUNINN_RUDP_MEDIA_REPAIR_MAX_CHUNKS_PER_POLL: usize = 256;
 const MUNINN_RUDP_MEDIA_SOCKET_BUFFER_BYTES: usize = 16 * 1024 * 1024;
-const MUNINN_RUDP_MEDIA_SEND_PACE_EVERY_PAYLOADS: usize = 4;
-const MUNINN_RUDP_MEDIA_SEND_PACE_SLEEP_US: u64 = 250;
+const MUNINN_RUDP_MEDIA_SEND_PACE_EVERY_PAYLOADS: usize = 1;
+const MUNINN_RUDP_MEDIA_SEND_PACE_SLEEP_US: u64 = 0;
 const MUNINN_RUDP_ACTIVE_CATALOG_REPUBLISH_MS: u64 = 2_000;
 const MUNINN_ODIN_PROVIDER_LEASE_REFRESH_SECONDS: u64 = 30;
 const PS_MOVE_LED_REPORT_LEN: usize = 49;
@@ -1789,32 +1789,63 @@ fn rudp_media_activity_detail(options: &Options) -> String {
     .to_string()
 }
 
-fn republish_running_stream_if_due(
-    node: &mut cultmesh_rs::CultMeshNode,
-    options: &Options,
-    plan: &MuxPlan,
-    supervisor_pid: u32,
-    mux_pid: u32,
-    restart_count: u32,
-    last_stream_publish_at: &mut Instant,
-) -> Result<()> {
-    if last_stream_publish_at.elapsed()
-        < Duration::from_millis(MUNINN_RUDP_ACTIVE_CATALOG_REPUBLISH_MS)
-    {
-        return Ok(());
+struct RudpCatalogPublisher {
+    stop: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl RudpCatalogPublisher {
+    fn start(
+        options: Options,
+        plan: MuxPlan,
+        supervisor_pid: u32,
+        mux_pid: Option<u32>,
+        restart_count: u32,
+    ) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let handle = thread::spawn(move || {
+            let mut node = match open_node(&options, "muninn-rudp-catalog-publisher") {
+                Ok(node) => node,
+                Err(error) => {
+                    eprintln!("Muninn catalog publisher could not open CultMesh state: {error:#}");
+                    return;
+                }
+            };
+            let mut next_publish_at = Instant::now()
+                + Duration::from_millis(MUNINN_RUDP_ACTIVE_CATALOG_REPUBLISH_MS);
+            while !thread_stop.load(Ordering::Relaxed) {
+                let now = Instant::now();
+                if now >= next_publish_at {
+                    if let Err(error) = publish_stream(
+                        &mut node,
+                        &options,
+                        &plan,
+                        "running",
+                        supervisor_pid,
+                        mux_pid,
+                        restart_count,
+                        &rudp_media_activity_detail(&options),
+                    ) {
+                        eprintln!("Muninn catalog publisher failed: {error:#}");
+                    }
+                    next_publish_at = Instant::now()
+                        + Duration::from_millis(MUNINN_RUDP_ACTIVE_CATALOG_REPUBLISH_MS);
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+        });
+        Self { stop, handle: Some(handle) }
     }
-    publish_stream(
-        node,
-        options,
-        plan,
-        "running",
-        supervisor_pid,
-        Some(mux_pid),
-        restart_count,
-        &rudp_media_activity_detail(options),
-    )?;
-    *last_stream_publish_at = Instant::now();
-    Ok(())
+}
+
+impl Drop for RudpCatalogPublisher {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
 }
 
 fn run_rudp_mux_once(
@@ -1972,7 +2003,17 @@ fn run_rudp_mux_once(
             restart_count,
             &rudp_media_activity_detail(options),
         )?;
-        let mut last_stream_publish_at = Instant::now();
+        let mux_pid = video_ffmpeg
+            .as_ref()
+            .map(Child::id)
+            .or_else(|| audio_ffmpeg.as_ref().map(Child::id));
+        let _catalog_publisher = RudpCatalogPublisher::start(
+            options.clone(),
+            plan.clone(),
+            supervisor_pid,
+            mux_pid,
+            restart_count,
+        );
 
         let (payload_tx, payload_rx) =
             mpsc::sync_channel::<Result<Vec<QueuedMuninnMediaSendPayload>>>(
@@ -2095,19 +2136,6 @@ fn run_rudp_mux_once(
                     )?;
                     poll_rudp_resends_with_backpressure(&mut video_transport)?;
                     poll_rudp_resends_with_backpressure(&mut audio_transport)?;
-                    republish_running_stream_if_due(
-                        node,
-                        options,
-                        plan,
-                        supervisor_pid,
-                        video_ffmpeg
-                            .as_ref()
-                            .map(Child::id)
-                            .or_else(|| audio_ffmpeg.as_ref().map(Child::id))
-                            .unwrap_or(supervisor_pid),
-                        restart_count,
-                        &mut last_stream_publish_at,
-                    )?;
                     if payloads_dropped == 1 || payloads_dropped % 300 == 0 {
                         let expired = reliable_packets_expired(&video_transport, &audio_transport);
                         eprintln!(
@@ -2173,19 +2201,6 @@ fn run_rudp_mux_once(
                 )?;
                 poll_rudp_resends_with_backpressure(&mut video_transport)?;
                 poll_rudp_resends_with_backpressure(&mut audio_transport)?;
-                republish_running_stream_if_due(
-                    node,
-                    options,
-                    plan,
-                    supervisor_pid,
-                    video_ffmpeg
-                        .as_ref()
-                        .map(Child::id)
-                        .or_else(|| audio_ffmpeg.as_ref().map(Child::id))
-                        .unwrap_or(supervisor_pid),
-                    restart_count,
-                    &mut last_stream_publish_at,
-                )?;
                 payloads_sent += 1;
                 if payloads_sent == 1 || payloads_sent % 900 == 0 {
                     let expired = reliable_packets_expired(&video_transport, &audio_transport);
@@ -2247,19 +2262,6 @@ fn run_rudp_mux_once(
                 )?;
                 poll_rudp_resends_with_backpressure(&mut video_transport)?;
                 poll_rudp_resends_with_backpressure(&mut audio_transport)?;
-                republish_running_stream_if_due(
-                    node,
-                    options,
-                    plan,
-                    supervisor_pid,
-                    video_ffmpeg
-                        .as_ref()
-                        .map(Child::id)
-                        .or_else(|| audio_ffmpeg.as_ref().map(Child::id))
-                        .unwrap_or(supervisor_pid),
-                    restart_count,
-                    &mut last_stream_publish_at,
-                )?;
             }
         }
     })();
@@ -2663,6 +2665,27 @@ fn queue_muninn_media_payloads(
         })
         .collect()))
         .context("queueing typed Muninn media payload group")
+}
+
+fn queue_muninn_video_payloads_by_access_unit(
+    tx: &mpsc::SyncSender<Result<Vec<QueuedMuninnMediaSendPayload>>>,
+    payloads: Vec<MuninnMediaSendPayload>,
+) -> Result<()> {
+    let mut current_frame_id = None;
+    let mut current = Vec::new();
+    for payload in payloads {
+        let frame_id = match decode_media_wire_record(&payload.payload)? {
+            MuninnMediaWireRecord::Video(record) => record.frame_id,
+            MuninnMediaWireRecord::VideoParity(record) => record.frame_id,
+            _ => return Err(anyhow!("video packetizer emitted a non-video media record")),
+        };
+        if current_frame_id.is_some_and(|current_id| current_id != frame_id) {
+            queue_muninn_media_payloads(tx, std::mem::take(&mut current), QueuedMuninnMediaKind::Video)?;
+        }
+        current_frame_id = Some(frame_id);
+        current.push(payload);
+    }
+    queue_muninn_media_payloads(tx, current, QueuedMuninnMediaKind::Video)
 }
 
 fn receive_pending_media_payloads(
@@ -3141,18 +3164,16 @@ where
             .read(&mut buffer)
             .context("reading encoded Annex B video from ffmpeg stdout")?;
         if read == 0 {
-            queue_muninn_media_payloads(
+            queue_muninn_video_payloads_by_access_unit(
                 tx,
                 sender.finish(&timestamp()?)?,
-                QueuedMuninnMediaKind::Video,
             )
             .context("queueing final typed video media payload group")?;
             return Ok(());
         }
-        queue_muninn_media_payloads(
+        queue_muninn_video_payloads_by_access_unit(
             tx,
             sender.push(&timestamp()?, &buffer[..read])?,
-            QueuedMuninnMediaKind::Video,
         )
         .context("queueing typed video media payload group")?;
     }
@@ -12159,6 +12180,60 @@ mod tests {
         assert_eq!(group.len(), 64);
         assert!(group.iter().all(|payload| payload.kind == QueuedMuninnMediaKind::Video));
         assert!(group.windows(2).all(|pair| pair[0].queued_at == pair[1].queued_at));
+    }
+
+    #[test]
+    fn video_handoff_splits_access_units_returned_by_one_encoder_read() {
+        let (tx, rx) = mpsc::sync_channel(2);
+        let payload = |frame_id, chunk_index| {
+            let record = odin_core::MuninnMediaVideoAccessUnitRecord {
+                stream_id: "video".to_string(),
+                session_id: "session".to_string(),
+                frame_id,
+                codec: "h264".to_string(),
+                pts_ticks: frame_id as i64 * 3_000,
+                duration_ticks: 3_000,
+                timebase_num: 1,
+                timebase_den: 90_000,
+                keyframe: frame_id == 1,
+                dependency_frame_id: frame_id.checked_sub(1),
+                deadline_ticks: frame_id as i64 * 3_000 + 180_000,
+                chunk_index,
+                chunk_count: 2,
+                payload: vec![frame_id as u8, chunk_index as u8],
+            };
+            MuninnMediaSendPayload {
+                channel_id: crate::media_packetizer::MUNINN_MEDIA_RUDP_CHANNEL,
+                payload: crate::media_packetizer::encode_media_wire_record(
+                    &MuninnMediaWireRecord::Video(record),
+                    "2026-07-17T00:00:00Z",
+                    "muninn-test",
+                    "video",
+                )
+                .unwrap(),
+            }
+        };
+
+        queue_muninn_video_payloads_by_access_unit(
+            &tx,
+            vec![payload(1, 0), payload(1, 1), payload(2, 0), payload(2, 1)],
+        )
+        .unwrap();
+
+        let first = rx.try_recv().unwrap().unwrap();
+        let second = rx.try_recv().unwrap().unwrap();
+        assert_eq!(first.len(), 2);
+        assert_eq!(second.len(), 2);
+        assert!(rx.try_recv().is_err());
+        for (expected_frame_id, group) in [(1, first), (2, second)] {
+            assert!(group.iter().all(|payload| {
+                matches!(
+                    decode_media_wire_record(&payload.payload.payload).unwrap(),
+                    MuninnMediaWireRecord::Video(record) if record.frame_id == expected_frame_id
+                )
+            }));
+            assert!(group.windows(2).all(|pair| pair[0].queued_at == pair[1].queued_at));
+        }
     }
 
     #[test]
