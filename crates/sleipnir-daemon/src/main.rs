@@ -26,6 +26,7 @@ const SLEIPNIR_INPUT_MAPPING_SCHEMA: &str = "sleipnir.input_mapping.v1";
 const IDUNN_HEALTH_RUDP_CONNECTION_ID: u32 = 0x1d0d_0001;
 const CULTNET_RUDP_PROTOCOL_ID: &str = "cultnet.transport.rudp.v0";
 const INPUT_STALE_NEUTRAL_AFTER: Duration = Duration::from_millis(1_500);
+const INPUT_RECEIVE_DRAIN_BUDGET: Duration = Duration::from_millis(2);
 const INPUT_STREAM_RECONNECT_AFTER: Duration = Duration::from_secs(3);
 const DEFAULT_STICK_DEADZONE: f32 = 0.12;
 const HID_RUDP_MAX_FRAGMENT_BYTES: u32 = 1_200;
@@ -97,11 +98,9 @@ struct SleipnirRuntimeState {
 struct SleipnirInputLatencySnapshot {
     device_id: String,
     sequence: u64,
-    source_to_arrival_ms: Option<i64>,
     arrival_to_buffer_ms: u128,
     buffer_to_axis_ms: u128,
     axis_to_hid_ms: u128,
-    source_to_hid_ms: Option<i64>,
     total_observed_ms: u128,
     axis_summary: Vec<String>,
     emitted: bool,
@@ -209,11 +208,22 @@ const SLEIPNIR_HID_MAX_PENDING_EDGE_GAP: u64 = 256;
 
 impl HidSemanticCursor {
     fn accept_state(&mut self, epoch: u64, sequence: u64) -> bool {
-        if epoch == 0 && self.epoch != 0 { return false; }
-        if self.retired_epochs.contains(&epoch) || (epoch == self.epoch && sequence <= self.state_sequence) { return false; }
+        if epoch == 0 && self.epoch != 0 {
+            return false;
+        }
+        if self.retired_epochs.contains(&epoch)
+            || (epoch == self.epoch && sequence <= self.state_sequence)
+        {
+            return false;
+        }
         if epoch != self.epoch {
-            if self.epoch != 0 { self.retired_epochs.insert(self.epoch); }
-            self.epoch = epoch; self.state_sequence = 0; self.edge_sequence = 0; self.pending_edges.clear();
+            if self.epoch != 0 {
+                self.retired_epochs.insert(self.epoch);
+            }
+            self.epoch = epoch;
+            self.state_sequence = 0;
+            self.edge_sequence = 0;
+            self.pending_edges.clear();
         }
         self.state_sequence = sequence;
         true
@@ -221,7 +231,10 @@ impl HidSemanticCursor {
     fn push_edge(&mut self, edge: HidButtonEdge) -> Vec<HidButtonEdge> {
         if edge.epoch != self.epoch
             || edge.edge_sequence <= self.edge_sequence
-            || edge.edge_sequence > self.edge_sequence.saturating_add(SLEIPNIR_HID_MAX_PENDING_EDGE_GAP)
+            || edge.edge_sequence
+                > self
+                    .edge_sequence
+                    .saturating_add(SLEIPNIR_HID_MAX_PENDING_EDGE_GAP)
         {
             return Vec::new();
         }
@@ -238,7 +251,6 @@ impl HidSemanticCursor {
 #[derive(Clone, Debug)]
 struct HidRecordTiming {
     frame_received_at: Instant,
-    frame_received_unix_ns: i64,
     buffer_ready_at: Instant,
 }
 
@@ -526,14 +538,11 @@ fn main() -> Result<()> {
                             let axis_classified_at = Instant::now();
                             let output_frame_at = Instant::now();
                             if options.trace {
-                                let source_age_ms = unix_nanos_i64()
-                                    .saturating_sub(record.source_timestamp_ns)
-                                    / 1_000_000;
                                 eprintln!(
-                                    "Sleipnir applying fast HID frame device={} seq={} source_age_ms={} lx={} ly={} lt={} rt={} buttons=[{}]",
+                                    "Sleipnir applying fast HID frame device={} seq={} receive_to_apply_us={} lx={} ly={} lt={} rt={} buttons=[{}]",
                                     record.device_id,
                                     record.sequence,
-                                    source_age_ms,
+                                    timing.frame_received_at.elapsed().as_micros(),
                                     state.left_x,
                                     state.left_y,
                                     state.left_trigger,
@@ -592,9 +601,16 @@ fn main() -> Result<()> {
                     let edge_sequence = edge.edge_sequence;
                     let edge_device = edge.device_id.clone();
                     for applied in semantic_cursor.push_edge(edge) {
-                        let Some(record) = last_applied_record.as_mut().or(recent_applied_record.as_mut()) else { continue; };
+                        let Some(record) = last_applied_record
+                            .as_mut()
+                            .or(recent_applied_record.as_mut())
+                        else {
+                            continue;
+                        };
                         if applied.pressed {
-                            if !record.buttons.contains(&applied.button) { record.buttons.push(applied.button.clone()); }
+                            if !record.buttons.contains(&applied.button) {
+                                record.buttons.push(applied.button.clone());
+                            }
                         } else {
                             record.buttons.retain(|button| button != &applied.button);
                         }
@@ -603,9 +619,13 @@ fn main() -> Result<()> {
                         output_is_neutral = state == VirtualPadState::default();
                         last_output_frame_at = Some(Instant::now());
                     }
-                    if edge_epoch == semantic_cursor.epoch && edge_sequence <= semantic_cursor.edge_sequence {
+                    if edge_epoch == semantic_cursor.epoch
+                        && edge_sequence <= semantic_cursor.edge_sequence
+                    {
                         let ack = serde_json::json!({"epoch": edge_epoch, "device_id": edge_device, "edge_sequence": semantic_cursor.edge_sequence});
-                        stream.transport.send("hid.edge.ack", serde_json::to_vec(&ack)?)?;
+                        stream
+                            .transport
+                            .send("hid.edge.ack", serde_json::to_vec(&ack)?)?;
                     }
                 }
                 if desired_mapping.enabled
@@ -1016,11 +1036,11 @@ fn pull_odin_catalog_snapshot(node: &mut cultmesh_rs::CultMeshNode, options: &Op
     let Some(target) = resolve_odin_cultmesh_uri(options) else {
         return;
     };
-    let hid_result = node.pull_rudp_catalog_snapshot(CultMeshRudpSnapshotOptions {
+    let discovery_result = node.pull_rudp_catalog_snapshot(CultMeshRudpSnapshotOptions {
         target,
         runtime_id: format!("sleipnir-{}-catalog-client", options.host_id),
         schema_ids: Some(vec![
-            MUNINN_HID_CONTROLLER_STATE_SCHEMA.to_string(),
+            EVE_PROVIDER_ADVERTISEMENT_SCHEMA.to_string(),
             SLEIPNIR_INPUT_MAPPING_SCHEMA.to_string(),
         ]),
         connect_timeout: Duration::from_millis(150),
@@ -1028,86 +1048,20 @@ fn pull_odin_catalog_snapshot(node: &mut cultmesh_rs::CultMeshNode, options: &Op
         resend_delay_ms: 15,
         ..CultMeshRudpSnapshotOptions::default()
     });
-    match hid_result {
+    match discovery_result {
         Ok(count) if options.trace => {
-            eprintln!("Sleipnir pulled {count} Odin HID/mapping discovery records from {target}");
-        }
-        Ok(_) => {}
-        Err(error) if options.trace => {
-            eprintln!("Sleipnir Odin HID/mapping snapshot pull failed from {target}: {error:#}");
-        }
-        Err(_) => return,
-    }
-
-    let provider_keys = muninn_provider_keys_for_discovered_hid_hosts(node);
-    if provider_keys.is_empty() {
-        return;
-    }
-    let provider_result = node.pull_rudp_catalog_snapshot(CultMeshRudpSnapshotOptions {
-        target,
-        runtime_id: format!("sleipnir-{}-provider-catalog-client", options.host_id),
-        schema_ids: Some(vec![EVE_PROVIDER_ADVERTISEMENT_SCHEMA.to_string()]),
-        record_keys: Some(provider_keys),
-        connect_timeout: Duration::from_millis(150),
-        response_timeout: Duration::from_millis(150),
-        resend_delay_ms: 15,
-        ..CultMeshRudpSnapshotOptions::default()
-    });
-    match provider_result {
-        Ok(count) if options.trace => {
-            eprintln!("Sleipnir pulled {count} Odin Muninn provider records from {target}");
+            eprintln!(
+                "Sleipnir pulled {count} Odin provider/mapping discovery records from {target}"
+            );
         }
         Ok(_) => {}
         Err(error) if options.trace => {
             eprintln!(
-                "Sleipnir Odin Muninn provider snapshot pull failed from {target}: {error:#}"
+                "Sleipnir Odin provider/mapping snapshot pull failed from {target}: {error:#}"
             );
         }
-        Err(_) => {}
+        Err(_) => return,
     }
-}
-
-fn muninn_provider_keys_for_discovered_hid_hosts(node: &cultmesh_rs::CultMeshNode) -> Vec<String> {
-    let mut keys = node
-        .cache()
-        .get_all::<MuninnHidControllerStateRecord>()
-        .ok()
-        .into_iter()
-        .flatten()
-        .map(|record| format!("muninn.telemetry.{}", record.host_id))
-        .collect::<Vec<_>>();
-    for envelope in node.cache().snapshot() {
-        if envelope.schema_id.as_deref() != Some(MUNINN_HID_CONTROLLER_STATE_SCHEMA)
-            && envelope.r#type != "muninn.hid_controller_state"
-        {
-            continue;
-        }
-        let Ok(value) = rmp_serde::from_slice::<serde_json::Value>(&envelope.payload) else {
-            continue;
-        };
-        if let Some(host_id) = hid_state_host_id_from_value(&value) {
-            keys.push(format!("muninn.telemetry.{host_id}"));
-        }
-    }
-    keys.sort();
-    keys.dedup();
-    keys
-}
-
-fn hid_state_host_id_from_value(value: &serde_json::Value) -> Option<String> {
-    let payload = value
-        .as_array()
-        .and_then(|items| {
-            (items.len() == 1)
-                .then(|| items.first())
-                .flatten()
-                .filter(|item| item.is_object() || item.is_array())
-        })
-        .unwrap_or(value);
-    if let Some(items) = payload.as_array() {
-        return items.get(1)?.as_str().map(ToString::to_string);
-    }
-    string_field(payload, &["host_id", "hostId"])
 }
 
 fn sleipnir_surface_document(state: &SleipnirRuntimeState) -> serde_json::Value {
@@ -1282,13 +1236,7 @@ fn input_latency_elements(state: &SleipnirRuntimeState) -> Vec<serde_json::Value
         ),
         text_element(
             format!("{}.latency.source-arrival", state.provider_id),
-            format!(
-                "signal arrival: {}",
-                trace
-                    .source_to_arrival_ms
-                    .map(|value| format!("source to arrival {} ms", value))
-                    .unwrap_or_else(|| "source timestamp unavailable".to_string())
-            ),
+            "source clock latency: unavailable (no clock model)".to_string(),
         ),
         text_element(
             format!("{}.latency.buffer", state.provider_id),
@@ -1308,12 +1256,8 @@ fn input_latency_elements(state: &SleipnirRuntimeState) -> Vec<serde_json::Value
         text_element(
             format!("{}.latency.total", state.provider_id),
             format!(
-                "observed mirror total: {} ms{}",
-                trace.total_observed_ms,
-                trace
-                    .source_to_hid_ms
-                    .map(|value| format!(" / source to HID {} ms", value))
-                    .unwrap_or_default()
+                "observed receive to HID total: {} ms",
+                trace.total_observed_ms
             ),
         ),
     ]
@@ -2264,14 +2208,6 @@ fn unix_millis_i64() -> i64 {
         .unwrap_or_default()
 }
 
-fn unix_nanos_i64() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| i64::try_from(duration.as_nanos()).unwrap_or(i64::MAX))
-        .unwrap_or_default()
-}
-
 fn title_case(value: &str) -> String {
     let mut chars = value.chars();
     match chars.next() {
@@ -2572,12 +2508,15 @@ fn stream_host_hint(stream_id: Option<&str>) -> Option<String> {
 fn receive_rudp_records(stream: &mut ActiveRudpStream, trace: bool) -> Result<Vec<TimedHidRecord>> {
     let mut records = Vec::new();
     let mut empty_polls = 0usize;
+    let drain_started_at = Instant::now();
     for _ in 0..64 {
+        if !records.is_empty() && drain_started_at.elapsed() >= INPUT_RECEIVE_DRAIN_BUDGET {
+            break;
+        }
         match stream.transport.receive_once() {
             Ok(Some(frame)) if frame.channel_id == "latest" || frame.channel_id == "hid" => {
                 empty_polls = 0;
                 let frame_received_at = Instant::now();
-                let frame_received_unix_ns = unix_nanos_i64();
                 if trace {
                     eprintln!(
                         "Sleipnir received fast HID frame channel={} bytes={}",
@@ -2588,15 +2527,17 @@ fn receive_rudp_records(stream: &mut ActiveRudpStream, trace: bool) -> Result<Ve
                 let decoded = decode_latest_state_frame(&frame.payload);
                 let record = match decoded.as_ref() {
                     Some(frame) => frame.record.clone(),
-                    None => serde_json::from_slice(&frame.payload).context("decoding Sleipnir RUDP HID frame")?,
+                    None => serde_json::from_slice(&frame.payload)
+                        .context("decoding Sleipnir RUDP HID frame")?,
                 };
                 records.push(TimedHidRecord {
-                    state_sequence: decoded.as_ref().map_or(record.sequence, |frame| frame.state_sequence),
+                    state_sequence: decoded
+                        .as_ref()
+                        .map_or(record.sequence, |frame| frame.state_sequence),
                     epoch: decoded.as_ref().map_or(0, |frame| frame.epoch),
                     record,
                     timing: HidRecordTiming {
                         frame_received_at,
-                        frame_received_unix_ns,
                         buffer_ready_at: frame_received_at,
                     },
                 });
@@ -2723,18 +2664,9 @@ fn input_latency_snapshot(
     mapping: &SleipnirDesiredMapping,
     emitted: bool,
 ) -> SleipnirInputLatencySnapshot {
-    let source_to_arrival_ms = (record.source_timestamp_ns > 0).then(|| {
-        timing
-            .frame_received_unix_ns
-            .saturating_sub(record.source_timestamp_ns)
-            / 1_000_000
-    });
-    let source_to_hid_ms = (record.source_timestamp_ns > 0)
-        .then(|| unix_nanos_i64().saturating_sub(record.source_timestamp_ns) / 1_000_000);
     SleipnirInputLatencySnapshot {
         device_id: record.device_id.clone(),
         sequence: record.sequence,
-        source_to_arrival_ms,
         arrival_to_buffer_ms: timing
             .buffer_ready_at
             .saturating_duration_since(timing.frame_received_at)
@@ -2745,7 +2677,6 @@ fn input_latency_snapshot(
         axis_to_hid_ms: hid_emitted_at
             .saturating_duration_since(axis_classified_at)
             .as_millis(),
-        source_to_hid_ms,
         total_observed_ms: hid_emitted_at
             .saturating_duration_since(timing.frame_received_at)
             .as_millis(),
@@ -3082,7 +3013,13 @@ mod tests {
     }
 
     fn edge(epoch: u64, sequence: u64, button: &str, pressed: bool) -> HidButtonEdge {
-        HidButtonEdge { epoch, device_id: "pad".into(), edge_sequence: sequence, button: button.into(), pressed }
+        HidButtonEdge {
+            epoch,
+            device_id: "pad".into(),
+            edge_sequence: sequence,
+            button: button.into(),
+            pressed,
+        }
     }
 
     #[test]
@@ -3091,7 +3028,13 @@ mod tests {
         assert!(cursor.accept_state(7, 1));
         assert!(cursor.push_edge(edge(7, 2, "a", false)).is_empty());
         let ready = cursor.push_edge(edge(7, 1, "a", true));
-        assert_eq!(ready.iter().map(|edge| (edge.pressed, edge.edge_sequence)).collect::<Vec<_>>(), vec![(true, 1), (false, 2)]);
+        assert_eq!(
+            ready
+                .iter()
+                .map(|edge| (edge.pressed, edge.edge_sequence))
+                .collect::<Vec<_>>(),
+            vec![(true, 1), (false, 2)]
+        );
         assert!(cursor.push_edge(edge(7, 1, "a", true)).is_empty());
     }
 
@@ -3281,11 +3224,9 @@ mod tests {
             last_input_latency: Some(SleipnirInputLatencySnapshot {
                 device_id: "nav".to_string(),
                 sequence: 42,
-                source_to_arrival_ms: Some(2),
                 arrival_to_buffer_ms: 3,
                 buffer_to_axis_ms: 1,
                 axis_to_hid_ms: 1,
-                source_to_hid_ms: Some(7),
                 total_observed_ms: 5,
                 axis_summary: vec!["leftX<-axis0 value=0.500".to_string()],
                 emitted: true,
@@ -3301,6 +3242,8 @@ mod tests {
         let surface = serde_json::to_string(&sleipnir_surface_document(&state)).unwrap();
 
         assert!(surface.contains("Input Latency"));
+        assert!(surface.contains("source clock latency: unavailable (no clock model)"));
+        assert!(surface.contains("observed receive to HID total: 5 ms"));
         assert!(surface.contains("arrival to buffer: 3 ms"));
         assert!(surface.contains("buffer to axis classification: 1 ms"));
         assert!(surface.contains("axis to HID emission: 1 ms"));

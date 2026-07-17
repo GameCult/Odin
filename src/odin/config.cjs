@@ -7,7 +7,7 @@ const { parseArgs } = require("./utils.cjs");
 const repoRoot = path.resolve(__dirname, "..", "..");
 
 process.env.NODE_PATH = [
-  path.resolve(repoRoot, "..", "CultLib", "packages"),
+  process.env.CULTLIB_PACKAGES || path.resolve(repoRoot, "..", "CultLib-dev-runtime", "packages"),
   process.env.NODE_PATH || "",
 ].filter(Boolean).join(path.delimiter);
 Module._initPaths();

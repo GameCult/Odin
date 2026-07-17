@@ -4,6 +4,7 @@ param(
   [string] $IdunnRudpHealth = $(if ($env:ODIN_IDUNN_RUDP_HEALTH) { $env:ODIN_IDUNN_RUDP_HEALTH } else { $env:IDUNN_RUDP_HEALTH }),
   [string] $IdunnDaemon = "odin",
   [string] $IdunnHealthContract = "odin.cultnet-rudp-provider-health",
+  [string] $CultLibPackages = $(if ($env:CULTLIB_PACKAGES) { $env:CULTLIB_PACKAGES } else { "E:\Projects\CultLib-dev-runtime\packages" }),
   [switch] $Foreground
 )
 
@@ -39,7 +40,11 @@ if (Test-Path $pidPath) {
   Remove-Item -LiteralPath $pidPath -Force
 }
 
-$env:NODE_PATH = "E:\Projects\CultLib\packages"
+if (-not (Test-Path -LiteralPath $CultLibPackages)) {
+  throw "CultLib package root is missing: $CultLibPackages"
+}
+$env:CULTLIB_PACKAGES = $CultLibPackages
+$env:NODE_PATH = $CultLibPackages
 $args = @(
   $scriptPath,
   "--stateDir", $StateDir,
