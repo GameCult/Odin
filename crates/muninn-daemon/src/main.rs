@@ -1,7 +1,7 @@
 mod media_packetizer;
 
 use crate::media_packetizer::{
-    AudioPcmStreamSendConfig, AudioPcmStreamSendState, MuninnMediaSendPayload,
+    AudioAdtsStreamSendConfig, AudioAdtsStreamSendState, MuninnMediaSendPayload,
     MuninnMediaWireRecord, VideoAnnexBStreamSendConfig, VideoAnnexBStreamSendState,
     decode_media_wire_record,
 };
@@ -73,7 +73,7 @@ const MUNINN_RUDP_MEDIA_VIDEO_BITRATE_KBPS: u32 = 12_000;
 const MUNINN_RUDP_MEDIA_VBV_FRAME_BUDGETS: u32 = 1;
 const MUNINN_RUDP_MEDIA_LOW_DELAY_KEY_FRAME_SCALE: u32 = 4;
 const MUNINN_RUDP_MEDIA_VIDEO_DPB_SIZE: u32 = 1;
-const MUNINN_RUDP_MEDIA_PACKET_BYTES: usize = 832;
+const MUNINN_RUDP_MEDIA_PACKET_BYTES: usize = 768;
 const MUNINN_RUDP_IPV4_UDP_PAYLOAD_BYTES: usize = 1_472;
 const MUNINN_RUDP_FIXED_HEADER_BYTES: usize = 36;
 const MUNINN_RUDP_MEDIA_MAX_FRAGMENT_BYTES: usize = MUNINN_RUDP_IPV4_UDP_PAYLOAD_BYTES
@@ -2051,22 +2051,18 @@ fn run_rudp_mux_once(
             Some(audio_rudp_payload_reader(
                 audio_payload_tx.clone(),
                 stdout,
-                AudioPcmStreamSendConfig {
+                AudioAdtsStreamSendConfig {
                     stream_id: options.stream_id.clone(),
                     session_id: format!("{}:{timestamp}:audio", options.host_id),
-                    codec: "pcm-f32le-interleaved".to_string(),
+                    codec: "aac-adts-padded-v1".to_string(),
                     first_packet_id: 0,
                     first_pts_ticks: 0,
-                    packet_duration_ticks: 480,
+                    packet_duration_ticks: 1_024,
                     timebase_num: 1,
                     timebase_den: options.audio_sample_rate,
                     deadline_delay_ticks: rudp_audio_deadline_delay_ticks(options, &media_profile),
-                    channels: options.audio_channels,
-                    bytes_per_sample: 4,
-                    max_pending_bytes: 480usize
-                        .saturating_mul(options.audio_channels as usize)
-                        .saturating_mul(4)
-                        .saturating_mul(128),
+                    max_pending_bytes: 64 * 1024,
+                    fec_shard_payload_bytes: 864,
                     source_runtime_id: options.host_id.clone(),
                     source_role: "muninn.rudp.audio".to_string(),
                 },
@@ -3202,7 +3198,7 @@ where
 fn audio_rudp_payload_reader<R>(
     tx: mpsc::SyncSender<Result<Vec<QueuedMuninnMediaSendPayload>>>,
     mut reader: R,
-    config: AudioPcmStreamSendConfig,
+    config: AudioAdtsStreamSendConfig,
 ) -> thread::JoinHandle<()>
 where
     R: Read + Send + 'static,
@@ -3247,17 +3243,17 @@ where
 fn read_audio_rudp_payloads<R>(
     tx: &mpsc::SyncSender<Result<Vec<QueuedMuninnMediaSendPayload>>>,
     reader: &mut R,
-    config: AudioPcmStreamSendConfig,
+    config: AudioAdtsStreamSendConfig,
 ) -> Result<()>
 where
     R: Read,
 {
-    let mut sender = AudioPcmStreamSendState::new(config)?;
+    let mut sender = AudioAdtsStreamSendState::new(config)?;
     let mut buffer = vec![0_u8; 16 * 1024];
     loop {
         let read = reader
             .read(&mut buffer)
-            .context("reading PCM audio from ffmpeg stdout")?;
+            .context("reading ADTS audio from ffmpeg stdout")?;
         if read == 0 {
             queue_muninn_media_payloads(
                 tx,
@@ -10199,8 +10195,14 @@ fn rudp_audio_ffmpeg_args(options: &Options) -> Vec<String> {
         options.audio_sample_rate.to_string(),
         "-ac".to_string(),
         options.audio_channels.to_string(),
+        "-c:a".to_string(),
+        "aac".to_string(),
+        "-profile:a".to_string(),
+        "aac_low".to_string(),
+        "-b:a".to_string(),
+        "160k".to_string(),
         "-f".to_string(),
-        "f32le".to_string(),
+        "adts".to_string(),
         "pipe:1".to_string(),
     ]
 }

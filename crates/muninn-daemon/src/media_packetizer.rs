@@ -225,23 +225,7 @@ pub struct AudioAdtsStreamSendConfig {
     pub timebase_den: u32,
     pub deadline_delay_ticks: i64,
     pub max_pending_bytes: usize,
-    pub source_runtime_id: String,
-    pub source_role: String,
-}
-
-pub struct AudioPcmStreamSendConfig {
-    pub stream_id: String,
-    pub session_id: String,
-    pub codec: String,
-    pub first_packet_id: u64,
-    pub first_pts_ticks: i64,
-    pub packet_duration_ticks: u32,
-    pub timebase_num: u32,
-    pub timebase_den: u32,
-    pub deadline_delay_ticks: i64,
-    pub channels: u32,
-    pub bytes_per_sample: u32,
-    pub max_pending_bytes: usize,
+    pub fec_shard_payload_bytes: usize,
     pub source_runtime_id: String,
     pub source_role: String,
 }
@@ -520,13 +504,14 @@ pub struct AudioAdtsStreamSendState {
     pending: Vec<u8>,
     next_packet_id: u64,
     next_pts_ticks: i64,
+    fec_block: Vec<MuninnMediaAudioPacketRecord>,
 }
 
 impl AudioAdtsStreamSendState {
     pub fn new(config: AudioAdtsStreamSendConfig) -> Result<Self> {
         if !matches!(
             config.codec.trim().to_ascii_lowercase().as_str(),
-            "aac" | "aac-adts" | "adts" | "audio/aac"
+            "aac" | "aac-adts" | "adts" | "audio/aac" | "aac-adts-padded-v1"
         ) {
             return Err(anyhow!("ADTS stream sender requires AAC/ADTS codec"));
         }
@@ -548,6 +533,9 @@ impl AudioAdtsStreamSendState {
         if config.max_pending_bytes == 0 {
             return Err(anyhow!("max_pending_bytes must be greater than zero"));
         }
+        if config.fec_shard_payload_bytes < 3 {
+            return Err(anyhow!("ADTS FEC shard must leave room for a two-byte frame length"));
+        }
         if config.source_runtime_id.is_empty() {
             return Err(anyhow!("source_runtime_id must be non-empty"));
         }
@@ -560,6 +548,7 @@ impl AudioAdtsStreamSendState {
             next_pts_ticks: config.first_pts_ticks,
             config,
             pending: Vec::new(),
+            fec_block: Vec::with_capacity(AUDIO_FEC_DATA_SHARDS),
         })
     }
 
@@ -611,25 +600,37 @@ impl AudioAdtsStreamSendState {
                 .next_pts_ticks
                 .checked_add(self.config.deadline_delay_ticks)
                 .ok_or_else(|| anyhow!("audio deadline_ticks overflow"))?;
-            payloads.push(audio_packet_send_payload(
-                AudioPacketWireOptions {
-                    packetize: AudioPacketizeOptions {
-                        stream_id: &self.config.stream_id,
-                        session_id: &self.config.session_id,
-                        codec: &self.config.codec,
-                        packet_id: self.next_packet_id,
-                        pts_ticks: self.next_pts_ticks,
-                        duration_ticks: self.config.packet_duration_ticks,
-                        timebase_num: self.config.timebase_num,
-                        timebase_den: self.config.timebase_den,
-                        deadline_ticks,
-                    },
-                    stored_at,
-                    source_runtime_id: &self.config.source_runtime_id,
-                    source_role: &self.config.source_role,
+            let padded = pad_audio_codec_frame(&frame, self.config.fec_shard_payload_bytes)?;
+            let record = packetize_audio_packet(
+                AudioPacketizeOptions {
+                    stream_id: &self.config.stream_id,
+                    session_id: &self.config.session_id,
+                    codec: &self.config.codec,
+                    packet_id: self.next_packet_id,
+                    pts_ticks: self.next_pts_ticks,
+                    duration_ticks: self.config.packet_duration_ticks,
+                    timebase_num: self.config.timebase_num,
+                    timebase_den: self.config.timebase_den,
+                    deadline_ticks,
                 },
-                &frame,
-            )?);
+                &padded,
+            )?;
+            payloads.push(wire_payload_to_media_send(encode_media_wire_record(
+                &MuninnMediaWireRecord::Audio(record.clone()),
+                stored_at,
+                &self.config.source_runtime_id,
+                &self.config.source_role,
+            )?));
+            self.fec_block.push(record);
+            if self.fec_block.len() == AUDIO_FEC_DATA_SHARDS {
+                payloads.extend(audio_fec_parity_send_payloads(
+                    &self.fec_block,
+                    stored_at,
+                    &self.config.source_runtime_id,
+                    &self.config.source_role,
+                )?);
+                self.fec_block.clear();
+            }
             self.advance_packet_clock()?;
         }
 
@@ -648,6 +649,39 @@ impl AudioAdtsStreamSendState {
             .ok_or_else(|| anyhow!("audio pts_ticks overflow"))?;
         Ok(())
     }
+}
+
+// Kept only until the compressed-audio cut is fully field-proved; it has no
+// production owner and must not be wired back into Muninn.
+#[allow(dead_code)]
+pub struct AudioPcmStreamSendConfig {
+    pub stream_id: String,
+    pub session_id: String,
+    pub codec: String,
+    pub first_packet_id: u64,
+    pub first_pts_ticks: i64,
+    pub packet_duration_ticks: u32,
+    pub timebase_num: u32,
+    pub timebase_den: u32,
+    pub deadline_delay_ticks: i64,
+    pub channels: u32,
+    pub bytes_per_sample: u32,
+    pub max_pending_bytes: usize,
+    pub source_runtime_id: String,
+    pub source_role: String,
+}
+
+fn pad_audio_codec_frame(frame: &[u8], shard_bytes: usize) -> Result<Vec<u8>> {
+    if frame.is_empty() || frame.len() > u16::MAX as usize || frame.len() + 2 > shard_bytes {
+        return Err(anyhow!(
+            "encoded audio frame of {} bytes does not fit {}-byte FEC shard",
+            frame.len(), shard_bytes
+        ));
+    }
+    let mut padded = vec![0_u8; shard_bytes];
+    padded[..2].copy_from_slice(&(frame.len() as u16).to_be_bytes());
+    padded[2..2 + frame.len()].copy_from_slice(frame);
+    Ok(padded)
 }
 
 pub struct AudioPcmStreamSendState {
@@ -1138,6 +1172,7 @@ pub fn packetize_video_access_unit(
 }
 
 const MUNINN_VIDEO_FEC_BLOCK_DATA_SHARDS: u16 = 8;
+const MUNINN_VIDEO_FEC_BLOCK_PARITY_SHARDS: u16 = 3;
 
 fn video_fec_coefficient(parity_index: u16, parity_count: u16, data_index: u16) -> u8 {
     debug_assert!(u32::from(parity_count) + u32::from(data_index) <= 255);
@@ -1200,7 +1235,7 @@ pub fn build_video_parity_shards(
         let block_data_start = block_index * MUNINN_VIDEO_FEC_BLOCK_DATA_SHARDS;
         let block_data_count = (first.chunk_count - block_data_start)
             .min(MUNINN_VIDEO_FEC_BLOCK_DATA_SHARDS);
-        let parity_count = MUNINN_VIDEO_FEC_BLOCK_DATA_SHARDS;
+        let parity_count = MUNINN_VIDEO_FEC_BLOCK_PARITY_SHARDS;
         let block_end = block_data_start + block_data_count;
         let chunk_payload_len = (block_data_start..block_end)
             .map(|index| by_index.get(&index).expect("chunk index checked").payload.len())
@@ -1296,16 +1331,20 @@ fn video_wire_records_with_parity(
             let Some(first_parity) = block_parity.first() else {
                 return Err(anyhow!("video FEC block {block_index} has no parity"));
             };
-            for local_index in 0..first_parity.parity_count as usize {
+            let lane_items = usize::from(first_parity.block_data_count)
+                .max(usize::from(first_parity.parity_count));
+            for local_index in 0..lane_items {
                 if local_index < first_parity.block_data_count as usize {
                     let global_index = first_parity.block_data_start as usize + local_index;
                     block_lanes[block_index].push(MuninnMediaWireRecord::Video(
                         frame_records[global_index].clone(),
                     ));
                 }
-                block_lanes[block_index].push(MuninnMediaWireRecord::VideoParity(
-                    block_parity[local_index].clone(),
-                ));
+                if local_index < block_parity.len() {
+                    block_lanes[block_index].push(MuninnMediaWireRecord::VideoParity(
+                        block_parity[local_index].clone(),
+                    ));
+                }
             }
         }
         let lane_len = block_lanes.iter().map(Vec::len).max().unwrap_or(0);
@@ -2325,7 +2364,7 @@ fn validate_video_parity_record(record: &MuninnMediaVideoParityShardRecord) -> R
     {
         return Err(anyhow!("video parity media record has invalid FEC block metadata"));
     }
-    if record.parity_count < record.block_data_count
+    if record.parity_count == 0
         || record.parity_count > MUNINN_VIDEO_FEC_BLOCK_DATA_SHARDS
         || record.parity_index >= record.parity_count
     {
@@ -2939,14 +2978,14 @@ mod tests {
         let parity = build_video_parity_shards(&records)?;
 
         assert_eq!(records.len(), 20);
-        assert_eq!(parity.len(), 24);
+        assert_eq!(parity.len(), 9);
         assert_eq!(parity.iter().map(|shard| shard.block_index).collect::<Vec<_>>(),
-                   [vec![0; 8], vec![1; 8], vec![2; 8]].concat());
-        assert!(parity.iter().all(|shard| shard.parity_count == 8));
+                   [vec![0; 3], vec![1; 3], vec![2; 3]].concat());
+        assert!(parity.iter().all(|shard| shard.parity_count == 3));
         assert!(parity.iter().all(|shard| shard.chunk_payload_bytes == 2));
 
         let missing_index = 18_u16;
-        let shard = &parity[18];
+        let shard = &parity[6];
         let mut recovered = shard.payload.clone();
         for chunk in records.iter().filter(|chunk| {
             chunk.chunk_index >= shard.block_data_start
@@ -2998,7 +3037,7 @@ mod tests {
         )?;
 
         let wire = video_wire_records_with_parity(&records)?;
-        assert_eq!(wire.len(), 44);
+        assert_eq!(wire.len(), 29);
         assert_eq!(
             wire[..3]
                 .iter()
@@ -3023,7 +3062,44 @@ mod tests {
     }
 
     #[test]
-    fn video_block_layout_survives_every_observed_contiguous_burst_alignment() -> Result<()> {
+    fn production_video_data_and_parity_fit_one_rudp_datagram() -> Result<()> {
+        const MAX_FRAGMENT_BYTES: usize = 1_431;
+        let access_unit = VideoAccessUnit {
+            bytes: vec![0x55; 768 * 64],
+            keyframe: true,
+        };
+        let records = packetize_video_access_unit(
+            VideoFramePacketizeOptions {
+                stream_id: "muninn.raven.av.rudp",
+                session_id: "raven:2026-07-17T06:19:00Z:video",
+                codec: "h264",
+                frame_id: 1_000_000,
+                pts_ticks: 9_000_000,
+                duration_ticks: 3_000,
+                timebase_num: 1,
+                timebase_den: 90_000,
+                deadline_ticks: 9_022_500,
+                max_payload_bytes: 768,
+            },
+            &access_unit,
+        )?;
+        let wire_records = video_wire_records_with_parity(&records)?;
+        let mut largest = 0;
+        for record in wire_records {
+            let wire = encode_media_wire_record(
+                &record,
+                "2026-07-17T06:19:00Z",
+                "raven",
+                "muninn.rudp.video",
+            )?;
+            largest = largest.max(wire.len());
+        }
+        assert!(largest <= MAX_FRAGMENT_BYTES - 32, "largest video wire document={largest}");
+        Ok(())
+    }
+
+    #[test]
+    fn video_block_layout_survives_three_packet_burst_at_every_alignment() -> Result<()> {
         let access_unit = VideoAccessUnit {
             bytes: (0..80).map(|index| (index * 17) as u8).collect(),
             keyframe: true,
@@ -3044,12 +3120,12 @@ mod tests {
             &access_unit,
         )?;
         let wire = video_wire_records_with_parity(&records)?;
-        assert_eq!(wire.len(), 160);
+        assert_eq!(wire.len(), 110);
 
-        for burst_len in 1..=54_usize {
+        for burst_len in 1..=3_usize {
             for burst_start in 0..=wire.len() - burst_len {
                 let mut missing_data = [0_u16; 10];
-                let mut surviving_parity = [8_u16; 10];
+                let mut surviving_parity = [3_u16; 10];
                 for record in &wire[burst_start..burst_start + burst_len] {
                     match record {
                         MuninnMediaWireRecord::Video(record) => {
@@ -4211,6 +4287,7 @@ mod tests {
             timebase_den: 48_000,
             deadline_delay_ticks: 1_024,
             max_pending_bytes: 128,
+            fec_shard_payload_bytes: 768,
             source_runtime_id: "muninn-test".to_string(),
             source_role: "media-test".to_string(),
         }
@@ -4344,7 +4421,7 @@ mod tests {
         assert_eq!(first.pts_ticks, 48_000);
         assert_eq!(first.deadline_ticks, 49_024);
         assert_eq!(first.codec, "aac-adts");
-        assert_eq!(first.payload, first_frame);
+        assert_eq!(first.payload, pad_audio_codec_frame(&first_frame, 768)?);
 
         let MuninnMediaWireRecord::Audio(second) =
             decode_media_wire_record(&second_push[1].payload)?
@@ -4354,7 +4431,7 @@ mod tests {
         assert_eq!(second.packet_id, 13);
         assert_eq!(second.pts_ticks, 49_024);
         assert_eq!(second.deadline_ticks, 50_048);
-        assert_eq!(second.payload, second_frame);
+        assert_eq!(second.payload, pad_audio_codec_frame(&second_frame, 768)?);
         assert_eq!(sender.pending_bytes(), 0);
         assert_eq!(sender.next_packet_id(), 14);
         Ok(())
@@ -4938,6 +5015,47 @@ mod tests {
             )
             .is_err()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn production_aac_audio_fec_shards_fit_one_rudp_datagram() -> Result<()> {
+        const DURATION_TICKS: u32 = 1_024;
+        const MAX_FRAGMENT_BYTES: usize = 1_431;
+        let payload_bytes = 864;
+        let records: Vec<_> = (0..4)
+            .map(|packet_id| {
+                packetize_audio_packet(
+                    AudioPacketizeOptions {
+                        stream_id: "muninn.raven.av.rudp",
+                        session_id: "raven:2026-07-17T05:34:17Z:audio",
+                        codec: "aac-adts-padded-v1",
+                        packet_id,
+                        pts_ticks: packet_id as i64 * i64::from(DURATION_TICKS),
+                        duration_ticks: DURATION_TICKS,
+                        timebase_num: 1,
+                        timebase_den: 48_000,
+                        deadline_ticks: 12_000,
+                    },
+                    &vec![0_u8; payload_bytes],
+                )
+            })
+            .collect::<Result<_>>()?;
+        let data_wire = encode_media_wire_record(
+            &MuninnMediaWireRecord::Audio(records[0].clone()),
+            "2026-07-17T05:34:17Z",
+            "raven",
+            "muninn.rudp.audio",
+        )?;
+        let parity = audio_fec_parity_records(&records)?;
+        let parity_wire = encode_media_wire_record(
+            &MuninnMediaWireRecord::AudioParity(parity[0].clone()),
+            "2026-07-17T05:34:17Z",
+            "raven",
+            "muninn.rudp.audio",
+        )?;
+        assert!(data_wire.len() <= MAX_FRAGMENT_BYTES, "data wire bytes={}", data_wire.len());
+        assert!(parity_wire.len() <= MAX_FRAGMENT_BYTES, "parity wire bytes={}", parity_wire.len());
         Ok(())
     }
 
