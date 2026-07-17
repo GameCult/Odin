@@ -1514,6 +1514,12 @@ fn channel_send_options(channel_id: &str, now_ms: u64) -> CultNetRudpSendOptions
             sequenced: false,
             now_ms,
         },
+        "hid.edge.assist" => CultNetRudpSendOptions {
+            reliable: false,
+            ordered: false,
+            sequenced: false,
+            now_ms,
+        },
         "latest" => CultNetRudpSendOptions {
             reliable: false,
             ordered: false,
@@ -1569,6 +1575,12 @@ mod socket_transport_tests {
                 "{channel} uses application sequence and must not head-of-line block behind latest state"
             );
         }
+        let assist = channel_send_options("hid.edge.assist", 7);
+        assert!(
+            !assist.reliable,
+            "edge assist must never accumulate retransmission debt"
+        );
+        assert!(!assist.ordered && !assist.sequenced);
         let latest = channel_send_options("latest", 7);
         assert!(!latest.reliable);
         assert!(latest.sequenced);

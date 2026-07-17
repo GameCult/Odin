@@ -5737,6 +5737,7 @@ struct ActiveHidControllerRudpSource {
     pending_edges: VecDeque<HidButtonEdge>,
     edge_buttons: Vec<String>,
     last_edge_sent: Option<(u64, u64)>,
+    last_edge_assist_at: Option<Instant>,
     joystick_axes: [i16; 16],
     joystick_buttons: [bool; 32],
     latest_report: Option<LatestHidReport>,
@@ -5754,6 +5755,8 @@ struct ActiveHidControllerRudpSource {
 
 const MUNINN_HID_MAX_PENDING_EDGES: usize = 256;
 const MUNINN_HID_MAX_NEW_EDGES_PER_TURN: usize = 16;
+const MUNINN_HID_EDGE_ASSIST_INTERVAL: Duration = Duration::from_millis(4);
+const MUNINN_HID_MAX_ASSIST_EDGES_PER_TURN: usize = 4;
 
 fn active_hid_controller_rudp_source(source: MoveStateSource) -> ActiveHidControllerRudpSource {
     let epoch = timestamp_ns().unwrap_or_default().max(0) as u64;
@@ -5771,6 +5774,7 @@ fn active_hid_controller_rudp_source(source: MoveStateSource) -> ActiveHidContro
         pending_edges: VecDeque::new(),
         edge_buttons: Vec::new(),
         last_edge_sent: None,
+        last_edge_assist_at: None,
         joystick_axes: [0; 16],
         joystick_buttons: [false; 32],
         latest_report: None,
@@ -5847,6 +5851,7 @@ fn capture_button_edges(active: &mut ActiveHidControllerRudpSource, buttons: &[S
         active.next_edge_sequence = 1;
         active.pending_edges.clear();
         active.last_edge_sent = None;
+        active.last_edge_assist_at = None;
     }
 }
 
@@ -6117,7 +6122,29 @@ fn run_hid_controller_rudp_ingress(
                         // semantic cursor owns ordering. Application ACKs only
                         // retire history; they never gate the next edge.
                         source.last_edge_sent = Some((edge.epoch, edge.edge_sequence));
+                        source.last_edge_assist_at = Some(Instant::now());
                     }
+                }
+                if !source.pending_edges.is_empty()
+                    && source
+                        .last_edge_assist_at
+                        .is_some_and(|sent_at| sent_at.elapsed() >= MUNINN_HID_EDGE_ASSIST_INTERVAL)
+                {
+                    let assist_edges = source
+                        .pending_edges
+                        .iter()
+                        .take(MUNINN_HID_MAX_ASSIST_EDGES_PER_TURN)
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    for edge in assist_edges {
+                        if let Err(error) =
+                            transport.send("hid.edge.assist", serde_json::to_vec(&edge)?)
+                        {
+                            eprintln!("Muninn HID edge assist warning: {error:#}");
+                            break;
+                        }
+                    }
+                    source.last_edge_assist_at = Some(Instant::now());
                 }
                 sent_frames = sent_frames.saturating_add(1);
                 last_sent_at = Some(Instant::now());

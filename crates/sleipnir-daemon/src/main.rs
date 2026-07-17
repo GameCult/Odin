@@ -2691,7 +2691,9 @@ fn receive_rudp_records(stream: &mut ActiveRudpStream, trace: bool) -> Result<Ve
                     },
                 });
             }
-            Ok(Some(frame)) if frame.channel_id == "hid.edge" => {
+            Ok(Some(frame))
+                if frame.channel_id == "hid.edge" || frame.channel_id == "hid.edge.assist" =>
+            {
                 empty_polls = 0;
                 let edge = decode_button_edge(&frame.payload)
                     .ok_or_else(|| anyhow!("decoding Sleipnir HID button edge"))?;
