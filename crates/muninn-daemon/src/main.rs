@@ -98,7 +98,7 @@ const MUNINN_RUDP_MEDIA_REPAIR_MAX_FEEDBACK_PER_POLL: usize = 32;
 const MUNINN_RUDP_MEDIA_REPAIR_MAX_CHUNKS_PER_POLL: usize = 4;
 const MUNINN_RUDP_MEDIA_SOCKET_BUFFER_BYTES: usize = 16 * 1024 * 1024;
 const MUNINN_RUDP_MEDIA_SEND_PACE_EVERY_PAYLOADS: usize = 1;
-const MUNINN_RUDP_MEDIA_SEND_PACE_SLEEP_US: u64 = 0;
+const MUNINN_RUDP_MEDIA_SEND_PACE_SLEEP_US: u64 = 50;
 const MUNINN_RUDP_ACTIVE_CATALOG_REPUBLISH_MS: u64 = 2_000;
 const MUNINN_ODIN_PROVIDER_LEASE_REFRESH_SECONDS: u64 = 30;
 const PS_MOVE_LED_REPORT_LEN: usize = 49;
@@ -2790,7 +2790,14 @@ impl MuninnRudpMediaSendPacer {
             return;
         }
         self.payloads_since_pause = 0;
-        thread::sleep(self.sleep_for);
+        if self.sleep_for <= Duration::from_micros(200) {
+            let deadline = Instant::now() + self.sleep_for;
+            while Instant::now() < deadline {
+                std::hint::spin_loop();
+            }
+        } else {
+            thread::sleep(self.sleep_for);
+        }
     }
 }
 
