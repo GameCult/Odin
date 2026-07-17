@@ -105,6 +105,7 @@ pub struct CultNetRudpSendOptions {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PendingReliablePacket {
     packet: CultNetRudpPacket,
+    first_sent_at_ms: u64,
     last_sent_at_ms: u64,
 }
 
@@ -127,6 +128,8 @@ pub struct CultNetRudpSession {
     connection_id: u32,
     resend_delay_ms: u64,
     max_pending_reliable_packets: Option<usize>,
+    reliable_expire_after_ms: Option<u64>,
+    reliable_packets_expired: u64,
     initial_sequence: u32,
     next_sequence: u32,
     next_fragment_id: u16,
@@ -146,6 +149,8 @@ impl CultNetRudpSession {
             connection_id: options.connection_id,
             resend_delay_ms: options.resend_delay_ms,
             max_pending_reliable_packets: options.max_pending_reliable_packets,
+            reliable_expire_after_ms: None,
+            reliable_packets_expired: 0,
             initial_sequence: options.initial_sequence,
             next_sequence: options.initial_sequence,
             next_fragment_id: 1,
@@ -174,6 +179,14 @@ impl CultNetRudpSession {
 
     pub fn pending_reliable_sequences(&self) -> Vec<u32> {
         self.pending_reliable.keys().copied().collect()
+    }
+
+    pub fn reliable_packets_expired(&self) -> u64 {
+        self.reliable_packets_expired
+    }
+
+    pub fn set_reliable_expire_after_ms(&mut self, expire_after_ms: Option<u64>) {
+        self.reliable_expire_after_ms = expire_after_ms;
     }
 
     pub fn last_received_at_ms(&self) -> Option<u64> {
@@ -495,6 +508,15 @@ impl CultNetRudpSession {
     }
 
     pub fn due_resends(&mut self, now_ms: u64) -> Vec<CultNetRudpPacket> {
+        if let Some(expire_after_ms) = self.reliable_expire_after_ms {
+            let before = self.pending_reliable.len();
+            self.pending_reliable.retain(|_, pending| {
+                now_ms.saturating_sub(pending.first_sent_at_ms) <= expire_after_ms
+            });
+            self.reliable_packets_expired = self
+                .reliable_packets_expired
+                .saturating_add((before - self.pending_reliable.len()) as u64);
+        }
         let mut due = Vec::new();
         for pending in self.pending_reliable.values_mut() {
             if now_ms.saturating_sub(pending.last_sent_at_ms) >= self.resend_delay_ms {
@@ -569,6 +591,7 @@ impl CultNetRudpSession {
             packet.sequence,
             PendingReliablePacket {
                 packet,
+                first_sent_at_ms: now_ms,
                 last_sent_at_ms: now_ms,
             },
         );
@@ -580,7 +603,11 @@ impl CultNetRudpSession {
         }
         if let Some(limit) = self.max_pending_reliable_packets {
             if self.pending_reliable.len() + packet_count > limit {
-                return Err(anyhow!("RUDP reliable send queue is full"));
+                return Err(std::io::Error::new(
+                    ErrorKind::WouldBlock,
+                    "RUDP reliable send queue is full",
+                )
+                .into());
             }
         }
         Ok(())
@@ -795,7 +822,7 @@ impl CultNetRudpSession {
 
     fn allocate_fragment_id(&mut self) -> u16 {
         let fragment_id = self.next_fragment_id;
-        self.next_fragment_id = self.next_fragment_id.saturating_add(1);
+        self.next_fragment_id = self.next_fragment_id.wrapping_add(1);
         if self.next_fragment_id == 0 {
             self.next_fragment_id = 1;
         }
@@ -887,6 +914,8 @@ pub struct CultNetRudpSocketTransportConnection {
     max_fragment_bytes: Option<usize>,
     disconnect_reason: Option<Vec<u8>>,
     pong_payloads: VecDeque<Vec<u8>>,
+    pending_outbound_packets: VecDeque<CultNetRudpPacket>,
+    max_pending_outbound_packets: usize,
 }
 
 impl CultNetRudpSocketTransportConnection {
@@ -907,14 +936,16 @@ impl CultNetRudpSocketTransportConnection {
         let max_pending_reliable_packets = options
             .max_pending_reliable_packets
             .map(|value| value as usize);
+        let max_pending_outbound_packets = max_pending_reliable_packets.unwrap_or(1_024).max(1);
+        let session = CultNetRudpSession::new(CultNetRudpSessionOptions {
+            connection_id: options.connection_id,
+            initial_sequence: options.initial_sequence,
+            resend_delay_ms: options.resend_delay_ms,
+            max_pending_reliable_packets,
+        });
         Ok(Self {
             socket: options.socket,
-            session: CultNetRudpSession::new(CultNetRudpSessionOptions {
-                connection_id: options.connection_id,
-                initial_sequence: options.initial_sequence,
-                resend_delay_ms: options.resend_delay_ms,
-                max_pending_reliable_packets,
-            }),
+            session,
             mode: options.mode,
             remote_addr: options.remote_addr,
             profile,
@@ -923,6 +954,8 @@ impl CultNetRudpSocketTransportConnection {
             max_fragment_bytes: options.max_fragment_bytes.map(|value| value as usize),
             disconnect_reason: None,
             pong_payloads: VecDeque::new(),
+            pending_outbound_packets: VecDeque::new(),
+            max_pending_outbound_packets,
         })
     }
 
@@ -932,6 +965,18 @@ impl CultNetRudpSocketTransportConnection {
 
     pub fn stats(&self) -> CultNetTransportStats {
         self.stats.clone()
+    }
+
+    pub fn reliable_packets_expired(&self) -> u64 {
+        self.session.reliable_packets_expired()
+    }
+
+    pub fn pending_reliable_packets(&self) -> usize {
+        self.session.pending_reliable_sequences().len()
+    }
+
+    pub fn set_reliable_expire_after_ms(&mut self, expire_after_ms: Option<u64>) {
+        self.session.set_reliable_expire_after_ms(expire_after_ms);
     }
 
     pub fn disconnect_reason(&self) -> Option<&[u8]> {
@@ -953,13 +998,23 @@ impl CultNetRudpSocketTransportConnection {
     }
 
     pub fn send(&mut self, channel_id: &str, payload: Vec<u8>) -> Result<()> {
+        self.flush_pending_outbound_packets()?;
+        let packet_count = self.outbound_packet_count(payload.len())?;
+        if self.pending_outbound_packets.len().saturating_add(packet_count)
+            > self.max_pending_outbound_packets
+        {
+            return Err(std::io::Error::new(
+                ErrorKind::WouldBlock,
+                "CultNet RUDP outbound packet queue is full",
+            )
+            .into());
+        }
         let options = channel_send_options(channel_id, now_ms());
         let packets =
             self.session
                 .send_many(channel_id, payload, options, self.max_fragment_bytes)?;
-        for packet in packets {
-            self.send_packet(&packet)?;
-        }
+        self.pending_outbound_packets.extend(packets);
+        self.flush_pending_outbound_packets()?;
         self.stats.frames_sent += 1;
         Ok(())
     }
@@ -1079,9 +1134,38 @@ impl CultNetRudpSocketTransportConnection {
     }
 
     pub fn poll_resends(&mut self) -> Result<()> {
-        for packet in self.session.due_resends(now_ms()) {
-            self.send_packet(&packet)?;
+        self.flush_pending_outbound_packets()?;
+        if !self.pending_outbound_packets.is_empty() {
+            return Ok(());
         }
+        for packet in self.session.due_resends(now_ms()) {
+            if self.pending_outbound_packets.len() >= self.max_pending_outbound_packets {
+                break;
+            }
+            self.pending_outbound_packets.push_back(packet);
+        }
+        self.flush_pending_outbound_packets()?;
+        Ok(())
+    }
+
+    fn outbound_packet_count(&self, payload_bytes: usize) -> Result<usize> {
+        match self.max_fragment_bytes {
+            Some(0) => Err(anyhow!("RUDP max_fragment_bytes must be greater than zero")),
+            Some(max_fragment_bytes) if payload_bytes > max_fragment_bytes => {
+                Ok(payload_bytes.div_ceil(max_fragment_bytes))
+            }
+            _ => Ok(1),
+        }
+    }
+
+    fn flush_pending_outbound_packets(&mut self) -> Result<()> {
+        let Some(remote_addr) = self.remote_addr else {
+            return Err(anyhow!("RUDP socket transport does not have a remote endpoint"));
+        };
+        let sent_bytes = flush_rudp_outbound_queue(&mut self.pending_outbound_packets, |wire| {
+            self.socket.send_to(wire, remote_addr)
+        })?;
+        self.stats.bytes_sent += sent_bytes as u64;
         Ok(())
     }
 
@@ -1096,6 +1180,33 @@ impl CultNetRudpSocketTransportConnection {
         self.stats.bytes_sent += sent as u64;
         Ok(())
     }
+}
+
+fn flush_rudp_outbound_queue<F>(
+    pending: &mut VecDeque<CultNetRudpPacket>,
+    mut send: F,
+) -> Result<usize>
+where
+    F: FnMut(&[u8]) -> std::io::Result<usize>,
+{
+    let mut sent_bytes = 0_usize;
+    while let Some(packet) = pending.front() {
+        let wire = encode_rudp_packet(packet)?;
+        match send(&wire) {
+            Ok(sent) => {
+                sent_bytes = sent_bytes.saturating_add(sent);
+                pending.pop_front();
+            }
+            Err(error)
+                if error.kind() == ErrorKind::WouldBlock
+                    || error.kind() == ErrorKind::TimedOut =>
+            {
+                break;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(sent_bytes)
 }
 
 pub struct CultNetRudpReconnectLoop<F>
@@ -1407,5 +1518,118 @@ fn packet_type_from_code(code: u8) -> Result<CultNetRudpPacketType> {
         6 => Ok(CultNetRudpPacketType::Pong),
         7 => Ok(CultNetRudpPacketType::Disconnect),
         _ => Err(anyhow!("Unsupported CultNet RUDP packet type {code}")),
+    }
+}
+
+#[cfg(test)]
+mod socket_transport_tests {
+    use super::*;
+
+    fn data_packet(sequence: u32) -> CultNetRudpPacket {
+        CultNetRudpPacket {
+            packet_type: CultNetRudpPacketType::Data,
+            connection_id: 7,
+            sequence,
+            ack: 0,
+            ack_mask: 0,
+            channel_id: "realtime".to_string(),
+            reliable: false,
+            ordered: false,
+            sequenced: false,
+            fragment_id: 0,
+            fragment_index: 0,
+            fragment_count: 0,
+            payload: vec![sequence as u8],
+        }
+    }
+
+    #[test]
+    fn fragment_ids_wrap_to_one_instead_of_sticking_at_u16_max() {
+        let mut session = CultNetRudpSession::new(CultNetRudpSessionOptions::default());
+        session.next_fragment_id = u16::MAX;
+
+        assert_eq!(session.allocate_fragment_id(), u16::MAX);
+        assert_eq!(session.allocate_fragment_id(), 1);
+        assert_eq!(session.allocate_fragment_id(), 2);
+    }
+
+    #[test]
+    fn outbound_queue_preserves_allocated_packets_across_would_block() -> Result<()> {
+        let mut pending = VecDeque::from([data_packet(41), data_packet(42)]);
+        let mut attempts = 0_usize;
+        let sent = flush_rudp_outbound_queue(&mut pending, |_| {
+            attempts += 1;
+            Err(std::io::Error::from(ErrorKind::WouldBlock))
+        })?;
+        assert_eq!(sent, 0);
+        assert_eq!(attempts, 1);
+        assert_eq!(pending.iter().map(|packet| packet.sequence).collect::<Vec<_>>(), vec![41, 42]);
+
+        let mut sent_sequences = Vec::new();
+        let sent = flush_rudp_outbound_queue(&mut pending, |wire| {
+            sent_sequences.push(decode_rudp_packet(wire).unwrap().sequence);
+            Ok(wire.len())
+        })?;
+        assert!(sent > 0);
+        assert_eq!(sent_sequences, vec![41, 42]);
+        assert!(pending.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn exact_ack_releases_one_reliable_packet() -> Result<()> {
+        let mut session = CultNetRudpSession::new(CultNetRudpSessionOptions {
+            connection_id: 7,
+            ..CultNetRudpSessionOptions::default()
+        });
+        let connect = session.create_connect(1, Vec::new())?;
+        session.receive(
+            &CultNetRudpPacket {
+                packet_type: CultNetRudpPacketType::Accept,
+                connection_id: 7,
+                sequence: 1,
+                ack: connect.sequence,
+                ack_mask: 0,
+                channel_id: "control".to_string(),
+                reliable: true,
+                ordered: true,
+                sequenced: false,
+                fragment_id: 0,
+                fragment_index: 0,
+                fragment_count: 0,
+                payload: Vec::new(),
+            },
+            2,
+        )?;
+        let packet = session.send(
+            "media",
+            vec![1, 2, 3],
+            CultNetRudpSendOptions {
+                reliable: true,
+                now_ms: 10,
+                ..CultNetRudpSendOptions::default()
+            },
+        )?;
+        assert_eq!(session.pending_reliable_sequences(), vec![packet.sequence]);
+        session.receive(
+            &CultNetRudpPacket {
+                packet_type: CultNetRudpPacketType::Ack,
+                connection_id: 7,
+                sequence: 99,
+                ack: packet.sequence,
+                ack_mask: 0,
+                channel_id: "control".to_string(),
+                reliable: false,
+                ordered: false,
+                sequenced: false,
+                fragment_id: 0,
+                fragment_index: 0,
+                fragment_count: 0,
+                payload: Vec::new(),
+            },
+            11,
+        )?;
+        assert!(session.pending_reliable_sequences().is_empty());
+        Ok(())
     }
 }

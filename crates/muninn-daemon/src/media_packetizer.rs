@@ -16,7 +16,8 @@ use std::collections::BTreeMap;
 // Deadline-bound audio/video must use the experimental CultNet realtime lane.
 // The `media` lane is reliable without expiry and can accumulate corpses behind
 // loss; application-level parity/repair and playout deadlines own recovery.
-pub const MUNINN_MEDIA_RUDP_CHANNEL: &str = "realtime";
+pub const MUNINN_MEDIA_RUDP_CHANNEL: &str = "media";
+pub const MUNINN_MEDIA_REALTIME_RUDP_CHANNEL: &str = "realtime";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VideoAccessUnit {
@@ -306,6 +307,10 @@ struct VideoParityShardWirePayload<'a>(
     bool,
     Option<u64>,
     i64,
+    u16,
+    u16,
+    u16,
+    u16,
     u16,
     u16,
     u16,
@@ -1132,7 +1137,7 @@ pub fn packetize_video_access_unit(
     Ok(records)
 }
 
-const MUNINN_VIDEO_PARITY_SHARDS: u16 = 16;
+const MUNINN_VIDEO_FEC_BLOCK_DATA_SHARDS: u16 = 8;
 
 fn video_fec_coefficient(parity_index: u16, parity_count: u16, data_index: u16) -> u8 {
     debug_assert!(u32::from(parity_count) + u32::from(data_index) <= 255);
@@ -1183,53 +1188,71 @@ pub fn build_video_parity_shards(
         }
     }
 
-    let mut chunk_payload_len = 0_usize;
-    let mut last_chunk_payload_bytes = 0_u32;
     for index in 0..first.chunk_count {
-        let chunk = by_index
-            .get(&index)
-            .ok_or_else(|| anyhow!("video parity missing chunk_index {index}"))?;
-        chunk_payload_len = chunk_payload_len.max(chunk.payload.len());
-        if index == first.chunk_count - 1 {
-            last_chunk_payload_bytes = u32::try_from(chunk.payload.len())
-                .context("video parity last chunk payload length exceeds u32")?;
+        if !by_index.contains_key(&index) {
+            return Err(anyhow!("video parity missing chunk_index {index}"));
         }
     }
-    let chunk_payload_bytes = u32::try_from(chunk_payload_len)
-        .context("video parity chunk payload length exceeds u32")?;
-    let parity_count = first
-        .chunk_count
-        .min(MUNINN_VIDEO_PARITY_SHARDS)
-        .min(256_u16.saturating_sub(first.chunk_count));
-    let mut records = Vec::with_capacity(parity_count as usize);
-    for parity_index in 0..parity_count {
-        let mut parity = vec![0_u8; chunk_payload_len];
-        for index in 0..first.chunk_count {
-            let chunk = by_index.get(&index).expect("chunk index was checked above");
-            let coefficient = video_fec_coefficient(parity_index, parity_count, index);
-            for (offset, byte) in chunk.payload.iter().enumerate() {
-                parity[offset] ^= gf256_mul(*byte, coefficient);
+
+    let block_count = first.chunk_count.div_ceil(MUNINN_VIDEO_FEC_BLOCK_DATA_SHARDS);
+    let mut records = Vec::with_capacity(first.chunk_count as usize);
+    for block_index in 0..block_count {
+        let block_data_start = block_index * MUNINN_VIDEO_FEC_BLOCK_DATA_SHARDS;
+        let block_data_count = (first.chunk_count - block_data_start)
+            .min(MUNINN_VIDEO_FEC_BLOCK_DATA_SHARDS);
+        let parity_count = MUNINN_VIDEO_FEC_BLOCK_DATA_SHARDS;
+        let block_end = block_data_start + block_data_count;
+        let chunk_payload_len = (block_data_start..block_end)
+            .map(|index| by_index.get(&index).expect("chunk index checked").payload.len())
+            .max()
+            .expect("block contains data");
+        let last_chunk_payload_bytes = u32::try_from(
+            by_index
+                .get(&(block_end - 1))
+                .expect("block last chunk checked")
+                .payload
+                .len(),
+        )
+        .context("video parity block last chunk payload length exceeds u32")?;
+        let chunk_payload_bytes = u32::try_from(chunk_payload_len)
+            .context("video parity chunk payload length exceeds u32")?;
+
+        for parity_index in 0..parity_count {
+            let mut parity = vec![0_u8; chunk_payload_len];
+            for local_index in 0..block_data_count {
+                let chunk = by_index
+                    .get(&(block_data_start + local_index))
+                    .expect("block chunk checked");
+                let coefficient =
+                    video_fec_coefficient(parity_index, parity_count, local_index);
+                for (offset, byte) in chunk.payload.iter().enumerate() {
+                    parity[offset] ^= gf256_mul(*byte, coefficient);
+                }
             }
+            records.push(MuninnMediaVideoParityShardRecord {
+                stream_id: first.stream_id.clone(),
+                session_id: first.session_id.clone(),
+                frame_id: first.frame_id,
+                codec: first.codec.clone(),
+                pts_ticks: first.pts_ticks,
+                duration_ticks: first.duration_ticks,
+                timebase_num: first.timebase_num,
+                timebase_den: first.timebase_den,
+                keyframe: first.keyframe,
+                dependency_frame_id: first.dependency_frame_id,
+                deadline_ticks: first.deadline_ticks,
+                chunk_count: first.chunk_count,
+                block_index,
+                block_count,
+                block_data_start,
+                block_data_count,
+                parity_index,
+                parity_count,
+                chunk_payload_bytes,
+                last_chunk_payload_bytes,
+                payload: parity,
+            });
         }
-        records.push(MuninnMediaVideoParityShardRecord {
-            stream_id: first.stream_id.clone(),
-            session_id: first.session_id.clone(),
-            frame_id: first.frame_id,
-            codec: first.codec.clone(),
-            pts_ticks: first.pts_ticks,
-            duration_ticks: first.duration_ticks,
-            timebase_num: first.timebase_num,
-            timebase_den: first.timebase_den,
-            keyframe: first.keyframe,
-            dependency_frame_id: first.dependency_frame_id,
-            deadline_ticks: first.deadline_ticks,
-            chunk_count: first.chunk_count,
-            parity_index,
-            parity_count,
-            chunk_payload_bytes,
-            last_chunk_payload_bytes,
-            payload: parity,
-        });
     }
     Ok(records)
 }
@@ -1251,25 +1274,48 @@ fn video_wire_records_with_parity(
         }
         let frame_records = &records[offset..end];
         let parity = build_video_parity_shards(frame_records)?;
-        let parity_split = parity.len().div_ceil(2);
-        wire_records.extend(
-            parity[..parity_split]
+        if parity.is_empty() {
+            wire_records.extend(
+                frame_records
+                    .iter()
+                    .cloned()
+                    .map(MuninnMediaWireRecord::Video),
+            );
+            offset = end;
+            continue;
+        }
+        let block_count = parity
+            .first()
+            .map_or(0_usize, |record| record.block_count as usize);
+        let mut block_lanes = vec![Vec::new(); block_count];
+        for block_index in 0..block_count {
+            let block_parity = parity
                 .iter()
-                .cloned()
-                .map(MuninnMediaWireRecord::VideoParity),
-        );
-        wire_records.extend(
-            frame_records
-                .iter()
-                .cloned()
-                .map(MuninnMediaWireRecord::Video),
-        );
-        wire_records.extend(
-            parity[parity_split..]
-                .iter()
-                .cloned()
-                .map(MuninnMediaWireRecord::VideoParity),
-        );
+                .filter(|record| record.block_index as usize == block_index)
+                .collect::<Vec<_>>();
+            let Some(first_parity) = block_parity.first() else {
+                return Err(anyhow!("video FEC block {block_index} has no parity"));
+            };
+            for local_index in 0..first_parity.parity_count as usize {
+                if local_index < first_parity.block_data_count as usize {
+                    let global_index = first_parity.block_data_start as usize + local_index;
+                    block_lanes[block_index].push(MuninnMediaWireRecord::Video(
+                        frame_records[global_index].clone(),
+                    ));
+                }
+                block_lanes[block_index].push(MuninnMediaWireRecord::VideoParity(
+                    block_parity[local_index].clone(),
+                ));
+            }
+        }
+        let lane_len = block_lanes.iter().map(Vec::len).max().unwrap_or(0);
+        for lane_position in 0..lane_len {
+            for lane in &block_lanes {
+                if let Some(record) = lane.get(lane_position) {
+                    wire_records.push(record.clone());
+                }
+            }
+        }
         offset = end;
     }
     Ok(wire_records)
@@ -1977,8 +2023,19 @@ fn wire_payloads_to_media_send(payloads: Vec<Vec<u8>>) -> Vec<MuninnMediaSendPay
 }
 
 fn wire_payload_to_media_send(payload: Vec<u8>) -> MuninnMediaSendPayload {
+    let channel_id = match decode_media_wire_record(&payload) {
+        Ok(
+            MuninnMediaWireRecord::Video(_)
+            | MuninnMediaWireRecord::VideoParity(_)
+            | MuninnMediaWireRecord::Audio(_)
+            | MuninnMediaWireRecord::AudioParity(_),
+        ) => {
+            MUNINN_MEDIA_REALTIME_RUDP_CHANNEL
+        }
+        _ => MUNINN_MEDIA_RUDP_CHANNEL,
+    };
     MuninnMediaSendPayload {
-        channel_id: MUNINN_MEDIA_RUDP_CHANNEL,
+        channel_id,
         payload,
     }
 }
@@ -2105,6 +2162,10 @@ fn encode_video_parity_record_payload(
         record.dependency_frame_id,
         record.deadline_ticks,
         record.chunk_count,
+        record.block_index,
+        record.block_count,
+        record.block_data_start,
+        record.block_data_count,
         record.parity_index,
         record.parity_count,
         record.chunk_payload_bytes,
@@ -2248,14 +2309,28 @@ fn validate_video_parity_record(record: &MuninnMediaVideoParityShardRecord) -> R
             "video parity media record chunk_count must be non-zero"
         ));
     }
-    if record.parity_count == 0 || record.parity_index >= record.parity_count {
-        return Err(anyhow!(
-            "video parity media record has invalid parity stripe metadata"
-        ));
+    let expected_block_count = record
+        .chunk_count
+        .div_ceil(MUNINN_VIDEO_FEC_BLOCK_DATA_SHARDS);
+    if record.block_count != expected_block_count
+        || record.block_index >= record.block_count
+        || record.block_data_count == 0
+        || record.block_data_count > MUNINN_VIDEO_FEC_BLOCK_DATA_SHARDS
+        || record.block_data_start
+            != record.block_index * MUNINN_VIDEO_FEC_BLOCK_DATA_SHARDS
+        || record
+            .block_data_start
+            .checked_add(record.block_data_count)
+            .is_none_or(|end| end > record.chunk_count)
+    {
+        return Err(anyhow!("video parity media record has invalid FEC block metadata"));
     }
-    if record.parity_count > record.chunk_count {
+    if record.parity_count < record.block_data_count
+        || record.parity_count > MUNINN_VIDEO_FEC_BLOCK_DATA_SHARDS
+        || record.parity_index >= record.parity_count
+    {
         return Err(anyhow!(
-            "video parity media record parity_count exceeds chunk_count"
+            "video parity media record has invalid block parity metadata"
         ));
     }
     if record.chunk_payload_bytes == 0 || record.last_chunk_payload_bytes == 0 {
@@ -2378,8 +2453,12 @@ fn video_record_key(record: &MuninnMediaVideoAccessUnitRecord) -> String {
 
 fn video_parity_record_key(record: &MuninnMediaVideoParityShardRecord) -> String {
     format!(
-        "{}:{}:video-parity:{}:{}",
-        record.stream_id, record.session_id, record.frame_id, record.parity_index
+        "{}:{}:video-parity:{}:{}:{}",
+        record.stream_id,
+        record.session_id,
+        record.frame_id,
+        record.block_index,
+        record.parity_index
     )
 }
 
@@ -2860,22 +2939,24 @@ mod tests {
         let parity = build_video_parity_shards(&records)?;
 
         assert_eq!(records.len(), 20);
-        assert_eq!(parity.len(), 16);
-        assert!(
-            parity.iter().enumerate().all(
-                |(index, shard)| shard.parity_index == index as u16 && shard.parity_count == 16
-            )
-        );
+        assert_eq!(parity.len(), 24);
+        assert_eq!(parity.iter().map(|shard| shard.block_index).collect::<Vec<_>>(),
+                   [vec![0; 8], vec![1; 8], vec![2; 8]].concat());
+        assert!(parity.iter().all(|shard| shard.parity_count == 8));
         assert!(parity.iter().all(|shard| shard.chunk_payload_bytes == 2));
 
         let missing_index = 18_u16;
-        let shard = &parity[7];
+        let shard = &parity[18];
         let mut recovered = shard.payload.clone();
-        for chunk in records.iter().filter(|chunk| chunk.chunk_index != missing_index) {
+        for chunk in records.iter().filter(|chunk| {
+            chunk.chunk_index >= shard.block_data_start
+                && chunk.chunk_index < shard.block_data_start + shard.block_data_count
+                && chunk.chunk_index != missing_index
+        }) {
             let coefficient = video_fec_coefficient(
                 shard.parity_index,
                 shard.parity_count,
-                chunk.chunk_index,
+                chunk.chunk_index - shard.block_data_start,
             );
             for (offset, byte) in chunk.payload.iter().enumerate() {
                 recovered[offset] ^= gf256_mul(*byte, coefficient);
@@ -2884,7 +2965,7 @@ mod tests {
         let inverse = gf256_inv(video_fec_coefficient(
             shard.parity_index,
             shard.parity_count,
-            missing_index,
+            missing_index - shard.block_data_start,
         ));
         for byte in &mut recovered {
             *byte = gf256_mul(*byte, inverse);
@@ -2895,7 +2976,7 @@ mod tests {
     }
 
     #[test]
-    fn video_wire_bookends_data_with_independent_parity() -> Result<()> {
+    fn video_wire_round_robins_independent_fec_blocks() -> Result<()> {
         let access_unit = VideoAccessUnit {
             bytes: (1_u8..=40).collect(),
             keyframe: true,
@@ -2917,10 +2998,124 @@ mod tests {
         )?;
 
         let wire = video_wire_records_with_parity(&records)?;
-        assert_eq!(wire.len(), 36);
-        assert!(wire[..8].iter().all(|record| matches!(record, MuninnMediaWireRecord::VideoParity(_))));
-        assert!(wire[8..28].iter().all(|record| matches!(record, MuninnMediaWireRecord::Video(_))));
-        assert!(wire[28..].iter().all(|record| matches!(record, MuninnMediaWireRecord::VideoParity(_))));
+        assert_eq!(wire.len(), 44);
+        assert_eq!(
+            wire[..3]
+                .iter()
+                .map(|record| match record {
+                    MuninnMediaWireRecord::Video(record) => record.chunk_index,
+                    _ => u16::MAX,
+                })
+                .collect::<Vec<_>>(),
+            vec![0, 8, 16]
+        );
+        assert_eq!(
+            wire[3..6]
+                .iter()
+                .map(|record| match record {
+                    MuninnMediaWireRecord::VideoParity(record) => record.block_index,
+                    _ => u16::MAX,
+                })
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn video_block_layout_survives_every_observed_contiguous_burst_alignment() -> Result<()> {
+        let access_unit = VideoAccessUnit {
+            bytes: (0..80).map(|index| (index * 17) as u8).collect(),
+            keyframe: true,
+        };
+        let records = packetize_video_access_unit(
+            VideoFramePacketizeOptions {
+                stream_id: "muninn.raven.av.rudp",
+                session_id: "session-1",
+                codec: "h264",
+                frame_id: 10,
+                pts_ticks: 30_000,
+                duration_ticks: 3_000,
+                timebase_num: 1,
+                timebase_den: 90_000,
+                deadline_ticks: 52_500,
+                max_payload_bytes: 1,
+            },
+            &access_unit,
+        )?;
+        let wire = video_wire_records_with_parity(&records)?;
+        assert_eq!(wire.len(), 160);
+
+        for burst_len in 1..=54_usize {
+            for burst_start in 0..=wire.len() - burst_len {
+                let mut missing_data = [0_u16; 10];
+                let mut surviving_parity = [8_u16; 10];
+                for record in &wire[burst_start..burst_start + burst_len] {
+                    match record {
+                        MuninnMediaWireRecord::Video(record) => {
+                            missing_data[record.chunk_index as usize / 8] += 1;
+                        }
+                        MuninnMediaWireRecord::VideoParity(record) => {
+                            surviving_parity[record.block_index as usize] -= 1;
+                        }
+                        _ => unreachable!("video wire contains only video records"),
+                    }
+                }
+                assert!(missing_data
+                    .iter()
+                    .zip(surviving_parity)
+                    .all(|(missing, parity)| *missing <= parity));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn video_tail_block_survives_eight_packet_burst_at_every_alignment() -> Result<()> {
+        for chunk_count in 2_usize..=80 {
+            let access_unit = VideoAccessUnit {
+                bytes: (0..chunk_count).map(|index| (index * 19) as u8).collect(),
+                keyframe: false,
+            };
+            let records = packetize_video_access_unit(
+                VideoFramePacketizeOptions {
+                    stream_id: "muninn.raven.av.rudp",
+                    session_id: "session-1",
+                    codec: "h264",
+                    frame_id: 11,
+                    pts_ticks: 33_000,
+                    duration_ticks: 3_000,
+                    timebase_num: 1,
+                    timebase_den: 90_000,
+                    deadline_ticks: 55_500,
+                    max_payload_bytes: 1,
+                },
+                &access_unit,
+            )?;
+            let wire = video_wire_records_with_parity(&records)?;
+            for burst_len in 1..=8_usize.min(wire.len()) {
+                for burst_start in 0..=wire.len() - burst_len {
+                    let block_count = chunk_count.div_ceil(8);
+                    let mut missing_data = vec![0_u16; block_count];
+                    let mut surviving_parity = vec![8_u16; block_count];
+                    for record in &wire[burst_start..burst_start + burst_len] {
+                        match record {
+                            MuninnMediaWireRecord::Video(record) => {
+                                missing_data[record.chunk_index as usize / 8] += 1;
+                            }
+                            MuninnMediaWireRecord::VideoParity(record) => {
+                                surviving_parity[record.block_index as usize] -= 1;
+                            }
+                            _ => unreachable!("video wire contains only video records"),
+                        }
+                    }
+                    assert!(missing_data
+                        .iter()
+                        .zip(surviving_parity)
+                        .all(|(missing, parity)| *missing <= parity));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -3950,7 +4145,7 @@ mod tests {
     }
 
     #[test]
-    fn media_send_payloads_pin_video_to_media_channel() -> Result<()> {
+    fn media_send_payloads_pin_video_to_realtime_channel() -> Result<()> {
         let mut stream = Vec::new();
         stream.extend_from_slice(&start_code());
         stream.extend_from_slice(&[0x65, 0x80]);
@@ -3977,7 +4172,7 @@ mod tests {
         )?;
 
         assert_eq!(payloads.len(), 1);
-        assert_eq!(payloads[0].channel_id, MUNINN_MEDIA_RUDP_CHANNEL);
+        assert_eq!(payloads[0].channel_id, MUNINN_MEDIA_REALTIME_RUDP_CHANNEL);
         let MuninnMediaWireRecord::Video(record) = decode_media_wire_record(&payloads[0].payload)?
         else {
             panic!("expected video media record");
@@ -4055,7 +4250,10 @@ mod tests {
         let second_push = sender.push("2026-06-18T00:00:00Z", &second_frame)?;
 
         assert_eq!(second_push.len(), 1);
-        assert_eq!(second_push[0].channel_id, MUNINN_MEDIA_RUDP_CHANNEL);
+        assert_eq!(
+            second_push[0].channel_id,
+            MUNINN_MEDIA_REALTIME_RUDP_CHANNEL
+        );
         let MuninnMediaWireRecord::Video(first) =
             decode_media_wire_record(&second_push[0].payload)?
         else {
@@ -4134,8 +4332,8 @@ mod tests {
         let second_push = sender.push("2026-06-18T00:00:00Z", &tail)?;
 
         assert_eq!(second_push.len(), 2);
-        assert_eq!(second_push[0].channel_id, MUNINN_MEDIA_RUDP_CHANNEL);
-        assert_eq!(second_push[1].channel_id, MUNINN_MEDIA_RUDP_CHANNEL);
+        assert_eq!(second_push[0].channel_id, MUNINN_MEDIA_REALTIME_RUDP_CHANNEL);
+        assert_eq!(second_push[1].channel_id, MUNINN_MEDIA_REALTIME_RUDP_CHANNEL);
 
         let MuninnMediaWireRecord::Audio(first) =
             decode_media_wire_record(&second_push[0].payload)?
@@ -4241,7 +4439,7 @@ mod tests {
     }
 
     #[test]
-    fn media_send_payload_pins_audio_to_media_channel() -> Result<()> {
+    fn media_send_payload_pins_audio_to_realtime_channel() -> Result<()> {
         let payload = audio_packet_send_payload(
             AudioPacketWireOptions {
                 packetize: AudioPacketizeOptions {
@@ -4262,7 +4460,7 @@ mod tests {
             &[0xf8, 0xff, 0xfe],
         )?;
 
-        assert_eq!(payload.channel_id, MUNINN_MEDIA_RUDP_CHANNEL);
+        assert_eq!(payload.channel_id, MUNINN_MEDIA_REALTIME_RUDP_CHANNEL);
         let MuninnMediaWireRecord::Audio(record) = decode_media_wire_record(&payload.payload)?
         else {
             panic!("expected audio media record");
