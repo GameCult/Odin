@@ -95,7 +95,7 @@ const MUNINN_RUDP_MEDIA_REPAIR_MAX_CHUNKS_PER_SECOND: usize = 512;
 const MUNINN_RUDP_MEDIA_REPAIR_ADD_CHUNKS_PER_SECOND: usize = 64;
 const MUNINN_RUDP_MEDIA_REPAIR_RECOVERY_INTERVAL_MS: u64 = 2_000;
 const MUNINN_RUDP_MEDIA_REPAIR_MAX_FEEDBACK_PER_POLL: usize = 32;
-const MUNINN_RUDP_MEDIA_REPAIR_MAX_CHUNKS_PER_POLL: usize = 1;
+const MUNINN_RUDP_MEDIA_REPAIR_MAX_CHUNKS_PER_POLL: usize = 8;
 const MUNINN_RUDP_MEDIA_SOCKET_BUFFER_BYTES: usize = 16 * 1024 * 1024;
 const MUNINN_RUDP_MEDIA_SEND_PACE_EVERY_PAYLOADS: usize = 1;
 const MUNINN_RUDP_MEDIA_SEND_PACE_SLEEP_US: u64 = 50;
@@ -2105,12 +2105,16 @@ fn run_rudp_mux_once(
                 audio_payload_channel_disconnected = drain_available_media_payloads(
                     &audio_payload_rx,
                     &mut pending_payloads,
+                    None,
+                    Duration::ZERO,
                 )?;
             }
             if !video_payload_channel_disconnected {
                 video_payload_channel_disconnected = drain_available_media_payloads(
                     &video_payload_rx,
                     &mut pending_payloads,
+                    Some(&mut repair_cache),
+                    Duration::from_millis(media_profile.sender_queue_deadline_ms),
                 )?;
             }
             if pending_payloads.is_empty()
@@ -2676,7 +2680,9 @@ fn video_repair_cache_key(stream_id: &str, session_id: &str, chunk_key: &str) ->
 }
 
 fn video_repair_cache_key_from_payload(payload: &MuninnMediaSendPayload) -> Result<Option<String>> {
-    if payload.channel_id != crate::media_packetizer::MUNINN_MEDIA_RUDP_CHANNEL {
+    if payload.channel_id != crate::media_packetizer::MUNINN_MEDIA_RUDP_CHANNEL
+        && payload.channel_id != crate::media_packetizer::MUNINN_MEDIA_REALTIME_RUDP_CHANNEL
+    {
         return Ok(None);
     }
     let MuninnMediaWireRecord::Video(video) = decode_media_wire_record(&payload.payload)? else {
@@ -2733,10 +2739,22 @@ fn queue_muninn_video_payloads_by_access_unit(
 fn drain_available_media_payloads(
     rx: &mpsc::Receiver<Result<Vec<QueuedMuninnMediaSendPayload>>>,
     pending: &mut PendingMuninnMediaSendQueues,
+    mut repair_cache: Option<&mut RecentVideoChunkRepairCache>,
+    repair_lifetime: Duration,
 ) -> Result<bool> {
     for _ in 0..MUNINN_RUDP_MEDIA_INGEST_BUDGET_PER_TURN {
         match rx.try_recv() {
-            Ok(Ok(payloads)) => pending.push_group(payloads),
+            Ok(Ok(payloads)) => {
+                if let Some(cache) = repair_cache.as_deref_mut() {
+                    let now = Instant::now();
+                    for queued in &payloads {
+                        if queued.kind == QueuedMuninnMediaKind::Video {
+                            cache.remember(&queued.payload, now, repair_lifetime)?;
+                        }
+                    }
+                }
+                pending.push_group(payloads);
+            }
             Ok(Err(error)) => return Err(error),
             Err(mpsc::TryRecvError::Empty) => return Ok(false),
             Err(mpsc::TryRecvError::Disconnected) => return Ok(true),
@@ -12266,7 +12284,13 @@ mod tests {
         }
         let mut pending = PendingMuninnMediaSendQueues::default();
 
-        let disconnected = drain_available_media_payloads(&rx, &mut pending).unwrap();
+        let disconnected = drain_available_media_payloads(
+            &rx,
+            &mut pending,
+            None,
+            Duration::ZERO,
+        )
+        .unwrap();
 
         assert!(!disconnected);
         assert_eq!(pending.video_len(), MUNINN_RUDP_MEDIA_INGEST_BUDGET_PER_TURN);
@@ -12447,7 +12471,7 @@ mod tests {
         assert_eq!(budget.chunks_per_second(), 192);
         assert_eq!(budget.take(512, start + Duration::from_secs(4), 1), 16);
         assert_eq!(budget.chunks_per_second(), 96);
-        assert_eq!(MUNINN_RUDP_MEDIA_REPAIR_MAX_CHUNKS_PER_POLL, 1);
+        assert_eq!(MUNINN_RUDP_MEDIA_REPAIR_MAX_CHUNKS_PER_POLL, 8);
     }
 
     #[test]
@@ -12560,7 +12584,7 @@ mod tests {
     }
 
     #[test]
-    fn repair_cache_returns_recent_missing_video_chunks_from_feedback() {
+    fn repair_cache_returns_production_realtime_video_chunks_from_feedback() {
         let video = odin_core::MuninnMediaVideoAccessUnitRecord {
             stream_id: "muninn.raven.av.rudp".to_string(),
             session_id: "raven:session:video".to_string(),
@@ -12578,7 +12602,7 @@ mod tests {
             payload: vec![1, 2, 3, 4],
         };
         let payload = MuninnMediaSendPayload {
-            channel_id: crate::media_packetizer::MUNINN_MEDIA_RUDP_CHANNEL,
+            channel_id: crate::media_packetizer::MUNINN_MEDIA_REALTIME_RUDP_CHANNEL,
             payload: crate::media_packetizer::encode_media_wire_record(
                 &crate::media_packetizer::MuninnMediaWireRecord::Video(video),
                 "unix:1000",

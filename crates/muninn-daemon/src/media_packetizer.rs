@@ -1172,7 +1172,7 @@ pub fn packetize_video_access_unit(
 }
 
 const MUNINN_VIDEO_FEC_BLOCK_DATA_SHARDS: u16 = 8;
-const MUNINN_VIDEO_FEC_BLOCK_PARITY_SHARDS: u16 = 3;
+const MUNINN_VIDEO_FEC_BLOCK_PARITY_SHARDS: u16 = 4;
 
 fn video_fec_coefficient(parity_index: u16, parity_count: u16, data_index: u16) -> u8 {
     debug_assert!(u32::from(parity_count) + u32::from(data_index) <= 255);
@@ -2978,14 +2978,14 @@ mod tests {
         let parity = build_video_parity_shards(&records)?;
 
         assert_eq!(records.len(), 20);
-        assert_eq!(parity.len(), 9);
+        assert_eq!(parity.len(), 12);
         assert_eq!(parity.iter().map(|shard| shard.block_index).collect::<Vec<_>>(),
-                   [vec![0; 3], vec![1; 3], vec![2; 3]].concat());
-        assert!(parity.iter().all(|shard| shard.parity_count == 3));
+                   [vec![0; 4], vec![1; 4], vec![2; 4]].concat());
+        assert!(parity.iter().all(|shard| shard.parity_count == 4));
         assert!(parity.iter().all(|shard| shard.chunk_payload_bytes == 2));
 
         let missing_index = 18_u16;
-        let shard = &parity[6];
+        let shard = &parity[8];
         let mut recovered = shard.payload.clone();
         for chunk in records.iter().filter(|chunk| {
             chunk.chunk_index >= shard.block_data_start
@@ -3037,7 +3037,7 @@ mod tests {
         )?;
 
         let wire = video_wire_records_with_parity(&records)?;
-        assert_eq!(wire.len(), 29);
+        assert_eq!(wire.len(), 32);
         assert_eq!(
             wire[..3]
                 .iter()
@@ -3099,7 +3099,7 @@ mod tests {
     }
 
     #[test]
-    fn video_block_layout_survives_three_packet_burst_at_every_alignment() -> Result<()> {
+    fn video_block_layout_survives_four_packet_burst_at_every_alignment() -> Result<()> {
         let access_unit = VideoAccessUnit {
             bytes: (0..80).map(|index| (index * 17) as u8).collect(),
             keyframe: true,
@@ -3120,12 +3120,12 @@ mod tests {
             &access_unit,
         )?;
         let wire = video_wire_records_with_parity(&records)?;
-        assert_eq!(wire.len(), 110);
+        assert_eq!(wire.len(), 120);
 
-        for burst_len in 1..=3_usize {
+        for burst_len in 1..=4_usize {
             for burst_start in 0..=wire.len() - burst_len {
                 let mut missing_data = [0_u16; 10];
-                let mut surviving_parity = [3_u16; 10];
+                let mut surviving_parity = [4_u16; 10];
                 for record in &wire[burst_start..burst_start + burst_len] {
                     match record {
                         MuninnMediaWireRecord::Video(record) => {
