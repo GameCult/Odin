@@ -3124,8 +3124,8 @@ mod tests {
         );
         assert!(cursor.pending_edges.is_empty());
     }
-    fn coalesces_by_source_timestamp_not_arrival_order() {
     #[test]
+    fn coalesces_by_source_timestamp_not_arrival_order() {
         let mut newer_nav = record(vec![0.0, 1.0, -1.0], Vec::new(), 10);
         newer_nav.device_id = "nav".to_string();
         newer_nav.source_timestamp_ns = 2_000;
