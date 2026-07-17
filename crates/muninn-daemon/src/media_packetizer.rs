@@ -1250,15 +1250,26 @@ fn video_wire_records_with_parity(
             end += 1;
         }
         let frame_records = &records[offset..end];
+        let parity = build_video_parity_shards(frame_records)?;
+        let parity_split = parity.len().div_ceil(2);
+        wire_records.extend(
+            parity[..parity_split]
+                .iter()
+                .cloned()
+                .map(MuninnMediaWireRecord::VideoParity),
+        );
         wire_records.extend(
             frame_records
                 .iter()
                 .cloned()
                 .map(MuninnMediaWireRecord::Video),
         );
-        for parity in build_video_parity_shards(frame_records)? {
-            wire_records.push(MuninnMediaWireRecord::VideoParity(parity));
-        }
+        wire_records.extend(
+            parity[parity_split..]
+                .iter()
+                .cloned()
+                .map(MuninnMediaWireRecord::VideoParity),
+        );
         offset = end;
     }
     Ok(wire_records)
@@ -2880,6 +2891,36 @@ mod tests {
         }
         recovered.truncate(records[missing_index as usize].payload.len());
         assert_eq!(recovered, records[missing_index as usize].payload);
+        Ok(())
+    }
+
+    #[test]
+    fn video_wire_bookends_data_with_independent_parity() -> Result<()> {
+        let access_unit = VideoAccessUnit {
+            bytes: (1_u8..=40).collect(),
+            keyframe: true,
+        };
+        let records = packetize_video_access_unit(
+            VideoFramePacketizeOptions {
+                stream_id: "muninn.raven.av.rudp",
+                session_id: "session-1",
+                codec: "h264",
+                frame_id: 9,
+                pts_ticks: 27_000,
+                duration_ticks: 3_000,
+                timebase_num: 1,
+                timebase_den: 90_000,
+                deadline_ticks: 45_000,
+                max_payload_bytes: 2,
+            },
+            &access_unit,
+        )?;
+
+        let wire = video_wire_records_with_parity(&records)?;
+        assert_eq!(wire.len(), 36);
+        assert!(wire[..8].iter().all(|record| matches!(record, MuninnMediaWireRecord::VideoParity(_))));
+        assert!(wire[8..28].iter().all(|record| matches!(record, MuninnMediaWireRecord::Video(_))));
+        assert!(wire[28..].iter().all(|record| matches!(record, MuninnMediaWireRecord::VideoParity(_))));
         Ok(())
     }
 
