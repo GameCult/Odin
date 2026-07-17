@@ -1576,10 +1576,13 @@ fn serve_should_manage_move_runtime(options: &Options) -> bool {
     serve_should_claim_move_host(options)
         || !options.move_state_sources.is_empty()
         || options.move_evidence_stream_id.is_some()
+        || options.hid_controller_rudp_bind.is_some()
 }
 
 fn serve_should_manage_platform_move_lights(options: &Options) -> bool {
-    serve_should_manage_move_runtime(options)
+    serve_should_claim_move_host(options)
+        || !options.move_state_sources.is_empty()
+        || options.move_evidence_stream_id.is_some()
 }
 
 fn serve_move_state_sources(options: &Options, move_runtime_enabled: bool) -> Vec<MoveStateSource> {
@@ -5733,7 +5736,7 @@ struct ActiveHidControllerRudpSource {
     next_edge_sequence: u64,
     pending_edges: VecDeque<HidButtonEdge>,
     edge_buttons: Vec<String>,
-    last_edge_send_at: Option<Instant>,
+    last_edge_sent: Option<(u64, u64)>,
     joystick_axes: [i16; 16],
     joystick_buttons: [bool; 32],
     latest_report: Option<LatestHidReport>,
@@ -5742,23 +5745,32 @@ struct ActiveHidControllerRudpSource {
     last_emitted_at: Option<Instant>,
     #[cfg(windows)]
     report_rx: Option<mpsc::Receiver<LatestHidReport>>,
+    #[cfg(windows)]
+    xinput_rx: Option<mpsc::Receiver<TimedXinputSnapshot>>,
+    #[cfg(windows)]
+    latest_xinput: Option<TimedXinputSnapshot>,
     last_read_error_log_at: Option<Instant>,
 }
 
 const MUNINN_HID_MAX_PENDING_EDGES: usize = 256;
+const MUNINN_HID_MAX_NEW_EDGES_PER_TURN: usize = 16;
 
 fn active_hid_controller_rudp_source(source: MoveStateSource) -> ActiveHidControllerRudpSource {
     let epoch = timestamp_ns().unwrap_or_default().max(0) as u64;
     ActiveHidControllerRudpSource {
         #[cfg(windows)]
         report_rx: start_windows_hid_report_reader_if_supported(&source.hidraw_path),
+        #[cfg(windows)]
+        xinput_rx: start_windows_xinput_reader_if_supported(&source.hidraw_path),
+        #[cfg(windows)]
+        latest_xinput: None,
         source,
         epoch,
         sequence: 0,
         next_edge_sequence: 1,
         pending_edges: VecDeque::new(),
         edge_buttons: Vec::new(),
-        last_edge_send_at: None,
+        last_edge_sent: None,
         joystick_axes: [0; 16],
         joystick_buttons: [false; 32],
         latest_report: None,
@@ -5795,11 +5807,37 @@ struct HidEdgeAck {
 fn capture_button_edges(active: &mut ActiveHidControllerRudpSource, buttons: &[String]) {
     let previous = active.edge_buttons.clone();
     for button in previous.iter().filter(|button| !buttons.contains(button)) {
-        active.pending_edges.push_back(HidButtonEdge { epoch: active.epoch.clone(), device_id: active.source.move_id.clone(), edge_sequence: active.next_edge_sequence, button: button.clone(), pressed: false });
+        let edge_sequence = active.next_edge_sequence;
+        active.pending_edges.push_back(HidButtonEdge {
+            epoch: active.epoch.clone(),
+            device_id: active.source.move_id.clone(),
+            edge_sequence,
+            button: button.clone(),
+            pressed: false,
+        });
+        if std::env::var_os("MUNINN_TRACE_HID_EDGES").is_some() {
+            eprintln!(
+                "Muninn captured HID edge device={} edge_sequence={} button={} pressed=false",
+                active.source.move_id, edge_sequence, button
+            );
+        }
         active.next_edge_sequence = active.next_edge_sequence.saturating_add(1);
     }
     for button in buttons.iter().filter(|button| !previous.contains(button)) {
-        active.pending_edges.push_back(HidButtonEdge { epoch: active.epoch.clone(), device_id: active.source.move_id.clone(), edge_sequence: active.next_edge_sequence, button: button.clone(), pressed: true });
+        let edge_sequence = active.next_edge_sequence;
+        active.pending_edges.push_back(HidButtonEdge {
+            epoch: active.epoch.clone(),
+            device_id: active.source.move_id.clone(),
+            edge_sequence,
+            button: button.clone(),
+            pressed: true,
+        });
+        if std::env::var_os("MUNINN_TRACE_HID_EDGES").is_some() {
+            eprintln!(
+                "Muninn captured HID edge device={} edge_sequence={} button={} pressed=true",
+                active.source.move_id, edge_sequence, button
+            );
+        }
         active.next_edge_sequence = active.next_edge_sequence.saturating_add(1);
     }
     active.edge_buttons = buttons.to_vec();
@@ -5808,7 +5846,7 @@ fn capture_button_edges(active: &mut ActiveHidControllerRudpSource, buttons: &[S
         active.sequence = 0;
         active.next_edge_sequence = 1;
         active.pending_edges.clear();
-        active.last_edge_send_at = None;
+        active.last_edge_sent = None;
     }
 }
 
@@ -5833,9 +5871,43 @@ struct LatestHidReport {
 }
 
 const HID_CONTROLLER_RUDP_HEARTBEAT_AFTER: Duration = Duration::from_millis(50);
+const HID_CONTROLLER_RUDP_POLL_INTERVAL: Duration = Duration::from_millis(2);
+#[cfg(windows)]
+const XINPUT_CAPTURE_INTERVAL: Duration = Duration::from_millis(1);
+#[cfg(windows)]
+const XINPUT_CAPTURE_SPIN_MARGIN: Duration = Duration::from_micros(250);
 const HID_CONTROLLER_RUDP_AXIS_EPSILON: f32 = 0.01;
 const HID_CONTROLLER_RUDP_MAX_FRAGMENT_BYTES: u32 = 1_200;
 const HID_CONTROLLER_RUDP_MAX_REPORT_DRAIN: usize = 256;
+
+#[cfg(windows)]
+struct WindowsTimerResolution;
+
+#[cfg(windows)]
+#[link(name = "winmm")]
+unsafe extern "system" {
+    fn timeBeginPeriod(period_ms: u32) -> u32;
+    fn timeEndPeriod(period_ms: u32) -> u32;
+}
+
+#[cfg(windows)]
+impl WindowsTimerResolution {
+    fn one_millisecond() -> Self {
+        unsafe {
+            let _ = timeBeginPeriod(1);
+        }
+        Self
+    }
+}
+
+#[cfg(windows)]
+impl Drop for WindowsTimerResolution {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = timeEndPeriod(1);
+        }
+    }
+}
 
 #[derive(Clone, Debug, Deserialize)]
 struct HidControllerRudpSubscription {
@@ -5858,8 +5930,10 @@ fn start_hid_controller_rudp_ingress(
     let socket = UdpSocket::bind(bind_address)
         .with_context(|| format!("binding Muninn HID controller RUDP stream at {bind_address}"))?;
     socket
-        .set_read_timeout(Some(Duration::from_millis(1)))
-        .with_context(|| format!("setting Muninn HID controller RUDP timeout at {bind_address}"))?;
+        .set_nonblocking(true)
+        .with_context(|| {
+            format!("setting Muninn HID controller RUDP nonblocking at {bind_address}")
+        })?;
     let move_evidence_latest = Arc::new(Mutex::new(None));
     let ingress_evidence = Arc::clone(&move_evidence_latest);
     let runtime_options = options.clone();
@@ -5944,8 +6018,14 @@ fn run_hid_controller_rudp_ingress(
                 }
                 Ok(Some(frame)) if frame.channel_id == "hid.edge.ack" => {
                     if let Ok(ack) = serde_json::from_slice::<HidEdgeAck>(&frame.payload) {
-                        if let Some(source) = sources.iter_mut().find(|source| source.source.move_id == ack.device_id && source.epoch == ack.epoch) {
-                            while source.pending_edges.front().is_some_and(|edge| edge.edge_sequence <= ack.edge_sequence) {
+                        if let Some(source) = sources.iter_mut().find(|source| {
+                            source.source.move_id == ack.device_id && source.epoch == ack.epoch
+                        }) {
+                            while source
+                                .pending_edges
+                                .front()
+                                .is_some_and(|edge| edge.edge_sequence <= ack.edge_sequence)
+                            {
                                 source.pending_edges.pop_front();
                             }
                         }
@@ -5969,11 +6049,14 @@ fn run_hid_controller_rudp_ingress(
                 );
                 last_waiting_for_subscription_log_at = Some(Instant::now());
             }
-            thread::sleep(Duration::from_millis(8));
+            thread::sleep(HID_CONTROLLER_RUDP_POLL_INTERVAL);
             continue;
         }
         if transport.connected() {
-            let payload = move_evidence_latest.lock().ok().and_then(|mut latest| latest.take());
+            let payload = move_evidence_latest
+                .lock()
+                .ok()
+                .and_then(|mut latest| latest.take());
             if let Some(payload) = payload {
                 if let Err(error) = transport.send("move-evidence", payload) {
                     eprintln!("Muninn Move evidence RUDP send warning: {error:#}");
@@ -6003,20 +6086,38 @@ fn run_hid_controller_rudp_ingress(
                 continue;
             }
             if transport.connected() {
-                let payload = serde_json::to_vec(&HidLatestStateFrame { epoch: source.epoch.clone(), state_sequence: record.sequence, record: sanitize_hid_controller_record(record.clone()) })
-                    .context("encoding Muninn HID controller stream record")?;
+                let payload = serde_json::to_vec(&HidLatestStateFrame {
+                    epoch: source.epoch.clone(),
+                    state_sequence: record.sequence,
+                    record: sanitize_hid_controller_record(record.clone()),
+                })
+                .context("encoding Muninn HID controller stream record")?;
                 if let Err(error) = transport.send("latest", payload) {
                     eprintln!("Muninn HID controller RUDP send warning: {error:#}");
                     break;
                 }
-                if source.last_edge_send_at.is_none_or(|sent| sent.elapsed() >= Duration::from_millis(15)) {
-                  if let Some(edge) = source.pending_edges.front() {
-                    if let Err(error) = transport.send("hid.edge", serde_json::to_vec(edge)?) {
+                let last_sent = source.last_edge_sent;
+                let unsent_edges = source
+                    .pending_edges
+                    .iter()
+                    .filter(|edge| {
+                        last_sent.is_none_or(|(epoch, sequence)| {
+                            edge.epoch != epoch || edge.edge_sequence > sequence
+                        })
+                    })
+                    .take(MUNINN_HID_MAX_NEW_EDGES_PER_TURN)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                for edge in unsent_edges {
+                    if let Err(error) = transport.send("hid.edge", serde_json::to_vec(&edge)?) {
                         eprintln!("Muninn HID edge send warning: {error:#}");
+                        break;
                     } else {
-                        source.last_edge_send_at = Some(Instant::now());
+                        // CultNet owns packet retransmission and Sleipnir's
+                        // semantic cursor owns ordering. Application ACKs only
+                        // retire history; they never gate the next edge.
+                        source.last_edge_sent = Some((edge.epoch, edge.edge_sequence));
                     }
-                  }
                 }
                 sent_frames = sent_frames.saturating_add(1);
                 last_sent_at = Some(Instant::now());
@@ -6029,7 +6130,9 @@ fn run_hid_controller_rudp_ingress(
                 }
             }
         }
-        if let Err(error) = transport.poll_resends() {
+        if transport.connected()
+            && let Err(error) = transport.poll_resends()
+        {
             eprintln!("Muninn HID controller RUDP resend warning: {error:#}");
         }
         if transport.connected()
@@ -6045,7 +6148,7 @@ fn run_hid_controller_rudp_ingress(
                 last_stale_log_at = Some(Instant::now());
             }
         }
-        thread::sleep(Duration::from_millis(8));
+        thread::sleep(HID_CONTROLLER_RUDP_POLL_INTERVAL);
     }
 }
 
@@ -6214,6 +6317,44 @@ fn read_hid_controller_state_for_stream(
     let Some(index) = xinput_index_from_source_path(&source.hidraw_path) else {
         return None;
     };
+    #[cfg(windows)]
+    if let Some(rx) = active.xinput_rx.as_ref() {
+        let mut samples = Vec::new();
+        for _ in 0..HID_CONTROLLER_RUDP_MAX_REPORT_DRAIN {
+            let Ok(sample) = rx.try_recv() else {
+                break;
+            };
+            samples.push(sample);
+        }
+        let saw_sample = !samples.is_empty();
+        for sample in samples {
+            for (button, pressed) in &sample.button_edges {
+                let mut buttons = active.edge_buttons.clone();
+                if *pressed {
+                    if !buttons.contains(button) {
+                        buttons.push(button.clone());
+                    }
+                } else {
+                    buttons.retain(|candidate| candidate != button);
+                }
+                capture_button_edges(active, &buttons);
+            }
+            active.latest_xinput = Some(sample);
+        }
+        if !saw_sample && !hid_controller_stream_heartbeat_due(active) {
+            return None;
+        }
+        let latest = active.latest_xinput.as_ref()?;
+        let record = build_hid_controller_state_record_from_xinput_gamepad(
+            options,
+            &source,
+            active.sequence.saturating_add(1),
+            &latest.gamepad,
+            latest.source_timestamp_ns,
+            latest.observed_at.clone(),
+        );
+        return emit_hid_controller_record_if_due(active, record);
+    }
     let gamepad = match platform_xinput_gamepad(index) {
         Ok(Some(gamepad)) => {
             active.last_read_error_log_at = None;
@@ -6705,6 +6846,100 @@ struct XinputGamepadSnapshot {
     thumb_ly: i16,
     thumb_rx: i16,
     thumb_ry: i16,
+}
+
+#[cfg(windows)]
+#[derive(Clone, Debug)]
+struct TimedXinputSnapshot {
+    gamepad: XinputGamepadSnapshot,
+    button_edges: Vec<(String, bool)>,
+    source_timestamp_ns: i64,
+    observed_at: String,
+}
+
+#[cfg(windows)]
+fn start_windows_xinput_reader_if_supported(
+    source: &str,
+) -> Option<mpsc::Receiver<TimedXinputSnapshot>> {
+    let index = xinput_index_from_source_path(source)?;
+    let (tx, rx) = mpsc::channel();
+    thread::Builder::new()
+        .name(format!("muninn-xinput-{index}-reader"))
+        .spawn(move || {
+            let _timer_resolution = WindowsTimerResolution::one_millisecond();
+            let mut previous: Option<XinputGamepadSnapshot> = None;
+            let mut last_heartbeat = Instant::now() - HID_CONTROLLER_RUDP_HEARTBEAT_AFTER;
+            let mut next_poll = Instant::now();
+            loop {
+                if let Ok(Some(gamepad)) = platform_xinput_gamepad(index) {
+                    let button_edges = previous.map_or_else(Vec::new, |previous_gamepad| {
+                        xinput_button_edges(previous_gamepad.buttons, gamepad.buttons)
+                    });
+                    let changed = previous != Some(gamepad);
+                    if changed
+                        || !button_edges.is_empty()
+                        || last_heartbeat.elapsed() >= HID_CONTROLLER_RUDP_HEARTBEAT_AFTER
+                    {
+                        let sample = TimedXinputSnapshot {
+                            gamepad,
+                            button_edges,
+                            source_timestamp_ns: timestamp_ns().unwrap_or_default(),
+                            observed_at: timestamp().unwrap_or_default(),
+                        };
+                        if tx.send(sample).is_err() {
+                            return;
+                        }
+                        previous = Some(gamepad);
+                        last_heartbeat = Instant::now();
+                    }
+                } else {
+                    previous = None;
+                }
+                next_poll += XINPUT_CAPTURE_INTERVAL;
+                let now = Instant::now();
+                if next_poll > now {
+                    wait_until_xinput_poll_deadline(next_poll);
+                } else {
+                    next_poll = now;
+                    thread::yield_now();
+                }
+            }
+        })
+        .ok()?;
+    Some(rx)
+}
+
+#[cfg(windows)]
+fn xinput_button_edges(previous: u16, current: u16) -> Vec<(String, bool)> {
+    let previous_names = xinput_button_names(previous);
+    let current_names = xinput_button_names(current);
+    previous_names
+        .iter()
+        .filter(|button| !current_names.contains(button))
+        .map(|button| (button.clone(), false))
+        .chain(
+            current_names
+                .iter()
+                .filter(|button| !previous_names.contains(button))
+                .map(|button| (button.clone(), true)),
+        )
+        .collect()
+}
+
+#[cfg(windows)]
+fn wait_until_xinput_poll_deadline(deadline: Instant) {
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            return;
+        }
+        let remaining = deadline - now;
+        if remaining > XINPUT_CAPTURE_SPIN_MARGIN {
+            thread::sleep(remaining - XINPUT_CAPTURE_SPIN_MARGIN);
+        } else {
+            std::hint::spin_loop();
+        }
+    }
 }
 
 fn build_hid_controller_state_record_from_xinput_gamepad(
@@ -14390,6 +14625,20 @@ Device 00:07:04:A8:00:D0 (public)
         assert_eq!(record.buttons, vec!["up", "a", "b", "x", "y"]);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn xinput_snapshots_derive_exact_semantic_button_edges() {
+        assert_eq!(
+            xinput_button_edges(0, XINPUT_GAMEPAD_A_MASK),
+            vec![("a".to_string(), true)]
+        );
+        assert_eq!(
+            xinput_button_edges(XINPUT_GAMEPAD_A_MASK, 0),
+            vec![("a".to_string(), false)]
+        );
+        assert!(xinput_button_edges(XINPUT_GAMEPAD_A_MASK, XINPUT_GAMEPAD_A_MASK).is_empty());
+    }
+
     #[test]
     fn hid_edge_capture_preserves_quick_tap_before_state_collapse() {
         let mut active = active_hid_controller_rudp_source(MoveStateSource {
@@ -14400,8 +14649,22 @@ Device 00:07:04:A8:00:D0 (public)
         capture_button_edges(&mut active, &[]);
         let edges = active.pending_edges.into_iter().collect::<Vec<_>>();
         assert_eq!(edges.len(), 2);
-        assert_eq!((edges[0].button.as_str(), edges[0].pressed, edges[0].edge_sequence), ("a", true, 1));
-        assert_eq!((edges[1].button.as_str(), edges[1].pressed, edges[1].edge_sequence), ("a", false, 2));
+        assert_eq!(
+            (
+                edges[0].button.as_str(),
+                edges[0].pressed,
+                edges[0].edge_sequence
+            ),
+            ("a", true, 1)
+        );
+        assert_eq!(
+            (
+                edges[1].button.as_str(),
+                edges[1].pressed,
+                edges[1].edge_sequence
+            ),
+            ("a", false, 2)
+        );
         assert_eq!(edges[0].epoch, edges[1].epoch);
     }
 
