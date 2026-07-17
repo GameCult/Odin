@@ -37,6 +37,21 @@ pub fn plan_keepalive(
         };
     }
 
+    if health.state == "warming" {
+        return IdunnPlan {
+            decision: decision(
+                &decision_id,
+                desired,
+                "observe",
+                "daemon is warming under provider-owned progress authority",
+                &now,
+            ),
+            deployment_request: None,
+            restart_request: None,
+            operator_alarm: None,
+        };
+    }
+
     if health.state == "degraded" || health.state == "dependency-unavailable" {
         let alarm_id = format!("alarm:{}:{}", desired.daemon_id, now);
         let reason = format!(
@@ -233,6 +248,23 @@ mod tests {
         );
 
         assert_eq!(plan.decision.action, "observe");
+        assert!(plan.deployment_request.is_none());
+        assert!(plan.restart_request.is_none());
+        assert!(plan.operator_alarm.is_none());
+    }
+
+    #[test]
+    fn warming_daemon_is_observed_without_actuation_or_promotion() {
+        let mut desired = desired(Some("systemctl restart epiphany"));
+        desired.deploy_command = Some("deploy epiphany".to_string());
+        let plan = plan_keepalive(
+            &desired,
+            &health("warming"),
+            "2026-07-17T00:00:02Z",
+        );
+
+        assert_eq!(plan.decision.action, "observe");
+        assert!(plan.decision.reason.contains("provider-owned progress"));
         assert!(plan.deployment_request.is_none());
         assert!(plan.restart_request.is_none());
         assert!(plan.operator_alarm.is_none());
