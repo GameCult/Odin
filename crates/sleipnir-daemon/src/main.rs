@@ -12,11 +12,12 @@ use odin_core::{
     IdunnDaemonHealthRecord, MUNINN_HID_CONTROLLER_STATE_SCHEMA, MuninnHidControllerStateRecord,
     OdinDocuments, OdinEndpointQuery, SleipnirInputMappingRecord, discover_provider_endpoints,
 };
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::env;
 use std::fs;
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::path::PathBuf;
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -27,6 +28,11 @@ const IDUNN_HEALTH_RUDP_CONNECTION_ID: u32 = 0x1d0d_0001;
 const CULTNET_RUDP_PROTOCOL_ID: &str = "cultnet.transport.rudp.v0";
 const INPUT_STALE_NEUTRAL_AFTER: Duration = Duration::from_millis(1_500);
 const INPUT_RECEIVE_DRAIN_BUDGET: Duration = Duration::from_millis(2);
+const INPUT_RECEIVE_MAX_STATE_RECORDS: usize = 4;
+// Hold each semantic edge across one 60 Hz consumer frame plus scheduler
+// phase margin. ViGEm can accept faster updates, but an XInput game sampling
+// once per frame cannot observe an 8 ms press/release pair reliably.
+const INPUT_EDGE_MINIMUM_VISIBILITY: Duration = Duration::from_millis(24);
 const INPUT_STREAM_RECONNECT_AFTER: Duration = Duration::from_secs(3);
 const DEFAULT_STICK_DEADZONE: f32 = 0.12;
 const HID_RUDP_MAX_FRAGMENT_BYTES: u32 = 1_200;
@@ -433,8 +439,11 @@ fn main() -> Result<()> {
     publish_sleipnir_runtime_surface(&mut node, &options, &initial_state, true)?;
     let mut last_idunn_health_attempt_at = Instant::now() - Duration::from_secs(60);
     publish_idunn_health_if_configured(&options, &initial_state, &mut last_idunn_health_attempt_at);
+    let runtime_publisher = start_runtime_publisher(options.clone())?;
 
     let mut semantic_cursor = HidSemanticCursor::default();
+    let mut ready_edges = VecDeque::<HidButtonEdge>::new();
+    let mut last_edge_actuation_at: Option<Instant> = None;
     let mut ignored_stream_frames = 0u64;
     let mut last_surface_publish_at = Instant::now() - Duration::from_secs(60);
     let mut last_odin_catalog_pull_at = Instant::now() - Duration::from_secs(60);
@@ -442,6 +451,7 @@ fn main() -> Result<()> {
     let mut recent_input_latency: Option<SleipnirInputLatencySnapshot> = None;
     let mut output_is_neutral = true;
     let mut last_output_frame_at: Option<Instant> = None;
+    let mut last_slow_input_trace_at = Instant::now() - Duration::from_secs(60);
     loop {
         let input_stream_needs_discovery = rudp_stream
             .as_ref()
@@ -451,6 +461,23 @@ fn main() -> Result<()> {
         {
             pull_odin_catalog_snapshot(discovery_node.as_mut().unwrap_or(&mut node), &options);
             last_odin_catalog_pull_at = Instant::now();
+            if desired_mapping.enabled {
+                let rediscovered_endpoint = effective_muninn_hid_endpoint(
+                    discovery_node.as_ref().unwrap_or(&node),
+                    current_device_filter.as_deref(),
+                    desired_mapping.stream_id.as_deref(),
+                    options.trace,
+                );
+                if rediscovered_endpoint.is_some() {
+                    drop(rudp_stream.take());
+                    rudp_stream = create_rudp_stream(
+                        options.rudp_bind,
+                        rediscovered_endpoint,
+                        options.trace,
+                    )?;
+                    last_rudp_discovery_attempt_at = Instant::now();
+                }
+            }
         }
         let next_desired_mapping =
             read_desired_mapping_from_sources(&mut node, discovery_node.as_mut(), &options);
@@ -480,6 +507,8 @@ fn main() -> Result<()> {
             rudp_stream =
                 create_rudp_stream(options.rudp_bind, rediscovered_endpoint, options.trace)?;
             semantic_cursor = HidSemanticCursor::default();
+            ready_edges.clear();
+            last_edge_actuation_at = None;
         }
         let mut last_applied_record: Option<MuninnHidControllerStateRecord> = None;
         if let Some(stream) = rudp_stream.as_mut() {
@@ -489,6 +518,8 @@ fn main() -> Result<()> {
                     output_is_neutral = true;
                     last_output_frame_at = Some(Instant::now());
                     semantic_cursor = HidSemanticCursor::default();
+                    ready_edges.clear();
+                    last_edge_actuation_at = None;
                     if options.trace {
                         eprintln!(
                             "Sleipnir neutralized virtual pad before recreating stale Muninn HID RUDP connection for filter={:?}",
@@ -521,7 +552,7 @@ fn main() -> Result<()> {
                 for timed_record in records {
                     let epoch = timed_record.epoch;
                     let state_sequence = timed_record.state_sequence;
-                    let record = timed_record.record;
+                    let mut record = timed_record.record;
                     let timing = timed_record.timing;
                     if record_matches_filter(&record, current_device_filter.as_deref()) {
                         stream.last_frame_at = Some(Instant::now());
@@ -533,16 +564,42 @@ fn main() -> Result<()> {
                                 desired_mapping = updated_mapping;
                             }
                         }
+                        let previous_epoch = semantic_cursor.epoch;
                         if semantic_cursor.accept_state(epoch, state_sequence) || options.once {
+                            if previous_epoch != epoch {
+                                ready_edges.clear();
+                                last_edge_actuation_at = None;
+                            }
+                            if previous_epoch == epoch
+                                && let Some(previous) = recent_applied_record.as_ref()
+                            {
+                                // Ordered edges own button visibility after the epoch baseline.
+                                // A newer replaceable snapshot may update axes immediately, but it
+                                // must not collapse an admitted press/release pair before actuation.
+                                record.buttons = previous.buttons.clone();
+                            }
                             let state = map_record_to_virtual_pad(&record, &desired_mapping);
                             let axis_classified_at = Instant::now();
                             let output_frame_at = Instant::now();
-                            if options.trace {
+                            let receive_to_apply_us = timing
+                                .frame_received_at
+                                .elapsed()
+                                .as_micros();
+                            let trace_slow_frame = receive_to_apply_us >= 5_000
+                                && last_slow_input_trace_at.elapsed() >= Duration::from_secs(1);
+                            if options.trace
+                                && (record.sequence <= 5
+                                    || record.sequence % 120 == 0
+                                    || trace_slow_frame)
+                            {
+                                if trace_slow_frame {
+                                    last_slow_input_trace_at = Instant::now();
+                                }
                                 eprintln!(
                                     "Sleipnir applying fast HID frame device={} seq={} receive_to_apply_us={} lx={} ly={} lt={} rt={} buttons=[{}]",
                                     record.device_id,
                                     record.sequence,
-                                    timing.frame_received_at.elapsed().as_micros(),
+                                    receive_to_apply_us,
                                     state.left_x,
                                     state.left_y,
                                     state.left_trigger,
@@ -597,36 +654,49 @@ fn main() -> Result<()> {
                 }
                 let edges = std::mem::take(&mut stream.received_edges);
                 for edge in edges {
-                    let edge_epoch = edge.epoch;
-                    let edge_sequence = edge.edge_sequence;
-                    let edge_device = edge.device_id.clone();
                     for applied in semantic_cursor.push_edge(edge) {
-                        let Some(record) = last_applied_record
-                            .as_mut()
-                            .or(recent_applied_record.as_mut())
-                        else {
-                            continue;
-                        };
-                        if applied.pressed {
-                            if !record.buttons.contains(&applied.button) {
-                                record.buttons.push(applied.button.clone());
-                            }
-                        } else {
-                            record.buttons.retain(|button| button != &applied.button);
+                        ready_edges.push_back(applied);
+                    }
+                }
+                if !ready_edges.is_empty()
+                    && last_edge_actuation_at.is_none_or(|last| {
+                        last.elapsed() >= INPUT_EDGE_MINIMUM_VISIBILITY
+                    })
+                    && let Some(applied) = ready_edges.pop_front()
+                    && let Some(record) = last_applied_record
+                        .as_mut()
+                        .or(recent_applied_record.as_mut())
+                {
+                    if applied.pressed {
+                        if !record.buttons.contains(&applied.button) {
+                            record.buttons.push(applied.button.clone());
                         }
-                        let state = map_record_to_virtual_pad(record, &desired_mapping);
-                        backend.update(&state)?;
-                        output_is_neutral = state == VirtualPadState::default();
-                        last_output_frame_at = Some(Instant::now());
+                    } else {
+                        record.buttons.retain(|button| button != &applied.button);
                     }
-                    if edge_epoch == semantic_cursor.epoch
-                        && edge_sequence <= semantic_cursor.edge_sequence
-                    {
-                        let ack = serde_json::json!({"epoch": edge_epoch, "device_id": edge_device, "edge_sequence": semantic_cursor.edge_sequence});
-                        stream
-                            .transport
-                            .send("hid.edge.ack", serde_json::to_vec(&ack)?)?;
+                    let state = map_record_to_virtual_pad(record, &desired_mapping);
+                    backend.update(&state)?;
+                    output_is_neutral = state == VirtualPadState::default();
+                    last_output_frame_at = Some(Instant::now());
+                    last_edge_actuation_at = Some(Instant::now());
+                    if options.trace {
+                        eprintln!(
+                            "Sleipnir applied HID edge device={} edge_sequence={} button={} pressed={} queued={}",
+                            applied.device_id,
+                            applied.edge_sequence,
+                            applied.button,
+                            applied.pressed,
+                            ready_edges.len()
+                        );
                     }
+                    let ack = serde_json::json!({
+                        "epoch": applied.epoch,
+                        "device_id": applied.device_id,
+                        "edge_sequence": applied.edge_sequence
+                    });
+                    stream
+                        .transport
+                        .send("hid.edge.ack", serde_json::to_vec(&ack)?)?;
                 }
                 if desired_mapping.enabled
                     && !output_is_neutral
@@ -673,12 +743,7 @@ fn main() -> Result<()> {
                         recent_input_latency.as_ref(),
                     )
                 };
-                publish_sleipnir_runtime_surface(&mut node, &options, &runtime_state, true)?;
-                publish_idunn_health_if_configured(
-                    &options,
-                    &runtime_state,
-                    &mut last_idunn_health_attempt_at,
-                );
+                let _ = runtime_publisher.try_send((runtime_state, true));
             } else if options.trace && desired_mapping.enabled {
                 eprintln!("Sleipnir still has no Odin-discovered Muninn HID endpoint");
             }
@@ -708,17 +773,7 @@ fn main() -> Result<()> {
                     recent_input_latency.as_ref(),
                 )
             };
-            publish_sleipnir_runtime_surface(
-                &mut node,
-                &options,
-                &runtime_state,
-                has_new_applied_record,
-            )?;
-            publish_idunn_health_if_configured(
-                &options,
-                &runtime_state,
-                &mut last_idunn_health_attempt_at,
-            );
+            let _ = runtime_publisher.try_send((runtime_state, has_new_applied_record));
             last_surface_publish_at = Instant::now();
         }
         if options.once {
@@ -727,6 +782,49 @@ fn main() -> Result<()> {
         thread::sleep(Duration::from_millis(options.interval_ms.max(1)));
     }
     Ok(())
+}
+
+fn start_runtime_publisher(
+    options: Options,
+) -> Result<mpsc::SyncSender<(SleipnirRuntimeState, bool)>> {
+    let (tx, rx) = mpsc::sync_channel::<(SleipnirRuntimeState, bool)>(1);
+    thread::Builder::new()
+        .name("sleipnir-runtime-publisher".to_string())
+        .spawn(move || {
+            let mut node = match CultMesh::create_node(
+                &options.store_path,
+                OdinDocuments,
+                CultMeshNodeOptions {
+                    runtime_id: "sleipnir-runtime-publisher".to_string(),
+                    pull_on_start: false,
+                },
+            ) {
+                Ok(node) => node,
+                Err(error) => {
+                    eprintln!("Sleipnir runtime publisher could not open CultMesh state: {error:#}");
+                    return;
+                }
+            };
+            let mut last_idunn_health_attempt_at = Instant::now() - Duration::from_secs(60);
+            while let Ok((mut state, mut publish_remote)) = rx.recv() {
+                while let Ok((newer_state, newer_publish_remote)) = rx.try_recv() {
+                    state = newer_state;
+                    publish_remote |= newer_publish_remote;
+                }
+                if let Err(error) =
+                    publish_sleipnir_runtime_surface(&mut node, &options, &state, publish_remote)
+                {
+                    eprintln!("Sleipnir runtime publisher warning: {error:#}");
+                }
+                publish_idunn_health_if_configured(
+                    &options,
+                    &state,
+                    &mut last_idunn_health_attempt_at,
+                );
+            }
+        })
+        .context("starting Sleipnir runtime publisher")?;
+    Ok(tx)
 }
 
 impl SleipnirRuntimeState {
@@ -2234,8 +2332,8 @@ fn create_rudp_stream(
         let socket = UdpSocket::bind(bind_address)
             .with_context(|| format!("binding Sleipnir RUDP HID client at {bind_address}"))?;
         socket
-            .set_read_timeout(Some(Duration::from_millis(1)))
-            .context("setting Sleipnir RUDP HID client timeout")?;
+            .set_nonblocking(true)
+            .context("setting Sleipnir RUDP HID client nonblocking")?;
         if trace {
             eprintln!(
                 "Sleipnir connecting to Muninn HID RUDP at {target} connection_id={SLEIPNIR_HID_RUDP_CONNECTION_ID:08x}"
@@ -2262,7 +2360,10 @@ fn create_rudp_stream(
             target: Some(target),
             last_connect_attempt_at: Some(Instant::now()),
             connected_logged: false,
-            last_frame_at: Some(Instant::now()),
+            // Absence of a selected hot-plug device is valid idle state. Only
+            // a stream that has delivered a selected frame can later become
+            // stale and justify connection recreation.
+            last_frame_at: None,
             last_stale_log_at: None,
             last_subscription: None,
             last_subscription_at: None,
@@ -2275,8 +2376,8 @@ fn create_rudp_stream(
     let socket = UdpSocket::bind(bind)
         .with_context(|| format!("binding Sleipnir RUDP HID stream at {bind}"))?;
     socket
-        .set_read_timeout(Some(Duration::from_millis(1)))
-        .with_context(|| format!("setting Sleipnir RUDP HID stream {bind} timeout"))?;
+        .set_nonblocking(true)
+        .with_context(|| format!("setting Sleipnir RUDP HID stream {bind} nonblocking"))?;
     if trace {
         eprintln!(
             "Sleipnir listening for fast HID RUDP on {bind} connection_id={SLEIPNIR_HID_RUDP_CONNECTION_ID:08x}"
@@ -2404,14 +2505,25 @@ fn discover_muninn_hid_endpoint(
     if let Some(endpoint) = discover_available_hid_endpoint(node, device_filter, stream_id) {
         return Some(endpoint);
     }
+    // Provider advertisements are map-shaped CultNet documents in the live
+    // Node runtime. Resolve the host-scoped endpoint from those raw envelopes
+    // even when the requested hot-plugged device is not yet listed.
     let host_hint = stream_host_hint(stream_id);
+    if let Some(host) = host_hint.as_deref()
+        && let Some(endpoint) = discover_provider_hid_endpoint_by_host(node, host)
+    {
+        return Some(endpoint);
+    }
     let endpoints = discover_provider_endpoints(
         node,
         OdinEndpointQuery {
             schema: Some(MUNINN_HID_CONTROLLER_STATE_SCHEMA),
             transport_contains: Some("rudp"),
             host_hint: host_hint.as_deref(),
-            device_filter,
+            // The provider route is host-scoped. Device selection belongs to
+            // the subscription sent after connecting, so hot-plugged devices
+            // must not need to pre-exist in the advertisement.
+            device_filter: None,
         },
     );
     if trace && endpoints.is_empty() {
@@ -2424,6 +2536,48 @@ fn discover_muninn_hid_endpoint(
         .into_iter()
         .next()
         .map(|endpoint| endpoint.address)
+}
+
+fn discover_provider_hid_endpoint_by_host(
+    node: &cultmesh_rs::CultMeshNode,
+    host: &str,
+) -> Option<String> {
+    let matches_host = |value: &serde_json::Value| {
+        string_field(value, &["providerId", "provider_id"])
+            .is_some_and(|provider| provider.eq_ignore_ascii_case(&format!("muninn.telemetry.{host}")))
+            || string_field(value, &["verseId", "verse_id"])
+                .is_some_and(|verse| verse.eq_ignore_ascii_case(&format!("{host}.local")))
+    };
+    for provider in node
+        .cache()
+        .get_all::<EveProviderAdvertisementRecord>()
+        .ok()
+        .into_iter()
+        .flatten()
+    {
+        if matches_host(&provider.value)
+            && let Some(endpoint) =
+                matching_provider_advertised_hid_endpoint(&provider.value, None, None)
+        {
+            return Some(endpoint);
+        }
+    }
+    for envelope in node.cache().snapshot() {
+        if envelope.schema_id.as_deref() != Some(EVE_PROVIDER_ADVERTISEMENT_SCHEMA)
+            && envelope.r#type != "gamecult.eve.provider_advertisement"
+        {
+            continue;
+        }
+        let Ok(value) = rmp_serde::from_slice::<serde_json::Value>(&envelope.payload) else {
+            continue;
+        };
+        if matches_host(&value)
+            && let Some(endpoint) = matching_provider_advertised_hid_endpoint(&value, None, None)
+        {
+            return Some(endpoint);
+        }
+    }
+    None
 }
 
 fn discover_available_hid_endpoint(
@@ -2510,20 +2664,15 @@ fn receive_rudp_records(stream: &mut ActiveRudpStream, trace: bool) -> Result<Ve
     let mut empty_polls = 0usize;
     let drain_started_at = Instant::now();
     for _ in 0..64 {
-        if !records.is_empty() && drain_started_at.elapsed() >= INPUT_RECEIVE_DRAIN_BUDGET {
+        if records.len() >= INPUT_RECEIVE_MAX_STATE_RECORDS
+            || (!records.is_empty() && drain_started_at.elapsed() >= INPUT_RECEIVE_DRAIN_BUDGET)
+        {
             break;
         }
         match stream.transport.receive_once() {
             Ok(Some(frame)) if frame.channel_id == "latest" || frame.channel_id == "hid" => {
                 empty_polls = 0;
                 let frame_received_at = Instant::now();
-                if trace {
-                    eprintln!(
-                        "Sleipnir received fast HID frame channel={} bytes={}",
-                        frame.channel_id,
-                        frame.payload.len()
-                    );
-                }
                 let decoded = decode_latest_state_frame(&frame.payload);
                 let record = match decoded.as_ref() {
                     Some(frame) => frame.record.clone(),
@@ -2572,7 +2721,9 @@ fn receive_rudp_records(stream: &mut ActiveRudpStream, trace: bool) -> Result<Ve
             }
         }
     }
-    if let Err(error) = stream.transport.poll_resends() {
+    if stream.transport.connected()
+        && let Err(error) = stream.transport.poll_resends()
+    {
         if trace {
             eprintln!("Sleipnir RUDP resend warning: {error:#}");
         }
@@ -3180,7 +3331,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_state_prefers_recent_frames_over_handshake_churn() {
+    fn runtime_state_does_not_claim_connected_before_first_frame_or_handshake() {
         let (node, store_path) = test_node("runtime-fresh-frame");
         let options = Options::parse(
             ["--store", store_path.to_str().unwrap(), "--dry-run"]
@@ -3203,7 +3354,7 @@ mod tests {
             None,
         );
 
-        assert_eq!(state.stream_state, "connected");
+        assert_eq!(state.stream_state, "connecting");
         let _ = fs::remove_file(store_path);
     }
 
@@ -3334,6 +3485,17 @@ mod tests {
             )
             .as_deref(),
             Some("198.51.100.66:17888")
+        );
+        assert_eq!(
+            discover_muninn_hid_endpoint(
+                &node,
+                Some("hotplugged-xinput-1"),
+                Some("starfire:hotplugged-xinput-1:hid-controller-state"),
+                false,
+            )
+            .as_deref(),
+            Some("198.51.100.66:17888"),
+            "host-level provider routes must accept later device subscriptions"
         );
         let _ = fs::remove_file(store_path);
     }

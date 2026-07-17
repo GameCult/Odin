@@ -135,6 +135,7 @@ pub struct CultNetRudpSession {
     next_fragment_id: u16,
     connected: bool,
     last_received_at_ms: Option<u64>,
+    last_received_sequence: Option<u32>,
     highest_received_sequence: Option<u32>,
     received_sequences: BTreeSet<u32>,
     pending_reliable: BTreeMap<u32, PendingReliablePacket>,
@@ -156,6 +157,7 @@ impl CultNetRudpSession {
             next_fragment_id: 1,
             connected: false,
             last_received_at_ms: None,
+            last_received_sequence: None,
             highest_received_sequence: None,
             received_sequences: BTreeSet::new(),
             pending_reliable: BTreeMap::new(),
@@ -198,6 +200,7 @@ impl CultNetRudpSession {
         self.next_fragment_id = 1;
         self.connected = false;
         self.last_received_at_ms = None;
+        self.last_received_sequence = None;
         self.highest_received_sequence = None;
         self.received_sequences.clear();
         self.pending_reliable.clear();
@@ -452,7 +455,11 @@ impl CultNetRudpSession {
     }
 
     pub fn create_ack(&mut self) -> CultNetRudpPacket {
-        let (ack, ack_mask) = self.ack_state();
+        // ACK the packet that actually caused this response. A retransmitted
+        // reliable packet can arrive more than 32 global sequence numbers
+        // behind replaceable realtime traffic; a highest-sequence-only ACK
+        // can never retire it once it falls outside that mask.
+        let (ack, ack_mask) = self.direct_ack_state();
         CultNetRudpPacket {
             packet_type: CultNetRudpPacketType::Ack,
             connection_id: self.connection_id,
@@ -623,6 +630,7 @@ impl CultNetRudpSession {
     }
 
     fn remember_received(&mut self, sequence: u32) {
+        self.last_received_sequence = Some(sequence);
         self.received_sequences.insert(sequence);
         if self
             .highest_received_sequence
@@ -634,6 +642,23 @@ impl CultNetRudpSession {
 
     fn ack_state(&self) -> (u32, u32) {
         let ack = self.highest_received_sequence.unwrap_or(0);
+        let mut ack_mask = 0_u32;
+        for bit in 0..32 {
+            if ack > bit && self.received_sequences.contains(&(ack - bit - 1)) {
+                ack_mask |= 1_u32 << bit;
+            }
+        }
+        (ack, ack_mask)
+    }
+
+    fn direct_ack_state(&self) -> (u32, u32) {
+        let last = self.last_received_sequence.unwrap_or(0);
+        let highest = self.highest_received_sequence.unwrap_or(last);
+        let ack = if highest.saturating_sub(last) > 32 {
+            last
+        } else {
+            highest
+        };
         let mut ack_mask = 0_u32;
         for bit in 0..32 {
             if ack > bit && self.received_sequences.contains(&(ack - bit - 1)) {
@@ -1126,7 +1151,10 @@ impl CultNetRudpSocketTransportConnection {
             });
             self.stats.frames_received += 1;
         }
-        if packet.packet_type == CultNetRudpPacketType::Accept || delivered_any {
+        // Reliable duplicates still need an ACK. Suppressing the ACK because
+        // deduplication produced no application frame creates an immortal
+        // resend loop after the original ACK is lost.
+        if packet.packet_type == CultNetRudpPacketType::Accept || delivered_any || packet.reliable {
             let ack = self.session.create_ack();
             self.send_packet(&ack)?;
         }
@@ -1480,6 +1508,12 @@ fn channel_send_options(channel_id: &str, now_ms: u64) -> CultNetRudpSendOptions
             sequenced: false,
             now_ms,
         },
+        "hid.edge" | "hid.edge.ack" | "hid.subscribe" => CultNetRudpSendOptions {
+            reliable: true,
+            ordered: false,
+            sequenced: false,
+            now_ms,
+        },
         "latest" => CultNetRudpSendOptions {
             reliable: false,
             ordered: false,
@@ -1524,6 +1558,21 @@ fn packet_type_from_code(code: u8) -> Result<CultNetRudpPacketType> {
 #[cfg(test)]
 mod socket_transport_tests {
     use super::*;
+
+    #[test]
+    fn hid_control_channels_are_reliable_while_latest_state_is_replaceable() {
+        for channel in ["hid.edge", "hid.edge.ack", "hid.subscribe"] {
+            let options = channel_send_options(channel, 7);
+            assert!(options.reliable, "{channel} must survive packet loss");
+            assert!(
+                !options.ordered,
+                "{channel} uses application sequence and must not head-of-line block behind latest state"
+            );
+        }
+        let latest = channel_send_options("latest", 7);
+        assert!(!latest.reliable);
+        assert!(latest.sequenced);
+    }
 
     fn data_packet(sequence: u32) -> CultNetRudpPacket {
         CultNetRudpPacket {
@@ -1630,6 +1679,24 @@ mod socket_transport_tests {
             11,
         )?;
         assert!(session.pending_reliable_sequences().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn ack_directly_names_late_reliable_packet_outside_cumulative_window() -> Result<()> {
+        let mut session = CultNetRudpSession::new(CultNetRudpSessionOptions {
+            connection_id: 7,
+            ..CultNetRudpSessionOptions::default()
+        });
+        session.connected = true;
+
+        session.receive(&data_packet(100), 1)?;
+        let mut late = data_packet(10);
+        late.reliable = true;
+        session.receive(&late, 2)?;
+
+        let ack = session.create_ack();
+        assert_eq!(ack.ack, 10);
         Ok(())
     }
 }
