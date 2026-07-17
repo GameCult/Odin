@@ -88,14 +88,14 @@ const MUNINN_RUDP_MEDIA_PENDING_VIDEO_CAPACITY: usize = 512;
 const MUNINN_RUDP_MEDIA_INGEST_BUDGET_PER_TURN: usize = 1;
 const MUNINN_RUDP_MEDIA_RECEIVER_GAP_WAIT_MS: u64 = 16;
 const MUNINN_RUDP_MEDIA_REPAIR_CACHE_CHUNKS: usize = 16_384;
-const MUNINN_RUDP_MEDIA_REPAIR_BURST_CHUNKS: usize = 2_048;
-const MUNINN_RUDP_MEDIA_REPAIR_INITIAL_CHUNKS_PER_SECOND: usize = 4_096;
+const MUNINN_RUDP_MEDIA_REPAIR_BURST_CHUNKS: usize = 16;
+const MUNINN_RUDP_MEDIA_REPAIR_INITIAL_CHUNKS_PER_SECOND: usize = 128;
 const MUNINN_RUDP_MEDIA_REPAIR_MIN_CHUNKS_PER_SECOND: usize = 8;
-const MUNINN_RUDP_MEDIA_REPAIR_MAX_CHUNKS_PER_SECOND: usize = 16_384;
-const MUNINN_RUDP_MEDIA_REPAIR_ADD_CHUNKS_PER_SECOND: usize = 2_048;
+const MUNINN_RUDP_MEDIA_REPAIR_MAX_CHUNKS_PER_SECOND: usize = 512;
+const MUNINN_RUDP_MEDIA_REPAIR_ADD_CHUNKS_PER_SECOND: usize = 64;
 const MUNINN_RUDP_MEDIA_REPAIR_RECOVERY_INTERVAL_MS: u64 = 2_000;
 const MUNINN_RUDP_MEDIA_REPAIR_MAX_FEEDBACK_PER_POLL: usize = 32;
-const MUNINN_RUDP_MEDIA_REPAIR_MAX_CHUNKS_PER_POLL: usize = 256;
+const MUNINN_RUDP_MEDIA_REPAIR_MAX_CHUNKS_PER_POLL: usize = 4;
 const MUNINN_RUDP_MEDIA_SOCKET_BUFFER_BYTES: usize = 16 * 1024 * 1024;
 const MUNINN_RUDP_MEDIA_SEND_PACE_EVERY_PAYLOADS: usize = 1;
 const MUNINN_RUDP_MEDIA_SEND_PACE_SLEEP_US: u64 = 0;
@@ -12324,20 +12324,21 @@ mod tests {
     }
 
     #[test]
-    fn default_rudp_repair_budget_has_lan_stream_headroom() {
+    fn default_rudp_repair_budget_cannot_starve_fresh_media() {
         let mut budget = MuninnRudpRepairBudget::new(
             MUNINN_RUDP_MEDIA_REPAIR_INITIAL_CHUNKS_PER_SECOND,
             MUNINN_RUDP_MEDIA_REPAIR_BURST_CHUNKS,
         );
         let start = budget.last_refill_at;
 
-        assert_eq!(budget.chunks_per_second(), 4_096);
-        assert_eq!(budget.take(2_048, start, 0), 2_048);
-        assert_eq!(budget.take(8_192, start + Duration::from_secs(1), 0), 2_048);
-        assert_eq!(budget.take(8_192, start + Duration::from_secs(3), 0), 2_048);
-        assert_eq!(budget.chunks_per_second(), 6_144);
-        assert_eq!(budget.take(512, start + Duration::from_secs(4), 1), 512);
-        assert_eq!(budget.chunks_per_second(), 3_072);
+        assert_eq!(budget.chunks_per_second(), 128);
+        assert_eq!(budget.take(2_048, start, 0), 16);
+        assert_eq!(budget.take(8_192, start + Duration::from_secs(1), 0), 16);
+        assert_eq!(budget.take(8_192, start + Duration::from_secs(3), 0), 16);
+        assert_eq!(budget.chunks_per_second(), 192);
+        assert_eq!(budget.take(512, start + Duration::from_secs(4), 1), 16);
+        assert_eq!(budget.chunks_per_second(), 96);
+        assert_eq!(MUNINN_RUDP_MEDIA_REPAIR_MAX_CHUNKS_PER_POLL, 4);
     }
 
     #[test]
