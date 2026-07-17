@@ -95,10 +95,11 @@ const MUNINN_RUDP_MEDIA_REPAIR_MAX_CHUNKS_PER_SECOND: usize = 512;
 const MUNINN_RUDP_MEDIA_REPAIR_ADD_CHUNKS_PER_SECOND: usize = 64;
 const MUNINN_RUDP_MEDIA_REPAIR_RECOVERY_INTERVAL_MS: u64 = 2_000;
 const MUNINN_RUDP_MEDIA_REPAIR_MAX_FEEDBACK_PER_POLL: usize = 32;
-const MUNINN_RUDP_MEDIA_REPAIR_MAX_CHUNKS_PER_POLL: usize = 4;
+const MUNINN_RUDP_MEDIA_REPAIR_MAX_CHUNKS_PER_POLL: usize = 1;
 const MUNINN_RUDP_MEDIA_SOCKET_BUFFER_BYTES: usize = 16 * 1024 * 1024;
 const MUNINN_RUDP_MEDIA_SEND_PACE_EVERY_PAYLOADS: usize = 1;
 const MUNINN_RUDP_MEDIA_SEND_PACE_SLEEP_US: u64 = 50;
+const MUNINN_RUDP_MEDIA_KEYFRAME_REQUEST_COOLDOWN_MS: u64 = 500;
 const MUNINN_RUDP_ACTIVE_CATALOG_REPUBLISH_MS: u64 = 2_000;
 const MUNINN_ODIN_PROVIDER_LEASE_REFRESH_SECONDS: u64 = 30;
 const PS_MOVE_LED_REPORT_LEN: usize = 49;
@@ -2075,7 +2076,7 @@ fn run_rudp_mux_once(
         let mut payloads_queue_expired = 0_u64;
         let mut payloads_send_expired = 0_u64;
         let mut receiver_feedback = MuninnRudpReceiverFeedbackStats::default();
-        let mut handled_keyframe_requests = 0_u64;
+        let mut keyframe_request_gate = MuninnKeyframeRequestGate::default();
         let mut video_bitrate_controller = MuninnVideoBitrateController::new(
             media_profile.video_bitrate_kbps,
             Instant::now(),
@@ -2128,7 +2129,7 @@ fn run_rudp_mux_once(
                     )?;
                     apply_video_encoder_feedback_control(
                         &receiver_feedback,
-                        &mut handled_keyframe_requests,
+                        &mut keyframe_request_gate,
                         &mut video_bitrate_controller,
                         video_encoder_control.as_mut(),
                         payloads_dropped,
@@ -2193,7 +2194,7 @@ fn run_rudp_mux_once(
                 )?;
                 apply_video_encoder_feedback_control(
                     &receiver_feedback,
-                    &mut handled_keyframe_requests,
+                    &mut keyframe_request_gate,
                     &mut video_bitrate_controller,
                     video_encoder_control.as_mut(),
                     payloads_dropped,
@@ -2254,7 +2255,7 @@ fn run_rudp_mux_once(
                 )?;
                 apply_video_encoder_feedback_control(
                     &receiver_feedback,
-                    &mut handled_keyframe_requests,
+                    &mut keyframe_request_gate,
                     &mut video_bitrate_controller,
                     video_encoder_control.as_mut(),
                     payloads_dropped,
@@ -2814,15 +2815,27 @@ fn default_rudp_mux_restart_delay(restart_count: u32) -> Duration {
     Duration::from_secs((2 + restart_count).min(30) as u64)
 }
 
-fn record_receiver_keyframe_pressure(
-    receiver_feedback: &MuninnRudpReceiverFeedbackStats,
-    handled_keyframe_requests: &mut u64,
-) -> bool {
-    if receiver_feedback.requested_keyframes <= *handled_keyframe_requests {
-        return false;
+#[derive(Default)]
+struct MuninnKeyframeRequestGate {
+    observed_requests: u64,
+    last_idr_at: Option<Instant>,
+}
+
+impl MuninnKeyframeRequestGate {
+    fn observe(&mut self, requested_keyframes: u64, now: Instant) -> bool {
+        if requested_keyframes <= self.observed_requests {
+            return false;
+        }
+        self.observed_requests = requested_keyframes;
+        if self.last_idr_at.is_some_and(|last| {
+            now.saturating_duration_since(last)
+                < Duration::from_millis(MUNINN_RUDP_MEDIA_KEYFRAME_REQUEST_COOLDOWN_MS)
+        }) {
+            return false;
+        }
+        self.last_idr_at = Some(now);
+        true
     }
-    *handled_keyframe_requests = receiver_feedback.requested_keyframes;
-    true
 }
 
 fn request_video_encoder_idr<W: std::io::Write + ?Sized>(control: Option<&mut W>) -> Result<()> {
@@ -2852,20 +2865,21 @@ fn request_video_encoder_bitrate<W: std::io::Write + ?Sized>(
 
 fn apply_video_encoder_feedback_control(
     feedback: &MuninnRudpReceiverFeedbackStats,
-    handled_keyframe_requests: &mut u64,
+    keyframe_request_gate: &mut MuninnKeyframeRequestGate,
     bitrate: &mut MuninnVideoBitrateController,
     mut control: Option<&mut std::process::ChildStdin>,
     queue_dropped: u64,
     deadline_ms: u64,
 ) -> Result<()> {
-    if record_receiver_keyframe_pressure(feedback, handled_keyframe_requests) {
+    let now = Instant::now();
+    if keyframe_request_gate.observe(feedback.requested_keyframes, now) {
         request_video_encoder_idr(control.as_deref_mut())?;
     }
     if let Some(kbps) = bitrate.observe(
         feedback,
         queue_dropped,
         deadline_ms.saturating_mul(1_000),
-        Instant::now(),
+        now,
     ) {
         request_video_encoder_bitrate(control.as_deref_mut(), kbps)?;
     }
@@ -12345,26 +12359,23 @@ mod tests {
         assert_eq!(budget.chunks_per_second(), 192);
         assert_eq!(budget.take(512, start + Duration::from_secs(4), 1), 16);
         assert_eq!(budget.chunks_per_second(), 96);
-        assert_eq!(MUNINN_RUDP_MEDIA_REPAIR_MAX_CHUNKS_PER_POLL, 4);
+        assert_eq!(MUNINN_RUDP_MEDIA_REPAIR_MAX_CHUNKS_PER_POLL, 1);
     }
 
     #[test]
-    fn receiver_feedback_keyframe_requests_are_edge_triggered() {
-        let mut handled = 0;
-        let mut receiver_feedback = MuninnRudpReceiverFeedbackStats::default();
+    fn receiver_feedback_keyframe_requests_are_edge_triggered_and_coalesced() {
+        let start = Instant::now();
+        let mut gate = MuninnKeyframeRequestGate::default();
 
-        assert!(!record_receiver_keyframe_pressure(&receiver_feedback, &mut handled));
-        assert_eq!(handled, 0);
-
-        receiver_feedback.requested_keyframes = 1;
-        assert!(record_receiver_keyframe_pressure(&receiver_feedback, &mut handled));
-        assert_eq!(handled, 1);
-        assert!(!record_receiver_keyframe_pressure(&receiver_feedback, &mut handled));
-        assert_eq!(handled, 1);
-
-        receiver_feedback.requested_keyframes = 2;
-        assert!(record_receiver_keyframe_pressure(&receiver_feedback, &mut handled));
-        assert_eq!(handled, 2);
+        assert!(!gate.observe(0, start));
+        assert!(gate.observe(1, start));
+        assert!(!gate.observe(1, start));
+        assert!(!gate.observe(2, start + Duration::from_millis(100)));
+        assert_eq!(gate.observed_requests, 2);
+        assert!(gate.observe(
+            3,
+            start + Duration::from_millis(MUNINN_RUDP_MEDIA_KEYFRAME_REQUEST_COOLDOWN_MS)
+        ));
     }
 
     #[test]
