@@ -1,8 +1,7 @@
 use anyhow::{Context, Result, anyhow};
-#[cfg(test)]
-use cultcache_rs::CacheBackingStore;
+use cultcache_rs::{CacheBackingStore, DatabaseEntry};
 use cultcache_rs::{
-    CultCache, CultCacheEnvelope, DatabaseEntry, SingleFileMessagePackBackingStore,
+    CultCache, CultCacheEnvelope, CultCacheExpectedEnvelope, SingleFileMessagePackBackingStore,
 };
 use cultmesh_rs::{CultMesh, CultMeshNode, CultMeshNodeOptions};
 use cultnet_rs::{
@@ -11,15 +10,17 @@ use cultnet_rs::{
     CultNetRudpSocketTransportOptions, CultNetWireContract, decode_cultnet_message_from_slice,
     decode_rudp_packet, encode_cultnet_message_to_vec, encode_rudp_packet,
 };
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use odin_core::{
-    BifrostRepositoryReleaseAuthorityRecord, IdunnCommandBoundaryRecord, IdunnDaemonHealthRecord,
-    IdunnDaemonSurgeryPlanRecord, IdunnDaemonTransportProfileRecord, IdunnDeploymentArtifactRecord,
-    IdunnDeploymentRequestRecord, IdunnDeploymentResultRecord, IdunnDesiredDaemonRecord,
-    IdunnLifecycleCommandRecord, IdunnOperatorAlarmRecord, IdunnReleaseTargetRecord,
-    IdunnRestartRequestRecord, IdunnRestartResultRecord, IdunnRolloutPlanRecord,
-    IdunnRolloutResultRecord, IdunnRudpHealthIngressRecord, IdunnRuntimeTransportCheckRecord,
-    IdunnStateMigrationPlanRecord, IdunnStateMigrationResultRecord, IdunnSwarmSurgeryPlanRecord,
-    OdinDocuments, plan_keepalive,
+    BifrostRepositoryReleaseAuthorityRecord, IdunnCommandBoundaryRecord,
+    IdunnCurrentDeploymentRequestRecord, IdunnDaemonHealthRecord, IdunnDaemonSurgeryPlanRecord,
+    IdunnDaemonTransportProfileRecord, IdunnDeploymentArtifactRecord, IdunnDeploymentRequestRecord,
+    IdunnDeploymentResultRecord, IdunnDesiredDaemonRecord, IdunnLifecycleCommandRecord,
+    IdunnOperatorAlarmRecord, IdunnReleaseTargetRecord, IdunnRestartRequestRecord,
+    IdunnRestartResultRecord, IdunnRolloutPlanRecord, IdunnRolloutResultRecord,
+    IdunnRudpHealthIngressRecord, IdunnRuntimeTransportCheckRecord,
+    IdunnSignedHealthAdmissionRecord, IdunnStateMigrationPlanRecord,
+    IdunnStateMigrationResultRecord, IdunnSwarmSurgeryPlanRecord, OdinDocuments, plan_keepalive,
 };
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -36,7 +37,58 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 const CULTNET_RUDP_PROTOCOL_ID: &str = "cultnet.transport.rudp.v0";
 const IDUNN_HEALTH_RUDP_CONNECTION_ID: u32 = 0x1d0d_0001;
+const EPIPHANY_SIGNED_RUNTIME_HEALTH_TYPE: &str = "epiphany.idunn_signed_runtime_health";
+const EPIPHANY_SIGNED_RUNTIME_HEALTH_SCHEMA_VERSION: &str =
+    "epiphany.idunn_signed_runtime_health.v0";
+const EPIPHANY_HEALTH_CONTRACT: &str = "epiphany.cultnet-rudp-runtime-health";
+const EPIPHANY_HEALTH_SOURCE_RUNTIME: &str = "epiphany-daemon-supervisor";
+const EPIPHANY_ADMISSION_MAX_AGE_SECONDS: u64 = 180;
+const HOST_IDENTITY_TYPE: &str = "epiphany.host_identity_trust_anchor.v0";
+const HOST_IDENTITY_KEY: &str = "host-incarnation-public";
+const HOST_SIGNATURE_DOMAIN: &[u8] = b"epiphany.host-incarnation.signature.v0\0";
+const HOST_IDENTITY_DOMAIN: &[u8] = b"epiphany.host-incarnation.identity.v0\0";
 static RELEASE_AUTHORITY_SNAPSHOT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct IdunnDaemonHealthWireV1 {
+    daemon_id: String,
+    state: String,
+    detail: String,
+    observed_at: String,
+    health_contract: String,
+    publication_source: String,
+    transport: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct EpiphanySignedRuntimeHealthWire {
+    schema_version: String,
+    health: IdunnDaemonHealthWireV1,
+    source_runtime_id: String,
+    release_id: String,
+    release_witness_sha256: String,
+    source_commit: String,
+    deployment_request_id: String,
+    publisher_incarnation_id: String,
+    publisher_sequence: u64,
+    publisher_process_id: u32,
+    publisher_process_creation_token: u64,
+    publisher_process_created_at: String,
+    publisher_executable_path: String,
+    signer_identity_id: String,
+    signature_algorithm: String,
+    signature: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+struct EpiphanyHostIdentityWire {
+    schema_version: String,
+    identity_id: String,
+    public_key: Vec<u8>,
+    assurance: String,
+    identity_created_at: String,
+    source_identity_record_sha256: String,
+}
 
 #[derive(Clone, Debug)]
 struct DaemonTarget {
@@ -404,6 +456,7 @@ struct CommonOptions {
     release_authority_store_path: Option<PathBuf>,
     operator_alarm_command: Option<String>,
     rudp_health_bind: Option<SocketAddr>,
+    trusted_epiphany_health_identity_store: Option<PathBuf>,
     execute: bool,
     command_timeout_seconds: u64,
 }
@@ -414,6 +467,16 @@ enum Mode {
     Swarm(SwarmOptions),
     LifecycleCommand(LifecycleCommandOptions),
     ReleaseAuthorityValidation(ReleaseAuthorityValidationOptions),
+    HealthAdmissionValidation(HealthAdmissionValidationOptions),
+}
+
+#[derive(Clone, Debug)]
+struct HealthAdmissionValidationOptions {
+    daemon_id: String,
+    deployment_request_id: String,
+    release_id: String,
+    release_witness_sha256: String,
+    source_commit: String,
 }
 
 #[derive(Clone, Debug)]
@@ -473,7 +536,77 @@ fn main() -> Result<()> {
         Mode::ReleaseAuthorityValidation(validation) => {
             validate_release_authority_at_privileged_boundary(validation)
         }
+        Mode::HealthAdmissionValidation(validation) => {
+            validate_health_admission(validation, &options.common)
+        }
     }
+}
+
+fn validate_health_admission(
+    expected: &HealthAdmissionValidationOptions,
+    options: &CommonOptions,
+) -> Result<()> {
+    validate_health_admission_at(expected, options, &timestamp()?)
+}
+
+fn validate_health_admission_at(
+    expected: &HealthAdmissionValidationOptions,
+    options: &CommonOptions,
+    now: &str,
+) -> Result<()> {
+    let lock = Arc::new(Mutex::new(()));
+    let admission = with_store_node(options, &lock, |node| {
+        let admission = node
+            .get::<IdunnSignedHealthAdmissionRecord>(&expected.daemon_id)?
+            .ok_or_else(|| {
+                anyhow!(
+                    "Idunn has no signed health admission for {}",
+                    expected.daemon_id
+                )
+            })?;
+        validate_admission_against_current_request(node, &admission)?;
+        let current_health = node
+            .get::<IdunnDaemonHealthRecord>(&expected.daemon_id)?
+            .ok_or_else(|| anyhow!("Idunn has no current health projection for admission"))?;
+        if current_health.state != admission.state
+            || current_health.observed_at != admission.observed_at
+            || current_health.health_contract != admission.health_contract
+            || current_health.publication_source != "daemon-published"
+            || current_health.transport != CULTNET_RUDP_PROTOCOL_ID
+        {
+            return Err(anyhow!(
+                "signed health admission is not the current daemon health observation"
+            ));
+        }
+        Ok(admission)
+    })?;
+    validate_admission_fresh_at(&admission, now, EPIPHANY_ADMISSION_MAX_AGE_SECONDS)?;
+    if admission.state != "active"
+        || admission.deployment_request_id != expected.deployment_request_id
+        || admission.release_id != expected.release_id
+        || admission.release_witness_sha256 != expected.release_witness_sha256
+        || admission.source_commit != expected.source_commit
+        || admission.publisher_incarnation_id.is_empty()
+        || admission.publisher_sequence == 0
+        || admission.signed_health_sha256.is_empty()
+        || admission.signer_identity_id.is_empty()
+    {
+        return Err(anyhow!(
+            "Idunn admitted health does not prove the exact active candidate"
+        ));
+    }
+    println!(
+        "validated signed Idunn health admission daemon={} state={} releaseId={} witnessSha256={} sourceCommit={} signedHealthSha256={} publisherIncarnation={} publisherSequence={}",
+        admission.daemon_id,
+        admission.state,
+        admission.release_id,
+        admission.release_witness_sha256,
+        admission.source_commit,
+        admission.signed_health_sha256,
+        admission.publisher_incarnation_id,
+        admission.publisher_sequence,
+    );
+    Ok(())
 }
 
 fn validate_release_authority_at_privileged_boundary(
@@ -678,9 +811,6 @@ fn run_target_cycle(
         node.put(&desired.daemon_id, &desired)?;
         node.put(&health_key, &health)?;
         node.put(&plan.decision.decision_id, &plan.decision)?;
-        if let Some(request) = &plan.deployment_request {
-            node.put(&request.request_id, request)?;
-        }
         if let Some(request) = &plan.restart_request {
             node.put(&request.request_id, request)?;
         }
@@ -689,6 +819,10 @@ fn run_target_cycle(
         }
         Ok(())
     })?;
+
+    if let Some(request) = &plan.deployment_request {
+        persist_current_deployment_request(options, store_lock, request)?;
+    }
 
     if let Some(request) = &plan.deployment_request {
         if options.execute {
@@ -959,9 +1093,9 @@ fn process_lifecycle_command(
                 running.state = "running".to_string();
                 running.claimed_at = claimed_at.clone();
                 node.put(&running.command_id, &running)?;
-                node.put(&request.request_id, &request)?;
                 Ok(())
             })?;
+            persist_current_deployment_request(options, store_lock, &request)?;
             let result = if options.execute {
                 run_deployment(&request, &claimed_at, options, store_lock)
             } else {
@@ -1041,6 +1175,71 @@ where
         },
     )?;
     write(&mut node)
+}
+
+fn persist_current_deployment_request(
+    options: &CommonOptions,
+    store_lock: &Arc<Mutex<()>>,
+    request: &IdunnDeploymentRequestRecord,
+) -> Result<IdunnCurrentDeploymentRequestRecord> {
+    for _ in 0..8 {
+        let (current_head, current_head_envelope, current_request_envelope) =
+            with_store_node(options, store_lock, |node| {
+                Ok((
+                    node.get::<IdunnCurrentDeploymentRequestRecord>(&request.daemon_id)?,
+                    node.cache()
+                        .get_envelope::<IdunnCurrentDeploymentRequestRecord>(&request.daemon_id)?,
+                    node.cache()
+                        .get_envelope::<IdunnDeploymentRequestRecord>(&request.request_id)?,
+                ))
+            })?;
+        if let Some(existing) = current_request_envelope.as_ref() {
+            let decoded: IdunnDeploymentRequestRecord = rmp_serde::from_slice(&existing.payload)?;
+            if decoded != *request {
+                return Err(anyhow!("deployment request identity collision"));
+            }
+            if let Some(head) = current_head.as_ref()
+                && head.request_id == request.request_id
+            {
+                return Ok(head.clone());
+            }
+            return Err(anyhow!(
+                "existing deployment request is not the current authority head"
+            ));
+        }
+        let head = IdunnCurrentDeploymentRequestRecord {
+            daemon_id: request.daemon_id.clone(),
+            request_id: request.request_id.clone(),
+            sequence: current_head
+                .as_ref()
+                .map_or(1, |head| head.sequence.saturating_add(1)),
+            updated_at: request.requested_at.clone(),
+        };
+        let expected = [
+            CultCacheExpectedEnvelope {
+                key: request.daemon_id.clone(),
+                r#type: IdunnCurrentDeploymentRequestRecord::TYPE.into(),
+                current: current_head_envelope,
+            },
+            CultCacheExpectedEnvelope {
+                key: request.request_id.clone(),
+                r#type: IdunnDeploymentRequestRecord::TYPE.into(),
+                current: None,
+            },
+        ];
+        if SingleFileMessagePackBackingStore::new(&options.store_path).compare_exchange(
+            &expected,
+            &[
+                typed_envelope(&request.request_id, request, &request.requested_at)?,
+                typed_envelope(&head.daemon_id, &head, &request.requested_at)?,
+            ],
+        )? {
+            return Ok(head);
+        }
+    }
+    Err(anyhow!(
+        "deployment request head lost repeated cross-process contention"
+    ))
 }
 
 fn release_authority_id(
@@ -1739,32 +1938,23 @@ fn run_rudp_health_ingress_loop(
                                     continue;
                                 }
                             };
-                            match health_from_rudp_message(&message) {
-                                Ok(mut health) => {
-                                    health.publication_source = "daemon-published".to_string();
-                                    health.transport = CULTNET_RUDP_PROTOCOL_ID.to_string();
-                                    if let Err(error) =
-                                        with_store_node(&options, &store_lock, |node| {
-                                            node.put(&health.daemon_id, &health)?;
-                                            Ok(())
-                                        })
-                                    {
-                                        eprintln!(
-                                            "Idunn RUDP health ingress failed to persist {} from {}: {}",
-                                            health.daemon_id, source, error
-                                        );
-                                    } else {
-                                        let bounded_detail =
-                                            health.detail.replace('\r', " ").replace('\n', " ");
-                                        println!(
-                                            "Idunn accepted RUDP health for {} from {} over {} state={} detail={}",
-                                            health.daemon_id,
-                                            source,
-                                            frame.channel_id,
-                                            health.state,
-                                            bounded_detail
-                                        );
-                                    }
+                            match admit_health_from_rudp_message(
+                                &message,
+                                &options,
+                                &store_lock,
+                                &observed_at,
+                            ) {
+                                Ok(health) => {
+                                    let bounded_detail =
+                                        health.detail.replace('\r', " ").replace('\n', " ");
+                                    println!(
+                                        "Idunn accepted RUDP health for {} from {} over {} state={} detail={}",
+                                        health.daemon_id,
+                                        source,
+                                        frame.channel_id,
+                                        health.state,
+                                        bounded_detail
+                                    );
                                 }
                                 Err(error) => {
                                     if trace_ingress {
@@ -1911,20 +2101,133 @@ fn handle_rudp_health_datagram(
     Ok(frames)
 }
 
-fn health_from_rudp_message(message: &CultNetMessage) -> Result<IdunnDaemonHealthRecord> {
+fn admit_health_from_rudp_message(
+    message: &CultNetMessage,
+    options: &CommonOptions,
+    store_lock: &Arc<Mutex<()>>,
+    admitted_at: &str,
+) -> Result<IdunnDaemonHealthRecord> {
+    let (health, admission) = decode_health_from_rudp_message(message, options, admitted_at)?;
+    let Some(admission) = admission else {
+        with_store_node(options, store_lock, |node| {
+            node.put(&health.daemon_id, &health)?;
+            Ok(())
+        })?;
+        return Ok(health);
+    };
+    for _ in 0..8 {
+        let (expected_health, expected_admission, expected_head, expected_request) =
+            with_store_node(options, store_lock, |node| {
+                validate_admission_against_current_request(node, &admission)?;
+                if let Some(existing) =
+                    node.get::<IdunnSignedHealthAdmissionRecord>(&admission.daemon_id)?
+                    && !signed_health_advances(&existing, &admission)?
+                {
+                    return Err(anyhow!("signed Epiphany health is replayed or regressed"));
+                }
+                Ok((
+                    node.cache()
+                        .get_envelope::<IdunnDaemonHealthRecord>(&health.daemon_id)?,
+                    node.cache()
+                        .get_envelope::<IdunnSignedHealthAdmissionRecord>(&admission.daemon_id)?,
+                    node.cache()
+                        .get_envelope::<IdunnCurrentDeploymentRequestRecord>(
+                            &admission.daemon_id,
+                        )?,
+                    node.cache().get_envelope::<IdunnDeploymentRequestRecord>(
+                        &admission.deployment_request_id,
+                    )?,
+                ))
+            })?;
+        let health_envelope = typed_envelope(&health.daemon_id, &health, admitted_at)?;
+        let admission_envelope = typed_envelope(&admission.daemon_id, &admission, admitted_at)?;
+        let expected = [
+            CultCacheExpectedEnvelope {
+                key: health.daemon_id.clone(),
+                r#type: IdunnDaemonHealthRecord::TYPE.into(),
+                current: expected_health,
+            },
+            CultCacheExpectedEnvelope {
+                key: admission.daemon_id.clone(),
+                r#type: IdunnSignedHealthAdmissionRecord::TYPE.into(),
+                current: expected_admission,
+            },
+            CultCacheExpectedEnvelope {
+                key: admission.daemon_id.clone(),
+                r#type: IdunnCurrentDeploymentRequestRecord::TYPE.into(),
+                current: expected_head,
+            },
+            CultCacheExpectedEnvelope {
+                key: admission.deployment_request_id.clone(),
+                r#type: IdunnDeploymentRequestRecord::TYPE.into(),
+                current: expected_request,
+            },
+        ];
+        if SingleFileMessagePackBackingStore::new(&options.store_path)
+            .compare_exchange(&expected, &[health_envelope, admission_envelope])?
+        {
+            return Ok(health);
+        }
+    }
+    Err(anyhow!(
+        "signed Epiphany health admission lost repeated cross-process contention"
+    ))
+}
+
+fn typed_envelope<T: DatabaseEntry>(
+    key: &str,
+    value: &T,
+    stored_at: &str,
+) -> Result<CultCacheEnvelope> {
+    Ok(CultCacheEnvelope {
+        key: key.to_string(),
+        r#type: T::TYPE.to_string(),
+        payload: rmp_serde::to_vec(value)?,
+        stored_at: stored_at.to_string(),
+        schema_id: Some(T::TYPE.to_string()),
+    })
+}
+
+#[cfg(test)]
+fn health_from_rudp_message(
+    message: &CultNetMessage,
+    options: &CommonOptions,
+) -> Result<IdunnDaemonHealthRecord> {
+    Ok(decode_health_from_rudp_message(message, options, &timestamp()?)?.0)
+}
+
+fn decode_health_from_rudp_message(
+    message: &CultNetMessage,
+    options: &CommonOptions,
+    admitted_at: &str,
+) -> Result<(
+    IdunnDaemonHealthRecord,
+    Option<IdunnSignedHealthAdmissionRecord>,
+)> {
     let CultNetMessage::DocumentPutRaw { document, .. } = message else {
         return Err(anyhow!("expected cultnet.document_put_raw.v0"));
     };
-    if document.schema_id != "idunn.daemon_health" {
-        return Err(anyhow!(
-            "expected idunn.daemon_health schema, received {}",
-            document.schema_id
-        ));
-    }
     if document.payload_encoding != CultNetRawPayloadEncoding::Messagepack {
         return Err(anyhow!("expected MessagePack raw payload encoding"));
     }
-    let health: IdunnDaemonHealthRecord = rmp_serde::from_slice(&document.payload)?;
+    if document.schema_id == EPIPHANY_SIGNED_RUNTIME_HEALTH_TYPE {
+        let (health, admission) =
+            authenticate_epiphany_signed_health(document, options, admitted_at)?;
+        return Ok((health, Some(admission)));
+    }
+    if document.schema_id != "idunn.daemon_health" {
+        return Err(anyhow!(
+            "expected signed Epiphany or idunn.daemon_health schema, received {}",
+            document.schema_id
+        ));
+    }
+    let wire: IdunnDaemonHealthWireV1 = rmp_serde::from_slice(&document.payload)?;
+    if wire.health_contract == EPIPHANY_HEALTH_CONTRACT {
+        return Err(anyhow!(
+            "Epiphany health requires its signed runtime-health schema"
+        ));
+    }
+    let health = legacy_health_record(wire);
     if document.record_key != health.daemon_id {
         return Err(anyhow!(
             "record key {} does not match health daemon_id {}",
@@ -1932,7 +2235,259 @@ fn health_from_rudp_message(message: &CultNetMessage) -> Result<IdunnDaemonHealt
             health.daemon_id
         ));
     }
-    Ok(health)
+    Ok((health, None))
+}
+
+fn authenticate_epiphany_signed_health(
+    document: &cultnet_rs::CultNetRawDocumentRecord,
+    options: &CommonOptions,
+    admitted_at: &str,
+) -> Result<(IdunnDaemonHealthRecord, IdunnSignedHealthAdmissionRecord)> {
+    let signed: EpiphanySignedRuntimeHealthWire = rmp_serde::from_slice(&document.payload)
+        .context("decoding signed Epiphany runtime health")?;
+    validate_epiphany_signed_health_shape(&signed)?;
+    if document.record_key != signed.health.daemon_id
+        || document.source_runtime_id.as_deref() != Some(EPIPHANY_HEALTH_SOURCE_RUNTIME)
+        || document.source_role.as_deref() != Some("daemon-health-publisher")
+    {
+        return Err(anyhow!(
+            "signed Epiphany health transport identity is invalid"
+        ));
+    }
+    let identity_store = options
+        .trusted_epiphany_health_identity_store
+        .as_deref()
+        .ok_or_else(|| anyhow!("signed Epiphany health has no configured trust anchor"))?;
+    let identity = load_epiphany_health_identity(identity_store)?;
+    if signed.signer_identity_id != identity.identity_id {
+        return Err(anyhow!(
+            "signed Epiphany health signer is not the configured host identity"
+        ));
+    }
+    let key_bytes: [u8; 32] = identity
+        .public_key
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow!("Epiphany health identity public key length is invalid"))?;
+    let signature_bytes: [u8; 64] = signed
+        .signature
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow!("signed Epiphany health signature length is invalid"))?;
+    let mut unsigned = signed.clone();
+    unsigned.signature.clear();
+    let statement = rmp_serde::to_vec_named(&unsigned)?;
+    VerifyingKey::from_bytes(&key_bytes)?
+        .verify(
+            &host_signature_message(EPIPHANY_SIGNED_RUNTIME_HEALTH_TYPE, &statement),
+            &Signature::from_bytes(&signature_bytes),
+        )
+        .context("signed Epiphany health signature is invalid")?;
+    let digest = format!("sha256-{:x}", Sha256::digest(&document.payload));
+    let health = IdunnDaemonHealthRecord {
+        daemon_id: signed.health.daemon_id,
+        state: signed.health.state,
+        detail: signed.health.detail,
+        observed_at: signed.health.observed_at,
+        health_contract: signed.health.health_contract,
+        publication_source: "daemon-published".into(),
+        transport: CULTNET_RUDP_PROTOCOL_ID.into(),
+    };
+    let admission = IdunnSignedHealthAdmissionRecord {
+        daemon_id: health.daemon_id.clone(),
+        state: health.state.clone(),
+        observed_at: health.observed_at.clone(),
+        admitted_at: admitted_at.to_string(),
+        health_contract: health.health_contract.clone(),
+        deployment_request_id: signed.deployment_request_id,
+        release_id: signed.release_id,
+        release_witness_sha256: signed.release_witness_sha256,
+        source_commit: signed.source_commit,
+        publisher_incarnation_id: signed.publisher_incarnation_id,
+        publisher_sequence: signed.publisher_sequence,
+        publisher_process_created_at: signed.publisher_process_created_at,
+        signer_identity_id: signed.signer_identity_id,
+        signed_health_sha256: digest,
+    };
+    Ok((health, admission))
+}
+
+fn validate_epiphany_signed_health_shape(signed: &EpiphanySignedRuntimeHealthWire) -> Result<()> {
+    if signed.schema_version != EPIPHANY_SIGNED_RUNTIME_HEALTH_SCHEMA_VERSION
+        || signed.health.daemon_id != "yggdrasil-epiphany"
+        || signed.health.health_contract != EPIPHANY_HEALTH_CONTRACT
+        || signed.health.publication_source != "daemon-published"
+        || signed.health.transport != CULTNET_RUDP_PROTOCOL_ID
+        || !matches!(
+            signed.health.state.as_str(),
+            "active" | "warming" | "degraded" | "failed"
+        )
+        || signed.source_runtime_id != EPIPHANY_HEALTH_SOURCE_RUNTIME
+        || signed.deployment_request_id.trim().is_empty()
+        || signed.release_id.trim().is_empty()
+        || signed.publisher_sequence == 0
+        || signed.publisher_process_id == 0
+        || signed.publisher_process_creation_token == 0
+        || signed.publisher_executable_path.trim().is_empty()
+        || signed.signature_algorithm != "ed25519"
+        || signed.signature.len() != 64
+    {
+        return Err(anyhow!("signed Epiphany health shape is invalid"));
+    }
+    uuid::Uuid::parse_str(&signed.publisher_incarnation_id)
+        .context("signed health publisher incarnation must be UUID")?;
+    chrono::DateTime::parse_from_rfc3339(&signed.health.observed_at)?;
+    chrono::DateTime::parse_from_rfc3339(&signed.publisher_process_created_at)?;
+    validate_sha256(&signed.release_witness_sha256, "release witness")?;
+    if signed.source_commit.len() != 40
+        || !signed
+            .source_commit
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(anyhow!("signed Epiphany health source commit is invalid"));
+    }
+    Ok(())
+}
+
+fn load_epiphany_health_identity(path: &std::path::Path) -> Result<EpiphanyHostIdentityWire> {
+    let entries = SingleFileMessagePackBackingStore::new(path).pull_all()?;
+    let envelope = entries
+        .iter()
+        .find(|entry| entry.r#type == HOST_IDENTITY_TYPE && entry.key == HOST_IDENTITY_KEY)
+        .ok_or_else(|| anyhow!("configured Epiphany health identity is absent"))?;
+    let identity: EpiphanyHostIdentityWire = rmp_serde::from_slice(&envelope.payload)?;
+    let expected_id = format!(
+        "{:x}",
+        Sha256::digest([HOST_IDENTITY_DOMAIN, identity.public_key.as_slice()].concat())
+    );
+    if identity.schema_version != HOST_IDENTITY_TYPE
+        || identity.identity_id != expected_id
+        || identity.public_key.len() != 32
+        || identity.assurance.trim().is_empty()
+        || chrono::DateTime::parse_from_rfc3339(&identity.identity_created_at).is_err()
+        || validate_sha256(&identity.source_identity_record_sha256, "identity record").is_err()
+    {
+        return Err(anyhow!("configured Epiphany health identity is invalid"));
+    }
+    Ok(identity)
+}
+
+fn validate_sha256(value: &str, label: &str) -> Result<()> {
+    let digest = value.strip_prefix("sha256-").unwrap_or(value);
+    if digest.len() != 64
+        || !digest
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(anyhow!("signed Epiphany health {label} is invalid"));
+    }
+    Ok(())
+}
+
+fn host_signature_message(purpose: &str, payload: &[u8]) -> Vec<u8> {
+    let mut message =
+        Vec::with_capacity(HOST_SIGNATURE_DOMAIN.len() + purpose.len() + payload.len() + 16);
+    message.extend_from_slice(HOST_SIGNATURE_DOMAIN);
+    message.extend_from_slice(&(purpose.len() as u64).to_be_bytes());
+    message.extend_from_slice(purpose.as_bytes());
+    message.extend_from_slice(&(payload.len() as u64).to_be_bytes());
+    message.extend_from_slice(payload);
+    message
+}
+
+fn signed_health_advances(
+    existing: &IdunnSignedHealthAdmissionRecord,
+    candidate: &IdunnSignedHealthAdmissionRecord,
+) -> Result<bool> {
+    if existing.signer_identity_id != candidate.signer_identity_id {
+        return Ok(false);
+    }
+    if existing.publisher_incarnation_id == candidate.publisher_incarnation_id {
+        return Ok(candidate.publisher_sequence > existing.publisher_sequence);
+    }
+    let existing_created =
+        chrono::DateTime::parse_from_rfc3339(&existing.publisher_process_created_at)?;
+    let candidate_created =
+        chrono::DateTime::parse_from_rfc3339(&candidate.publisher_process_created_at)?;
+    Ok(candidate_created > existing_created)
+}
+
+fn validate_admission_against_current_request(
+    node: &mut CultMeshNode,
+    admission: &IdunnSignedHealthAdmissionRecord,
+) -> Result<()> {
+    let request = node
+        .get::<IdunnDeploymentRequestRecord>(&admission.deployment_request_id)?
+        .ok_or_else(|| anyhow!("signed health names an unknown deployment request"))?;
+    if request.daemon_id != admission.daemon_id
+        || request.source_revision != admission.source_commit
+        || !request.requires_bifrost_authority
+        || request.repository_full_name != "GameCult/Epiphany"
+        || request.upstream_ref != "refs/heads/main"
+        || request.release_authority_id.trim().is_empty()
+        || request.release_authority_envelope_sha256.trim().is_empty()
+    {
+        return Err(anyhow!(
+            "signed health does not match an exact Bifrost-authorized Epiphany deployment request"
+        ));
+    }
+    let request_time = parse_timestamp_seconds(&request.requested_at)
+        .ok_or_else(|| anyhow!("deployment request timestamp is invalid"))?;
+    let observed_time = parse_timestamp_seconds(&admission.observed_at)
+        .ok_or_else(|| anyhow!("signed health observation timestamp is invalid"))?;
+    let admitted_time = parse_timestamp_seconds(&admission.admitted_at)
+        .ok_or_else(|| anyhow!("signed health admission timestamp is invalid"))?;
+    if observed_time < request_time || admitted_time < request_time {
+        return Err(anyhow!(
+            "signed health predates the deployment request it claims"
+        ));
+    }
+    let current = node
+        .get::<IdunnCurrentDeploymentRequestRecord>(&admission.daemon_id)?
+        .ok_or_else(|| anyhow!("Idunn has no current deployment request authority head"))?;
+    if current.request_id != request.request_id || current.sequence == 0 {
+        return Err(anyhow!(
+            "signed health is bound to a superseded deployment request"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_admission_fresh_at(
+    admission: &IdunnSignedHealthAdmissionRecord,
+    now: &str,
+    max_age_seconds: u64,
+) -> Result<()> {
+    let observed = parse_timestamp_seconds(&admission.observed_at)
+        .ok_or_else(|| anyhow!("signed health observation timestamp is invalid"))?;
+    let admitted = parse_timestamp_seconds(&admission.admitted_at)
+        .ok_or_else(|| anyhow!("signed health admission timestamp is invalid"))?;
+    let now =
+        parse_timestamp_seconds(now).ok_or_else(|| anyhow!("Idunn admission clock is invalid"))?;
+    if observed > admitted || admitted > now {
+        return Err(anyhow!(
+            "signed health admission carries a future or causally inverted timestamp"
+        ));
+    }
+    if now.saturating_sub(observed) > max_age_seconds
+        || now.saturating_sub(admitted) > max_age_seconds
+    {
+        return Err(anyhow!("signed health admission is stale"));
+    }
+    Ok(())
+}
+
+fn legacy_health_record(wire: IdunnDaemonHealthWireV1) -> IdunnDaemonHealthRecord {
+    IdunnDaemonHealthRecord {
+        daemon_id: wire.daemon_id,
+        state: wire.state,
+        detail: wire.detail,
+        observed_at: wire.observed_at,
+        health_contract: wire.health_contract,
+        publication_source: "daemon-published".into(),
+        transport: CULTNET_RUDP_PROTOCOL_ID.into(),
+    }
 }
 
 fn publish_surgery_plans(
@@ -3254,6 +3809,9 @@ impl Options {
         let release_authority_validation = args
             .first()
             .is_some_and(|arg| arg == "validate-release-authority");
+        let health_admission_validation = args
+            .first()
+            .is_some_and(|arg| arg == "validate-health-admission");
         let lifecycle_action = args.first().and_then(|arg| match arg.as_str() {
             "restart" | "request-restart" => Some(LifecycleAction::Restart),
             "redeploy" | "request-redeploy" | "deploy" | "request-deploy" => {
@@ -3265,6 +3823,7 @@ impl Options {
         let mut release_authority_store_path = None;
         let mut operator_alarm_command = None;
         let mut rudp_health_bind = None;
+        let mut trusted_epiphany_health_identity_store = None;
         let mut execute = false;
         let mut command_timeout_seconds = 30;
         let mut daemon_id = None;
@@ -3285,9 +3844,13 @@ impl Options {
         let mut validation_source_revision = None;
         let mut validation_authority_id = None;
         let mut validation_envelope_sha256 = None;
+        let mut validation_release_id = None;
+        let mut validation_release_witness_sha256 = None;
+        let mut validation_deployment_request_id = None;
 
         let mut args = args.into_iter().peekable();
-        if lifecycle_action.is_some() || release_authority_validation {
+        if lifecycle_action.is_some() || release_authority_validation || health_admission_validation
+        {
             let _ = args.next();
         }
         while let Some(arg) = args.next() {
@@ -3315,6 +3878,17 @@ impl Options {
                 "--release-authority-sha256" => {
                     validation_envelope_sha256 =
                         Some(take_value(&mut args, "--release-authority-sha256")?)
+                }
+                "--release-id" => {
+                    validation_release_id = Some(take_value(&mut args, "--release-id")?)
+                }
+                "--release-witness-sha256" => {
+                    validation_release_witness_sha256 =
+                        Some(take_value(&mut args, "--release-witness-sha256")?)
+                }
+                "--deployment-request-id" => {
+                    validation_deployment_request_id =
+                        Some(take_value(&mut args, "--deployment-request-id")?)
                 }
                 "--daemon" => daemon_id = Some(take_value(&mut args, "--daemon")?),
                 "--verse" => verse_id = take_value(&mut args, "--verse")?,
@@ -3347,6 +3921,12 @@ impl Options {
                                 .with_context(|| "--rudp-health-bind must be a socket address")?,
                         )
                     };
+                }
+                "--trusted-epiphany-health-identity-store" => {
+                    trusted_epiphany_health_identity_store = Some(PathBuf::from(take_value(
+                        &mut args,
+                        "--trusted-epiphany-health-identity-store",
+                    )?));
                 }
                 "--disabled" => enabled = false,
                 "--execute" => execute = true,
@@ -3389,6 +3969,7 @@ impl Options {
             release_authority_store_path,
             operator_alarm_command,
             rudp_health_bind,
+            trusted_epiphany_health_identity_store,
             execute,
             command_timeout_seconds,
         };
@@ -3420,11 +4001,40 @@ impl Options {
             });
         }
 
+        if health_admission_validation {
+            return Ok(Self {
+                common,
+                mode: Mode::HealthAdmissionValidation(HealthAdmissionValidationOptions {
+                    daemon_id: daemon_id
+                        .ok_or_else(|| anyhow!("health admission validation requires --daemon"))?,
+                    deployment_request_id: validation_deployment_request_id.ok_or_else(|| {
+                        anyhow!("health admission validation requires --deployment-request-id")
+                    })?,
+                    release_id: validation_release_id.ok_or_else(|| {
+                        anyhow!("health admission validation requires --release-id")
+                    })?,
+                    release_witness_sha256: validation_release_witness_sha256.ok_or_else(|| {
+                        anyhow!("health admission validation requires --release-witness-sha256")
+                    })?,
+                    source_commit: validation_source_revision.ok_or_else(|| {
+                        anyhow!("health admission validation requires --source-revision")
+                    })?,
+                }),
+            });
+        }
+
         if swarm_profile.as_deref() == Some("yggdrasil-local")
             && common.release_authority_store_path.is_none()
         {
             return Err(anyhow!(
                 "--release-authority-store is required for yggdrasil-local release targets"
+            ));
+        }
+        if swarm_profile.as_deref() == Some("yggdrasil-local")
+            && common.trusted_epiphany_health_identity_store.is_none()
+        {
+            return Err(anyhow!(
+                "--trusted-epiphany-health-identity-store is required for yggdrasil-local"
             ));
         }
 
@@ -3989,13 +4599,14 @@ fn unix_epoch_millis() -> Result<u64> {
 }
 
 fn help_text() -> &'static str {
-    "Usage: idunn --daemon <id> [--name <name>] [--verse <verse>] [--store <path>] [--release-authority-store <path>] [--deploy-command <command>] [--restart-command <command>] [--operator-alarm-command <command>] [--rudp-health-bind <addr|none>] [--execute] [--interval-seconds <seconds>] [--command-timeout-seconds <seconds>] [--repo-root <path>] [--swarm-profile <profile>]\n       idunn restart --daemon <id> [--store <path>] [--requested-by <who>] [--detail <text>]\n       idunn redeploy --daemon <id> [--store <path>] [--requested-by <who>] [--detail <text>]\n\nIdunn supervises daemon-published CultNet/RUDP health with --daemon, or a built-in swarm supervisor with --swarm-profile starfire-local or yggdrasil-local. Yggdrasil release targets require an explicit Bifrost CultCache path via --release-authority-store. RUDP health ingress is disabled unless --rudp-health-bind is supplied. The restart/redeploy verbs publish typed idunn.lifecycle_command.v1 records; the running supervisor claims them and executes only through its configured command boundary."
+    "Usage: idunn --daemon <id> [--name <name>] [--verse <verse>] [--store <path>] [--release-authority-store <path>] [--deploy-command <command>] [--restart-command <command>] [--operator-alarm-command <command>] [--rudp-health-bind <addr|none>] [--trusted-epiphany-health-identity-store <path>] [--execute] [--interval-seconds <seconds>] [--command-timeout-seconds <seconds>] [--repo-root <path>] [--swarm-profile <profile>]\n       idunn restart --daemon <id> [--store <path>] [--requested-by <who>] [--detail <text>]\n       idunn redeploy --daemon <id> [--store <path>] [--requested-by <who>] [--detail <text>]\n       idunn validate-health-admission --store <path> --daemon <id> --deployment-request-id <id> --release-id <id> --release-witness-sha256 <sha256> --source-revision <commit>\n\nIdunn supervises daemon-published CultNet/RUDP health with --daemon, or a built-in swarm supervisor with --swarm-profile starfire-local or yggdrasil-local. Yggdrasil release targets require an explicit Bifrost CultCache path via --release-authority-store. Epiphany health additionally requires a pinned host identity and a signed release-bound runtime-health document. RUDP health ingress is disabled unless --rudp-health-bind is supplied. The restart/redeploy verbs publish typed idunn.lifecycle_command.v1 records; the running supervisor claims them and executes only through its configured command boundary."
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use cultnet_rs::{CultNetRawDocumentRecord, CultNetRawPayloadEncoding};
+    use ed25519_dalek::{Signer, SigningKey};
     use std::cell::RefCell;
 
     const EPIPHANY_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
@@ -4240,6 +4851,7 @@ mod tests {
             release_authority_store_path: Some(path.clone()),
             operator_alarm_command: None,
             rudp_health_bind: None,
+            trusted_epiphany_health_identity_store: None,
             execute: true,
             command_timeout_seconds: 1,
         };
@@ -5173,7 +5785,10 @@ mod tests {
         assert!(unit.contains(
             "--release-authority-store /srv/bifrost/state/repository-release-authority.cc"
         ));
-        assert!(unit.contains("--command-timeout-seconds 3600"));
+        assert!(unit.contains("--command-timeout-seconds 21600"));
+        assert!(unit.contains(
+            "--trusted-epiphany-health-identity-store /etc/gamecult/idunn/epiphany-health-identity.ccmp"
+        ));
         assert!(actuator.contains("deploy:epiphany|restart:epiphany"));
         assert!(actuator.contains("/usr/local/bin/idunn validate-release-authority"));
         assert!(actuator.contains("epiphany) target_requires_bifrost_authority=true"));
@@ -5469,6 +6084,7 @@ mod tests {
             release_authority_store_path: None,
             operator_alarm_command: None,
             rudp_health_bind: None,
+            trusted_epiphany_health_identity_store: None,
             execute: false,
             command_timeout_seconds: 1,
         };
@@ -5538,6 +6154,7 @@ mod tests {
             release_authority_store_path: None,
             operator_alarm_command: None,
             rudp_health_bind: None,
+            trusted_epiphany_health_identity_store: None,
             execute: false,
             command_timeout_seconds: 1,
         };
@@ -6057,7 +6674,16 @@ mod tests {
                 record_key: health.daemon_id.clone(),
                 stored_at: "2026-06-15T00:00:00Z".to_string(),
                 payload_encoding: CultNetRawPayloadEncoding::Messagepack,
-                payload: rmp_serde::to_vec(&health).unwrap(),
+                payload: rmp_serde::to_vec(&IdunnDaemonHealthWireV1 {
+                    daemon_id: health.daemon_id.clone(),
+                    state: health.state.clone(),
+                    detail: health.detail.clone(),
+                    observed_at: health.observed_at.clone(),
+                    health_contract: health.health_contract.clone(),
+                    publication_source: health.publication_source.clone(),
+                    transport: health.transport.clone(),
+                })
+                .unwrap(),
                 source_runtime_id: Some("test-daemon".to_string()),
                 source_agent_id: None,
                 source_role: Some("daemon-health-publisher".to_string()),
@@ -6065,6 +6691,406 @@ mod tests {
             },
         };
 
-        assert_eq!(health_from_rudp_message(&message).unwrap(), health);
+        let options = CommonOptions {
+            store_path: PathBuf::from("unused.cc"),
+            release_authority_store_path: None,
+            operator_alarm_command: None,
+            rudp_health_bind: None,
+            trusted_epiphany_health_identity_store: None,
+            execute: false,
+            command_timeout_seconds: 1,
+        };
+        assert_eq!(
+            health_from_rudp_message(&message, &options).unwrap(),
+            health
+        );
+    }
+
+    fn signed_epiphany_health_fixture(
+        sequence: u64,
+    ) -> (CultNetMessage, CommonOptions, tempfile::TempDir) {
+        let root = tempfile::tempdir().unwrap();
+        let identity_path = root.path().join("host.ccmp");
+        let store_path = root.path().join("idunn.cc");
+        let key = SigningKey::from_bytes(&[23; 32]);
+        let public_key = key.verifying_key().to_bytes().to_vec();
+        let identity_id = format!(
+            "{:x}",
+            Sha256::digest([HOST_IDENTITY_DOMAIN, public_key.as_slice()].concat())
+        );
+        let identity = EpiphanyHostIdentityWire {
+            schema_version: HOST_IDENTITY_TYPE.into(),
+            identity_id: identity_id.clone(),
+            public_key,
+            assurance: "test".into(),
+            identity_created_at: "2026-07-16T00:00:00Z".into(),
+            source_identity_record_sha256: format!("sha256-{}", "c".repeat(64)),
+        };
+        let mut backing = SingleFileMessagePackBackingStore::new(&identity_path);
+        backing
+            .push(&CultCacheEnvelope {
+                key: HOST_IDENTITY_KEY.into(),
+                r#type: HOST_IDENTITY_TYPE.into(),
+                payload: rmp_serde::to_vec(&identity).unwrap(),
+                stored_at: identity.identity_created_at.clone(),
+                schema_id: Some(HOST_IDENTITY_TYPE.into()),
+            })
+            .unwrap();
+        let mut signed = EpiphanySignedRuntimeHealthWire {
+            schema_version: EPIPHANY_SIGNED_RUNTIME_HEALTH_SCHEMA_VERSION.into(),
+            health: IdunnDaemonHealthWireV1 {
+                daemon_id: "yggdrasil-epiphany".into(),
+                state: "warming".into(),
+                detail: "authenticated checkpoint progress".into(),
+                observed_at: "2026-07-16T00:01:00Z".into(),
+                health_contract: EPIPHANY_HEALTH_CONTRACT.into(),
+                publication_source: "daemon-published".into(),
+                transport: CULTNET_RUDP_PROTOCOL_ID.into(),
+            },
+            source_runtime_id: EPIPHANY_HEALTH_SOURCE_RUNTIME.into(),
+            release_id: "release-test".into(),
+            release_witness_sha256: format!("sha256-{}", "a".repeat(64)),
+            source_commit: "b".repeat(40),
+            deployment_request_id: "deploy:yggdrasil-epiphany:fixture".into(),
+            publisher_incarnation_id: "00000000-0000-4000-8000-000000000001".into(),
+            publisher_sequence: sequence,
+            publisher_process_id: 42,
+            publisher_process_creation_token: 7,
+            publisher_process_created_at: "2026-07-16T00:00:30Z".into(),
+            publisher_executable_path: "/srv/epiphany/app/current/epiphany-daemon-supervisor"
+                .into(),
+            signer_identity_id: identity_id,
+            signature_algorithm: "ed25519".into(),
+            signature: Vec::new(),
+        };
+        let statement = rmp_serde::to_vec_named(&signed).unwrap();
+        signed.signature = key
+            .sign(&host_signature_message(
+                EPIPHANY_SIGNED_RUNTIME_HEALTH_TYPE,
+                &statement,
+            ))
+            .to_bytes()
+            .to_vec();
+        let message = CultNetMessage::DocumentPutRaw {
+            message_id: format!("signed-health-{sequence}"),
+            document: CultNetRawDocumentRecord {
+                schema_id: EPIPHANY_SIGNED_RUNTIME_HEALTH_TYPE.into(),
+                record_key: signed.health.daemon_id.clone(),
+                stored_at: signed.health.observed_at.clone(),
+                payload_encoding: CultNetRawPayloadEncoding::Messagepack,
+                payload: rmp_serde::to_vec_named(&signed).unwrap(),
+                source_runtime_id: Some(EPIPHANY_HEALTH_SOURCE_RUNTIME.into()),
+                source_agent_id: None,
+                source_role: Some("daemon-health-publisher".into()),
+                tags: Some(vec![CULTNET_RUDP_PROTOCOL_ID.into()]),
+            },
+        };
+        let options = CommonOptions {
+            store_path,
+            release_authority_store_path: None,
+            operator_alarm_command: None,
+            rudp_health_bind: None,
+            trusted_epiphany_health_identity_store: Some(identity_path),
+            execute: false,
+            command_timeout_seconds: 1,
+        };
+        persist_current_deployment_request(
+            &options,
+            &Arc::new(Mutex::new(())),
+            &IdunnDeploymentRequestRecord {
+                request_id: "deploy:yggdrasil-epiphany:fixture".into(),
+                daemon_id: "yggdrasil-epiphany".into(),
+                command: "fixture".into(),
+                authority: "idunn-supervisor-command.manual".into(),
+                requested_at: "unix:1784160000".into(),
+                repository_full_name: "GameCult/Epiphany".into(),
+                upstream_ref: "refs/heads/main".into(),
+                source_revision: "b".repeat(40),
+                release_authority_id: "authority-fixture".into(),
+                release_authority_envelope_sha256: format!("sha256-{}", "d".repeat(64)),
+                requires_bifrost_authority: true,
+            },
+        )
+        .unwrap();
+        (message, options, root)
+    }
+
+    #[test]
+    fn signed_epiphany_health_requires_pinned_identity_and_advancing_sequence() {
+        let (message, options, _root) = signed_epiphany_health_fixture(1);
+        let lock = Arc::new(Mutex::new(()));
+        let admitted =
+            admit_health_from_rudp_message(&message, &options, &lock, "2026-07-16T00:01:01Z")
+                .unwrap();
+        assert_eq!(admitted.state, "warming");
+        validate_health_admission_at(
+            &HealthAdmissionValidationOptions {
+                daemon_id: "yggdrasil-epiphany".into(),
+                deployment_request_id: "deploy:yggdrasil-epiphany:fixture".into(),
+                release_id: "release-test".into(),
+                release_witness_sha256: format!("sha256-{}", "a".repeat(64)),
+                source_commit: "b".repeat(40),
+            },
+            &options,
+            "2026-07-16T00:01:02Z",
+        )
+        .unwrap_err();
+        let mut active_message = message.clone();
+        let CultNetMessage::DocumentPutRaw { document, .. } = &mut active_message else {
+            unreachable!()
+        };
+        let mut active: EpiphanySignedRuntimeHealthWire =
+            rmp_serde::from_slice(&document.payload).unwrap();
+        active.health.state = "active".into();
+        active.publisher_sequence = 2;
+        active.signature.clear();
+        let key = SigningKey::from_bytes(&[23; 32]);
+        let statement = rmp_serde::to_vec_named(&active).unwrap();
+        active.signature = key
+            .sign(&host_signature_message(
+                EPIPHANY_SIGNED_RUNTIME_HEALTH_TYPE,
+                &statement,
+            ))
+            .to_bytes()
+            .to_vec();
+        document.payload = rmp_serde::to_vec_named(&active).unwrap();
+        admit_health_from_rudp_message(&active_message, &options, &lock, "2026-07-16T00:01:02Z")
+            .unwrap();
+        validate_health_admission_at(
+            &HealthAdmissionValidationOptions {
+                daemon_id: "yggdrasil-epiphany".into(),
+                deployment_request_id: "deploy:yggdrasil-epiphany:fixture".into(),
+                release_id: "release-test".into(),
+                release_witness_sha256: format!("sha256-{}", "a".repeat(64)),
+                source_commit: "b".repeat(40),
+            },
+            &options,
+            "2026-07-16T00:01:03Z",
+        )
+        .unwrap();
+        assert!(
+            admit_health_from_rudp_message(&message, &options, &lock, "2026-07-16T00:01:03Z",)
+                .is_err()
+        );
+
+        let mut newer = with_store_node(&options, &lock, |node| {
+            node.get::<IdunnDeploymentRequestRecord>("deploy:yggdrasil-epiphany:fixture")?
+                .ok_or_else(|| anyhow!("fixture request missing"))
+        })
+        .unwrap();
+        newer.request_id = "deploy:yggdrasil-epiphany:aaa".into();
+        newer.requested_at = "unix:1784160000".into();
+        persist_current_deployment_request(&options, &lock, &newer).unwrap();
+        let stale_error = validate_health_admission_at(
+            &HealthAdmissionValidationOptions {
+                daemon_id: "yggdrasil-epiphany".into(),
+                deployment_request_id: "deploy:yggdrasil-epiphany:fixture".into(),
+                release_id: "release-test".into(),
+                release_witness_sha256: format!("sha256-{}", "a".repeat(64)),
+                source_commit: "b".repeat(40),
+            },
+            &options,
+            "2026-07-16T00:02:00Z",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(stale_error.contains("superseded deployment request"));
+        assert!(
+            admit_health_from_rudp_message(
+                &active_message,
+                &options,
+                &lock,
+                "2026-07-16T00:02:00Z",
+            )
+            .is_err()
+        );
+
+        let (mut alien, alien_options, _alien_root) = signed_epiphany_health_fixture(2);
+        if let CultNetMessage::DocumentPutRaw { document, .. } = &mut alien {
+            document.source_runtime_id = Some("alien-runtime".into());
+        }
+        assert!(health_from_rudp_message(&alien, &alien_options).is_err());
+
+        let (mut forged, forged_options, _forged_root) = signed_epiphany_health_fixture(3);
+        let CultNetMessage::DocumentPutRaw { document, .. } = &mut forged else {
+            unreachable!()
+        };
+        let mut forged_wire: EpiphanySignedRuntimeHealthWire =
+            rmp_serde::from_slice(&document.payload).unwrap();
+        forged_wire.signature[0] ^= 1;
+        document.payload = rmp_serde::to_vec_named(&forged_wire).unwrap();
+        assert!(health_from_rudp_message(&forged, &forged_options).is_err());
+    }
+
+    #[test]
+    fn unsigned_epiphany_health_is_rejected() {
+        let (mut message, options, _root) = signed_epiphany_health_fixture(1);
+        let CultNetMessage::DocumentPutRaw { document, .. } = &mut message else {
+            unreachable!()
+        };
+        let signed: EpiphanySignedRuntimeHealthWire =
+            rmp_serde::from_slice(&document.payload).unwrap();
+        document.schema_id = "idunn.daemon_health".into();
+        document.payload = rmp_serde::to_vec(&signed.health).unwrap();
+        assert!(health_from_rudp_message(&message, &options).is_err());
+    }
+
+    #[test]
+    fn signed_admission_must_remain_the_current_health_observation() {
+        let (message, options, _root) = signed_epiphany_health_fixture(1);
+        let lock = Arc::new(Mutex::new(()));
+        admit_health_from_rudp_message(&message, &options, &lock, "2026-07-16T00:01:01Z").unwrap();
+        with_store_node(&options, &lock, |node| {
+            let mut health = node
+                .get::<IdunnDaemonHealthRecord>("yggdrasil-epiphany")?
+                .unwrap();
+            health.state = "failed".into();
+            health.observed_at = "2026-07-16T00:01:02Z".into();
+            node.put(&health.daemon_id, &health)?;
+            Ok(())
+        })
+        .unwrap();
+        let error = validate_health_admission_at(
+            &HealthAdmissionValidationOptions {
+                daemon_id: "yggdrasil-epiphany".into(),
+                deployment_request_id: "deploy:yggdrasil-epiphany:fixture".into(),
+                release_id: "release-test".into(),
+                release_witness_sha256: format!("sha256-{}", "a".repeat(64)),
+                source_commit: "b".repeat(40),
+            },
+            &options,
+            "2026-07-16T00:01:03Z",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("not the current daemon health observation"));
+    }
+
+    #[test]
+    fn generic_health_cannot_substitute_for_signed_admission() {
+        let root = tempfile::tempdir().unwrap();
+        let options = CommonOptions {
+            store_path: root.path().join("idunn.cc"),
+            release_authority_store_path: None,
+            operator_alarm_command: None,
+            rudp_health_bind: None,
+            trusted_epiphany_health_identity_store: None,
+            execute: false,
+            command_timeout_seconds: 1,
+        };
+        let lock = Arc::new(Mutex::new(()));
+        with_store_node(&options, &lock, |node| {
+            node.put(
+                "yggdrasil-epiphany",
+                &IdunnDaemonHealthRecord {
+                    daemon_id: "yggdrasil-epiphany".into(),
+                    state: "active".into(),
+                    detail: "counterfeit generic observation".into(),
+                    observed_at: "2026-07-16T00:01:00Z".into(),
+                    health_contract: EPIPHANY_HEALTH_CONTRACT.into(),
+                    publication_source: "daemon-published".into(),
+                    transport: CULTNET_RUDP_PROTOCOL_ID.into(),
+                },
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let error = validate_health_admission(
+            &HealthAdmissionValidationOptions {
+                daemon_id: "yggdrasil-epiphany".into(),
+                deployment_request_id: "counterfeit".into(),
+                release_id: "release-test".into(),
+                release_witness_sha256: format!("sha256-{}", "a".repeat(64)),
+                source_commit: "b".repeat(40),
+            },
+            &options,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("no signed health admission"));
+    }
+
+    #[test]
+    fn signed_admission_freshness_rejects_stale_future_and_inverted_time() {
+        let mut admission = IdunnSignedHealthAdmissionRecord {
+            daemon_id: "yggdrasil-epiphany".into(),
+            state: "active".into(),
+            observed_at: "unix:100".into(),
+            admitted_at: "unix:101".into(),
+            health_contract: EPIPHANY_HEALTH_CONTRACT.into(),
+            deployment_request_id: "request".into(),
+            release_id: "release".into(),
+            release_witness_sha256: format!("sha256-{}", "a".repeat(64)),
+            source_commit: "b".repeat(40),
+            publisher_incarnation_id: "00000000-0000-4000-8000-000000000001".into(),
+            publisher_sequence: 1,
+            publisher_process_created_at: "2026-07-16T00:00:00Z".into(),
+            signer_identity_id: "signer".into(),
+            signed_health_sha256: format!("sha256-{}", "c".repeat(64)),
+        };
+        validate_admission_fresh_at(&admission, "unix:280", 180).unwrap();
+        assert!(validate_admission_fresh_at(&admission, "unix:282", 180).is_err());
+        admission.observed_at = "unix:102".into();
+        assert!(validate_admission_fresh_at(&admission, "unix:102", 180).is_err());
+        admission.observed_at = "unix:100".into();
+        admission.admitted_at = "unix:103".into();
+        assert!(validate_admission_fresh_at(&admission, "unix:102", 180).is_err());
+    }
+
+    #[test]
+    fn concurrent_signed_health_writers_cannot_regress_sequence() {
+        let (message_one, options, _root) = signed_epiphany_health_fixture(1);
+        let (mut message_two, _, _) = signed_epiphany_health_fixture(2);
+        // Re-sign sequence two with the trust anchor belonging to the shared fixture.
+        let CultNetMessage::DocumentPutRaw { document, .. } = &mut message_two else {
+            unreachable!()
+        };
+        let mut signed: EpiphanySignedRuntimeHealthWire =
+            rmp_serde::from_slice(&document.payload).unwrap();
+        signed.signer_identity_id = match &message_one {
+            CultNetMessage::DocumentPutRaw { document, .. } => {
+                let first: EpiphanySignedRuntimeHealthWire =
+                    rmp_serde::from_slice(&document.payload).unwrap();
+                first.signer_identity_id
+            }
+            _ => unreachable!(),
+        };
+        signed.signature.clear();
+        let key = SigningKey::from_bytes(&[23; 32]);
+        let statement = rmp_serde::to_vec_named(&signed).unwrap();
+        signed.signature = key
+            .sign(&host_signature_message(
+                EPIPHANY_SIGNED_RUNTIME_HEALTH_TYPE,
+                &statement,
+            ))
+            .to_bytes()
+            .to_vec();
+        document.payload = rmp_serde::to_vec_named(&signed).unwrap();
+
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let mut workers = Vec::new();
+        for message in [message_one, message_two] {
+            let options = options.clone();
+            let barrier = barrier.clone();
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                admit_health_from_rudp_message(
+                    &message,
+                    &options,
+                    &Arc::new(Mutex::new(())),
+                    "2026-07-16T00:01:01Z",
+                )
+            }));
+        }
+        barrier.wait();
+        for worker in workers {
+            let _ = worker.join().unwrap();
+        }
+        let final_admission = with_store_node(&options, &Arc::new(Mutex::new(())), |node| {
+            node.get::<IdunnSignedHealthAdmissionRecord>("yggdrasil-epiphany")?
+                .ok_or_else(|| anyhow!("final admission missing"))
+        })
+        .unwrap();
+        assert_eq!(final_admission.publisher_sequence, 2);
     }
 }

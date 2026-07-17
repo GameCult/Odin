@@ -8,7 +8,9 @@ Requires=docker.service
 Type=simple
 User=idunn
 Group=idunn
-ExecStart=/usr/local/bin/idunn --swarm-profile yggdrasil-local --repo-root /srv/odin/source --store /var/lib/gamecult/idunn/yggdrasil.keepalive.cc --release-authority-store /srv/bifrost/state/repository-release-authority.cc --rudp-health-bind 10.77.0.1:17870 --command-timeout-seconds 3600 --execute
+# Operational cancellation ceiling only. Target daemons own readiness through
+# typed health; this duration must never be interpreted as deployment success.
+ExecStart=/usr/local/bin/idunn --swarm-profile yggdrasil-local --repo-root /srv/odin/source --store /var/lib/gamecult/idunn/yggdrasil.keepalive.cc --release-authority-store /srv/bifrost/state/repository-release-authority.cc --rudp-health-bind 10.77.0.1:17870 --trusted-epiphany-health-identity-store /etc/gamecult/idunn/epiphany-health-identity.ccmp --command-timeout-seconds 21600 --execute
 Restart=always
 RestartSec=5
 TimeoutStopSec=20

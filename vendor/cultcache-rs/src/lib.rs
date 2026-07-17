@@ -8,6 +8,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::fs::File;
 use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -41,7 +42,7 @@ macro_rules! cultcache_registry {
     };
 }
 
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CultCacheEnvelope {
     pub key: String,
@@ -52,6 +53,13 @@ pub struct CultCacheEnvelope {
     pub stored_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema_id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CultCacheExpectedEnvelope {
+    pub key: String,
+    pub r#type: String,
+    pub current: Option<CultCacheEnvelope>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -128,6 +136,49 @@ impl SingleFileMessagePackBackingStore {
         &self.path
     }
 
+    pub fn compare_exchange(
+        &self,
+        expected: &[CultCacheExpectedEnvelope],
+        replacements: &[CultCacheEnvelope],
+    ) -> Result<bool> {
+        self.with_exclusive_lock(|| {
+            let mut entries = self.read_all_unlocked()?;
+            for condition in expected {
+                let current = entries
+                    .iter()
+                    .find(|entry| entry.r#type == condition.r#type && entry.key == condition.key);
+                if current != condition.current.as_ref() {
+                    return Ok(false);
+                }
+                if let Some(envelope) = condition.current.as_ref()
+                    && (envelope.r#type != condition.r#type || envelope.key != condition.key)
+                {
+                    return Err(anyhow!(
+                        "CultCache compare-exchange expectation identity differs from its envelope"
+                    ));
+                }
+            }
+            let mut replacement_ids = BTreeSet::new();
+            for replacement in replacements {
+                if replacement.key.trim().is_empty() || replacement.r#type.trim().is_empty() {
+                    return Err(anyhow!(
+                        "CultCache compare-exchange replacement identity is empty"
+                    ));
+                }
+                if !replacement_ids.insert(entry_id(replacement)) {
+                    return Err(anyhow!(
+                        "CultCache compare-exchange contains a duplicate replacement"
+                    ));
+                }
+            }
+            entries.retain(|entry| !replacement_ids.contains(&entry_id(entry)));
+            entries.extend_from_slice(replacements);
+            entries.sort_by_key(entry_id);
+            self.write_all_unlocked(&entries)?;
+            Ok(true)
+        })
+    }
+
     fn read_all_unlocked(&self) -> Result<Vec<CultCacheEnvelope>> {
         if !self.path.exists() {
             return Ok(Vec::new());
@@ -150,19 +201,25 @@ impl SingleFileMessagePackBackingStore {
         let bytes = rmp_serde::to_vec(&encode_store_snapshot(entries))
             .context("failed to encode MessagePack")?;
         let tmp_path = temporary_path_for(&self.path);
-        fs::write(&tmp_path, bytes)
+        let mut temporary = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&tmp_path)
+            .with_context(|| format!("failed to create {}", tmp_path.display()))?;
+        temporary
+            .write_all(&bytes)
             .with_context(|| format!("failed to write {}", tmp_path.display()))?;
-        if self.path.exists() {
-            fs::remove_file(&self.path)
-                .with_context(|| format!("failed to replace {}", self.path.display()))?;
+        temporary
+            .sync_all()
+            .with_context(|| format!("failed to sync {}", tmp_path.display()))?;
+        drop(temporary);
+        replace_file_atomically(&tmp_path, &self.path)?;
+        #[cfg(unix)]
+        if let Some(parent) = self.path.parent() {
+            File::open(parent)
+                .and_then(|directory| directory.sync_all())
+                .with_context(|| format!("failed to sync {}", parent.display()))?;
         }
-        fs::rename(&tmp_path, &self.path).with_context(|| {
-            format!(
-                "failed to move {} to {}",
-                tmp_path.display(),
-                self.path.display()
-            )
-        })?;
         Ok(())
     }
 
@@ -210,6 +267,42 @@ impl SingleFileMessagePackBackingStore {
         lock_name.push(".lock");
         self.path.with_file_name(lock_name)
     }
+}
+
+#[cfg(unix)]
+fn replace_file_atomically(source: &Path, destination: &Path) -> Result<()> {
+    fs::rename(source, destination).with_context(|| {
+        format!(
+            "failed to atomically replace {} with {}",
+            destination.display(),
+            source.display()
+        )
+    })
+}
+
+#[cfg(windows)]
+fn replace_file_atomically(source: &Path, destination: &Path) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+    let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+    let destination: Vec<u16> = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    let result = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if result == 0 {
+        return Err(std::io::Error::last_os_error()).context("atomic CultCache replacement failed");
+    }
+    Ok(())
 }
 
 impl CacheBackingStore for SingleFileMessagePackBackingStore {

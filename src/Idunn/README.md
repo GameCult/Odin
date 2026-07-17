@@ -186,8 +186,10 @@ external-owned.
 
 - `idunn.desired_daemon.v1`
 - `idunn.daemon_health.v1`
+- `idunn.signed_health_admission.v1`
 - `idunn.keepalive_decision.v1`
-- `idunn.deployment_request.v1`
+- `idunn.deployment_request.v2`
+- `idunn.current_deployment_request.v1`
 - `idunn.deployment_result.v1`
 - `idunn.release_target.v1`
 - `idunn.deployment_artifact.v1`
@@ -243,6 +245,11 @@ and writes them into the keepalive store. That is daemon-owned health
 publication, not restart/deploy authority. On Windows, UDP reset reports from
 closed one-shot publishers are treated as nonfatal ingress noise so one accepted
 health frame cannot kill the listener.
+
+Epiphany uses a separate signed runtime-health schema. Idunn joins that document
+to the exact latest Bifrost-authorized deployment request and persists
+`idunn.signed_health_admission.v1`. The privileged admission verifier reads only
+that fresh, current, request-bound record; generic health remains observation.
 
 When a fresh daemon-published RUDP health record exists for a target, Idunn uses
 that record for keepalive planning. The record must match the daemon id, health

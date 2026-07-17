@@ -257,11 +257,7 @@ mod tests {
     fn warming_daemon_is_observed_without_actuation_or_promotion() {
         let mut desired = desired(Some("systemctl restart epiphany"));
         desired.deploy_command = Some("deploy epiphany".to_string());
-        let plan = plan_keepalive(
-            &desired,
-            &health("warming"),
-            "2026-07-17T00:00:02Z",
-        );
+        let plan = plan_keepalive(&desired, &health("warming"), "2026-07-17T00:00:02Z");
 
         assert_eq!(plan.decision.action, "observe");
         assert!(plan.decision.reason.contains("provider-owned progress"));

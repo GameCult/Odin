@@ -13,10 +13,12 @@ pub const EVE_PROVIDER_ADVERTISEMENT_SCHEMA: &str = "gamecult.eve.provider_adver
 pub const VOIDBOT_SWARM_STATE_SNAPSHOT_SCHEMA: &str = "voidbot.swarm_state_snapshot.v1";
 pub const IDUNN_DESIRED_DAEMON_SCHEMA: &str = "idunn.desired_daemon.v1";
 pub const IDUNN_DAEMON_HEALTH_SCHEMA: &str = "idunn.daemon_health.v1";
+pub const IDUNN_SIGNED_HEALTH_ADMISSION_SCHEMA: &str = "idunn.signed_health_admission.v1";
 pub const IDUNN_KEEPALIVE_DECISION_SCHEMA: &str = "idunn.keepalive_decision.v1";
 pub const IDUNN_RESTART_REQUEST_SCHEMA: &str = "idunn.restart_request.v1";
 pub const IDUNN_RESTART_RESULT_SCHEMA: &str = "idunn.restart_result.v1";
 pub const IDUNN_DEPLOYMENT_REQUEST_SCHEMA: &str = "idunn.deployment_request.v2";
+pub const IDUNN_CURRENT_DEPLOYMENT_REQUEST_SCHEMA: &str = "idunn.current_deployment_request.v1";
 pub const IDUNN_DEPLOYMENT_RESULT_SCHEMA: &str = "idunn.deployment_result.v1";
 pub const IDUNN_LIFECYCLE_COMMAND_SCHEMA: &str = "idunn.lifecycle_command.v1";
 pub const IDUNN_RELEASE_TARGET_SCHEMA: &str = "idunn.release_target.v2";
@@ -49,7 +51,8 @@ pub const MUNINN_MOVE_IDENTITY_SCHEMA: &str = "muninn.move_identity.v1";
 pub const MUNINN_MOVE_LIGHT_COMMAND_SCHEMA: &str = "muninn.move_light_command.v1";
 pub const MUNINN_MOVE_HUE_PROGRAM_SCHEMA: &str = "muninn.move_hue_program.v1";
 pub const MUNINN_MOVE_TRACKER_HEALTH_SCHEMA: &str = "muninn.move_tracker_health.v1";
-pub const MUNINN_MOVE_EVIDENCE_TRANSPORT_HEALTH_SCHEMA: &str = "muninn.move_evidence_transport_health.v1";
+pub const MUNINN_MOVE_EVIDENCE_TRANSPORT_HEALTH_SCHEMA: &str =
+    "muninn.move_evidence_transport_health.v1";
 pub const MUNINN_QUEST_ACCESS_SCHEMA: &str = "muninn.quest_access.v1";
 pub const MUNINN_COMMAND_BOUNDARY_SCHEMA: &str = "muninn.command_boundary.v1";
 pub const MUNINN_TRANSPORT_PROFILE_SCHEMA: &str = "muninn.transport_profile.v1";
@@ -272,6 +275,42 @@ pub struct IdunnDaemonHealthRecord {
 
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
 #[cultcache(
+    type = "idunn.signed_health_admission",
+    schema = "idunn.signed_health_admission.v1"
+)]
+pub struct IdunnSignedHealthAdmissionRecord {
+    #[cultcache(key = 0)]
+    pub daemon_id: String,
+    #[cultcache(key = 1)]
+    pub state: String,
+    #[cultcache(key = 2)]
+    pub observed_at: String,
+    #[cultcache(key = 3)]
+    pub admitted_at: String,
+    #[cultcache(key = 4)]
+    pub health_contract: String,
+    #[cultcache(key = 5)]
+    pub deployment_request_id: String,
+    #[cultcache(key = 6)]
+    pub release_id: String,
+    #[cultcache(key = 7)]
+    pub release_witness_sha256: String,
+    #[cultcache(key = 8)]
+    pub source_commit: String,
+    #[cultcache(key = 9)]
+    pub publisher_incarnation_id: String,
+    #[cultcache(key = 10)]
+    pub publisher_sequence: u64,
+    #[cultcache(key = 11)]
+    pub publisher_process_created_at: String,
+    #[cultcache(key = 12)]
+    pub signer_identity_id: String,
+    #[cultcache(key = 13)]
+    pub signed_health_sha256: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(
     type = "idunn.keepalive_decision",
     schema = "idunn.keepalive_decision.v1"
 )]
@@ -350,6 +389,22 @@ pub struct IdunnDeploymentRequestRecord {
     pub release_authority_envelope_sha256: String,
     #[cultcache(key = 10, default)]
     pub requires_bifrost_authority: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(
+    type = "idunn.current_deployment_request",
+    schema = "idunn.current_deployment_request.v1"
+)]
+pub struct IdunnCurrentDeploymentRequestRecord {
+    #[cultcache(key = 0)]
+    pub daemon_id: String,
+    #[cultcache(key = 1)]
+    pub request_id: String,
+    #[cultcache(key = 2)]
+    pub sequence: u64,
+    #[cultcache(key = 3)]
+    pub updated_at: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
@@ -1286,46 +1341,85 @@ pub struct MuninnMoveHueProgramRecord {
 }
 
 #[derive(Clone, Debug, PartialEq, DatabaseEntry)]
-#[cultcache(type = "muninn.move_tracker_health", schema = "muninn.move_tracker_health.v1")]
+#[cultcache(
+    type = "muninn.move_tracker_health",
+    schema = "muninn.move_tracker_health.v1"
+)]
 pub struct MuninnMoveTrackerHealthRecord {
-    #[cultcache(key = 0)] pub health_id: String,
-    #[cultcache(key = 1)] pub host_id: String,
-    #[cultcache(key = 2)] pub camera_id: String,
-    #[cultcache(key = 3)] pub camera_index: i32,
-    #[cultcache(key = 4)] pub state: String,
-    #[cultcache(key = 5)] pub camera_name: String,
-    #[cultcache(key = 6)] pub camera_api: String,
-    #[cultcache(key = 7)] pub width: u32,
-    #[cultcache(key = 8)] pub height: u32,
-    #[cultcache(key = 9)] pub exposure: f32,
-    #[cultcache(key = 10)] pub calibrated_controller_count: u32,
-    #[cultcache(key = 11)] pub update_count: u64,
-    #[cultcache(key = 12)] pub observation_count: u64,
-    #[cultcache(key = 13)] pub latest_observation_count: u32,
-    #[cultcache(key = 14)] pub last_observation_at: String,
-    #[cultcache(key = 15)] pub detail: String,
-    #[cultcache(key = 16)] pub updated_at: String,
-    #[cultcache(key = 17, default)] pub image_mean_rgb: Vec<u32>,
-    #[cultcache(key = 18, default)] pub image_peak_rgb: Vec<u32>,
-    #[cultcache(key = 19, default)] pub color_evidence_move_ids: Vec<String>,
-    #[cultcache(key = 20, default)] pub color_evidence_pixel_counts: Vec<u32>,
-    #[cultcache(key = 21, default)] pub rejected_stale_count: u64,
-    #[cultcache(key = 22, default)] pub rejected_radius_count: u64,
-    #[cultcache(key = 23, default)] pub rejected_bounds_count: u64,
-    #[cultcache(key = 24, default)] pub rejected_continuity_count: u64,
+    #[cultcache(key = 0)]
+    pub health_id: String,
+    #[cultcache(key = 1)]
+    pub host_id: String,
+    #[cultcache(key = 2)]
+    pub camera_id: String,
+    #[cultcache(key = 3)]
+    pub camera_index: i32,
+    #[cultcache(key = 4)]
+    pub state: String,
+    #[cultcache(key = 5)]
+    pub camera_name: String,
+    #[cultcache(key = 6)]
+    pub camera_api: String,
+    #[cultcache(key = 7)]
+    pub width: u32,
+    #[cultcache(key = 8)]
+    pub height: u32,
+    #[cultcache(key = 9)]
+    pub exposure: f32,
+    #[cultcache(key = 10)]
+    pub calibrated_controller_count: u32,
+    #[cultcache(key = 11)]
+    pub update_count: u64,
+    #[cultcache(key = 12)]
+    pub observation_count: u64,
+    #[cultcache(key = 13)]
+    pub latest_observation_count: u32,
+    #[cultcache(key = 14)]
+    pub last_observation_at: String,
+    #[cultcache(key = 15)]
+    pub detail: String,
+    #[cultcache(key = 16)]
+    pub updated_at: String,
+    #[cultcache(key = 17, default)]
+    pub image_mean_rgb: Vec<u32>,
+    #[cultcache(key = 18, default)]
+    pub image_peak_rgb: Vec<u32>,
+    #[cultcache(key = 19, default)]
+    pub color_evidence_move_ids: Vec<String>,
+    #[cultcache(key = 20, default)]
+    pub color_evidence_pixel_counts: Vec<u32>,
+    #[cultcache(key = 21, default)]
+    pub rejected_stale_count: u64,
+    #[cultcache(key = 22, default)]
+    pub rejected_radius_count: u64,
+    #[cultcache(key = 23, default)]
+    pub rejected_bounds_count: u64,
+    #[cultcache(key = 24, default)]
+    pub rejected_continuity_count: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
-#[cultcache(type = "muninn.move_evidence_transport_health", schema = "muninn.move_evidence_transport_health.v1")]
+#[cultcache(
+    type = "muninn.move_evidence_transport_health",
+    schema = "muninn.move_evidence_transport_health.v1"
+)]
 pub struct MuninnMoveEvidenceTransportHealthRecord {
-    #[cultcache(key = 0)] pub health_id: String,
-    #[cultcache(key = 1)] pub host_id: String,
-    #[cultcache(key = 2)] pub stream_id: String,
-    #[cultcache(key = 3)] pub produced_frames: u64,
-    #[cultcache(key = 4)] pub local_ring_admissions: u64,
-    #[cultcache(key = 5)] pub remote_handoffs: u64,
-    #[cultcache(key = 6)] pub remote_sends: u64,
-    #[cultcache(key = 7)] pub updated_at: String,
+    #[cultcache(key = 0)]
+    pub health_id: String,
+    #[cultcache(key = 1)]
+    pub host_id: String,
+    #[cultcache(key = 2)]
+    pub stream_id: String,
+    #[cultcache(key = 3)]
+    pub produced_frames: u64,
+    #[cultcache(key = 4)]
+    pub local_ring_admissions: u64,
+    #[cultcache(key = 5)]
+    pub remote_handoffs: u64,
+    #[cultcache(key = 6)]
+    pub remote_sends: u64,
+    #[cultcache(key = 7)]
+    pub updated_at: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
@@ -1421,10 +1515,12 @@ cultmesh_rs::cultmesh_documents!(OdinDocuments {
     VoidBotSwarmStateSnapshotCompatRecord => VOIDBOT_SWARM_STATE_SNAPSHOT_SCHEMA,
     IdunnDesiredDaemonRecord => IDUNN_DESIRED_DAEMON_SCHEMA,
     IdunnDaemonHealthRecord => IDUNN_DAEMON_HEALTH_SCHEMA,
+    IdunnSignedHealthAdmissionRecord => IDUNN_SIGNED_HEALTH_ADMISSION_SCHEMA,
     IdunnKeepaliveDecisionRecord => IDUNN_KEEPALIVE_DECISION_SCHEMA,
     IdunnRestartRequestRecord => IDUNN_RESTART_REQUEST_SCHEMA,
     IdunnRestartResultRecord => IDUNN_RESTART_RESULT_SCHEMA,
     IdunnDeploymentRequestRecord => IDUNN_DEPLOYMENT_REQUEST_SCHEMA,
+    IdunnCurrentDeploymentRequestRecord => IDUNN_CURRENT_DEPLOYMENT_REQUEST_SCHEMA,
     IdunnDeploymentResultRecord => IDUNN_DEPLOYMENT_RESULT_SCHEMA,
     IdunnLifecycleCommandRecord => IDUNN_LIFECYCLE_COMMAND_SCHEMA,
     IdunnReleaseTargetRecord => IDUNN_RELEASE_TARGET_SCHEMA,

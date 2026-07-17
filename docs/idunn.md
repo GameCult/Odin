@@ -110,8 +110,10 @@ The current typed records are:
 ```text
 idunn.desired_daemon.v1
 idunn.daemon_health.v1
+idunn.signed_health_admission.v1
 idunn.keepalive_decision.v1
-idunn.deployment_request.v1
+idunn.deployment_request.v2
+idunn.current_deployment_request.v1
 idunn.deployment_result.v1
 idunn.release_target.v1
 idunn.deployment_artifact.v1
@@ -184,9 +186,12 @@ idunn.rudp_health_ingress.v1
   and then publishes `idunn.rudp_health_ingress.v1`. The Starfire local
   supervisor binds `0.0.0.0:17870` explicitly so host-local and WireGuard
   publishers can use the configured Idunn health endpoint. That ingress
-  accepts only raw `idunn.daemon_health` CultNet document puts on the `schema`
-  channel, decodes the typed MessagePack payload, and writes it into the
-  keepalive store. Each one-shot publisher gets its own RUDP session from its
+  accepts raw `idunn.daemon_health` CultNet document puts and the dedicated
+  signed Epiphany runtime-health schema on the `schema` channel. Generic health
+  is observation-only. Epiphany promotion requires the separately persisted
+  `idunn.signed_health_admission.v1`, an exact latest
+  `idunn.deployment_request.v2`, a pinned host signature, current matching
+  health, and a fresh active admission. Each one-shot publisher gets its own RUDP session from its
   UDP source address and the session is discarded after a delivered health
   frame. Windows UDP `ConnectionReset`/`ConnectionAborted` reports from closed
   one-shot clients are nonfatal ingress noise, not a reason to kill the worker.
@@ -285,7 +290,7 @@ idunn.rudp_health_ingress.v1
   execution. Operators publish `idunn.lifecycle_command.v1` with `idunn restart
   --daemon <id>` or `idunn redeploy --daemon <id>`. The running supervisor
   claims pending records for its target catalog, writes the corresponding
-  `idunn.restart_request.v1` or `idunn.deployment_request.v1`, executes through
+  `idunn.restart_request.v1` or `idunn.deployment_request.v2`, executes through
   the same guarded actuator path used by health-driven decisions, and records
   the matching result document. If a target lacks restart or deploy authority,
   Idunn marks the lifecycle command rejected instead of inventing authority.
