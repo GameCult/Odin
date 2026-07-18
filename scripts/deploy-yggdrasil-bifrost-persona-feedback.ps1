@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([string] $SshTarget = "gamecultadmin@yggdrasil.gamecult.org")
+param([string] $SshTarget = "yggdrasil")
 $ErrorActionPreference = "Stop"
 if ($env:IDUNN_ACTUATOR -ne "1" -or $env:IDUNN_COMMAND_AUTHORITY -ne "idunn-daemon") {
     throw "This command is owned by Idunn's deployment actuator."
