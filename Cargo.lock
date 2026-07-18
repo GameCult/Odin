@@ -506,6 +506,7 @@ dependencies = [
  "cultmesh-rs",
  "cultnet-rs",
  "ed25519-dalek",
+ "libc",
  "odin-core",
  "rmp-serde",
  "serde",

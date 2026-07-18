@@ -4415,6 +4415,7 @@ fn run_shell(
     let stderr_file = File::create(&stderr_path)
         .with_context(|| format!("creating {}", stderr_path.display()))?;
 
+    configure_command_lifetime(&mut process);
     let child = process
         .stdout(Stdio::from(stdout_file))
         .stderr(Stdio::from(stderr_file))
@@ -4467,6 +4468,7 @@ fn run_operator_alarm_command(options: &CommonOptions, alarm: &IdunnOperatorAlar
         process
     };
 
+    configure_command_lifetime(&mut process);
     let output = process
         .env("IDUNN_ALARM_ID", &alarm.alarm_id)
         .env("IDUNN_ALARM_DAEMON_ID", &alarm.daemon_id)
@@ -4538,6 +4540,31 @@ fn apply_windows_command_environment(process: &mut Command, path: &str) {
     process.env("Path", path);
 }
 
+#[cfg(unix)]
+fn configure_command_lifetime(process: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    process.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn configure_command_lifetime(_process: &mut Command) {}
+
+#[cfg(unix)]
+fn terminate_command_lifetime(child: &mut Child) {
+    let process_group = i32::try_from(child.id()).expect("Unix child pid exceeded i32");
+    // Idunn created the child as leader of this private process group. Killing
+    // the group ends sudo, shells, and deployment descendants under the same
+    // command lifetime instead of merely severing the parent we can see.
+    unsafe {
+        libc::kill(-process_group, libc::SIGKILL);
+    }
+}
+
+#[cfg(not(unix))]
+fn terminate_command_lifetime(child: &mut Child) {
+    let _ = child.kill();
+}
+
 fn wait_for_child_with_timeout(
     mut child: Child,
     timeout: Duration,
@@ -4557,7 +4584,7 @@ fn wait_for_child_with_timeout(
         }
 
         if started_at.elapsed() >= timeout {
-            let _ = child.kill();
+            terminate_command_lifetime(&mut child);
             let _ = child.wait_with_output();
             return Err(anyhow!(
                 "command timed out after {} seconds: {command:?}",
@@ -4585,7 +4612,7 @@ fn wait_for_child_status_with_timeout(
         }
 
         if started_at.elapsed() >= timeout {
-            let _ = child.kill();
+            terminate_command_lifetime(&mut child);
             let _ = child.wait();
             return Err(anyhow!(
                 "command timed out after {} seconds: {command:?}",
@@ -4628,6 +4655,50 @@ fn help_text() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn descendant_marker_command(marker: &std::path::Path) -> Child {
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg(format!("(sleep 1; touch '{}') & wait", marker.display()))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        configure_command_lifetime(&mut command);
+        command.spawn().expect("spawn process-group test command")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn status_timeout_terminates_command_descendants() {
+        let marker = env::temp_dir().join(format!("idunn-status-descendant-{}", std::process::id()));
+        let _ = fs::remove_file(&marker);
+        let error = wait_for_child_status_with_timeout(
+            descendant_marker_command(&marker),
+            Duration::from_millis(100),
+            "descendant timeout test",
+        )
+        .expect_err("command should time out");
+        assert!(error.to_string().contains("timed out"));
+        thread::sleep(Duration::from_millis(1200));
+        assert!(!marker.exists(), "timed-out descendant survived to write marker");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn output_timeout_terminates_command_descendants() {
+        let marker = env::temp_dir().join(format!("idunn-output-descendant-{}", std::process::id()));
+        let _ = fs::remove_file(&marker);
+        let error = wait_for_child_with_timeout(
+            descendant_marker_command(&marker),
+            Duration::from_millis(100),
+            "descendant output timeout test",
+        )
+        .expect_err("command should time out");
+        assert!(error.to_string().contains("timed out"));
+        thread::sleep(Duration::from_millis(1200));
+        assert!(!marker.exists(), "timed-out descendant survived to write marker");
+    }
     use cultnet_rs::{CultNetRawDocumentRecord, CultNetRawPayloadEncoding};
     use ed25519_dalek::{Signer, SigningKey};
     use std::cell::RefCell;
