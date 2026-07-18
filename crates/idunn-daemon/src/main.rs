@@ -1486,16 +1486,27 @@ fn evaluate_release_drift(
     port: &dyn ReleaseStatePort,
     observed_at: &str,
 ) -> Option<IdunnDaemonHealthRecord> {
-    let observation = (|| -> Result<(String, String)> {
+    let observation = (|| -> Result<(String, Option<String>)> {
         port.fetch(release)?;
-        Ok((
-            port.desired_revision(release)?,
-            port.deployed_revision(release)?,
-        ))
+        let wanted = port.desired_revision(release)?;
+        let deployed = match port.deployed_revision(release) {
+            Ok(deployed) => Some(deployed),
+            Err(error) if error_chain_contains_io_not_found(&error) => None,
+            Err(error) => return Err(error),
+        };
+        Ok((wanted, deployed))
     })();
 
     let (state, detail, transport) = match observation {
-        Ok((wanted, deployed)) if wanted != deployed => (
+        Ok((wanted, None)) => (
+            "stale-deployment",
+            format!(
+                "upstream {}/{} is {wanted}, but no deployed revision witness exists",
+                release.upstream_remote, release.upstream_branch
+            ),
+            "idunn.release-not-deployed",
+        ),
+        Ok((wanted, Some(deployed))) if wanted != deployed => (
             "stale-deployment",
             format!(
                 "upstream {}/{} is {wanted}, but the deployed revision witness reports {deployed}",
@@ -1522,6 +1533,14 @@ fn evaluate_release_drift(
         publication_source: "idunn-release-observation".to_string(),
         transport: transport.to_string(),
         observed_at: observed_at.to_string(),
+    })
+}
+
+fn error_chain_contains_io_not_found(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io_error| io_error.kind() == std::io::ErrorKind::NotFound)
     })
 }
 
@@ -5944,6 +5963,28 @@ mod tests {
         }
     }
 
+    struct MissingWitnessReleaseStatePort {
+        desired: String,
+    }
+
+    impl ReleaseStatePort for MissingWitnessReleaseStatePort {
+        fn fetch(&self, _release: &ReleaseTarget) -> Result<()> {
+            Ok(())
+        }
+
+        fn desired_revision(&self, _release: &ReleaseTarget) -> Result<String> {
+            Ok(self.desired.clone())
+        }
+
+        fn deployed_revision(&self, _release: &ReleaseTarget) -> Result<String> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "deployment witness is absent",
+            )
+            .into())
+        }
+    }
+
     fn release_desired(target: &DaemonTarget) -> IdunnDesiredDaemonRecord {
         IdunnDesiredDaemonRecord {
             daemon_id: target.daemon_id.clone(),
@@ -6033,6 +6074,38 @@ mod tests {
                 "unix:101"
             )
             .is_none()
+        );
+    }
+
+    #[test]
+    fn absent_release_witness_is_first_deployment_not_dependency_failure() {
+        let target = swarm_targets(&SwarmOptions {
+            profile: "yggdrasil-local".to_string(),
+            repo_root: PathBuf::from("/srv/odin/source"),
+        })
+        .unwrap()
+        .into_iter()
+        .find(|target| target.daemon_id == "yggdrasil-bifrost-persona-feedback")
+        .unwrap();
+        let desired = release_desired(&target);
+        let health = evaluate_release_drift(
+            &target,
+            &desired,
+            target.release.as_ref().unwrap(),
+            &MissingWitnessReleaseStatePort {
+                desired: "abc123".to_string(),
+            },
+            "unix:100",
+        )
+        .unwrap();
+
+        assert_eq!(health.state, "stale-deployment");
+        assert_eq!(health.transport, "idunn.release-not-deployed");
+        assert!(health.detail.contains("no deployed revision witness exists"));
+        assert!(
+            plan_keepalive(&desired, &health, "unix:100")
+                .deployment_request
+                .is_some()
         );
     }
 
