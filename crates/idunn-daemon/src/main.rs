@@ -2936,6 +2936,29 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 interval_seconds: 300,
             },
             DaemonTarget {
+                daemon_id: "yggdrasil-bifrost-persona-feedback".to_string(),
+                verse_id: "yggdrasil.local".to_string(),
+                name: "Yggdrasil Bifrost Persona feedback".to_string(),
+                health_contract: health_contract(
+                    "bifrost.cultnet-rudp-persona-feedback-health",
+                    "stale-deployment",
+                ),
+                deploy_command: Some(yggdrasil_actuator("deploy", "bifrost-persona-feedback")),
+                restart_command: None,
+                release: Some(requiring_bifrost_authority(with_deployed_revision_witness(
+                    release_target(
+                        "Bifrost",
+                        PathBuf::from("/srv/build/Bifrost-persona-feedback"),
+                        "restart-after-verified-build",
+                        None,
+                        "restart-required",
+                    ),
+                    PathBuf::from("/srv/bifrost/persona-feedback/runtime/deployment.env"),
+                ))),
+                enabled: true,
+                interval_seconds: 30,
+            },
+            DaemonTarget {
                 daemon_id: "yggdrasil-repixelizer".to_string(),
                 verse_id: "yggdrasil.local".to_string(),
                 name: "Yggdrasil Repixelizer".to_string(),
@@ -3115,20 +3138,6 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 )),
                 enabled: true,
                 interval_seconds: 300,
-            },
-            DaemonTarget {
-                daemon_id: "yggdrasil-bifrost-persona-feedback".to_string(),
-                verse_id: "yggdrasil.local".to_string(),
-                name: "Yggdrasil Bifrost Persona feedback".to_string(),
-                health_contract: health_contract(
-                    "bifrost.cultnet-rudp-persona-feedback-health",
-                    "stale-deployment",
-                ),
-                deploy_command: Some(script("deploy-yggdrasil-bifrost-persona-feedback.ps1")),
-                restart_command: None,
-                release: None,
-                enabled: true,
-                interval_seconds: 30,
             },
             DaemonTarget {
                 daemon_id: "yggdrasil-repixelizer".to_string(),
@@ -5151,7 +5160,12 @@ mod tests {
 
         for legacy in yggdrasil
             .iter()
-            .filter(|target| target.daemon_id != "yggdrasil-epiphany")
+            .filter(|target| {
+                !matches!(
+                    target.daemon_id.as_str(),
+                    "yggdrasil-epiphany" | "yggdrasil-bifrost-persona-feedback"
+                )
+            })
             .filter_map(|target| target.release.as_ref())
         {
             assert!(
@@ -5173,7 +5187,9 @@ mod tests {
         assert!(unit.contains("--command-timeout-seconds 3600"));
         assert!(actuator.contains("deploy:epiphany|restart:epiphany"));
         assert!(actuator.contains("/usr/local/bin/idunn validate-release-authority"));
-        assert!(actuator.contains("epiphany) target_requires_bifrost_authority=true"));
+        assert!(actuator.contains(
+            "epiphany|bifrost-persona-feedback) target_requires_bifrost_authority=true"
+        ));
         assert!(actuator.contains(
             "voidbot|heimdall|repixelizer|streampixels) target_requires_bifrost_authority=false"
         ));
@@ -5402,10 +5418,10 @@ mod tests {
     #[test]
     fn bifrost_persona_feedback_target_uses_daemon_health_and_idunn_deployment() {
         let options = SwarmOptions {
-            profile: "starfire-local".to_string(),
-            repo_root: PathBuf::from("E:/Projects/Odin"),
+            profile: "yggdrasil-local".to_string(),
+            repo_root: PathBuf::from("/srv/odin/source"),
         };
-        let targets = swarm_targets(&options).expect("starfire-local targets");
+        let targets = swarm_targets(&options).expect("yggdrasil-local targets");
         let target = targets
             .iter()
             .find(|target| target.daemon_id == "yggdrasil-bifrost-persona-feedback")
@@ -5416,9 +5432,13 @@ mod tests {
         );
         assert_eq!(
             target.deploy_command.as_deref(),
-            Some("E:/Projects/Odin\\scripts\\deploy-yggdrasil-bifrost-persona-feedback.ps1")
+            Some("sudo -n /usr/local/libexec/idunn-yggdrasil deploy bifrost-persona-feedback \"$IDUNN_SOURCE_COMMIT\" \"$IDUNN_REPOSITORY_FULL_NAME\" \"$IDUNN_UPSTREAM_REF\" \"$BIFROST_RELEASE_AUTHORITY_ID\" \"$BIFROST_RELEASE_AUTHORITY_SHA256\" \"$IDUNN_DEPLOYMENT_REQUEST_ID\" \"$IDUNN_REQUIRES_BIFROST_AUTHORITY\"")
         );
         assert!(target.restart_command.is_none());
+        let release = target.release.as_ref().expect("release target");
+        assert!(release.requires_bifrost_authority);
+        assert_eq!(release.repository_full_name, "GameCult/Bifrost");
+        assert_eq!(release.repo_path, PathBuf::from("/srv/build/Bifrost-persona-feedback"));
 
         let desired = IdunnDesiredDaemonRecord {
             daemon_id: target.daemon_id.clone(),
