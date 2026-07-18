@@ -19,7 +19,7 @@ compose=/srv/compose/yggdrasil-apps.yaml
 
 require_release_lineage() {
   case "$target" in
-    epiphany) target_requires_bifrost_authority=true ;;
+    epiphany|bifrost-persona-feedback) target_requires_bifrost_authority=true ;;
     voidbot|heimdall|repixelizer|streampixels) target_requires_bifrost_authority=false ;;
     *) echo "deployment target has no release-authority policy: $target" >&2; exit 1 ;;
   esac
@@ -88,7 +88,7 @@ case "$action:$target" in
       IDUNN_REQUIRES_BIFROST_AUTHORITY="$requires_bifrost_authority" \
       exec "$manifest" "$action"
     ;;
-  deploy:heimdall|deploy:repixelizer|deploy:streampixels)
+  deploy:heimdall|deploy:repixelizer|deploy:streampixels|deploy:bifrost-persona-feedback)
     manifest="/srv/odin/deploy-manifests/$target"
     if [ ! -x "$manifest" ] || [ ! -O "$manifest" ]; then
       echo "root-owned executable deploy manifest is not installed: $manifest" >&2

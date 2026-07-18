@@ -3482,6 +3482,29 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 interval_seconds: 300,
             },
             DaemonTarget {
+                daemon_id: "yggdrasil-bifrost-persona-feedback".to_string(),
+                verse_id: "yggdrasil.local".to_string(),
+                name: "Yggdrasil Bifrost Persona feedback".to_string(),
+                health_contract: health_contract(
+                    "bifrost.cultnet-rudp-persona-feedback-health",
+                    "stale-deployment",
+                ),
+                deploy_command: Some(yggdrasil_actuator("deploy", "bifrost-persona-feedback")),
+                restart_command: None,
+                release: Some(requiring_bifrost_authority(with_deployed_revision_witness(
+                    release_target(
+                        "Bifrost",
+                        PathBuf::from("/srv/build/Bifrost-persona-feedback"),
+                        "restart-after-verified-build",
+                        None,
+                        "restart-required",
+                    ),
+                    PathBuf::from("/srv/bifrost/persona-feedback/runtime/deployment.env"),
+                ))),
+                enabled: true,
+                interval_seconds: 30,
+            },
+            DaemonTarget {
                 daemon_id: "yggdrasil-repixelizer".to_string(),
                 verse_id: "yggdrasil.local".to_string(),
                 name: "Yggdrasil Repixelizer".to_string(),
@@ -5766,7 +5789,12 @@ mod tests {
 
         for legacy in yggdrasil
             .iter()
-            .filter(|target| target.daemon_id != "yggdrasil-epiphany")
+            .filter(|target| {
+                !matches!(
+                    target.daemon_id.as_str(),
+                    "yggdrasil-epiphany" | "yggdrasil-bifrost-persona-feedback"
+                )
+            })
             .filter_map(|target| target.release.as_ref())
         {
             assert!(
@@ -5791,7 +5819,9 @@ mod tests {
         ));
         assert!(actuator.contains("deploy:epiphany|restart:epiphany"));
         assert!(actuator.contains("/usr/local/bin/idunn validate-release-authority"));
-        assert!(actuator.contains("epiphany) target_requires_bifrost_authority=true"));
+        assert!(actuator.contains(
+            "epiphany|bifrost-persona-feedback) target_requires_bifrost_authority=true"
+        ));
         assert!(actuator.contains(
             "voidbot|heimdall|repixelizer|streampixels) target_requires_bifrost_authority=false"
         ));
@@ -6015,6 +6045,57 @@ mod tests {
             );
             assert!(plan.operator_alarm.is_none());
         }
+    }
+
+    #[test]
+    fn bifrost_persona_feedback_target_uses_daemon_health_and_idunn_deployment() {
+        let options = SwarmOptions {
+            profile: "yggdrasil-local".to_string(),
+            repo_root: PathBuf::from("/srv/odin/source"),
+        };
+        let targets = swarm_targets(&options).expect("yggdrasil-local targets");
+        let target = targets
+            .iter()
+            .find(|target| target.daemon_id == "yggdrasil-bifrost-persona-feedback")
+            .expect("Bifrost Persona-feedback target");
+        assert_eq!(
+            target.health_contract.id,
+            "bifrost.cultnet-rudp-persona-feedback-health"
+        );
+        assert_eq!(
+            target.deploy_command.as_deref(),
+            Some("sudo -n /usr/local/libexec/idunn-yggdrasil deploy bifrost-persona-feedback \"$IDUNN_SOURCE_COMMIT\" \"$IDUNN_REPOSITORY_FULL_NAME\" \"$IDUNN_UPSTREAM_REF\" \"$BIFROST_RELEASE_AUTHORITY_ID\" \"$BIFROST_RELEASE_AUTHORITY_SHA256\" \"$IDUNN_DEPLOYMENT_REQUEST_ID\" \"$IDUNN_REQUIRES_BIFROST_AUTHORITY\"")
+        );
+        assert!(target.restart_command.is_none());
+        let release = target.release.as_ref().expect("release target");
+        assert!(release.requires_bifrost_authority);
+        assert_eq!(release.repository_full_name, "GameCult/Bifrost");
+        assert_eq!(release.repo_path, PathBuf::from("/srv/build/Bifrost-persona-feedback"));
+
+        let desired = IdunnDesiredDaemonRecord {
+            daemon_id: target.daemon_id.clone(),
+            verse_id: target.verse_id.clone(),
+            name: target.name.clone(),
+            enabled: true,
+            health_command: None,
+            restart_command: None,
+            deploy_command: target.deploy_command.clone(),
+            health_contract: target.health_contract.id.clone(),
+            transport_profile_id: transport_profile_id(target),
+            command_boundary_id: command_boundary_id(target),
+            authority: "idunn-supervisor-command".to_string(),
+            max_silence_seconds: 60,
+            observed_at: "unix:100".to_string(),
+        };
+        let health = missing_daemon_published_health(target, &desired, "unix:101");
+        assert_eq!(health.state, "stale-deployment");
+        let plan = plan_keepalive(&desired, &health, "unix:102");
+        assert_eq!(plan.decision.action, "deploy");
+        assert_eq!(
+            plan.deployment_request.expect("deployment request").command,
+            target.deploy_command.clone().expect("deploy command")
+        );
+        assert!(plan.restart_request.is_none());
     }
 
     #[test]
