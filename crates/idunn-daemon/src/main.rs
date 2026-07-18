@@ -692,7 +692,16 @@ fn missing_daemon_published_health(
     desired: &IdunnDesiredDaemonRecord,
     observed_at: &str,
 ) -> IdunnDaemonHealthRecord {
-    let (state, detail, transport) = if target.health_contract.restart_on_missing_publication {
+    let (state, detail, transport) = if target.health_contract.default_failure_state == "stale-deployment" {
+        (
+            "stale-deployment",
+            format!(
+                "no fresh daemon-published {} record arrived over {}; Idunn owns this declared deployment boundary.",
+                desired.health_contract, CULTNET_RUDP_PROTOCOL_ID
+            ),
+            "cultmesh.missing-deployment-health-publication",
+        )
+    } else if target.health_contract.restart_on_missing_publication {
         (
             "failed",
             format!(
@@ -2227,6 +2236,20 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 interval_seconds: 300,
             },
             DaemonTarget {
+                daemon_id: "yggdrasil-bifrost-persona-feedback".to_string(),
+                verse_id: "yggdrasil.local".to_string(),
+                name: "Yggdrasil Bifrost Persona feedback".to_string(),
+                health_contract: health_contract(
+                    "bifrost.cultnet-rudp-persona-feedback-health",
+                    "stale-deployment",
+                ),
+                deploy_command: Some(script("deploy-yggdrasil-bifrost-persona-feedback.ps1")),
+                restart_command: None,
+                release: None,
+                enabled: true,
+                interval_seconds: 30,
+            },
+            DaemonTarget {
                 daemon_id: "yggdrasil-repixelizer".to_string(),
                 verse_id: "yggdrasil.local".to_string(),
                 name: "Yggdrasil Repixelizer".to_string(),
@@ -2620,7 +2643,11 @@ fn run_deployment(
     options: &CommonOptions,
 ) -> IdunnDeploymentResultRecord {
     let result_id = format!("result:{}", request.request_id);
-    match run_shell(&request.command, options) {
+    match run_shell_with_environment(
+        &request.command,
+        options,
+        &[("IDUNN_DEPLOYMENT_REQUEST_ID", request.request_id.as_str())],
+    ) {
         Ok(output) if output.status.success() => IdunnDeploymentResultRecord {
             result_id,
             request_id: request.request_id.clone(),
@@ -2756,6 +2783,14 @@ fn rollout_result_record(
 }
 
 fn run_shell(command: &str, options: &CommonOptions) -> Result<std::process::Output> {
+    run_shell_with_environment(command, options, &[])
+}
+
+fn run_shell_with_environment(
+    command: &str,
+    options: &CommonOptions,
+    environment: &[(&str, &str)],
+) -> Result<std::process::Output> {
     let mut process = if cfg!(windows) {
         let path = windows_command_path();
         let command = format!(r#"set "PATH={path}" && set "Path={path}" && {command}"#);
@@ -2772,6 +2807,9 @@ fn run_shell(command: &str, options: &CommonOptions) -> Result<std::process::Out
     process
         .env("IDUNN_ACTUATOR", "1")
         .env("IDUNN_COMMAND_AUTHORITY", "idunn-daemon");
+    for (name, value) in environment {
+        process.env(name, value);
+    }
     if let Some(endpoint) = actuator_idunn_rudp_health_endpoint(options) {
         process
             .env("IDUNN_RUDP_HEALTH", &endpoint)
@@ -3794,6 +3832,53 @@ mod tests {
             );
             assert!(plan.operator_alarm.is_none());
         }
+    }
+
+    #[test]
+    fn bifrost_persona_feedback_target_uses_daemon_health_and_idunn_deployment() {
+        let options = SwarmOptions {
+            profile: "starfire-local".to_string(),
+            repo_root: PathBuf::from("E:/Projects/Odin"),
+        };
+        let targets = swarm_targets(&options).expect("starfire-local targets");
+        let target = targets
+            .iter()
+            .find(|target| target.daemon_id == "yggdrasil-bifrost-persona-feedback")
+            .expect("Bifrost Persona-feedback target");
+        assert_eq!(
+            target.health_contract.id,
+            "bifrost.cultnet-rudp-persona-feedback-health"
+        );
+        assert_eq!(
+            target.deploy_command.as_deref(),
+            Some("E:/Projects/Odin\\scripts\\deploy-yggdrasil-bifrost-persona-feedback.ps1")
+        );
+        assert!(target.restart_command.is_none());
+
+        let desired = IdunnDesiredDaemonRecord {
+            daemon_id: target.daemon_id.clone(),
+            verse_id: target.verse_id.clone(),
+            name: target.name.clone(),
+            enabled: true,
+            health_command: None,
+            restart_command: None,
+            deploy_command: target.deploy_command.clone(),
+            health_contract: target.health_contract.id.clone(),
+            transport_profile_id: transport_profile_id(target),
+            command_boundary_id: command_boundary_id(target),
+            authority: "idunn-supervisor-command".to_string(),
+            max_silence_seconds: 60,
+            observed_at: "unix:100".to_string(),
+        };
+        let health = missing_daemon_published_health(target, &desired, "unix:101");
+        assert_eq!(health.state, "stale-deployment");
+        let plan = plan_keepalive(&desired, &health, "unix:102");
+        assert_eq!(plan.decision.action, "deploy");
+        assert_eq!(
+            plan.deployment_request.expect("deployment request").command,
+            target.deploy_command.clone().expect("deploy command")
+        );
+        assert!(plan.restart_request.is_none());
     }
 
     #[test]
