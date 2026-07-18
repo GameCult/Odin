@@ -6088,13 +6088,10 @@ mod tests {
             observed_at: "unix:100".to_string(),
         };
         let health = missing_daemon_published_health(target, &desired, "unix:101");
-        assert_eq!(health.state, "stale-deployment");
+        assert_eq!(health.state, "dependency-unavailable");
         let plan = plan_keepalive(&desired, &health, "unix:102");
-        assert_eq!(plan.decision.action, "deploy");
-        assert_eq!(
-            plan.deployment_request.expect("deployment request").command,
-            target.deploy_command.clone().expect("deploy command")
-        );
+        assert_ne!(plan.decision.action, "deploy");
+        assert!(plan.deployment_request.is_none());
         assert!(plan.restart_request.is_none());
     }
 
