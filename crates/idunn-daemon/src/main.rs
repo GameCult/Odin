@@ -8,9 +8,12 @@ use cultnet_rs::{
     CultNetMessage, CultNetRawPayloadEncoding, CultNetRudpPacketType, CultNetRudpSession,
     CultNetRudpSessionOptions, CultNetRudpSocketTransportConnection,
     CultNetRudpSocketTransportOptions, CultNetWireContract,
-    IdunnAuthenticatedProviderHealthProjectionPurpose, IdunnServiceIdentity, ServiceIdentitySigner,
+    GameCultProviderHealthIdentity, IdunnAuthenticatedProviderHealthProjectionPurpose,
+    IdunnServiceIdentity, IdunnSignedDaemonHealthPurpose, ServiceIdentitySignature,
+    ServiceIdentitySigner,
     decode_cultnet_message_from_slice, decode_rudp_packet, encode_cultnet_message_to_vec,
-    encode_rudp_packet, open_service_identity_at,
+    derive_service_identity_id, encode_rudp_packet, open_service_identity_at,
+    verify_service_identity_signature_with_public_key,
 };
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use odin_core::{
@@ -3075,15 +3078,9 @@ fn authenticate_generic_signed_health(
             "signed daemon health carries release authority not declared by its trust binding"
         ));
     }
-    let key_bytes: [u8; 32] = binding
-        .signer_public_key
-        .as_slice()
-        .try_into()
-        .map_err(|_| anyhow!("daemon health trust key length is invalid"))?;
-    let expected_identity = format!(
-        "{:x}",
-        Sha256::digest([HOST_IDENTITY_DOMAIN, binding.signer_public_key.as_slice()].concat())
-    );
+    let expected_identity = derive_service_identity_id::<GameCultProviderHealthIdentity>(
+        &binding.signer_public_key,
+    )?;
     if binding.signer_identity_id != expected_identity
         || statement.signer_identity_id != binding.signer_identity_id
     {
@@ -3097,12 +3094,18 @@ fn authenticate_generic_signed_health(
     let mut unsigned = statement.clone();
     unsigned.signature.clear();
     let unsigned_payload = rmp_serde::to_vec(&unsigned)?;
-    VerifyingKey::from_bytes(&key_bytes)?
-        .verify(
-            &host_signature_message(SIGNED_DAEMON_HEALTH_TYPE, &unsigned_payload),
-            &Signature::from_bytes(&signature_bytes),
-        )
-        .context("signed daemon health signature is invalid")?;
+    verify_service_identity_signature_with_public_key::<
+        GameCultProviderHealthIdentity,
+        IdunnSignedDaemonHealthPurpose,
+    >(
+        &binding.signer_public_key,
+        &unsigned_payload,
+        &ServiceIdentitySignature {
+            identity_id: binding.signer_identity_id.clone(),
+            signature: signature_bytes.to_vec(),
+        },
+    )
+    .context("signed daemon health signature is invalid")?;
     let admitted_at_unix_millis = parse_timestamp_millis(admitted_at)
         .ok_or_else(|| anyhow!("signed daemon health admission time is invalid"))?;
     if statement.observed_at_unix_millis > admitted_at_unix_millis
@@ -8201,12 +8204,12 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let trust_path = root.path().join("health-trust.cc");
         let store_path = root.path().join("idunn.cc");
-        let key = SigningKey::from_bytes(&[31; 32]);
-        let public_key = key.verifying_key().to_bytes().to_vec();
-        let identity_id = format!(
-            "{:x}",
-            Sha256::digest([HOST_IDENTITY_DOMAIN, public_key.as_slice()].concat())
-        );
+        let signer = cultnet_rs::enroll_service_identity_at::<GameCultProviderHealthIdentity>(
+            &root.path().join("provider-health-identity.cc"),
+        )
+        .unwrap();
+        let public_key = signer.entry().public_key.clone();
+        let identity_id = signer.entry().identity_id.clone();
         let binding = IdunnDaemonHealthTrustBindingRecord {
             schema_version: odin_core::IDUNN_DAEMON_HEALTH_TRUST_BINDING_SCHEMA.into(),
             binding_id: "root/test-daemon/health".into(),
@@ -8249,10 +8252,9 @@ mod tests {
             private_state_exposed: false,
         };
         let unsigned = rmp_serde::to_vec(&statement).unwrap();
-        statement.signature = key
-            .sign(&host_signature_message(SIGNED_DAEMON_HEALTH_TYPE, &unsigned))
-            .to_bytes()
-            .to_vec();
+        statement.signature = signer
+            .sign::<IdunnSignedDaemonHealthPurpose>(&unsigned)
+            .signature;
         let message = CultNetMessage::DocumentPutRaw {
             message_id: format!("signed-health-{sequence}"),
             document: CultNetRawDocumentRecord {
@@ -8695,7 +8697,7 @@ mod tests {
 
     #[test]
     fn generic_signed_health_requires_canonical_bytes_and_preserves_millisecond_clock() {
-        let (mut message, options, _root) = generic_signed_health_fixture(1);
+        let (mut message, options, root) = generic_signed_health_fixture(1);
         let mut statement: IdunnSignedDaemonHealthRecord = match &message {
             CultNetMessage::DocumentPutRaw { document, .. } => {
                 rmp_serde::from_slice(&document.payload).unwrap()
@@ -8707,14 +8709,13 @@ mod tests {
                 .unwrap()
                 .timestamp_millis() as u64;
         statement.signature.clear();
-        let key = SigningKey::from_bytes(&[31; 32]);
-        statement.signature = key
-            .sign(&host_signature_message(
-                SIGNED_DAEMON_HEALTH_TYPE,
-                &rmp_serde::to_vec(&statement).unwrap(),
-            ))
-            .to_bytes()
-            .to_vec();
+        let signer = cultnet_rs::open_service_identity_at::<GameCultProviderHealthIdentity>(
+            &root.path().join("provider-health-identity.cc"),
+        )
+        .unwrap();
+        statement.signature = signer
+            .sign::<IdunnSignedDaemonHealthPurpose>(&rmp_serde::to_vec(&statement).unwrap())
+            .signature;
         let CultNetMessage::DocumentPutRaw { document, .. } = &mut message else {
             unreachable!()
         };

@@ -1,5 +1,7 @@
 use cultcache_rs::DatabaseEntry;
-use cultnet_rs::{IdunnServiceIdentity, derive_service_identity_id};
+use cultnet_rs::{
+    GameCultProviderHealthIdentity, IdunnServiceIdentity, derive_service_identity_id,
+};
 use serde_json::Value;
 
 use anyhow::{Result, bail};
@@ -459,6 +461,13 @@ impl IdunnDaemonHealthTrustBindingRecord {
         }
         if self.private_state_exposed {
             bail!("daemon health trust binding exposes private state");
+        }
+        if self.signer_identity_id
+            != derive_service_identity_id::<GameCultProviderHealthIdentity>(
+                &self.signer_public_key,
+            )?
+        {
+            bail!("daemon health trust binding identity does not match its public key");
         }
         Ok(())
     }
@@ -2151,14 +2160,18 @@ mod tests {
 
     fn trust_binding_fixture() -> IdunnDaemonHealthTrustBindingRecord {
         let health = signed_health_fixture();
+        let signer_public_key = vec![7; 32];
         IdunnDaemonHealthTrustBindingRecord {
             schema_version: IDUNN_DAEMON_HEALTH_TRUST_BINDING_SCHEMA.into(),
             binding_id: "root/yggdrasil-epiphany/health".into(),
             daemon_id: health.daemon_id,
             health_contract: health.health_contract,
             source_runtime_id: health.source_runtime_id,
-            signer_identity_id: health.signer_identity_id,
-            signer_public_key: vec![7; 32],
+            signer_identity_id: derive_service_identity_id::<GameCultProviderHealthIdentity>(
+                &signer_public_key,
+            )
+            .unwrap(),
+            signer_public_key,
             binding_authority: "root".into(),
             bound_at_unix_millis: 1_784_483_100_000,
             release_binding_required: true,

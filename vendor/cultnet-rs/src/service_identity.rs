@@ -34,6 +34,27 @@ pub trait ServiceSignaturePurpose<P: ServiceIdentityProfile>: Send + Sync + 'sta
 }
 
 pub enum IdunnServiceIdentity {}
+pub enum GameCultProviderHealthIdentity {}
+
+pub struct IdunnSignedDaemonHealthPurpose;
+
+impl ServiceSignaturePurpose<GameCultProviderHealthIdentity>
+    for IdunnSignedDaemonHealthPurpose
+{
+    const PURPOSE: &'static [u8] = b"idunn.signed_daemon_health.v1";
+}
+
+impl ServiceIdentityProfile for GameCultProviderHealthIdentity {
+    const PRIVATE_TYPE: &'static str = "gamecult.provider_health_identity.private.v1";
+    const PRIVATE_SCHEMA: &'static str = "gamecult.provider_health_identity.private.v1";
+    const PRIVATE_KEY: &'static str = "gamecult-provider-health-identity";
+    const TRUST_ANCHOR_TYPE: &'static str = "gamecult.provider_health_identity.trust_anchor.v1";
+    const TRUST_ANCHOR_SCHEMA: &'static str = "gamecult.provider_health_identity.trust_anchor.v1";
+    const TRUST_ANCHOR_KEY: &'static str = "gamecult-provider-health-identity-public";
+    const ID_DOMAIN: &'static [u8] = b"gamecult.provider-health.identity.v1\0";
+    const SIGNATURE_DOMAIN: &'static [u8] = b"gamecult.provider-health.signature.v1\0";
+    const PROTECTOR_CONTEXT: &'static str = "gamecult-provider-health-identity-v1";
+}
 
 /// The only signing purpose accepted for Idunn's public projection of a
 /// provider-authenticated health admission. Keeping this profile here makes
@@ -251,6 +272,30 @@ where
     let key: [u8; 32] = anchor
         .public_key
         .as_slice()
+        .try_into()
+        .map_err(|_| anyhow!("service identity public key has invalid length"))?;
+    let signature = Signature::from_slice(&proof.signature)
+        .map_err(|_| anyhow!("service identity signature has invalid length"))?;
+    VerifyingKey::from_bytes(&key)?
+        .verify(&signing_message::<P, S>(payload), &signature)
+        .map_err(|_| anyhow!("service identity signature verification failed"))
+}
+
+/// Verifies against a public key already admitted by an owning trust store.
+/// The identity is still derived from the profile; callers cannot name it.
+pub fn verify_service_identity_signature_with_public_key<P, S>(
+    public_key: &[u8],
+    payload: &[u8],
+    proof: &ServiceIdentitySignature,
+) -> Result<()>
+where
+    P: ServiceIdentityProfile,
+    S: ServiceSignaturePurpose<P>,
+{
+    if proof.identity_id != derive_service_identity_id::<P>(public_key)? {
+        bail!("service identity signature names a different identity");
+    }
+    let key: [u8; 32] = public_key
         .try_into()
         .map_err(|_| anyhow!("service identity public key has invalid length"))?;
     let signature = Signature::from_slice(&proof.signature)
