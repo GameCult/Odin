@@ -1137,7 +1137,7 @@ mod tests {
     }
 
     #[test]
-    fn brake_operator_can_engage_then_issue_one_exact_bounded_release() -> Result<()> {
+    fn brake_operator_can_issue_one_exact_bounded_rollout_grant() -> Result<()> {
         let temp = TempDir::new()?;
         let private = temp.path().join("operator-private.cc");
         let anchor = temp.path().join("operator-public.cc");
@@ -1179,7 +1179,7 @@ mod tests {
             "--owner",
             "operator/metacrat",
             "--reason",
-            "one deployment",
+            "one rollout",
             "--authorization-id",
             "auth/r4",
             "--release-id",

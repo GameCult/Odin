@@ -144,6 +144,28 @@ impl SingleFileMessagePackBackingStore {
         self.read_all_unlocked()
     }
 
+    /// Holds the pre-created sibling lock shared while a read-only consumer
+    /// evaluates and acts on one snapshot. The reader never creates or writes
+    /// either file, so an authority owner can grant only read access. Writers
+    /// using `compare_exchange` cannot replace the snapshot until `action`
+    /// returns.
+    pub fn with_read_only_shared_snapshot<T>(
+        &self,
+        action: impl FnOnce(Vec<CultCacheEnvelope>) -> Result<T>,
+    ) -> Result<T> {
+        let lock_path = self.lock_path();
+        let lock = OpenOptions::new()
+            .read(true)
+            .open(&lock_path)
+            .with_context(|| format!("failed to open pre-created {}", lock_path.display()))?;
+        fs2::FileExt::lock_shared(&lock)
+            .with_context(|| format!("failed to lock {}", lock_path.display()))?;
+        let result = self.read_all_unlocked().and_then(action);
+        fs2::FileExt::unlock(&lock)
+            .with_context(|| format!("failed to unlock {}", lock_path.display()))?;
+        result
+    }
+
     pub fn compare_exchange(
         &self,
         expected: &[CultCacheExpectedEnvelope],
@@ -775,6 +797,8 @@ fn temporary_path_for(path: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+    use std::sync::mpsc;
+    use std::time::Duration;
 
     #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
     #[cultcache(type = "settings")]
@@ -795,6 +819,44 @@ mod tests {
     }
 
     cultcache_registry!(TestEntries { Settings, Note });
+
+    #[test]
+    fn captured_snapshot_cannot_outlive_a_shared_consequence_gate() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store_path = temp.path().join("authority.cc");
+        let mut store = SingleFileMessagePackBackingStore::new(&store_path);
+        let released = CultCacheEnvelope {
+            key: "brake".into(),
+            r#type: "brake".into(),
+            payload: b"released".to_vec(),
+            stored_at: "2026-07-20T00:00:00Z".into(),
+            schema_id: Some("brake.v0".into()),
+        };
+        store.push(&released)?;
+
+        let writer_path = store_path.clone();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        store.with_read_only_shared_snapshot(|captured| {
+            assert_eq!(captured, vec![released.clone()]);
+            std::thread::spawn(move || {
+                started_tx.send(()).unwrap();
+                let engaged = CultCacheEnvelope {
+                    payload: b"engaged".to_vec(),
+                    ..released
+                };
+                let mut writer = SingleFileMessagePackBackingStore::new(writer_path);
+                writer.push(&engaged).unwrap();
+                finished_tx.send(()).unwrap();
+            });
+            started_rx.recv_timeout(Duration::from_secs(1))?;
+            assert!(finished_rx.recv_timeout(Duration::from_millis(100)).is_err());
+            Ok(())
+        })?;
+        finished_rx.recv_timeout(Duration::from_secs(1))?;
+        assert_eq!(store.pull_all_read_only_snapshot()?[0].payload, b"engaged");
+        Ok(())
+    }
 
     #[test]
     fn familiar_cultcache_flow_persists_and_reloads_typed_documents() -> Result<()> {

@@ -6007,14 +6007,17 @@ fn run_shell(
         .with_context(|| format!("creating {}", stderr_path.display()))?;
 
     configure_command_lifetime(&mut process);
-    // This is deliberately the last fallible authority read before spawn.
-    // Preparation above has no consequence outside Idunn's temporary files.
-    verify_deployment_brake(options, release_id, deployment_id)?;
-    let child = process
-        .stdout(Stdio::from(stdout_file))
-        .stderr(Stdio::from(stderr_file))
-        .spawn()
-        .with_context(|| format!("running command {command:?}"))?;
+    // Hold the root-owned authority lock from the final read through spawn.
+    // An operator engage therefore wins before this gate or waits until the
+    // already-authorized consequence has begun; captured release bytes cannot
+    // race a later engage into a new spawn.
+    let child = with_verified_deployment_brake(options, release_id, deployment_id, || {
+        process
+            .stdout(Stdio::from(stdout_file))
+            .stderr(Stdio::from(stderr_file))
+            .spawn()
+            .with_context(|| format!("running command {command:?}"))
+    })?;
     let status = wait_for_child_status_with_timeout(
         child,
         Duration::from_secs(options.command_timeout_seconds),
@@ -6044,15 +6047,30 @@ fn run_braked_shell(
     run_shell(command, options, release_id, deployment_id, deployment)
 }
 
-fn verify_deployment_brake(
+fn with_verified_deployment_brake<T>(
     options: &CommonOptions,
     release_id: &str,
     deployment_id: &str,
-) -> Result<()> {
+    consequence: impl FnOnce() -> Result<T>,
+) -> Result<T> {
     let store_path = options
         .deployment_brake_store_path
         .as_ref()
         .ok_or_else(|| anyhow!("--deployment-brake-store is required for actuation"))?;
+    SingleFileMessagePackBackingStore::new(store_path)
+        .with_read_only_shared_snapshot(|entries| {
+            verify_deployment_brake_snapshot(options, release_id, deployment_id, entries)?;
+            consequence()
+        })
+        .with_context(|| format!("reading deployment brake {}", store_path.display()))
+}
+
+fn verify_deployment_brake_snapshot(
+    options: &CommonOptions,
+    release_id: &str,
+    deployment_id: &str,
+    entries: Vec<cultcache_rs::CultCacheEnvelope>,
+) -> Result<()> {
     let anchor_path = options
         .deployment_brake_operator_anchor_path
         .as_ref()
@@ -6061,10 +6079,6 @@ fn verify_deployment_brake(
         .deployment_brake_runtime_id
         .as_deref()
         .ok_or_else(|| anyhow!("deployment brake runtime id is not configured"))?;
-
-    let entries = SingleFileMessagePackBackingStore::new(store_path)
-        .pull_all_read_only_snapshot()
-        .with_context(|| format!("reading deployment brake {}", store_path.display()))?;
     let observation = match entries.as_slice() {
         [entry]
             if entry.r#type == IdunnDeploymentBrakeRecord::TYPE
@@ -7653,6 +7667,14 @@ mod tests {
             "--release-authority-store /srv/bifrost/state/repository-release-authority.cc"
         ));
         assert!(unit.contains("--command-timeout-seconds 21600"));
+        assert!(unit.contains(
+            "--deployment-brake-store /var/lib/gamecult/idunn-authority/deployment-brake.cc"
+        ));
+        assert!(unit.contains("ReadOnlyPaths=/var/lib/gamecult/idunn-authority"));
+        assert!(!unit.contains("ReadWritePaths=/var/lib/gamecult/idunn-authority"));
+        assert!(
+            !unit.contains("--deployment-brake-store /var/lib/gamecult/idunn/deployment-brake.cc")
+        );
         assert!(unit.contains(
             "--trusted-epiphany-health-identity-store /etc/gamecult/idunn/epiphany-health-identity.ccmp"
         ));

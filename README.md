@@ -61,7 +61,14 @@ the canonical runtime (`yggdrasil` for `yggdrasil-local`), exact source revision
 (or `restart:<daemon>`), exact request id, operator, signature, and short expiry.
 Missing, corrupt, engaged, expired, foreign, wrong-scope, substituted, or
 badly-signed state fails closed. Planning and lifecycle-command publication do
-not bypass or cache this decision.
+not bypass or cache this decision. The store and its sibling `.lock` live in
+`/var/lib/gamecult/idunn-authority`, a root-owned `root:idunn` `0750` directory;
+both files are `root:idunn` `0640`, and the daemon's systemd sandbox exposes the
+directory read-only. Idunn holds the lock shared from its final snapshot read
+through process spawn, so an engage cannot be defeated by previously captured
+released bytes. A release is not one-shot: its exact request/revision grant
+covers each migration and deploy spawn in that rollout until its short expiry;
+every spawn independently reopens and validates the same grant.
 
 Local package surfaces:
 

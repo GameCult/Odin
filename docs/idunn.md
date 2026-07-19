@@ -38,6 +38,15 @@ escalation, and continuity witness state.
 - Shared paths: manual operator deploy/restart, scheduled deploy/restart,
   degraded-health repair, boot rehydration, and future remote worker recovery
   must pass through the same Idunn command primitive.
+- Consequence gate: Yggdrasil keeps `deployment-brake.cc` and its pre-created
+  sibling `deployment-brake.cc.lock` in `/var/lib/gamecult/idunn-authority`.
+  The directory is `root:idunn` `0750`, both files are `root:idunn` `0640`, and
+  Idunn receives only a systemd `ReadOnlyPaths` view. It holds the lock shared
+  across the final read, validation, and spawn; the root-owned operator writer
+  takes it exclusive for engage/release. A bounded release authorizes the exact
+  rollout request and source revision, covering its migration and deploy spawns
+  until expiry. It is not consumed after the first spawn, and every spawn must
+  independently revalidate it.
 - Deletion line: any keepalive loop inside Odin, Gjallar, Eve lowerers, or
   renderer code must be cut or demoted to a probe that names Idunn as the
   restart owner.
