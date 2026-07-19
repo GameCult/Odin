@@ -131,13 +131,25 @@ missing-publication clock, suppress recovery, or produce authenticated health.
 The evaluation clock is passed through the whole target cycle instead of being
 resampled inside the health selector.
 
+Idunn now also has the local outward projection writer. One publisher opens an
+already-enrolled Idunn service identity before workers start, captures an
+incarnation-stable root trust snapshot, and writes only
+`idunn.authenticated_provider_health_projection.v1` envelopes to a distinct
+public store. Each write rejoins the exact health, admission, signed statement,
+root binding, and optional current deployment lineage. The signed positional
+record has a fixed hash-derived key, a store-monotonic sequence, a process UUID,
+and an expiry capped by the provider observation's managed-health silence
+window. Missing, legacy, unsigned, drifted, or mutated input cannot write,
+refresh, or delete a projection; an old row simply expires for consumers.
+
 This source is deliberately not deployable yet: Bifrost and the remaining
-generic publishers still emit the unsigned diagnostic contract, the root trust
-store has not been installed, Epiphany still uses its signed v0 migration path,
-and Idunn has no signed outward status projection. Deploying this intermediate
-source would correctly classify unmigrated daemons as missing health and could
-therefore actuate recovery. Publisher migration and the outward projection must
-land before promotion.
+generic publishers still emit the unsigned diagnostic contract, production
+root trust and Idunn identity stores have not been installed, Epiphany still
+uses its signed v0 migration path, and the public projection has no CultNet
+query transport or consumer verifier. Deploying this intermediate source would
+correctly classify unmigrated daemons as missing health and could therefore
+actuate recovery. Publisher migration, trust enrollment, transport, and the
+consumer must land before promotion.
 
 ## Verification layer
 
@@ -154,8 +166,9 @@ Hostile tests must prove:
 - unsigned legacy health cannot suppress recovery or yield outward healthy;
 - outward provider health is signed by Idunn under the fixed, typed purpose and
   binds the exact admitted statement;
-- missing health, release drift, and dependency failure remove the projection
-  instead of impersonating provider-authored states;
+- missing health, release drift, and dependency failure cannot write or refresh
+  the projection; any prior row expires instead of being rewritten as an
+  Idunn-authored provider state;
 - caller-selected signing purposes, signer ids, reason strings, and synthetic
   states fail closed;
 - private detail and filesystem/process internals never enter the operator

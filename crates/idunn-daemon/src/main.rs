@@ -7,32 +7,35 @@ use cultmesh_rs::{CultMesh, CultMeshNode, CultMeshNodeOptions};
 use cultnet_rs::{
     CultNetMessage, CultNetRawPayloadEncoding, CultNetRudpPacketType, CultNetRudpSession,
     CultNetRudpSessionOptions, CultNetRudpSocketTransportConnection,
-    CultNetRudpSocketTransportOptions, CultNetWireContract, decode_cultnet_message_from_slice,
-    decode_rudp_packet, encode_cultnet_message_to_vec, encode_rudp_packet,
+    CultNetRudpSocketTransportOptions, CultNetWireContract,
+    IdunnAuthenticatedProviderHealthProjectionPurpose, IdunnServiceIdentity, ServiceIdentitySigner,
+    decode_cultnet_message_from_slice, decode_rudp_packet, encode_cultnet_message_to_vec,
+    encode_rudp_packet, open_service_identity_at,
 };
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use odin_core::{
-    BifrostRepositoryReleaseAuthorityRecord, IdunnCommandBoundaryRecord,
-    IdunnCurrentDeploymentRequestRecord, IdunnDaemonHealthRecord, IdunnDaemonSurgeryPlanRecord,
-    IdunnAuthenticatedDaemonHealthAdmissionRecord, IdunnDaemonHealthTrustBindingRecord,
+    BifrostRepositoryReleaseAuthorityRecord, IDUNN_AUTHENTICATED_DAEMON_HEALTH_ADMISSION_SCHEMA,
+    IDUNN_AUTHENTICATED_PROVIDER_HEALTH_PROJECTION_SCHEMA,
+    IDUNN_UNSIGNED_DAEMON_HEALTH_DIAGNOSTIC_SCHEMA, IdunnAuthenticatedDaemonHealthAdmissionRecord,
+    IdunnAuthenticatedProviderHealthProjectionRecord, IdunnCommandBoundaryRecord,
+    IdunnCurrentDeploymentRequestRecord, IdunnDaemonHealthRecord,
+    IdunnDaemonHealthTrustBindingRecord, IdunnDaemonSurgeryPlanRecord,
     IdunnDaemonTransportProfileRecord, IdunnDeploymentArtifactRecord, IdunnDeploymentRequestRecord,
     IdunnDeploymentResultRecord, IdunnDesiredDaemonRecord, IdunnLifecycleCommandRecord,
     IdunnOperatorAlarmRecord, IdunnPlan, IdunnReleaseTargetRecord, IdunnRestartRequestRecord,
     IdunnRestartResultRecord, IdunnRolloutPlanRecord, IdunnRolloutResultRecord,
-    IdunnRudpHealthIngressRecord, IdunnRuntimeTransportCheckRecord,
+    IdunnRudpHealthIngressRecord, IdunnRuntimeTransportCheckRecord, IdunnSignedDaemonHealthRecord,
     IdunnSignedHealthAdmissionRecord, IdunnStateMigrationPlanRecord,
     IdunnStateMigrationResultRecord, IdunnSwarmSurgeryPlanRecord,
-    IdunnSignedDaemonHealthRecord, IdunnUnsignedDaemonHealthDiagnosticRecord, OdinDocuments,
-    IDUNN_AUTHENTICATED_DAEMON_HEALTH_ADMISSION_SCHEMA,
-    IDUNN_SIGNED_DAEMON_HEALTH_SCHEMA, IDUNN_UNSIGNED_DAEMON_HEALTH_DIAGNOSTIC_SCHEMA,
-    plan_keepalive,
+    IdunnUnsignedDaemonHealthDiagnosticRecord, OdinDocuments,
+    authenticated_provider_health_reason_code, plan_keepalive,
 };
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::env;
 use std::fs::{self, File};
 use std::net::{SocketAddr, UdpSocket};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -495,6 +498,8 @@ struct CommonOptions {
     rudp_health_bind: Option<SocketAddr>,
     trusted_epiphany_health_identity_store: Option<PathBuf>,
     daemon_health_trust_store_path: Option<PathBuf>,
+    service_identity_store_path: Option<PathBuf>,
+    public_health_store_path: Option<PathBuf>,
     execute: bool,
     command_timeout_seconds: u64,
 }
@@ -563,6 +568,7 @@ fn main() -> Result<()> {
 
     match &options.mode {
         Mode::Single(target) => {
+            let projection_publisher = initialize_projection_publisher(&options.common)?;
             let store_lock = Arc::new(Mutex::new(()));
             let actuation_gate = Arc::new(TargetActuationGate::new());
             let now = timestamp()?;
@@ -573,6 +579,7 @@ fn main() -> Result<()> {
                 &options.common,
                 &store_lock,
                 Arc::clone(&actuation_gate),
+                projection_publisher.as_deref(),
                 &mut missing_since,
             )?;
             while actuation_gate.reserved.load(Ordering::Acquire) {
@@ -580,7 +587,10 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        Mode::Swarm(swarm) => run_swarm(swarm, &options.common),
+        Mode::Swarm(swarm) => {
+            let projection_publisher = initialize_projection_publisher(&options.common)?;
+            run_swarm(swarm, &options.common, projection_publisher)
+        }
         Mode::LifecycleCommand(command) => publish_lifecycle_command(command, &options.common),
         Mode::ReleaseAuthorityValidation(validation) => {
             validate_release_authority_at_privileged_boundary(validation)
@@ -681,7 +691,11 @@ fn validate_release_authority_at_privileged_boundary(
     Ok(())
 }
 
-fn run_swarm(options: &SwarmOptions, common: &CommonOptions) -> Result<()> {
+fn run_swarm(
+    options: &SwarmOptions,
+    common: &CommonOptions,
+    projection_publisher: Option<Arc<IdunnProjectionPublisher>>,
+) -> Result<()> {
     let targets = swarm_targets(options)?;
     if targets.is_empty() {
         return Err(anyhow!(
@@ -740,12 +754,14 @@ fn run_swarm(options: &SwarmOptions, common: &CommonOptions) -> Result<()> {
             .get(&target.daemon_id)
             .cloned()
             .ok_or_else(|| anyhow!("Idunn target lost its actuation gate"))?;
+        let worker_projection_publisher = projection_publisher.clone();
         workers.push(thread::spawn(move || {
             run_target_loop(
                 target,
                 worker_common,
                 worker_store_lock,
                 worker_actuation_gate,
+                worker_projection_publisher,
             )
         }));
     }
@@ -821,6 +837,7 @@ fn run_target_loop(
     options: CommonOptions,
     store_lock: Arc<Mutex<()>>,
     actuation_gate: Arc<TargetActuationGate>,
+    projection_publisher: Option<Arc<IdunnProjectionPublisher>>,
 ) -> Result<()> {
     let mut missing_since = None;
     loop {
@@ -829,6 +846,7 @@ fn run_target_loop(
             &options,
             &store_lock,
             Arc::clone(&actuation_gate),
+            projection_publisher.as_deref(),
             &mut missing_since,
         ) {
             eprintln!(
@@ -855,6 +873,7 @@ fn run_target_cycle(
     options: &CommonOptions,
     store_lock: &Arc<Mutex<()>>,
     actuation_gate: Arc<TargetActuationGate>,
+    projection_publisher: Option<&IdunnProjectionPublisher>,
     missing_since: &mut Option<Instant>,
 ) -> Result<()> {
     let now = timestamp()?;
@@ -875,8 +894,10 @@ fn run_target_cycle(
         observed_at: now.clone(),
     };
 
-    let (mut health_key, mut health, health_authenticated) =
+    let (mut health_key, mut health, mut projection_source) =
         evaluate_target_health(target, options, store_lock, &desired, &now)?;
+    let health_authenticated =
+        projection_source.is_some() || health.publication_source == "daemon-published";
     apply_missing_publication_grace(
         target,
         &desired,
@@ -891,9 +912,10 @@ fn run_target_cycle(
         if let Some(fresh_health) =
             read_fresh_daemon_published_health(options, store_lock, &desired, &veto_now)?
         {
-            if health_state_is_healthy(&fresh_health.state) {
+            if health_state_is_healthy(&fresh_health.health.state) {
                 health_key = desired.daemon_id.clone();
-                health = fresh_health;
+                health = fresh_health.health;
+                projection_source = fresh_health.projection_source;
                 *missing_since = None;
                 plan = plan_keepalive(&desired, &health, veto_now);
             }
@@ -935,6 +957,15 @@ fn run_target_cycle(
         }
         Ok(())
     })?;
+
+    publish_authenticated_provider_health(
+        projection_publisher,
+        options,
+        store_lock,
+        &desired,
+        projection_source.as_ref(),
+        &now,
+    )?;
 
     if plan.deployment_request.is_some() || plan.restart_request.is_some() {
         schedule_automatic_actuation(
@@ -1787,7 +1818,7 @@ fn read_fresh_daemon_published_health(
     store_lock: &Arc<Mutex<()>>,
     desired: &IdunnDesiredDaemonRecord,
     now: &str,
-) -> Result<Option<IdunnDaemonHealthRecord>> {
+) -> Result<Option<ManagedHealthRead>> {
     with_store_node(options, store_lock, |node| {
         let Some(health) = node.get::<IdunnDaemonHealthRecord>(&desired.daemon_id)? else {
             return Ok(None);
@@ -1797,18 +1828,18 @@ fn read_fresh_daemon_published_health(
         }
         match health.publication_source.as_str() {
             "daemon-authenticated" => {
-                let Some(admission) = node
-                    .get::<IdunnAuthenticatedDaemonHealthAdmissionRecord>(&desired.daemon_id)?
+                let Some(admission) =
+                    node.get::<IdunnAuthenticatedDaemonHealthAdmissionRecord>(&desired.daemon_id)?
                 else {
                     return Ok(None);
                 };
                 admission.validate()?;
-                let Some(statement) = node.get::<IdunnSignedDaemonHealthRecord>(
-                    &admission.signed_health_sha256,
-                )? else {
+                let Some(statement) =
+                    node.get::<IdunnSignedDaemonHealthRecord>(&admission.signed_health_sha256)?
+                else {
                     return Ok(None);
                 };
-                let (_, current_binding_sha256) =
+                let (binding, current_binding_sha256) =
                     load_daemon_health_trust_binding(options, &statement)?;
                 validate_generic_release_binding(node, &admission)?;
                 let now_millis = parse_timestamp_millis(now)
@@ -1832,7 +1863,34 @@ fn read_fresh_daemon_published_health(
                 {
                     return Ok(None);
                 }
-                Ok(Some(health))
+                let admission_sha256 = record_sha256(&admission)?;
+                let (deployment_head, deployment_request) = if let Some(deployment_id) =
+                    admission.deployment_id.as_deref()
+                {
+                    let head = node
+                        .get::<IdunnCurrentDeploymentRequestRecord>(&admission.daemon_id)?
+                        .ok_or_else(|| anyhow!("authenticated health lost deployment head"))?;
+                    let request = node
+                        .get::<IdunnDeploymentRequestRecord>(deployment_id)?
+                        .ok_or_else(|| anyhow!("authenticated health lost deployment request"))?;
+                    (Some(head), Some(request))
+                } else {
+                    (None, None)
+                };
+                Ok(Some(ManagedHealthRead {
+                    health: health.clone(),
+                    projection_source: Some(AuthenticatedProviderHealthSource {
+                        health,
+                        admission,
+                        statement,
+                        binding,
+                        binding_sha256: current_binding_sha256,
+                        statement_sha256: statement_digest,
+                        admission_sha256,
+                        deployment_head,
+                        deployment_request,
+                    }),
+                }))
             }
             "daemon-published" => {
                 let Some(admission) =
@@ -1853,7 +1911,10 @@ fn read_fresh_daemon_published_health(
                 {
                     return Ok(None);
                 }
-                Ok(Some(health))
+                Ok(Some(ManagedHealthRead {
+                    health,
+                    projection_source: None,
+                }))
             }
             _ => Ok(None),
         }
@@ -1866,24 +1927,32 @@ fn evaluate_target_health(
     store_lock: &Arc<Mutex<()>>,
     desired: &IdunnDesiredDaemonRecord,
     now: &str,
-) -> Result<(String, IdunnDaemonHealthRecord, bool)> {
+) -> Result<(
+    String,
+    IdunnDaemonHealthRecord,
+    Option<AuthenticatedProviderHealthSource>,
+)> {
     if let Some(release) = &target.release {
         if release.deployed_revision_witness.is_some() {
             if let Some(health) =
                 evaluate_release_drift(target, desired, release, &SystemReleaseStatePort, now)
             {
-                return Ok((supervisor_health_key(&desired.daemon_id), health, false));
+                return Ok((supervisor_health_key(&desired.daemon_id), health, None));
             }
         }
     }
-    if let Some(health) = read_fresh_daemon_published_health(options, store_lock, desired, now)? {
-        return Ok((desired.daemon_id.clone(), health, true));
+    if let Some(managed) = read_fresh_daemon_published_health(options, store_lock, desired, now)? {
+        return Ok((
+            desired.daemon_id.clone(),
+            managed.health,
+            managed.projection_source,
+        ));
     }
 
     Ok((
         supervisor_health_key(&desired.daemon_id),
         missing_daemon_published_health(target, desired, now),
-        false,
+        None,
     ))
 }
 
@@ -2089,6 +2158,304 @@ fn parse_unix_timestamp(value: &str) -> Option<u64> {
 
 fn parse_timestamp_seconds(value: &str) -> Option<u64> {
     parse_unix_timestamp(value).or_else(|| parse_utc_iso_timestamp_seconds(value))
+}
+
+struct IdunnProjectionPublisher {
+    signer: ServiceIdentitySigner<IdunnServiceIdentity>,
+    public_store_path: PathBuf,
+    incarnation_id: String,
+    root_trust_snapshot_sha256: String,
+    write_lock: Mutex<()>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AuthenticatedProviderHealthSource {
+    health: IdunnDaemonHealthRecord,
+    admission: IdunnAuthenticatedDaemonHealthAdmissionRecord,
+    statement: IdunnSignedDaemonHealthRecord,
+    binding: IdunnDaemonHealthTrustBindingRecord,
+    binding_sha256: String,
+    statement_sha256: String,
+    admission_sha256: String,
+    deployment_head: Option<IdunnCurrentDeploymentRequestRecord>,
+    deployment_request: Option<IdunnDeploymentRequestRecord>,
+}
+
+#[derive(Clone, Debug)]
+struct ManagedHealthRead {
+    health: IdunnDaemonHealthRecord,
+    projection_source: Option<AuthenticatedProviderHealthSource>,
+}
+
+fn initialize_projection_publisher(
+    options: &CommonOptions,
+) -> Result<Option<Arc<IdunnProjectionPublisher>>> {
+    let (Some(identity_path), Some(public_path)) = (
+        options.service_identity_store_path.as_deref(),
+        options.public_health_store_path.as_deref(),
+    ) else {
+        if options.service_identity_store_path.is_some() || options.public_health_store_path.is_some()
+        {
+            return Err(anyhow!(
+                "--service-identity-store and --public-health-store must be configured together"
+            ));
+        }
+        return Ok(None);
+    };
+    reject_store_aliases(options, identity_path, public_path)?;
+    if let Some(parent) = public_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("creating public health store parent {}", parent.display()))?;
+    }
+    let signer = open_service_identity_at::<IdunnServiceIdentity>(identity_path)
+        .context("opening enrolled Idunn service identity")?;
+    let trust_path = options
+        .daemon_health_trust_store_path
+        .as_deref()
+        .ok_or_else(|| anyhow!("public health projection requires --daemon-health-trust-store"))?;
+    let root_trust_snapshot_sha256 = trust_store_snapshot_sha256(trust_path)?;
+    Ok(Some(Arc::new(IdunnProjectionPublisher {
+        signer,
+        public_store_path: public_path.to_path_buf(),
+        incarnation_id: uuid::Uuid::new_v4().to_string(),
+        root_trust_snapshot_sha256,
+        write_lock: Mutex::new(()),
+    })))
+}
+
+fn reject_store_aliases(options: &CommonOptions, identity_path: &Path, public_path: &Path) -> Result<()> {
+    let identity = normalized_store_path(identity_path)?;
+    let public = normalized_store_path(public_path)?;
+    let mut private_paths = vec![normalized_store_path(&options.store_path)?, identity];
+    for path in [
+        options.daemon_health_trust_store_path.as_deref(),
+        options.release_authority_store_path.as_deref(),
+        options.trusted_epiphany_health_identity_store.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        private_paths.push(normalized_store_path(path)?);
+    }
+    if private_paths
+        .iter()
+        .enumerate()
+        .any(|(index, path)| private_paths.iter().skip(index + 1).any(|other| other == path))
+    {
+        return Err(anyhow!(
+            "service identity, operational, trust, and release stores must not alias"
+        ));
+    }
+    if private_paths.iter().any(|path| path == &public) {
+        return Err(anyhow!(
+            "public health store must not alias identity, operational, trust, or release state"
+        ));
+    }
+    Ok(())
+}
+
+fn normalized_store_path(path: &Path) -> Result<PathBuf> {
+    if path.exists() {
+        return fs::canonicalize(path)
+            .with_context(|| format!("canonicalizing store path {}", path.display()));
+    }
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| anyhow!("store path {} has no file name", path.display()))?;
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let canonical_parent = fs::canonicalize(parent)
+        .with_context(|| format!("canonicalizing store parent {}", parent.display()))?;
+    Ok(canonical_parent.join(file_name))
+}
+
+fn trust_store_snapshot_sha256(path: &Path) -> Result<String> {
+    let entries = SingleFileMessagePackBackingStore::new(path).pull_all_read_only_snapshot()?;
+    record_sha256(&entries)
+}
+
+impl IdunnProjectionPublisher {
+    fn publish_if_current(
+        &self,
+        options: &CommonOptions,
+        store_lock: &Arc<Mutex<()>>,
+        desired: &IdunnDesiredDaemonRecord,
+        source: &AuthenticatedProviderHealthSource,
+        evaluated_at: &str,
+    ) -> Result<()> {
+        let evaluated_at_unix_millis = parse_timestamp_millis(evaluated_at)
+            .ok_or_else(|| anyhow!("projection evaluation time is invalid"))?;
+        let current = read_fresh_daemon_published_health(options, store_lock, desired, evaluated_at)?
+            .and_then(|managed| managed.projection_source)
+            .ok_or_else(|| anyhow!("authenticated provider health vanished before projection"))?;
+        if &current != source {
+            return Err(anyhow!(
+                "authenticated provider health changed before projection publication"
+            ));
+        }
+        self.require_incarnation_trust_snapshot(options)?;
+        let reason_code = authenticated_provider_health_reason_code(&source.health.state)
+            .ok_or_else(|| anyhow!("provider state is not publicly projectable"))?;
+        let expires_at_unix_millis = source
+            .admission
+            .observed_at_unix_millis
+            .saturating_add(u64::from(desired.max_silence_seconds).saturating_mul(1000));
+        if expires_at_unix_millis <= evaluated_at_unix_millis {
+            return Err(anyhow!("authenticated provider health expired before projection"));
+        }
+        let projection_key = format!(
+            "provider-health:{:x}",
+            Sha256::digest(
+                [source.health.daemon_id.as_bytes(), b"\0", source.health.health_contract.as_bytes()]
+                    .concat()
+            )
+        );
+        let _write_guard = self
+            .write_lock
+            .lock()
+            .map_err(|_| anyhow!("Idunn public projection store lock is poisoned"))?;
+        for _ in 0..8 {
+            let backing = SingleFileMessagePackBackingStore::new(&self.public_store_path);
+            let entries = backing.pull_all_read_only_snapshot()?;
+            if entries.iter().any(|entry| {
+                entry.r#type != IdunnAuthenticatedProviderHealthProjectionRecord::TYPE
+                    || entry.schema_id.as_deref()
+                        != Some(IDUNN_AUTHENTICATED_PROVIDER_HEALTH_PROJECTION_SCHEMA)
+            }) {
+                return Err(anyhow!("public health store contains a non-projection envelope"));
+            }
+            for entry in &entries {
+                self.verify_existing_projection(entry)?;
+            }
+            let current_envelope = entries.iter().find(|entry| entry.key == projection_key).cloned();
+            let current_projection = current_envelope
+                .as_ref()
+                .map(|entry| rmp_serde::from_slice::<IdunnAuthenticatedProviderHealthProjectionRecord>(&entry.payload))
+                .transpose()
+                .context("decoding existing public health projection")?;
+            if let Some(existing) = current_projection.as_ref() {
+                existing.validate()?;
+                if current_envelope.as_ref().is_some_and(|entry| entry.key != existing.projection_id)
+                    || existing.projection_id != projection_key
+                {
+                    return Err(anyhow!("public projection envelope key does not match its payload"));
+                }
+                if existing.idunn_signer_identity_id != self.signer.entry().identity_id {
+                    return Err(anyhow!("public projection signer identity changed without store rotation"));
+                }
+                if existing.projection_incarnation_id == self.incarnation_id
+                    && existing.signed_health_sha256 == source.statement_sha256
+                    && existing.authenticated_admission_sha256 == source.admission_sha256
+                    && existing.trust_binding_sha256 == source.binding_sha256
+                {
+                    return Ok(());
+                }
+            }
+            let sequence = current_projection
+                .as_ref()
+                .map_or(1, |existing| existing.projection_sequence.saturating_add(1));
+            if sequence == 0 {
+                return Err(anyhow!("public projection sequence exhausted"));
+            }
+            let mut projection = IdunnAuthenticatedProviderHealthProjectionRecord {
+                schema_version: IDUNN_AUTHENTICATED_PROVIDER_HEALTH_PROJECTION_SCHEMA.into(),
+                projection_id: projection_key.clone(), daemon_id: source.health.daemon_id.clone(),
+                health_contract: source.health.health_contract.clone(),
+                provider_state: source.health.state.clone(), reason_code: reason_code.into(),
+                provider_observed_at_unix_millis: source.admission.observed_at_unix_millis,
+                admitted_at_unix_millis: source.admission.admitted_at_unix_millis,
+                evaluated_at_unix_millis, trust_binding_id: source.binding.binding_id.clone(),
+                trust_binding_sha256: source.binding_sha256.clone(),
+                signed_health_sha256: source.statement_sha256.clone(),
+                authenticated_admission_sha256: source.admission_sha256.clone(),
+                provider_signer_identity_id: source.admission.signer_identity_id.clone(),
+                provider_incarnation_id: source.admission.publisher_incarnation_id.clone(),
+                provider_sequence: source.admission.publisher_sequence,
+                release_id: source.admission.release_id.clone(),
+                release_witness_sha256: source.admission.release_witness_sha256.clone(),
+                source_commit: source.admission.source_commit.clone(),
+                deployment_id: source.admission.deployment_id.clone(),
+                idunn_runtime_id: "idunn-daemon".into(),
+                idunn_signer_identity_id: self.signer.entry().identity_id.clone(),
+                projection_incarnation_id: self.incarnation_id.clone(), projection_sequence: sequence,
+                signature_algorithm: "ed25519".into(), signature: Vec::new(),
+                private_state_exposed: false, expires_at_unix_millis,
+            };
+            let unsigned = rmp_serde::to_vec(&projection)?;
+            projection.signature = self.signer
+                .sign::<IdunnAuthenticatedProviderHealthProjectionPurpose>(&unsigned).signature;
+            projection.validate()?;
+            self.require_incarnation_trust_snapshot(options)?;
+            let replacement = CultCacheEnvelope {
+                key: projection_key.clone(),
+                r#type: IdunnAuthenticatedProviderHealthProjectionRecord::TYPE.into(),
+                payload: rmp_serde::to_vec(&projection)?, stored_at: evaluated_at.into(),
+                schema_id: Some(IDUNN_AUTHENTICATED_PROVIDER_HEALTH_PROJECTION_SCHEMA.into()),
+            };
+            let expected = CultCacheExpectedEnvelope {
+                key: projection_key.clone(),
+                r#type: IdunnAuthenticatedProviderHealthProjectionRecord::TYPE.into(),
+                current: current_envelope,
+            };
+            if backing.compare_exchange(&[expected], &[replacement])? { return Ok(()); }
+        }
+        Err(anyhow!("public health projection lost repeated cross-process contention"))
+    }
+
+    fn require_incarnation_trust_snapshot(&self, options: &CommonOptions) -> Result<()> {
+        let path = options.daemon_health_trust_store_path.as_deref()
+            .ok_or_else(|| anyhow!("projection publisher lost its root trust store"))?;
+        if trust_store_snapshot_sha256(path)? != self.root_trust_snapshot_sha256 {
+            return Err(anyhow!(
+                "root daemon-health trust changed during this Idunn incarnation; restart is required"
+            ));
+        }
+        Ok(())
+    }
+
+    fn verify_existing_projection(&self, entry: &CultCacheEnvelope) -> Result<()> {
+        let projection: IdunnAuthenticatedProviderHealthProjectionRecord =
+            rmp_serde::from_slice(&entry.payload)
+                .context("decoding public health projection during store audit")?;
+        if rmp_serde::to_vec(&projection)? != entry.payload {
+            return Err(anyhow!("public health projection is not canonical MessagePack"));
+        }
+        projection.validate()?;
+        if entry.key != projection.projection_id
+            || projection.idunn_signer_identity_id != self.signer.entry().identity_id
+        {
+            return Err(anyhow!("public health projection key or signer is foreign"));
+        }
+        let proof = cultnet_rs::ServiceIdentitySignature {
+            identity_id: projection.idunn_signer_identity_id.clone(),
+            signature: projection.signature.clone(),
+        };
+        let mut unsigned = projection;
+        unsigned.signature.clear();
+        cultnet_rs::verify_service_identity_signature::<
+            IdunnServiceIdentity,
+            IdunnAuthenticatedProviderHealthProjectionPurpose,
+        >(
+            &self.signer.trust_anchor()?,
+            &rmp_serde::to_vec(&unsigned)?,
+            &proof,
+        )
+        .context("public health projection signature audit failed")
+    }
+}
+
+fn record_sha256<T: serde::Serialize>(value: &T) -> Result<String> {
+    Ok(format!("sha256-{:x}", Sha256::digest(rmp_serde::to_vec(value)?)))
+}
+
+fn publish_authenticated_provider_health(
+    publisher: Option<&IdunnProjectionPublisher>, options: &CommonOptions,
+    store_lock: &Arc<Mutex<()>>, desired: &IdunnDesiredDaemonRecord,
+    source: Option<&AuthenticatedProviderHealthSource>, evaluated_at: &str,
+) -> Result<()> {
+    if let (Some(publisher), Some(source)) = (publisher, source) {
+        publisher.publish_if_current(options, store_lock, desired, source, evaluated_at)?;
+    }
+    Ok(())
 }
 
 fn parse_timestamp_millis(value: &str) -> Option<u64> {
@@ -4615,6 +4982,8 @@ impl Options {
         let mut rudp_health_bind = None;
         let mut trusted_epiphany_health_identity_store = None;
         let mut daemon_health_trust_store_path = None;
+        let mut service_identity_store_path = None;
+        let mut public_health_store_path = None;
         let mut execute = false;
         let mut command_timeout_seconds = 30;
         let mut daemon_id = None;
@@ -4725,6 +5094,18 @@ impl Options {
                         "--daemon-health-trust-store",
                     )?));
                 }
+                "--service-identity-store" => {
+                    service_identity_store_path = Some(PathBuf::from(take_value(
+                        &mut args,
+                        "--service-identity-store",
+                    )?));
+                }
+                "--public-health-store" => {
+                    public_health_store_path = Some(PathBuf::from(take_value(
+                        &mut args,
+                        "--public-health-store",
+                    )?));
+                }
                 "--disabled" => enabled = false,
                 "--execute" => execute = true,
                 "--interval-seconds" => {
@@ -4768,6 +5149,8 @@ impl Options {
             rudp_health_bind,
             trusted_epiphany_health_identity_store,
             daemon_health_trust_store_path,
+            service_identity_store_path,
+            public_health_store_path,
             execute,
             command_timeout_seconds,
         };
@@ -5790,6 +6173,8 @@ mod tests {
             rudp_health_bind: None,
             trusted_epiphany_health_identity_store: None,
             daemon_health_trust_store_path: None,
+            service_identity_store_path: None,
+            public_health_store_path: None,
             execute: true,
             command_timeout_seconds: 1,
         };
@@ -7133,6 +7518,8 @@ mod tests {
             rudp_health_bind: None,
             trusted_epiphany_health_identity_store: None,
             daemon_health_trust_store_path: None,
+            service_identity_store_path: None,
+            public_health_store_path: None,
             execute: false,
             command_timeout_seconds: 1,
         };
@@ -7185,7 +7572,7 @@ mod tests {
         assert_eq!(health_key, "observation:test-daemon");
         assert_eq!(selected.publication_source, "idunn-supervisor-observation");
         assert_ne!(selected.state, "active");
-        assert!(!authenticated);
+        assert!(authenticated.is_none());
 
         let _ = std::fs::remove_file(store_path);
     }
@@ -7206,6 +7593,8 @@ mod tests {
             rudp_health_bind: None,
             trusted_epiphany_health_identity_store: None,
             daemon_health_trust_store_path: None,
+            service_identity_store_path: None,
+            public_health_store_path: None,
             execute: false,
             command_timeout_seconds: 1,
         };
@@ -7244,7 +7633,7 @@ mod tests {
         assert_eq!(selected.state, "dependency-unavailable");
         assert_eq!(selected.publication_source, "idunn-supervisor-observation");
         assert_eq!(selected.transport, "cultmesh.missing-daemon-publication");
-        assert!(!authenticated);
+        assert!(authenticated.is_none());
         assert!(
             selected
                 .detail
@@ -7769,6 +8158,8 @@ mod tests {
             rudp_health_bind: None,
             trusted_epiphany_health_identity_store: None,
             daemon_health_trust_store_path: None,
+            service_identity_store_path: None,
+            public_health_store_path: None,
             execute: false,
             command_timeout_seconds: 1,
         };
@@ -7800,6 +8191,13 @@ mod tests {
     fn generic_signed_health_fixture(
         sequence: u64,
     ) -> (CultNetMessage, CommonOptions, tempfile::TempDir) {
+        generic_signed_health_fixture_with_release(sequence, false)
+    }
+
+    fn generic_signed_health_fixture_with_release(
+        sequence: u64,
+        release_bound: bool,
+    ) -> (CultNetMessage, CommonOptions, tempfile::TempDir) {
         let root = tempfile::tempdir().unwrap();
         let trust_path = root.path().join("health-trust.cc");
         let store_path = root.path().join("idunn.cc");
@@ -7819,7 +8217,7 @@ mod tests {
             signer_public_key: public_key,
             binding_authority: "root".into(),
             bound_at_unix_millis: 1_784_483_100_000,
-            release_binding_required: false,
+            release_binding_required: release_bound,
             private_state_exposed: false,
         };
         SingleFileMessagePackBackingStore::new(&trust_path)
@@ -7831,7 +8229,7 @@ mod tests {
         .unwrap()
         .timestamp_millis() as u64;
         let mut statement = IdunnSignedDaemonHealthRecord {
-            schema_version: IDUNN_SIGNED_DAEMON_HEALTH_SCHEMA.into(),
+            schema_version: odin_core::IDUNN_SIGNED_DAEMON_HEALTH_SCHEMA.into(),
             daemon_id: binding.daemon_id.clone(),
             health_contract: binding.health_contract.clone(),
             source_runtime_id: binding.source_runtime_id.clone(),
@@ -7841,10 +8239,11 @@ mod tests {
             publisher_incarnation_id: "00000000-0000-4000-8000-000000000031".into(),
             publisher_sequence: sequence,
             observed_at_unix_millis,
-            release_id: None,
-            release_witness_sha256: None,
-            source_commit: None,
-            deployment_id: None,
+            release_id: release_bound.then(|| "release-test-1".into()),
+            release_witness_sha256: release_bound
+                .then(|| format!("sha256-{}", "a".repeat(64))),
+            source_commit: release_bound.then(|| "b".repeat(40)),
+            deployment_id: release_bound.then(|| "deploy-test-1".into()),
             signature_algorithm: "ed25519".into(),
             signature: Vec::new(),
             private_state_exposed: false,
@@ -7868,6 +8267,34 @@ mod tests {
                 tags: Some(vec![CULTNET_RUDP_PROTOCOL_ID.into()]),
             },
         };
+        if release_bound {
+            let request = IdunnDeploymentRequestRecord {
+                request_id: "deploy-test-1".into(),
+                daemon_id: "test-daemon".into(),
+                command: "deploy".into(),
+                authority: "idunn".into(),
+                requested_at: "2026-07-19T11:59:00Z".into(),
+                repository_full_name: "GameCult/Test".into(),
+                upstream_ref: "refs/heads/main".into(),
+                source_revision: "b".repeat(40),
+                release_authority_id: "bifrost-test".into(),
+                release_authority_envelope_sha256: format!("sha256-{}", "c".repeat(64)),
+                requires_bifrost_authority: true,
+            };
+            let head = IdunnCurrentDeploymentRequestRecord {
+                daemon_id: "test-daemon".into(),
+                request_id: request.request_id.clone(),
+                sequence: 1,
+                updated_at: "2026-07-19T11:59:00Z".into(),
+            };
+            let mut backing = SingleFileMessagePackBackingStore::new(&store_path);
+            backing
+                .push(&typed_envelope(&request.request_id, &request, "unix:1784462340").unwrap())
+                .unwrap();
+            backing
+                .push(&typed_envelope(&head.daemon_id, &head, "unix:1784462340").unwrap())
+                .unwrap();
+        }
         (
             message,
             CommonOptions {
@@ -7877,6 +8304,8 @@ mod tests {
                 rudp_health_bind: None,
                 trusted_epiphany_health_identity_store: None,
                 daemon_health_trust_store_path: Some(trust_path),
+                service_identity_store_path: None,
+                public_health_store_path: None,
                 execute: false,
                 command_timeout_seconds: 1,
             },
@@ -7888,22 +8317,13 @@ mod tests {
     fn generic_signed_health_requires_root_binding_and_monotonic_admission() {
         let (first, options, _root) = generic_signed_health_fixture(1);
         let lock = Arc::new(Mutex::new(()));
-        let outcome = admit_health_from_rudp_message(
-            &first,
-            &options,
-            &lock,
-            "2026-07-19T12:00:01Z",
-        )
-        .unwrap();
+        let outcome =
+            admit_health_from_rudp_message(&first, &options, &lock, "2026-07-19T12:00:01Z")
+                .unwrap();
         assert_eq!(outcome.authority, "authenticated");
         assert!(
-            admit_health_from_rudp_message(
-                &first,
-                &options,
-                &lock,
-                "2026-07-19T12:00:02Z"
-            )
-            .is_err()
+            admit_health_from_rudp_message(&first, &options, &lock, "2026-07-19T12:00:02Z")
+                .is_err()
         );
         with_store_node(&options, &lock, |node| {
             let health = node
@@ -7956,17 +8376,12 @@ mod tests {
             transport_profile_id: transport_profile_id(&target),
             command_boundary_id: command_boundary_id(&target),
         };
-        let (health_key, selected, authenticated) = evaluate_target_health(
-            &target,
-            &options,
-            &lock,
-            &desired,
-            "2026-07-19T12:00:02Z",
-        )
-        .unwrap();
+        let (health_key, selected, authenticated) =
+            evaluate_target_health(&target, &options, &lock, &desired, "2026-07-19T12:00:02Z")
+                .unwrap();
         assert_eq!(health_key, "test-daemon");
         assert_eq!(selected.publication_source, "daemon-authenticated");
-        assert!(authenticated);
+        assert!(authenticated.is_some());
 
         let (mut forged, mut no_trust, _other_root) = generic_signed_health_fixture(2);
         no_trust.daemon_health_trust_store_path = None;
@@ -7985,6 +8400,299 @@ mod tests {
         assert!(health_from_rudp_message(&forged, &options).is_err());
     }
 
+    fn projection_fixture(
+        release_bound: bool,
+    ) -> (
+        CommonOptions,
+        Arc<Mutex<()>>,
+        IdunnDesiredDaemonRecord,
+        AuthenticatedProviderHealthSource,
+        Arc<IdunnProjectionPublisher>,
+        tempfile::TempDir,
+    ) {
+        let (message, mut options, root) =
+            generic_signed_health_fixture_with_release(1, release_bound);
+        let identity_path = root.path().join("idunn-identity.ccmp");
+        let public_path = root.path().join("public-health.cc");
+        cultnet_rs::enroll_service_identity_at::<IdunnServiceIdentity>(&identity_path).unwrap();
+        options.service_identity_store_path = Some(identity_path);
+        options.public_health_store_path = Some(public_path);
+        let publisher = initialize_projection_publisher(&options)
+            .unwrap()
+            .expect("configured publisher");
+        let lock = Arc::new(Mutex::new(()));
+        admit_health_from_rudp_message(&message, &options, &lock, "2026-07-19T12:00:01Z").unwrap();
+        let desired = IdunnDesiredDaemonRecord {
+            daemon_id: "test-daemon".into(),
+            verse_id: "test.local".into(),
+            name: "Test daemon".into(),
+            enabled: true,
+            health_command: None,
+            restart_command: None,
+            deploy_command: None,
+            authority: "idunn-supervisor-command".into(),
+            max_silence_seconds: 60,
+            observed_at: "2026-07-19T12:00:02Z".into(),
+            health_contract: "test.signed-health".into(),
+            transport_profile_id: "test-transport".into(),
+            command_boundary_id: "test-command".into(),
+        };
+        let source =
+            read_fresh_daemon_published_health(&options, &lock, &desired, "2026-07-19T12:00:02Z")
+                .unwrap()
+                .unwrap()
+                .projection_source
+                .unwrap();
+        (options, lock, desired, source, publisher, root)
+    }
+
+    fn public_projection(
+        options: &CommonOptions,
+    ) -> IdunnAuthenticatedProviderHealthProjectionRecord {
+        let entries = SingleFileMessagePackBackingStore::new(
+            options.public_health_store_path.as_ref().unwrap(),
+        )
+        .pull_all_read_only_snapshot()
+        .unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].r#type,
+            IdunnAuthenticatedProviderHealthProjectionRecord::TYPE
+        );
+        rmp_serde::from_slice(&entries[0].payload).unwrap()
+    }
+
+    #[test]
+    fn projection_is_signed_canonical_public_state_without_provider_detail() {
+        let (options, lock, desired, source, publisher, _root) = projection_fixture(false);
+        publisher
+            .publish_if_current(&options, &lock, &desired, &source, "2026-07-19T12:00:02Z")
+            .unwrap();
+        let projection = public_projection(&options);
+        assert_eq!(projection.projection_sequence, 1);
+        assert_eq!(
+            projection.expires_at_unix_millis,
+            source.admission.observed_at_unix_millis + 60_000
+        );
+        assert!(
+            !rmp_serde::to_vec(&projection)
+                .unwrap()
+                .windows(b"signed provider health".len())
+                .any(|window| window == b"signed provider health")
+        );
+        let signature = projection.signature.clone();
+        let mut unsigned = projection.clone();
+        unsigned.signature.clear();
+        let anchor = publisher.signer.trust_anchor().unwrap();
+        cultnet_rs::verify_service_identity_signature::<
+            IdunnServiceIdentity,
+            IdunnAuthenticatedProviderHealthProjectionPurpose,
+        >(
+            &anchor,
+            &rmp_serde::to_vec(&unsigned).unwrap(),
+            &cultnet_rs::ServiceIdentitySignature {
+                identity_id: projection.idunn_signer_identity_id.clone(),
+                signature,
+            },
+        )
+        .unwrap();
+        publisher
+            .publish_if_current(&options, &lock, &desired, &source, "2026-07-19T12:00:03Z")
+            .unwrap();
+        assert_eq!(
+            public_projection(&options),
+            projection,
+            "same source refreshed public state"
+        );
+    }
+
+    #[test]
+    fn projection_rejoins_trust_and_refuses_rotation_or_source_mutation() {
+        let (options, lock, desired, source, publisher, _root) = projection_fixture(false);
+        let trust_path = options.daemon_health_trust_store_path.as_ref().unwrap();
+        let backing = SingleFileMessagePackBackingStore::new(trust_path);
+        let current = backing.pull_all_read_only_snapshot().unwrap().remove(0);
+        let mut rotated = source.binding.clone();
+        rotated.binding_id = "root/test-daemon/health-rotated".into();
+        assert!(
+            backing
+                .compare_exchange(
+                    &[CultCacheExpectedEnvelope {
+                        key: source.binding.binding_id.clone(),
+                        r#type: IdunnDaemonHealthTrustBindingRecord::TYPE.into(),
+                        current: Some(current),
+                    }],
+                    &[
+                        typed_envelope(&rotated.binding_id, &rotated, "2026-07-19T12:00:02Z")
+                            .unwrap()
+                    ],
+                )
+                .unwrap()
+        );
+        assert!(
+            publisher
+                .publish_if_current(&options, &lock, &desired, &source, "2026-07-19T12:00:02Z")
+                .is_err()
+        );
+        assert!(!options.public_health_store_path.as_ref().unwrap().exists());
+
+        let (options, lock, desired, source, publisher, _root) = projection_fixture(false);
+        with_store_node(&options, &lock, |node| {
+            let mut admission = source.admission.clone();
+            admission.publisher_sequence += 1;
+            node.put(&admission.daemon_id, &admission)?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(
+            publisher
+                .publish_if_current(&options, &lock, &desired, &source, "2026-07-19T12:00:02Z")
+                .is_err()
+        );
+        assert!(!options.public_health_store_path.as_ref().unwrap().exists());
+    }
+
+    #[test]
+    fn projection_refuses_superseded_deployment_and_does_not_delete_prior_row() {
+        let (options, lock, desired, source, publisher, _root) = projection_fixture(true);
+        publisher
+            .publish_if_current(&options, &lock, &desired, &source, "2026-07-19T12:00:02Z")
+            .unwrap();
+        let prior = public_projection(&options);
+        with_store_node(&options, &lock, |node| {
+            let mut head = source.deployment_head.clone().unwrap();
+            head.request_id = "deploy-test-2".into();
+            head.sequence += 1;
+            node.put(&head.daemon_id, &head)?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(
+            publisher
+                .publish_if_current(&options, &lock, &desired, &source, "2026-07-19T12:00:03Z")
+                .is_err()
+        );
+        assert_eq!(public_projection(&options), prior);
+    }
+
+    #[test]
+    fn projection_store_alias_contamination_and_restart_are_bounded() {
+        let (mut options, _lock, _desired, _source, _publisher, root) = projection_fixture(false);
+        options.public_health_store_path = Some(options.store_path.clone());
+        assert!(initialize_projection_publisher(&options).is_err());
+
+        let (options, lock, desired, source, first, second_root) = projection_fixture(false);
+        first
+            .publish_if_current(&options, &lock, &desired, &source, "2026-07-19T12:00:02Z")
+            .unwrap();
+        let first_projection = public_projection(&options);
+        let second = initialize_projection_publisher(&options).unwrap().unwrap();
+        second
+            .publish_if_current(&options, &lock, &desired, &source, "2026-07-19T12:00:03Z")
+            .unwrap();
+        let second_projection = public_projection(&options);
+        assert_eq!(second_projection.projection_sequence, 2);
+        assert_ne!(
+            second_projection.projection_incarnation_id,
+            first_projection.projection_incarnation_id
+        );
+
+        let public_path = options.public_health_store_path.as_ref().unwrap();
+        let backing = SingleFileMessagePackBackingStore::new(public_path);
+        let current_envelope = backing.pull_all_read_only_snapshot().unwrap().remove(0);
+        let mut corrupted = second_projection.clone();
+        corrupted.signature[0] ^= 1;
+        let corrupted_envelope = CultCacheEnvelope {
+            payload: rmp_serde::to_vec(&corrupted).unwrap(),
+            ..current_envelope.clone()
+        };
+        assert!(backing
+            .compare_exchange(
+                &[CultCacheExpectedEnvelope {
+                    key: current_envelope.key.clone(),
+                    r#type: current_envelope.r#type.clone(),
+                    current: Some(current_envelope),
+                }],
+                &[corrupted_envelope],
+            )
+            .unwrap());
+        assert!(second
+            .publish_if_current(&options, &lock, &desired, &source, "2026-07-19T12:00:04Z")
+            .is_err());
+
+        let contaminated_path = root.path().join("contaminated-public.cc");
+        SingleFileMessagePackBackingStore::new(&contaminated_path)
+            .push(&typed_envelope(&desired.daemon_id, &desired, "2026-07-19T12:00:02Z").unwrap())
+            .unwrap();
+        let mut contaminated = options.clone();
+        contaminated.public_health_store_path = Some(contaminated_path);
+        let contaminated_publisher = initialize_projection_publisher(&contaminated)
+            .unwrap()
+            .unwrap();
+        assert!(
+            contaminated_publisher
+                .publish_if_current(
+                    &contaminated,
+                    &lock,
+                    &desired,
+                    &source,
+                    "2026-07-19T12:00:04Z",
+                )
+                .is_err()
+        );
+        drop(second_root);
+    }
+
+    #[test]
+    fn non_authenticated_paths_cannot_refresh_or_remove_public_projection() {
+        let (options, lock, desired, source, publisher, _root) = projection_fixture(false);
+        publisher
+            .publish_if_current(&options, &lock, &desired, &source, "2026-07-19T12:00:02Z")
+            .unwrap();
+        let prior = public_projection(&options);
+        publish_authenticated_provider_health(
+            Some(&publisher),
+            &options,
+            &lock,
+            &desired,
+            None,
+            "2026-07-19T12:00:30Z",
+        )
+        .unwrap();
+        assert_eq!(public_projection(&options), prior);
+    }
+
+    #[test]
+    fn projection_cas_serializes_competing_idunn_incarnations() {
+        let (options, lock, desired, source, first, _root) = projection_fixture(false);
+        let second = initialize_projection_publisher(&options).unwrap().unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let spawn_publish = |publisher: Arc<IdunnProjectionPublisher>| {
+            let options = options.clone();
+            let lock = Arc::clone(&lock);
+            let desired = desired.clone();
+            let source = source.clone();
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                barrier.wait();
+                publisher.publish_if_current(
+                    &options,
+                    &lock,
+                    &desired,
+                    &source,
+                    "2026-07-19T12:00:02Z",
+                )
+            })
+        };
+        let one = spawn_publish(first);
+        let two = spawn_publish(second);
+        barrier.wait();
+        one.join().unwrap().unwrap();
+        two.join().unwrap().unwrap();
+        let final_projection = public_projection(&options);
+        assert_eq!(final_projection.projection_sequence, 2);
+    }
+
     #[test]
     fn generic_signed_health_requires_canonical_bytes_and_preserves_millisecond_clock() {
         let (mut message, options, _root) = generic_signed_health_fixture(1);
@@ -7994,11 +8702,10 @@ mod tests {
             }
             _ => unreachable!(),
         };
-        statement.observed_at_unix_millis = chrono::DateTime::parse_from_rfc3339(
-            "2026-07-19T12:00:00.500Z",
-        )
-        .unwrap()
-        .timestamp_millis() as u64;
+        statement.observed_at_unix_millis =
+            chrono::DateTime::parse_from_rfc3339("2026-07-19T12:00:00.500Z")
+                .unwrap()
+                .timestamp_millis() as u64;
         statement.signature.clear();
         let key = SigningKey::from_bytes(&[31; 32]);
         statement.signature = key
@@ -8025,7 +8732,11 @@ mod tests {
             unreachable!()
         };
         let canonical = rmp_serde::to_vec(&statement).unwrap();
-        let string_marker_index = if canonical.first() == Some(&0xdc) { 3 } else { 1 };
+        let string_marker_index = if canonical.first() == Some(&0xdc) {
+            3
+        } else {
+            1
+        };
         let string_marker = canonical[string_marker_index];
         assert!((0xa0..=0xbf).contains(&string_marker));
         let string_length = string_marker & 0x1f;
@@ -8034,13 +8745,10 @@ mod tests {
         noncanonical.extend_from_slice(&[0xd9, string_length]);
         noncanonical.extend_from_slice(&canonical[string_marker_index + 1..]);
         document.payload = noncanonical;
-        let error = authenticate_generic_signed_health(
-            document,
-            &options,
-            "2026-07-19T12:00:00.500Z",
-        )
-        .unwrap_err()
-        .to_string();
+        let error =
+            authenticate_generic_signed_health(document, &options, "2026-07-19T12:00:00.500Z")
+                .unwrap_err()
+                .to_string();
         assert!(error.contains("canonical positional MessagePack"));
     }
 
@@ -8130,6 +8838,8 @@ mod tests {
             rudp_health_bind: None,
             trusted_epiphany_health_identity_store: Some(identity_path),
             daemon_health_trust_store_path: None,
+            service_identity_store_path: None,
+            public_health_store_path: None,
             execute: false,
             command_timeout_seconds: 1,
         };
@@ -8285,41 +8995,33 @@ mod tests {
         let (_message, options, _root) = signed_epiphany_health_fixture(1);
         let lock = Arc::new(Mutex::new(()));
         let prior = with_store_node(&options, &lock, |node| {
-            node.get::<IdunnDeploymentRequestRecord>(
-                "deploy:yggdrasil-epiphany:fixture",
-            )?
-            .ok_or_else(|| anyhow!("fixture request missing"))
+            node.get::<IdunnDeploymentRequestRecord>("deploy:yggdrasil-epiphany:fixture")?
+                .ok_or_else(|| anyhow!("fixture request missing"))
         })
         .unwrap();
 
         assert_eq!(
-            terminalize_interrupted_deployment_requests(
-                &options,
-                &lock,
-                "2026-07-16T00:02:00Z",
-            )
-            .unwrap(),
+            terminalize_interrupted_deployment_requests(&options, &lock, "2026-07-16T00:02:00Z",)
+                .unwrap(),
             1
         );
         let result = with_store_node(&options, &lock, |node| {
-            node.get::<IdunnDeploymentResultRecord>(
-                "result:deploy:yggdrasil-epiphany:fixture",
-            )?
-            .ok_or_else(|| anyhow!("recovered result missing"))
+            node.get::<IdunnDeploymentResultRecord>("result:deploy:yggdrasil-epiphany:fixture")?
+                .ok_or_else(|| anyhow!("recovered result missing"))
         })
         .unwrap();
         assert_eq!(result.request_id, prior.request_id);
         assert_eq!(result.daemon_id, prior.daemon_id);
         assert_eq!(result.state, "failed");
         assert_eq!(result.completed_at, "2026-07-16T00:02:00Z");
-        assert!(result.detail.contains("owning Idunn daemon incarnation stopped"));
+        assert!(
+            result
+                .detail
+                .contains("owning Idunn daemon incarnation stopped")
+        );
         assert_eq!(
-            terminalize_interrupted_deployment_requests(
-                &options,
-                &lock,
-                "2026-07-16T00:03:00Z",
-            )
-            .unwrap(),
+            terminalize_interrupted_deployment_requests(&options, &lock, "2026-07-16T00:03:00Z",)
+                .unwrap(),
             0
         );
 
@@ -8431,6 +9133,8 @@ mod tests {
             rudp_health_bind: None,
             trusted_epiphany_health_identity_store: None,
             daemon_health_trust_store_path: None,
+            service_identity_store_path: None,
+            public_health_store_path: None,
             execute: false,
             command_timeout_seconds: 1,
         };

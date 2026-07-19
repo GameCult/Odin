@@ -20,7 +20,7 @@ sha2 = "0.10"
 chrono = "0.4"
 serde = { version = "1", features = ["derive"] }
 ed25519-dalek = "2.2"
-uuid = "1"
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 tempfile = "3"
