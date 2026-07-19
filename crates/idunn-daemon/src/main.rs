@@ -655,18 +655,43 @@ fn run_swarm(options: &SwarmOptions, common: &CommonOptions) -> Result<()> {
     start_rudp_health_ingress(common, &store_lock, &now)?;
     publish_surgery_plans(&options.profile, &targets, common, &store_lock, &now)?;
 
+    // Health-driven and lifecycle-command workers are separate so observation
+    // remains responsive. One per-target gate serializes local actuation; the
+    // persistent request/result CAS chain remains the durable authority.
+    let actuation_gates = Arc::new(
+        targets
+            .iter()
+            .map(|target| (target.daemon_id.clone(), Arc::new(Mutex::new(()))))
+            .collect::<HashMap<_, _>>(),
+    );
+
     let command_targets = targets.clone();
     let command_common = common.clone();
     let command_store_lock = Arc::clone(&store_lock);
+    let command_actuation_gates = Arc::clone(&actuation_gates);
     let mut workers = Vec::with_capacity(targets.len() + 1);
     workers.push(thread::spawn(move || {
-        run_lifecycle_command_loop(command_targets, command_common, command_store_lock)
+        run_lifecycle_command_loop(
+            command_targets,
+            command_common,
+            command_store_lock,
+            command_actuation_gates,
+        )
     }));
     for target in targets {
         let worker_common = common.clone();
         let worker_store_lock = Arc::clone(&store_lock);
+        let worker_actuation_gate = actuation_gates
+            .get(&target.daemon_id)
+            .cloned()
+            .ok_or_else(|| anyhow!("Idunn target lost its actuation gate"))?;
         workers.push(thread::spawn(move || {
-            run_target_loop(target, worker_common, worker_store_lock)
+            run_target_loop(
+                target,
+                worker_common,
+                worker_store_lock,
+                worker_actuation_gate,
+            )
         }));
     }
 
@@ -685,10 +710,16 @@ fn run_lifecycle_command_loop(
     targets: Vec<DaemonTarget>,
     options: CommonOptions,
     store_lock: Arc<Mutex<()>>,
+    actuation_gates: Arc<HashMap<String, Arc<Mutex<()>>>>,
 ) -> Result<()> {
     loop {
         for target in &targets {
-            if let Err(error) = process_pending_lifecycle_commands(target, &options, &store_lock) {
+            let gate = actuation_gates
+                .get(&target.daemon_id)
+                .ok_or_else(|| anyhow!("Idunn lifecycle target lost its actuation gate"))?;
+            if let Err(error) = with_target_actuation_gate(gate, || {
+                process_pending_lifecycle_commands(target, &options, &store_lock)
+            }) {
                 eprintln!(
                     "Idunn lifecycle command cycle failed for {}: {}",
                     target.daemon_id, error
@@ -729,10 +760,13 @@ fn run_target_loop(
     target: DaemonTarget,
     options: CommonOptions,
     store_lock: Arc<Mutex<()>>,
+    actuation_gate: Arc<Mutex<()>>,
 ) -> Result<()> {
     let mut missing_since = None;
     loop {
-        if let Err(error) = run_target_cycle(&target, &options, &store_lock, &mut missing_since) {
+        if let Err(error) = with_target_actuation_gate(&actuation_gate, || {
+            run_target_cycle(&target, &options, &store_lock, &mut missing_since)
+        }) {
             eprintln!(
                 "Idunn swarm target {} cycle failed: {}",
                 target.daemon_id, error
@@ -740,6 +774,16 @@ fn run_target_loop(
         }
         thread::sleep(Duration::from_secs(target.interval_seconds));
     }
+}
+
+fn with_target_actuation_gate<T>(
+    gate: &Mutex<()>,
+    action: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let _actuation = gate
+        .lock()
+        .map_err(|_| anyhow!("Idunn target actuation gate is poisoned"))?;
+    action()
 }
 
 fn run_target_cycle(
@@ -1183,12 +1227,36 @@ fn persist_current_deployment_request(
     request: &IdunnDeploymentRequestRecord,
 ) -> Result<IdunnCurrentDeploymentRequestRecord> {
     for _ in 0..8 {
-        let (current_head, current_head_envelope, current_request_envelope) =
+        let (
+            current_head,
+            current_head_envelope,
+            current_head_request_envelope,
+            current_head_result_envelope,
+            current_request_envelope,
+        ) =
             with_store_node(options, store_lock, |node| {
+                let head =
+                    node.get::<IdunnCurrentDeploymentRequestRecord>(&request.daemon_id)?;
                 Ok((
-                    node.get::<IdunnCurrentDeploymentRequestRecord>(&request.daemon_id)?,
+                    head.clone(),
                     node.cache()
                         .get_envelope::<IdunnCurrentDeploymentRequestRecord>(&request.daemon_id)?,
+                    head.as_ref()
+                        .map(|head| {
+                            node.cache()
+                                .get_envelope::<IdunnDeploymentRequestRecord>(&head.request_id)
+                        })
+                        .transpose()?
+                        .flatten(),
+                    head.as_ref()
+                        .map(|head| {
+                            node.cache().get_envelope::<IdunnDeploymentResultRecord>(&format!(
+                                "result:{}",
+                                head.request_id
+                            ))
+                        })
+                        .transpose()?
+                        .flatten(),
                     node.cache()
                         .get_envelope::<IdunnDeploymentRequestRecord>(&request.request_id)?,
                 ))
@@ -1207,6 +1275,37 @@ fn persist_current_deployment_request(
                 "existing deployment request is not the current authority head"
             ));
         }
+        if let Some(current) = current_head.as_ref() {
+            let prior_request_envelope = current_head_request_envelope
+                .as_ref()
+                .ok_or_else(|| anyhow!("current deployment head lost its exact request"))?;
+            let prior_request: IdunnDeploymentRequestRecord =
+                rmp_serde::from_slice(&prior_request_envelope.payload)?;
+            if prior_request.request_id != current.request_id
+                || prior_request.daemon_id != current.daemon_id
+            {
+                return Err(anyhow!(
+                    "current deployment head request identity is substituted"
+                ));
+            }
+            let prior_result_envelope = current_head_result_envelope.as_ref().ok_or_else(|| {
+                anyhow!(
+                    "current deployment request {} remains live; refusing supersession",
+                    current.request_id
+                )
+            })?;
+            let prior_result: IdunnDeploymentResultRecord =
+                rmp_serde::from_slice(&prior_result_envelope.payload)?;
+            if prior_result.result_id != format!("result:{}", current.request_id)
+                || prior_result.request_id != current.request_id
+                || prior_result.daemon_id != current.daemon_id
+                || !matches!(prior_result.state.as_str(), "succeeded" | "failed" | "skipped")
+            {
+                return Err(anyhow!(
+                    "current deployment request lacks an exact terminal result"
+                ));
+            }
+        }
         let head = IdunnCurrentDeploymentRequestRecord {
             daemon_id: request.daemon_id.clone(),
             request_id: request.request_id.clone(),
@@ -1215,7 +1314,7 @@ fn persist_current_deployment_request(
                 .map_or(1, |head| head.sequence.saturating_add(1)),
             updated_at: request.requested_at.clone(),
         };
-        let expected = [
+        let mut expected = vec![
             CultCacheExpectedEnvelope {
                 key: request.daemon_id.clone(),
                 r#type: IdunnCurrentDeploymentRequestRecord::TYPE.into(),
@@ -1227,6 +1326,18 @@ fn persist_current_deployment_request(
                 current: None,
             },
         ];
+        if let Some(current) = current_head.as_ref() {
+            expected.push(CultCacheExpectedEnvelope {
+                key: current.request_id.clone(),
+                r#type: IdunnDeploymentRequestRecord::TYPE.into(),
+                current: current_head_request_envelope,
+            });
+            expected.push(CultCacheExpectedEnvelope {
+                key: format!("result:{}", current.request_id),
+                r#type: IdunnDeploymentResultRecord::TYPE.into(),
+                current: current_head_result_envelope,
+            });
+        }
         if SingleFileMessagePackBackingStore::new(&options.store_path).compare_exchange(
             &expected,
             &[
@@ -4675,6 +4786,44 @@ fn help_text() -> &'static str {
 mod tests {
     use super::*;
 
+    #[test]
+    fn target_actuation_gate_serializes_request_owners() {
+        let gate = Arc::new(Mutex::new(()));
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let first_gate = Arc::clone(&gate);
+        let first_entered = entered_tx.clone();
+        let first = thread::spawn(move || {
+            with_target_actuation_gate(&first_gate, || {
+                first_entered.send("manual").unwrap();
+                release_rx.recv().unwrap();
+                Ok(())
+            })
+            .unwrap();
+        });
+        assert_eq!(entered_rx.recv().unwrap(), "manual");
+
+        let second_gate = Arc::clone(&gate);
+        let second_entered = entered_tx;
+        let second = thread::spawn(move || {
+            with_target_actuation_gate(&second_gate, || {
+                second_entered.send("automatic").unwrap();
+                Ok(())
+            })
+            .unwrap();
+        });
+        assert!(
+            entered_rx
+                .recv_timeout(Duration::from_millis(100))
+                .is_err(),
+            "automatic request owner entered while manual actuation was live"
+        );
+        release_tx.send(()).unwrap();
+        assert_eq!(entered_rx.recv().unwrap(), "automatic");
+        first.join().unwrap();
+        second.join().unwrap();
+    }
+
     #[cfg(unix)]
     fn descendant_marker_command(marker: &std::path::Path) -> Child {
         let mut command = Command::new("sh");
@@ -7102,6 +7251,25 @@ mod tests {
         .unwrap();
         newer.request_id = "deploy:yggdrasil-epiphany:aaa".into();
         newer.requested_at = "unix:1784160000".into();
+        let live_error = persist_current_deployment_request(&options, &lock, &newer)
+            .unwrap_err()
+            .to_string();
+        assert!(live_error.contains("remains live; refusing supersession"));
+        with_store_node(&options, &lock, |node| {
+            node.put(
+                "result:deploy:yggdrasil-epiphany:fixture",
+                &IdunnDeploymentResultRecord {
+                    result_id: "result:deploy:yggdrasil-epiphany:fixture".into(),
+                    request_id: "deploy:yggdrasil-epiphany:fixture".into(),
+                    daemon_id: "yggdrasil-epiphany".into(),
+                    state: "succeeded".into(),
+                    detail: "fixture deployment completed".into(),
+                    completed_at: "unix:1784160001".into(),
+                },
+            )?;
+            Ok(())
+        })
+        .unwrap();
         persist_current_deployment_request(&options, &lock, &newer).unwrap();
         let stale_error = validate_health_admission_at(
             &HealthAdmissionValidationOptions {
