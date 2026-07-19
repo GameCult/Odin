@@ -606,6 +606,24 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_health_binding_appends_have_one_cas_winner() -> Result<()> {
+        let temp = TempDir::new()?;
+        let store = temp.path().join("trust.cc");
+        let path = store.to_str().unwrap().to_string();
+        invoke(&binding_args("create-daemon-health-trust-binding", &path, "one", "daemon-one", "runtime-one"))?;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let workers = [("two", "daemon-two", "runtime-two"), ("three", "daemon-three", "runtime-three")].map(|(id, daemon, runtime)| {
+            let path = path.clone(); let barrier = barrier.clone();
+            std::thread::spawn(move || { barrier.wait(); invoke(&binding_args("add-daemon-health-trust-binding", &path, id, daemon, runtime)) })
+        });
+        barrier.wait();
+        let wins = workers.into_iter().filter(|worker| worker.join().unwrap().is_ok()).count();
+        assert!((1..=2).contains(&wins));
+        assert_eq!(SingleFileMessagePackBackingStore::new(&store).pull_all_read_only_snapshot()?.len(), 1 + wins);
+        Ok(())
+    }
+
+    #[test]
     fn identity_enrollment_and_export_are_immutable_and_paths_cannot_alias() -> Result<()> {
         let temp = TempDir::new()?;
         let private = temp.path().join("identity.cc");
