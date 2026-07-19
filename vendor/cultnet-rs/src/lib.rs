@@ -5,6 +5,7 @@ mod rudp;
 mod schema_discovery;
 mod security;
 mod service_identity;
+mod snapshot_query;
 mod transport;
 
 pub use contracts::*;
@@ -14,4 +15,5 @@ pub use rudp::*;
 pub use schema_discovery::*;
 pub use security::*;
 pub use service_identity::*;
+pub use snapshot_query::*;
 pub use transport::*;
