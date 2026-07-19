@@ -153,6 +153,34 @@ impl SingleFileMessagePackBackingStore {
         &self,
         action: impl FnOnce(Vec<CultCacheEnvelope>) -> Result<T>,
     ) -> Result<T> {
+        self.with_read_only_shared_snapshot_and_unlock_diagnostic(action, |_| {})
+    }
+
+    pub fn with_read_only_shared_snapshot_and_unlock_diagnostic<T>(
+        &self,
+        action: impl FnOnce(Vec<CultCacheEnvelope>) -> Result<T>,
+        on_unlock_failure: impl FnOnce(anyhow::Error),
+    ) -> Result<T> {
+        self.with_read_only_shared_snapshot_using(
+            action,
+            |lock| {
+                fs2::FileExt::unlock(lock)
+                    .with_context(|| format!("failed to unlock {}", self.lock_path().display()))
+            },
+            on_unlock_failure,
+        )
+    }
+
+    fn with_read_only_shared_snapshot_using<T, U, D>(
+        &self,
+        action: impl FnOnce(Vec<CultCacheEnvelope>) -> Result<T>,
+        unlock: U,
+        on_unlock_failure: D,
+    ) -> Result<T>
+    where
+        U: FnOnce(&File) -> Result<()>,
+        D: FnOnce(anyhow::Error),
+    {
         let lock_path = self.lock_path();
         let lock = OpenOptions::new()
             .read(true)
@@ -160,9 +188,9 @@ impl SingleFileMessagePackBackingStore {
             .with_context(|| format!("failed to open pre-created {}", lock_path.display()))?;
         fs2::FileExt::lock_shared(&lock)
             .with_context(|| format!("failed to lock {}", lock_path.display()))?;
+        let guard = ReadOnlySharedLockGuard::new(lock, unlock, on_unlock_failure);
         let result = self.read_all_unlocked().and_then(action);
-        fs2::FileExt::unlock(&lock)
-            .with_context(|| format!("failed to unlock {}", lock_path.display()))?;
+        drop(guard);
         result
     }
 
@@ -296,6 +324,41 @@ impl SingleFileMessagePackBackingStore {
             .unwrap_or_else(|| "cultcache.cc".into());
         lock_name.push(".lock");
         self.path.with_file_name(lock_name)
+    }
+}
+
+struct ReadOnlySharedLockGuard<U, D>
+where
+    U: FnOnce(&File) -> Result<()>,
+    D: FnOnce(anyhow::Error),
+{
+    lock: Option<File>,
+    unlock: Option<U>,
+    on_unlock_failure: Option<D>,
+}
+
+impl<U, D> ReadOnlySharedLockGuard<U, D>
+where
+    U: FnOnce(&File) -> Result<()>,
+    D: FnOnce(anyhow::Error),
+{
+    fn new(lock: File, unlock: U, on_unlock_failure: D) -> Self {
+        Self { lock: Some(lock), unlock: Some(unlock), on_unlock_failure: Some(on_unlock_failure) }
+    }
+}
+
+impl<U, D> Drop for ReadOnlySharedLockGuard<U, D>
+where
+    U: FnOnce(&File) -> Result<()>,
+    D: FnOnce(anyhow::Error),
+{
+    fn drop(&mut self) {
+        let (Some(lock), Some(unlock)) = (self.lock.as_ref(), self.unlock.take()) else { return; };
+        if let Err(error) = unlock(lock)
+            && let Some(on_unlock_failure) = self.on_unlock_failure.take()
+        {
+            on_unlock_failure(error);
+        }
     }
 }
 
@@ -855,6 +918,31 @@ mod tests {
         })?;
         finished_rx.recv_timeout(Duration::from_secs(1))?;
         assert_eq!(store.pull_all_read_only_snapshot()?[0].payload, b"engaged");
+        Ok(())
+    }
+
+    #[test]
+    fn post_action_unlock_failure_is_diagnostic_not_action_result() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store_path = temp.path().join("authority.cc");
+        let mut store = SingleFileMessagePackBackingStore::new(&store_path);
+        store.push(&CultCacheEnvelope {
+            key: "brake".into(),
+            r#type: "brake".into(),
+            payload: b"released".to_vec(),
+            stored_at: "2026-07-20T00:00:00Z".into(),
+            schema_id: Some("brake".into()),
+        })?;
+
+        let mut diagnostic = None;
+        let result = store.with_read_only_shared_snapshot_using(
+            |_| Ok(42),
+            |_| Err(anyhow!("injected post-action unlock failure")),
+            |error| diagnostic = Some(error.to_string()),
+        );
+
+        assert_eq!(result?, 42);
+        assert_eq!(diagnostic.as_deref(), Some("injected post-action unlock failure"));
         Ok(())
     }
 
