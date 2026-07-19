@@ -5,14 +5,15 @@ use cultcache_rs::{
 };
 use cultmesh_rs::{CultMesh, CultMeshNode, CultMeshNodeOptions};
 use cultnet_rs::{
-    CultNetMessage, CultNetRawPayloadEncoding, CultNetRudpPacketType, CultNetRudpSession,
-    CultNetRudpSessionOptions, CultNetRudpSocketTransportConnection,
-    CultNetRudpSocketTransportOptions, CultNetWireContract,
+    CultNetDocumentBinding, CultNetDocumentRegistry, CultNetMessage, CultNetRawDocumentRecord,
+    CultNetRawPayloadEncoding, CultNetReadOnlySnapshotPolicy, CultNetRudpPacketType,
+    CultNetRudpSendOptions, CultNetRudpSession, CultNetRudpSessionOptions,
+    CultNetRudpSocketTransportConnection, CultNetRudpSocketTransportOptions, CultNetWireContract,
     GameCultProviderHealthIdentity, IdunnAuthenticatedProviderHealthProjectionPurpose,
     IdunnServiceIdentity, IdunnSignedDaemonHealthPurpose, ServiceIdentitySignature,
-    ServiceIdentitySigner,
-    decode_cultnet_message_from_slice, decode_rudp_packet, encode_cultnet_message_to_vec,
-    derive_service_identity_id, encode_rudp_packet, open_service_identity_at,
+    ServiceIdentitySigner, decode_cultnet_message_from_slice, decode_rudp_packet,
+    derive_service_identity_id, encode_cultnet_message_to_vec, encode_rudp_packet,
+    open_service_identity_at, serve_read_only_raw_snapshot,
     verify_service_identity_signature_with_public_key,
 };
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
@@ -34,7 +35,7 @@ use odin_core::{
     authenticated_provider_health_reason_code, plan_keepalive,
 };
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::env;
 use std::fs::{self, File};
 use std::net::{SocketAddr, UdpSocket};
@@ -48,6 +49,9 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 const CULTNET_RUDP_PROTOCOL_ID: &str = "cultnet.transport.rudp.v0";
 const IDUNN_HEALTH_RUDP_CONNECTION_ID: u32 = 0x1d0d_0001;
+const IDUNN_PUBLIC_HEALTH_QUERY_CONNECTION_ID: u32 = 0x1d0d_0002;
+const IDUNN_PUBLIC_HEALTH_QUERY_RUNTIME_ID: &str = "idunn-daemon";
+const IDUNN_PUBLIC_HEALTH_QUERY_ROLE: &str = "authenticated-provider-health-projector";
 const EPIPHANY_SIGNED_RUNTIME_HEALTH_TYPE: &str = "epiphany.idunn_signed_runtime_health";
 const EPIPHANY_SIGNED_RUNTIME_HEALTH_SCHEMA_VERSION: &str =
     "epiphany.idunn_signed_runtime_health.v0";
@@ -63,7 +67,10 @@ struct TargetActuationGate {
 
 impl TargetActuationGate {
     fn new() -> Self {
-        Self { lock: Mutex::new(()), reserved: AtomicBool::new(false) }
+        Self {
+            lock: Mutex::new(()),
+            reserved: AtomicBool::new(false),
+        }
     }
 }
 const HOST_IDENTITY_TYPE: &str = "epiphany.host_identity_trust_anchor.v0";
@@ -503,6 +510,7 @@ struct CommonOptions {
     daemon_health_trust_store_path: Option<PathBuf>,
     service_identity_store_path: Option<PathBuf>,
     public_health_store_path: Option<PathBuf>,
+    public_health_query_bind: Option<SocketAddr>,
     execute: bool,
     command_timeout_seconds: u64,
 }
@@ -724,6 +732,7 @@ fn run_swarm(
         );
     }
     publish_runtime_transport_check(common, &store_lock, &now)?;
+    start_public_health_query_listener(common, &targets)?;
     start_rudp_health_ingress(common, &store_lock, &now)?;
     publish_surgery_plans(&options.profile, &targets, common, &store_lock, &now)?;
 
@@ -733,7 +742,12 @@ fn run_swarm(
     let actuation_gates = Arc::new(
         targets
             .iter()
-            .map(|target| (target.daemon_id.clone(), Arc::new(TargetActuationGate::new())))
+            .map(|target| {
+                (
+                    target.daemon_id.clone(),
+                    Arc::new(TargetActuationGate::new()),
+                )
+            })
             .collect::<HashMap<_, _>>(),
     );
 
@@ -972,7 +986,12 @@ fn run_target_cycle(
 
     if plan.deployment_request.is_some() || plan.restart_request.is_some() {
         schedule_automatic_actuation(
-            target.clone(), options.clone(), Arc::clone(store_lock), actuation_gate, plan, now,
+            target.clone(),
+            options.clone(),
+            Arc::clone(store_lock),
+            actuation_gate,
+            plan,
+            now,
         );
         return Ok(());
     }
@@ -999,14 +1018,21 @@ fn schedule_target_actuation(
     daemon_id: String,
     action: impl FnOnce() -> Result<()> + Send + 'static,
 ) {
-    if gate.reserved.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+    if gate
+        .reserved
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
         return;
     }
     thread::spawn(move || {
         let result = with_target_actuation_gate(&gate.lock, action);
         gate.reserved.store(false, Ordering::Release);
         if let Err(error) = result {
-            eprintln!("Idunn automatic actuation failed for {}: {}", daemon_id, error);
+            eprintln!(
+                "Idunn automatic actuation failed for {}: {}",
+                daemon_id, error
+            );
         }
     });
 }
@@ -1018,7 +1044,6 @@ fn finish_target_cycle(
     plan: IdunnPlan,
     now: &str,
 ) -> Result<()> {
-
     if let Some(request) = &plan.deployment_request {
         persist_current_deployment_request(options, store_lock, request)?;
     }
@@ -1388,10 +1413,8 @@ fn persist_current_deployment_request(
             current_head_request_envelope,
             current_head_result_envelope,
             current_request_envelope,
-        ) =
-            with_store_node(options, store_lock, |node| {
-                let head =
-                    node.get::<IdunnCurrentDeploymentRequestRecord>(&request.daemon_id)?;
+        ) = with_store_node(options, store_lock, |node| {
+            let head = node.get::<IdunnCurrentDeploymentRequestRecord>(&request.daemon_id)?;
                 Ok((
                     head.clone(),
                     node.cache()
@@ -1405,7 +1428,8 @@ fn persist_current_deployment_request(
                         .flatten(),
                     head.as_ref()
                         .map(|head| {
-                            node.cache().get_envelope::<IdunnDeploymentResultRecord>(&format!(
+                        node.cache()
+                            .get_envelope::<IdunnDeploymentResultRecord>(&format!(
                                 "result:{}",
                                 head.request_id
                             ))
@@ -1454,7 +1478,10 @@ fn persist_current_deployment_request(
             if prior_result.result_id != format!("result:{}", current.request_id)
                 || prior_result.request_id != current.request_id
                 || prior_result.daemon_id != current.daemon_id
-                || !matches!(prior_result.state.as_str(), "succeeded" | "failed" | "skipped")
+                || !matches!(
+                    prior_result.state.as_str(),
+                    "succeeded" | "failed" | "skipped"
+                )
             {
                 return Err(anyhow!(
                     "current deployment request lacks an exact terminal result"
@@ -1542,8 +1569,7 @@ fn terminalize_interrupted_deployment_requests(
         let request_matches = opening
             .iter()
             .filter(|entry| {
-                entry.r#type == IdunnDeploymentRequestRecord::TYPE
-                    && entry.key == head.request_id
+                entry.r#type == IdunnDeploymentRequestRecord::TYPE && entry.key == head.request_id
             })
             .collect::<Vec<_>>();
         if request_matches.len() != 1 {
@@ -2171,6 +2197,98 @@ struct IdunnProjectionPublisher {
     write_lock: Mutex<()>,
 }
 
+#[derive(Clone)]
+struct IdunnPublicHealthSnapshotServer {
+    public_store_path: PathBuf,
+    allowed_record_keys: BTreeSet<String>,
+}
+
+impl IdunnPublicHealthSnapshotServer {
+    fn new(public_store_path: PathBuf, targets: &[DaemonTarget]) -> Result<Self> {
+        let allowed_record_keys = targets
+            .iter()
+            .map(|target| {
+                provider_health_projection_key(&target.daemon_id, &target.health_contract.id)
+            })
+            .collect::<BTreeSet<_>>();
+        if allowed_record_keys.len() != targets.len() {
+            return Err(anyhow!(
+                "public health query target catalog contains a duplicate daemon/contract pair"
+            ));
+        }
+        let server = Self {
+            public_store_path,
+            allowed_record_keys,
+        };
+        // Startup observes the exact public store before any worker starts.
+        // An absent store is an empty public projection, not private fallback.
+        server.raw_snapshot()?;
+        Ok(server)
+    }
+
+    fn serve(&self, request: &CultNetMessage) -> Result<CultNetMessage> {
+        let registry = public_health_document_registry();
+        let mut policy = CultNetReadOnlySnapshotPolicy::new();
+        for key in &self.allowed_record_keys {
+            policy.allow(IDUNN_AUTHENTICATED_PROVIDER_HEALTH_PROJECTION_SCHEMA, key)?;
+        }
+        serve_read_only_raw_snapshot(&registry, &policy, &self.raw_snapshot()?, request)
+    }
+
+    fn raw_snapshot(&self) -> Result<Vec<CultNetRawDocumentRecord>> {
+        let registry = public_health_document_registry();
+        let entries = SingleFileMessagePackBackingStore::new(&self.public_store_path)
+            .pull_all_read_only_snapshot()?;
+        let mut records = Vec::with_capacity(entries.len());
+        for entry in entries {
+            if entry.r#type != IdunnAuthenticatedProviderHealthProjectionRecord::TYPE
+                || entry.schema_id.as_deref()
+                    != Some(IDUNN_AUTHENTICATED_PROVIDER_HEALTH_PROJECTION_SCHEMA)
+            {
+                return Err(anyhow!(
+                    "public health query store contains a non-projection envelope"
+                ));
+            }
+            let projection: IdunnAuthenticatedProviderHealthProjectionRecord =
+                rmp_serde::from_slice(&entry.payload)
+                    .context("decoding public health query projection")?;
+            if rmp_serde::to_vec(&projection)? != entry.payload
+                || projection.projection_id != entry.key
+            {
+                return Err(anyhow!(
+                    "public health query projection is noncanonical or has a mismatched key"
+                ));
+            }
+            projection.validate()?;
+            let mut record = registry.raw_document_record_from_envelope(&entry)?;
+            record.source_runtime_id = Some(IDUNN_PUBLIC_HEALTH_QUERY_RUNTIME_ID.into());
+            record.source_agent_id = None;
+            record.source_role = Some(IDUNN_PUBLIC_HEALTH_QUERY_ROLE.into());
+            record.tags = Some(vec!["public-health".into()]);
+            records.push(record);
+        }
+        Ok(records)
+    }
+}
+
+fn public_health_document_registry() -> CultNetDocumentRegistry {
+    let mut registry = CultNetDocumentRegistry::new();
+    registry.register(CultNetDocumentBinding {
+        schema_id: IDUNN_AUTHENTICATED_PROVIDER_HEALTH_PROJECTION_SCHEMA.into(),
+        document_type: IdunnAuthenticatedProviderHealthProjectionRecord::TYPE.into(),
+        mutation_contract: None,
+        payload_schema_version: Some(IDUNN_AUTHENTICATED_PROVIDER_HEALTH_PROJECTION_SCHEMA.into()),
+    });
+    registry
+}
+
+fn provider_health_projection_key(daemon_id: &str, health_contract: &str) -> String {
+    format!(
+        "provider-health:{:x}",
+        Sha256::digest([daemon_id.as_bytes(), b"\0", health_contract.as_bytes()].concat())
+    )
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct AuthenticatedProviderHealthSource {
     health: IdunnDaemonHealthRecord,
@@ -2197,7 +2315,8 @@ fn initialize_projection_publisher(
         options.service_identity_store_path.as_deref(),
         options.public_health_store_path.as_deref(),
     ) else {
-        if options.service_identity_store_path.is_some() || options.public_health_store_path.is_some()
+        if options.service_identity_store_path.is_some()
+            || options.public_health_store_path.is_some()
         {
             return Err(anyhow!(
                 "--service-identity-store and --public-health-store must be configured together"
@@ -2226,7 +2345,11 @@ fn initialize_projection_publisher(
     })))
 }
 
-fn reject_store_aliases(options: &CommonOptions, identity_path: &Path, public_path: &Path) -> Result<()> {
+fn reject_store_aliases(
+    options: &CommonOptions,
+    identity_path: &Path,
+    public_path: &Path,
+) -> Result<()> {
     let identity = normalized_store_path(identity_path)?;
     let public = normalized_store_path(public_path)?;
     let mut private_paths = vec![normalized_store_path(&options.store_path)?, identity];
@@ -2240,11 +2363,12 @@ fn reject_store_aliases(options: &CommonOptions, identity_path: &Path, public_pa
     {
         private_paths.push(normalized_store_path(path)?);
     }
-    if private_paths
+    if private_paths.iter().enumerate().any(|(index, path)| {
+        private_paths
         .iter()
-        .enumerate()
-        .any(|(index, path)| private_paths.iter().skip(index + 1).any(|other| other == path))
-    {
+            .skip(index + 1)
+            .any(|other| other == path)
+    }) {
         return Err(anyhow!(
             "service identity, operational, trust, and release stores must not alias"
         ));
@@ -2287,9 +2411,12 @@ impl IdunnProjectionPublisher {
     ) -> Result<()> {
         let evaluated_at_unix_millis = parse_timestamp_millis(evaluated_at)
             .ok_or_else(|| anyhow!("projection evaluation time is invalid"))?;
-        let current = read_fresh_daemon_published_health(options, store_lock, desired, evaluated_at)?
+        let current =
+            read_fresh_daemon_published_health(options, store_lock, desired, evaluated_at)?
             .and_then(|managed| managed.projection_source)
-            .ok_or_else(|| anyhow!("authenticated provider health vanished before projection"))?;
+                .ok_or_else(|| {
+                    anyhow!("authenticated provider health vanished before projection")
+                })?;
         if &current != source {
             return Err(anyhow!(
                 "authenticated provider health changed before projection publication"
@@ -2303,14 +2430,13 @@ impl IdunnProjectionPublisher {
             .observed_at_unix_millis
             .saturating_add(u64::from(desired.max_silence_seconds).saturating_mul(1000));
         if expires_at_unix_millis <= evaluated_at_unix_millis {
-            return Err(anyhow!("authenticated provider health expired before projection"));
+            return Err(anyhow!(
+                "authenticated provider health expired before projection"
+            ));
         }
-        let projection_key = format!(
-            "provider-health:{:x}",
-            Sha256::digest(
-                [source.health.daemon_id.as_bytes(), b"\0", source.health.health_contract.as_bytes()]
-                    .concat()
-            )
+        let projection_key = provider_health_projection_key(
+            &source.health.daemon_id,
+            &source.health.health_contract,
         );
         let _write_guard = self
             .write_lock
@@ -2324,26 +2450,41 @@ impl IdunnProjectionPublisher {
                     || entry.schema_id.as_deref()
                         != Some(IDUNN_AUTHENTICATED_PROVIDER_HEALTH_PROJECTION_SCHEMA)
             }) {
-                return Err(anyhow!("public health store contains a non-projection envelope"));
+                return Err(anyhow!(
+                    "public health store contains a non-projection envelope"
+                ));
             }
             for entry in &entries {
                 self.verify_existing_projection(entry)?;
             }
-            let current_envelope = entries.iter().find(|entry| entry.key == projection_key).cloned();
+            let current_envelope = entries
+                .iter()
+                .find(|entry| entry.key == projection_key)
+                .cloned();
             let current_projection = current_envelope
                 .as_ref()
-                .map(|entry| rmp_serde::from_slice::<IdunnAuthenticatedProviderHealthProjectionRecord>(&entry.payload))
+                .map(|entry| {
+                    rmp_serde::from_slice::<IdunnAuthenticatedProviderHealthProjectionRecord>(
+                        &entry.payload,
+                    )
+                })
                 .transpose()
                 .context("decoding existing public health projection")?;
             if let Some(existing) = current_projection.as_ref() {
                 existing.validate()?;
-                if current_envelope.as_ref().is_some_and(|entry| entry.key != existing.projection_id)
+                if current_envelope
+                    .as_ref()
+                    .is_some_and(|entry| entry.key != existing.projection_id)
                     || existing.projection_id != projection_key
                 {
-                    return Err(anyhow!("public projection envelope key does not match its payload"));
+                    return Err(anyhow!(
+                        "public projection envelope key does not match its payload"
+                    ));
                 }
                 if existing.idunn_signer_identity_id != self.signer.entry().identity_id {
-                    return Err(anyhow!("public projection signer identity changed without store rotation"));
+                    return Err(anyhow!(
+                        "public projection signer identity changed without store rotation"
+                    ));
                 }
                 if existing.projection_incarnation_id == self.incarnation_id
                     && existing.signed_health_sha256 == source.statement_sha256
@@ -2361,12 +2502,15 @@ impl IdunnProjectionPublisher {
             }
             let mut projection = IdunnAuthenticatedProviderHealthProjectionRecord {
                 schema_version: IDUNN_AUTHENTICATED_PROVIDER_HEALTH_PROJECTION_SCHEMA.into(),
-                projection_id: projection_key.clone(), daemon_id: source.health.daemon_id.clone(),
+                projection_id: projection_key.clone(),
+                daemon_id: source.health.daemon_id.clone(),
                 health_contract: source.health.health_contract.clone(),
-                provider_state: source.health.state.clone(), reason_code: reason_code.into(),
+                provider_state: source.health.state.clone(),
+                reason_code: reason_code.into(),
                 provider_observed_at_unix_millis: source.admission.observed_at_unix_millis,
                 admitted_at_unix_millis: source.admission.admitted_at_unix_millis,
-                evaluated_at_unix_millis, trust_binding_id: source.binding.binding_id.clone(),
+                evaluated_at_unix_millis,
+                trust_binding_id: source.binding.binding_id.clone(),
                 trust_binding_sha256: source.binding_sha256.clone(),
                 signed_health_sha256: source.statement_sha256.clone(),
                 authenticated_admission_sha256: source.admission_sha256.clone(),
@@ -2379,19 +2523,25 @@ impl IdunnProjectionPublisher {
                 deployment_id: source.admission.deployment_id.clone(),
                 idunn_runtime_id: "idunn-daemon".into(),
                 idunn_signer_identity_id: self.signer.entry().identity_id.clone(),
-                projection_incarnation_id: self.incarnation_id.clone(), projection_sequence: sequence,
-                signature_algorithm: "ed25519".into(), signature: Vec::new(),
-                private_state_exposed: false, expires_at_unix_millis,
+                projection_incarnation_id: self.incarnation_id.clone(),
+                projection_sequence: sequence,
+                signature_algorithm: "ed25519".into(),
+                signature: Vec::new(),
+                private_state_exposed: false,
+                expires_at_unix_millis,
             };
             let unsigned = rmp_serde::to_vec(&projection)?;
-            projection.signature = self.signer
-                .sign::<IdunnAuthenticatedProviderHealthProjectionPurpose>(&unsigned).signature;
+            projection.signature = self
+                .signer
+                .sign::<IdunnAuthenticatedProviderHealthProjectionPurpose>(&unsigned)
+                .signature;
             projection.validate()?;
             self.require_incarnation_trust_snapshot(options)?;
             let replacement = CultCacheEnvelope {
                 key: projection_key.clone(),
                 r#type: IdunnAuthenticatedProviderHealthProjectionRecord::TYPE.into(),
-                payload: rmp_serde::to_vec(&projection)?, stored_at: evaluated_at.into(),
+                payload: rmp_serde::to_vec(&projection)?,
+                stored_at: evaluated_at.into(),
                 schema_id: Some(IDUNN_AUTHENTICATED_PROVIDER_HEALTH_PROJECTION_SCHEMA.into()),
             };
             let expected = CultCacheExpectedEnvelope {
@@ -2399,13 +2549,19 @@ impl IdunnProjectionPublisher {
                 r#type: IdunnAuthenticatedProviderHealthProjectionRecord::TYPE.into(),
                 current: current_envelope,
             };
-            if backing.compare_exchange(&[expected], &[replacement])? { return Ok(()); }
+            if backing.compare_exchange(&[expected], &[replacement])? {
+                return Ok(());
+            }
         }
-        Err(anyhow!("public health projection lost repeated cross-process contention"))
+        Err(anyhow!(
+            "public health projection lost repeated cross-process contention"
+        ))
     }
 
     fn require_incarnation_trust_snapshot(&self, options: &CommonOptions) -> Result<()> {
-        let path = options.daemon_health_trust_store_path.as_deref()
+        let path = options
+            .daemon_health_trust_store_path
+            .as_deref()
             .ok_or_else(|| anyhow!("projection publisher lost its root trust store"))?;
         if trust_store_snapshot_sha256(path)? != self.root_trust_snapshot_sha256 {
             return Err(anyhow!(
@@ -2420,7 +2576,9 @@ impl IdunnProjectionPublisher {
             rmp_serde::from_slice(&entry.payload)
                 .context("decoding public health projection during store audit")?;
         if rmp_serde::to_vec(&projection)? != entry.payload {
-            return Err(anyhow!("public health projection is not canonical MessagePack"));
+            return Err(anyhow!(
+                "public health projection is not canonical MessagePack"
+            ));
         }
         projection.validate()?;
         if entry.key != projection.projection_id
@@ -2447,13 +2605,19 @@ impl IdunnProjectionPublisher {
 }
 
 fn record_sha256<T: serde::Serialize>(value: &T) -> Result<String> {
-    Ok(format!("sha256-{:x}", Sha256::digest(rmp_serde::to_vec(value)?)))
+    Ok(format!(
+        "sha256-{:x}",
+        Sha256::digest(rmp_serde::to_vec(value)?)
+    ))
 }
 
 fn publish_authenticated_provider_health(
-    publisher: Option<&IdunnProjectionPublisher>, options: &CommonOptions,
-    store_lock: &Arc<Mutex<()>>, desired: &IdunnDesiredDaemonRecord,
-    source: Option<&AuthenticatedProviderHealthSource>, evaluated_at: &str,
+    publisher: Option<&IdunnProjectionPublisher>,
+    options: &CommonOptions,
+    store_lock: &Arc<Mutex<()>>,
+    desired: &IdunnDesiredDaemonRecord,
+    source: Option<&AuthenticatedProviderHealthSource>,
+    evaluated_at: &str,
 ) -> Result<()> {
     if let (Some(publisher), Some(source)) = (publisher, source) {
         publisher.publish_if_current(options, store_lock, desired, source, evaluated_at)?;
@@ -2677,6 +2841,177 @@ fn start_rudp_health_ingress(
             eprintln!("Idunn RUDP health ingress stopped: {error}");
         }
     });
+    Ok(())
+}
+
+fn start_public_health_query_listener(
+    options: &CommonOptions,
+    targets: &[DaemonTarget],
+) -> Result<Option<SocketAddr>> {
+    let Some(bind_address) = options.public_health_query_bind else {
+        return Ok(None);
+    };
+    let public_store_path = options
+        .public_health_store_path
+        .clone()
+        .ok_or_else(|| anyhow!("--public-health-query-bind requires --public-health-store"))?;
+    if options.service_identity_store_path.is_none() {
+        return Err(anyhow!(
+            "--public-health-query-bind requires --service-identity-store projection authority"
+        ));
+    }
+    let server = IdunnPublicHealthSnapshotServer::new(public_store_path, targets)?;
+    let socket = UdpSocket::bind(bind_address)
+        .with_context(|| format!("binding public health query listener at {bind_address}"))?;
+    let local_addr = socket.local_addr()?;
+    socket.set_read_timeout(Some(Duration::from_millis(250)))?;
+    thread::spawn(move || {
+        if let Err(error) = run_public_health_query_listener_loop(socket, server, None) {
+            eprintln!("Idunn public health query listener stopped: {error:#}");
+        }
+    });
+    println!(
+        "Idunn public health query listener active at {local_addr} for {} target projection key(s).",
+        targets.len()
+    );
+    Ok(Some(local_addr))
+}
+
+fn run_public_health_query_listener_loop(
+    socket: UdpSocket,
+    server: IdunnPublicHealthSnapshotServer,
+    stop: Option<Arc<AtomicBool>>,
+) -> Result<()> {
+    let mut sessions: HashMap<SocketAddr, CultNetRudpSession> = HashMap::new();
+    let mut buffer = vec![0_u8; 65_535];
+    loop {
+        if stop
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Acquire))
+        {
+            return Ok(());
+        }
+        match socket.recv_from(&mut buffer) {
+            Ok((size, source)) => {
+                if let Err(error) = handle_public_health_query_datagram(
+                    &socket,
+                    &mut sessions,
+                    &server,
+                    &buffer[..size],
+                    source,
+                ) {
+                    eprintln!(
+                        "Idunn public health query listener refused datagram from {source}: {error:#}"
+                    );
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionAborted
+                ) => {}
+            Err(error) => return Err(error.into()),
+        }
+        let now = unix_epoch_millis()?;
+        let mut expired = Vec::new();
+        for (peer, session) in &mut sessions {
+            for packet in session.due_resends(now) {
+                socket.send_to(&encode_rudp_packet(&packet)?, peer)?;
+            }
+            if session.check_timeout(now, 60_000) {
+                expired.push(*peer);
+            }
+        }
+        for peer in expired {
+            sessions.remove(&peer);
+        }
+    }
+}
+
+fn handle_public_health_query_datagram(
+    socket: &UdpSocket,
+    sessions: &mut HashMap<SocketAddr, CultNetRudpSession>,
+    server: &IdunnPublicHealthSnapshotServer,
+    wire: &[u8],
+    source: SocketAddr,
+) -> Result<()> {
+    let packet = decode_rudp_packet(wire)?;
+    if packet.connection_id != IDUNN_PUBLIC_HEALTH_QUERY_CONNECTION_ID {
+        return Err(anyhow!(
+            "unexpected public health query RUDP connection id {:08x}",
+            packet.connection_id
+        ));
+    }
+    let now = unix_epoch_millis()?;
+    if packet.packet_type == CultNetRudpPacketType::Connect {
+        let mut session = CultNetRudpSession::new(CultNetRudpSessionOptions {
+            connection_id: IDUNN_PUBLIC_HEALTH_QUERY_CONNECTION_ID,
+            initial_sequence: 1,
+            resend_delay_ms: 100,
+            max_pending_reliable_packets: Some(64),
+        });
+        let accept = session.accept_connect(&packet, now, Vec::new())?;
+        socket.send_to(&encode_rudp_packet(&accept)?, source)?;
+        sessions.insert(source, session);
+        return Ok(());
+    }
+    let session = sessions
+        .get_mut(&source)
+        .ok_or_else(|| anyhow!("public health query peer has no accepted RUDP session"))?;
+    let result = session.receive(&packet, now)?;
+    if let Some(reply) = result.reply {
+        socket.send_to(&encode_rudp_packet(&reply)?, source)?;
+    }
+    if result.disconnected {
+        sessions.remove(&source);
+        return Ok(());
+    }
+    if packet.packet_type == CultNetRudpPacketType::Accept || !result.delivered.is_empty() {
+        socket.send_to(&encode_rudp_packet(&session.create_ack())?, source)?;
+    }
+    for frame in result.delivered {
+        let response = if frame.channel_id != "schema" {
+            CultNetMessage::Error {
+                error: "public health queries require the CultNet schema channel".into(),
+            }
+        } else {
+            match decode_cultnet_message_from_slice(
+                &frame.payload,
+                CultNetWireContract::CultNetSchemaV0,
+            ) {
+                Ok(request) => {
+                    server
+                        .serve(&request)
+                        .unwrap_or_else(|error| CultNetMessage::Error {
+                            error: format!("public health query refused: {error}"),
+                        })
+                }
+                Err(error) => CultNetMessage::Error {
+                    error: format!("public health query message is malformed: {error}"),
+                },
+            }
+        };
+        let payload =
+            encode_cultnet_message_to_vec(&response, CultNetWireContract::CultNetSchemaV0)?;
+        let packets = session.send_many(
+            "schema",
+            payload,
+            CultNetRudpSendOptions {
+                reliable: true,
+                ordered: true,
+                sequenced: false,
+                now_ms: now,
+                reliable_expire_after_ms: None,
+            },
+            Some(1200),
+        )?;
+        for packet in packets {
+            socket.send_to(&encode_rudp_packet(&packet)?, source)?;
+        }
+    }
     Ok(())
 }
 
@@ -3058,7 +3393,9 @@ fn authenticate_generic_signed_health(
         || document.source_runtime_id.as_deref() != Some(statement.source_runtime_id.as_str())
         || document.source_role.as_deref() != Some("daemon-health-publisher")
     {
-        return Err(anyhow!("signed daemon health transport identity is invalid"));
+        return Err(anyhow!(
+            "signed daemon health transport identity is invalid"
+        ));
     }
     let (binding, binding_sha256) = load_daemon_health_trust_binding(options, &statement)?;
     if binding.release_binding_required {
@@ -3067,7 +3404,9 @@ fn authenticate_generic_signed_health(
             || statement.source_commit.is_none()
             || statement.deployment_id.is_none()
         {
-            return Err(anyhow!("signed daemon health lacks required release binding"));
+            return Err(anyhow!(
+                "signed daemon health lacks required release binding"
+            ));
         }
     } else if statement.release_id.is_some()
         || statement.release_witness_sha256.is_some()
@@ -3078,9 +3417,8 @@ fn authenticate_generic_signed_health(
             "signed daemon health carries release authority not declared by its trust binding"
         ));
     }
-    let expected_identity = derive_service_identity_id::<GameCultProviderHealthIdentity>(
-        &binding.signer_public_key,
-    )?;
+    let expected_identity =
+        derive_service_identity_id::<GameCultProviderHealthIdentity>(&binding.signer_public_key)?;
     if binding.signer_identity_id != expected_identity
         || statement.signer_identity_id != binding.signer_identity_id
     {
@@ -3112,7 +3450,9 @@ fn authenticate_generic_signed_health(
         || admitted_at_unix_millis.saturating_sub(statement.observed_at_unix_millis)
             > EPIPHANY_ADMISSION_MAX_AGE_SECONDS.saturating_mul(1000)
     {
-        return Err(anyhow!("signed daemon health observation is future or stale"));
+        return Err(anyhow!(
+            "signed daemon health observation is future or stale"
+        ));
     }
     let signed_health_sha256 = format!("sha256-{:x}", Sha256::digest(&document.payload));
     let observed_at = chrono::DateTime::from_timestamp_millis(
@@ -3199,8 +3539,8 @@ fn admit_generic_signed_health(
     for _ in 0..8 {
         let (expected_health, expected_admission, expected_statement) =
             with_store_node(options, store_lock, |node| {
-                if let Some(existing) = node
-                    .get::<IdunnAuthenticatedDaemonHealthAdmissionRecord>(&admission.daemon_id)?
+                if let Some(existing) =
+                    node.get::<IdunnAuthenticatedDaemonHealthAdmissionRecord>(&admission.daemon_id)?
                     && !generic_signed_health_advances(&existing, &admission)
                 {
                     return Err(anyhow!("signed daemon health is replayed or regressed"));
@@ -3213,8 +3553,7 @@ fn admit_generic_signed_health(
                         .get_envelope::<IdunnAuthenticatedDaemonHealthAdmissionRecord>(
                             &admission.daemon_id,
                         )?,
-                    node.cache()
-                        .get_envelope::<IdunnSignedDaemonHealthRecord>(
+                    node.cache().get_envelope::<IdunnSignedDaemonHealthRecord>(
                             &admission.signed_health_sha256,
                         )?,
                 ))
@@ -3292,13 +3631,17 @@ fn validate_generic_release_binding(
         || request.release_authority_id.trim().is_empty()
         || request.release_authority_envelope_sha256.trim().is_empty()
     {
-        return Err(anyhow!("signed daemon health deployment authority is invalid"));
+        return Err(anyhow!(
+            "signed daemon health deployment authority is invalid"
+        ));
     }
     let current = node
         .get::<IdunnCurrentDeploymentRequestRecord>(&admission.daemon_id)?
         .ok_or_else(|| anyhow!("signed daemon health has no current deployment head"))?;
     if current.request_id != request.request_id || current.sequence == 0 {
-        return Err(anyhow!("signed daemon health names a superseded deployment"));
+        return Err(anyhow!(
+            "signed daemon health names a superseded deployment"
+        ));
     }
     let requested_at = parse_timestamp_millis(&request.requested_at)
         .ok_or_else(|| anyhow!("deployment request timestamp is invalid"))?;
@@ -3364,7 +3707,8 @@ fn decode_health_from_rudp_message(
     if document.record_key != wire.daemon_id {
         return Err(anyhow!(
             "record key {} does not match health daemon_id {}",
-            document.record_key, wire.daemon_id
+            document.record_key,
+            wire.daemon_id
         ));
     }
     let received_at_unix_millis = parse_timestamp_millis(admitted_at)
@@ -4987,6 +5331,7 @@ impl Options {
         let mut daemon_health_trust_store_path = None;
         let mut service_identity_store_path = None;
         let mut public_health_store_path = None;
+        let mut public_health_query_bind = None;
         let mut execute = false;
         let mut command_timeout_seconds = 30;
         let mut daemon_id = None;
@@ -5109,6 +5454,15 @@ impl Options {
                         "--public-health-store",
                     )?));
                 }
+                "--public-health-query-bind" => {
+                    public_health_query_bind = Some(
+                        take_value(&mut args, "--public-health-query-bind")?
+                            .parse()
+                            .with_context(
+                                || "--public-health-query-bind must be a socket address",
+                            )?,
+                    );
+                }
                 "--disabled" => enabled = false,
                 "--execute" => execute = true,
                 "--interval-seconds" => {
@@ -5154,6 +5508,7 @@ impl Options {
             daemon_health_trust_store_path,
             service_identity_store_path,
             public_health_store_path,
+            public_health_query_bind,
             execute,
             command_timeout_seconds,
         };
@@ -5278,6 +5633,20 @@ impl Options {
                 ));
             }
         };
+
+        if common.public_health_query_bind.is_some() && !matches!(mode, Mode::Swarm(_)) {
+            return Err(anyhow!(
+                "--public-health-query-bind requires --swarm-profile"
+            ));
+        }
+        if common.public_health_query_bind.is_some()
+            && (common.public_health_store_path.is_none()
+                || common.service_identity_store_path.is_none())
+        {
+            return Err(anyhow!(
+                "--public-health-query-bind requires --public-health-store and --service-identity-store"
+            ));
+        }
 
         Ok(Self { common, mode })
     }
@@ -5810,7 +6179,7 @@ fn unix_epoch_millis() -> Result<u64> {
 }
 
 fn help_text() -> &'static str {
-    "Usage: idunn --daemon <id> [--name <name>] [--verse <verse>] [--store <path>] [--release-authority-store <path>] [--daemon-health-trust-store <path>] [--deploy-command <command>] [--restart-command <command>] [--operator-alarm-command <command>] [--rudp-health-bind <addr|none>] [--trusted-epiphany-health-identity-store <path>] [--execute] [--interval-seconds <seconds>] [--command-timeout-seconds <seconds>] [--repo-root <path>] [--swarm-profile <profile>]\n       idunn restart --daemon <id> [--store <path>] [--requested-by <who>] [--detail <text>]\n       idunn redeploy --daemon <id> [--store <path>] [--requested-by <who>] [--detail <text>]\n       idunn validate-health-admission --store <path> --daemon <id> --deployment-request-id <id> --release-id <id> --release-witness-sha256 <sha256> --source-revision <commit>\n\nIdunn supervises owner-authenticated CultNet/RUDP health with --daemon, or a built-in swarm supervisor with --swarm-profile starfire-local or yggdrasil-local. Generic signed health requires a root-owned CultCache trust store via --daemon-health-trust-store. Unsigned idunn.daemon_health packets are diagnostic-only and cannot satisfy lifecycle health. Yggdrasil release targets require an explicit Bifrost CultCache path via --release-authority-store. The Epiphany v0 migration path additionally requires its pinned host identity. RUDP health ingress is disabled unless --rudp-health-bind is supplied. The restart/redeploy verbs publish typed idunn.lifecycle_command.v1 records; the running supervisor claims them and executes only through its configured command boundary."
+    "Usage: idunn --daemon <id> [--name <name>] [--verse <verse>] [--store <path>] [--release-authority-store <path>] [--daemon-health-trust-store <path>] [--deploy-command <command>] [--restart-command <command>] [--operator-alarm-command <command>] [--rudp-health-bind <addr|none>] [--trusted-epiphany-health-identity-store <path>] [--execute] [--interval-seconds <seconds>] [--command-timeout-seconds <seconds>] [--repo-root <path>] [--swarm-profile <profile>] [--service-identity-store <path>] [--public-health-store <path>] [--public-health-query-bind <addr>]\n       idunn restart --daemon <id> [--store <path>] [--requested-by <who>] [--detail <text>]\n       idunn redeploy --daemon <id> [--store <path>] [--requested-by <who>] [--detail <text>]\n       idunn validate-health-admission --store <path> --daemon <id> --deployment-request-id <id> --release-id <id> --release-witness-sha256 <sha256> --source-revision <commit>\n\nIdunn supervises owner-authenticated CultNet/RUDP health with --daemon, or a built-in swarm supervisor with --swarm-profile starfire-local or yggdrasil-local. Generic signed health requires a root-owned CultCache trust store via --daemon-health-trust-store. Unsigned idunn.daemon_health packets are diagnostic-only and cannot satisfy lifecycle health. Yggdrasil release targets require an explicit Bifrost CultCache path via --release-authority-store. The Epiphany v0 migration path additionally requires its pinned host identity. RUDP health ingress is disabled unless --rudp-health-bind is supplied. The read-only outward projection listener is disabled unless --public-health-query-bind is supplied with the dedicated public store and Idunn service identity; it serves only target-catalog authenticated-provider projection keys and never opens private Idunn state. The restart/redeploy verbs publish typed idunn.lifecycle_command.v1 records; the running supervisor claims them and executes only through its configured command boundary."
 }
 
 #[cfg(test)]
@@ -5844,9 +6213,7 @@ mod tests {
             .unwrap();
         });
         assert!(
-            entered_rx
-                .recv_timeout(Duration::from_millis(100))
-                .is_err(),
+            entered_rx.recv_timeout(Duration::from_millis(100)).is_err(),
             "automatic request owner entered while manual actuation was live"
         );
         release_tx.send(()).unwrap();
@@ -5866,7 +6233,11 @@ mod tests {
             Ok(())
         });
 
-        assert!(actuation_rx.recv_timeout(Duration::from_millis(100)).is_err());
+        assert!(
+            actuation_rx
+                .recv_timeout(Duration::from_millis(100))
+                .is_err()
+        );
         // This is the target loop's independent signed-health admission lane:
         // it does not acquire or await the consequence gate.
         let admitted_health = "accepted";
@@ -5900,7 +6271,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn status_timeout_terminates_command_descendants() {
-        let marker = env::temp_dir().join(format!("idunn-status-descendant-{}", std::process::id()));
+        let marker =
+            env::temp_dir().join(format!("idunn-status-descendant-{}", std::process::id()));
         let _ = fs::remove_file(&marker);
         let error = wait_for_child_status_with_timeout(
             descendant_marker_command(&marker),
@@ -5910,13 +6282,17 @@ mod tests {
         .expect_err("command should time out");
         assert!(error.to_string().contains("timed out"));
         thread::sleep(Duration::from_millis(1200));
-        assert!(!marker.exists(), "timed-out descendant survived to write marker");
+        assert!(
+            !marker.exists(),
+            "timed-out descendant survived to write marker"
+        );
     }
 
     #[cfg(unix)]
     #[test]
     fn output_timeout_terminates_command_descendants() {
-        let marker = env::temp_dir().join(format!("idunn-output-descendant-{}", std::process::id()));
+        let marker =
+            env::temp_dir().join(format!("idunn-output-descendant-{}", std::process::id()));
         let _ = fs::remove_file(&marker);
         let error = wait_for_child_with_timeout(
             descendant_marker_command(&marker),
@@ -5926,7 +6302,10 @@ mod tests {
         .expect_err("command should time out");
         assert!(error.to_string().contains("timed out"));
         thread::sleep(Duration::from_millis(1200));
-        assert!(!marker.exists(), "timed-out descendant survived to write marker");
+        assert!(
+            !marker.exists(),
+            "timed-out descendant survived to write marker"
+        );
     }
     use cultnet_rs::{CultNetRawDocumentRecord, CultNetRawPayloadEncoding};
     use ed25519_dalek::{Signer, SigningKey};
@@ -6178,6 +6557,7 @@ mod tests {
             daemon_health_trust_store_path: None,
             service_identity_store_path: None,
             public_health_store_path: None,
+            public_health_query_bind: None,
             execute: true,
             command_timeout_seconds: 1,
         };
@@ -7122,9 +7502,11 @@ mod tests {
         ));
         assert!(actuator.contains("deploy:epiphany|restart:epiphany"));
         assert!(actuator.contains("/usr/local/bin/idunn validate-release-authority"));
-        assert!(actuator.contains(
+        assert!(
+            actuator.contains(
             "epiphany|bifrost-persona-feedback) target_requires_bifrost_authority=true"
-        ));
+            )
+        );
         assert!(actuator.contains(
             "voidbot|heimdall|repixelizer|streampixels) target_requires_bifrost_authority=false"
         ));
@@ -7190,11 +7572,10 @@ mod tests {
         }
 
         fn deployed_revision(&self, _release: &ReleaseTarget) -> Result<String> {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "deployment witness is absent",
+            Err(
+                std::io::Error::new(std::io::ErrorKind::NotFound, "deployment witness is absent")
+                    .into(),
             )
-            .into())
         }
     }
 
@@ -7314,7 +7695,11 @@ mod tests {
 
         assert_eq!(health.state, "stale-deployment");
         assert_eq!(health.transport, "idunn.release-not-deployed");
-        assert!(health.detail.contains("no deployed revision witness exists"));
+        assert!(
+            health
+                .detail
+                .contains("no deployed revision witness exists")
+        );
         assert!(
             plan_keepalive(&desired, &health, "unix:100")
                 .deployment_request
@@ -7421,13 +7806,18 @@ mod tests {
         );
         assert_eq!(
             target.deploy_command.as_deref(),
-            Some("sudo -n /usr/local/libexec/idunn-yggdrasil deploy bifrost-persona-feedback \"$IDUNN_SOURCE_COMMIT\" \"$IDUNN_REPOSITORY_FULL_NAME\" \"$IDUNN_UPSTREAM_REF\" \"$BIFROST_RELEASE_AUTHORITY_ID\" \"$BIFROST_RELEASE_AUTHORITY_SHA256\" \"$IDUNN_DEPLOYMENT_REQUEST_ID\" \"$IDUNN_REQUIRES_BIFROST_AUTHORITY\"")
+            Some(
+                "sudo -n /usr/local/libexec/idunn-yggdrasil deploy bifrost-persona-feedback \"$IDUNN_SOURCE_COMMIT\" \"$IDUNN_REPOSITORY_FULL_NAME\" \"$IDUNN_UPSTREAM_REF\" \"$BIFROST_RELEASE_AUTHORITY_ID\" \"$BIFROST_RELEASE_AUTHORITY_SHA256\" \"$IDUNN_DEPLOYMENT_REQUEST_ID\" \"$IDUNN_REQUIRES_BIFROST_AUTHORITY\""
+            )
         );
         assert!(target.restart_command.is_none());
         let release = target.release.as_ref().expect("release target");
         assert!(release.requires_bifrost_authority);
         assert_eq!(release.repository_full_name, "GameCult/Bifrost");
-        assert_eq!(release.repo_path, PathBuf::from("/srv/build/Bifrost-persona-feedback"));
+        assert_eq!(
+            release.repo_path,
+            PathBuf::from("/srv/build/Bifrost-persona-feedback")
+        );
 
         let desired = IdunnDesiredDaemonRecord {
             daemon_id: target.daemon_id.clone(),
@@ -7523,6 +7913,7 @@ mod tests {
             daemon_health_trust_store_path: None,
             service_identity_store_path: None,
             public_health_store_path: None,
+            public_health_query_bind: None,
             execute: false,
             command_timeout_seconds: 1,
         };
@@ -7598,6 +7989,7 @@ mod tests {
             daemon_health_trust_store_path: None,
             service_identity_store_path: None,
             public_health_store_path: None,
+            public_health_query_bind: None,
             execute: false,
             command_timeout_seconds: 1,
         };
@@ -8163,21 +8555,21 @@ mod tests {
             daemon_health_trust_store_path: None,
             service_identity_store_path: None,
             public_health_store_path: None,
+            public_health_query_bind: None,
             execute: false,
             command_timeout_seconds: 1,
         };
         let lock = Arc::new(Mutex::new(()));
-        let outcome = admit_health_from_rudp_message(
-            &message,
-            &options,
-            &lock,
-            "2026-06-15T00:00:01Z",
-        )
+        let outcome =
+            admit_health_from_rudp_message(&message, &options, &lock, "2026-06-15T00:00:01Z")
         .unwrap();
         assert_eq!(outcome.authority, "diagnostic-only");
         assert!(health_from_rudp_message(&message, &options).is_err());
         with_store_node(&options, &lock, |node| {
-            assert!(node.get::<IdunnDaemonHealthRecord>(&health.daemon_id)?.is_none());
+            assert!(
+                node.get::<IdunnDaemonHealthRecord>(&health.daemon_id)?
+                    .is_none()
+            );
             let diagnostic = node
                 .get::<IdunnUnsignedDaemonHealthDiagnosticRecord>(&format!(
                     "diagnostic:{}",
@@ -8226,9 +8618,7 @@ mod tests {
         SingleFileMessagePackBackingStore::new(&trust_path)
             .push(&typed_envelope(&binding.binding_id, &binding, "unix:1784483100").unwrap())
             .unwrap();
-        let observed_at_unix_millis = chrono::DateTime::parse_from_rfc3339(
-            "2026-07-19T12:00:00Z",
-        )
+        let observed_at_unix_millis = chrono::DateTime::parse_from_rfc3339("2026-07-19T12:00:00Z")
         .unwrap()
         .timestamp_millis() as u64;
         let mut statement = IdunnSignedDaemonHealthRecord {
@@ -8243,8 +8633,7 @@ mod tests {
             publisher_sequence: sequence,
             observed_at_unix_millis,
             release_id: release_bound.then(|| "release-test-1".into()),
-            release_witness_sha256: release_bound
-                .then(|| format!("sha256-{}", "a".repeat(64))),
+            release_witness_sha256: release_bound.then(|| format!("sha256-{}", "a".repeat(64))),
             source_commit: release_bound.then(|| "b".repeat(40)),
             deployment_id: release_bound.then(|| "deploy-test-1".into()),
             signature_algorithm: "ed25519".into(),
@@ -8308,6 +8697,7 @@ mod tests {
                 daemon_health_trust_store_path: Some(trust_path),
                 service_identity_store_path: None,
                 public_health_store_path: None,
+                public_health_query_bind: None,
                 execute: false,
                 command_timeout_seconds: 1,
             },
@@ -8464,6 +8854,233 @@ mod tests {
         rmp_serde::from_slice(&entries[0].payload).unwrap()
     }
 
+    fn public_query_target(desired: &IdunnDesiredDaemonRecord) -> DaemonTarget {
+        DaemonTarget {
+            daemon_id: desired.daemon_id.clone(),
+            verse_id: desired.verse_id.clone(),
+            name: desired.name.clone(),
+            health_contract: health_contract(&desired.health_contract, "failed"),
+            deploy_command: None,
+            restart_command: None,
+            release: None,
+            enabled: true,
+            interval_seconds: 30,
+        }
+    }
+
+    fn connect_public_query_client(
+        server_addr: SocketAddr,
+    ) -> CultNetRudpSocketTransportConnection {
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        let mut client =
+            CultNetRudpSocketTransportConnection::new(CultNetRudpSocketTransportOptions::client(
+                "epiphany-test-consumer",
+                socket,
+                server_addr,
+                IDUNN_PUBLIC_HEALTH_QUERY_CONNECTION_ID,
+            ))
+            .unwrap();
+        client.connect(Vec::new()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !client.connected() {
+            client.receive_once().unwrap();
+            client.poll_resends().unwrap();
+            assert!(
+                Instant::now() < deadline,
+                "public query handshake timed out"
+            );
+        }
+        client
+    }
+
+    fn receive_public_query_message(
+        client: &mut CultNetRudpSocketTransportConnection,
+    ) -> CultNetMessage {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Some(frame) = client.receive_once().unwrap() {
+                assert_eq!(frame.channel_id, "schema");
+                return decode_cultnet_message_from_slice(
+                    &frame.payload,
+                    CultNetWireContract::CultNetSchemaV0,
+                )
+                .unwrap();
+            }
+            client.poll_resends().unwrap();
+            assert!(Instant::now() < deadline, "public query response timed out");
+        }
+    }
+
+    #[test]
+    fn public_query_server_returns_exact_allowlisted_bytes_and_correlation() {
+        let (options, lock, desired, source, publisher, _root) = projection_fixture(false);
+        publisher
+            .publish_if_current(&options, &lock, &desired, &source, "2026-07-19T12:00:02Z")
+            .unwrap();
+        let public_path = options.public_health_store_path.as_ref().unwrap();
+        let stored = SingleFileMessagePackBackingStore::new(public_path)
+            .pull_all_read_only_snapshot()
+            .unwrap()
+            .remove(0);
+        let server = IdunnPublicHealthSnapshotServer::new(
+            public_path.clone(),
+            &[public_query_target(&desired)],
+        )
+        .unwrap();
+        let request = CultNetMessage::SnapshotRequest {
+            message_id: "status-correlation-7".into(),
+            schema_ids: Some(vec![
+                IDUNN_AUTHENTICATED_PROVIDER_HEALTH_PROJECTION_SCHEMA.into(),
+            ]),
+            record_keys: Some(vec![stored.key.clone()]),
+        };
+        let CultNetMessage::SnapshotResponseRaw {
+            message_id,
+            documents,
+        } = server.serve(&request).unwrap()
+        else {
+            panic!("expected raw public health snapshot");
+        };
+        assert_eq!(message_id, "status-correlation-7");
+        assert_eq!(documents.len(), 1);
+        assert_eq!(documents[0].payload, stored.payload);
+        assert_eq!(
+            documents[0].source_runtime_id.as_deref(),
+            Some(IDUNN_PUBLIC_HEALTH_QUERY_RUNTIME_ID)
+        );
+        assert_eq!(
+            documents[0].source_role.as_deref(),
+            Some(IDUNN_PUBLIC_HEALTH_QUERY_ROLE)
+        );
+
+        for request in [
+            CultNetMessage::SnapshotRequest {
+                message_id: "unknown-schema".into(),
+                schema_ids: Some(vec!["private.idunn.state.v0".into()]),
+                record_keys: None,
+            },
+            CultNetMessage::SnapshotRequest {
+                message_id: "unknown-key".into(),
+                schema_ids: None,
+                record_keys: Some(vec!["provider-health:not-in-target-catalog".into()]),
+            },
+        ] {
+            let CultNetMessage::SnapshotResponseRaw { documents, .. } =
+                server.serve(&request).unwrap()
+            else {
+                panic!("expected bounded empty response");
+            };
+            assert!(documents.is_empty());
+        }
+    }
+
+    #[test]
+    fn public_query_store_contamination_is_fatal_and_private_type_is_never_served() {
+        let (options, _lock, desired, _source, _publisher, root) = projection_fixture(false);
+        let private_path = root.path().join("private-in-public.cc");
+        let private = IdunnDaemonHealthRecord {
+            daemon_id: desired.daemon_id.clone(),
+            state: "active".into(),
+            detail: "private managed judgment".into(),
+            observed_at: "2026-07-19T12:00:02Z".into(),
+            health_contract: desired.health_contract.clone(),
+            publication_source: "daemon-authenticated".into(),
+            transport: CULTNET_RUDP_PROTOCOL_ID.into(),
+        };
+        SingleFileMessagePackBackingStore::new(&private_path)
+            .push(&typed_envelope(&private.daemon_id, &private, "2026-07-19T12:00:02Z").unwrap())
+            .unwrap();
+        assert!(
+            IdunnPublicHealthSnapshotServer::new(private_path, &[public_query_target(&desired)])
+                .is_err()
+        );
+
+        let public_path = options.public_health_store_path.as_ref().unwrap();
+        let server = IdunnPublicHealthSnapshotServer::new(
+            public_path.clone(),
+            &[public_query_target(&desired)],
+        )
+        .unwrap();
+        SingleFileMessagePackBackingStore::new(public_path)
+            .push(&typed_envelope(&private.daemon_id, &private, "2026-07-19T12:00:03Z").unwrap())
+            .unwrap();
+        assert!(
+            server
+                .serve(&CultNetMessage::SnapshotRequest {
+                    message_id: "private-probe".into(),
+                    schema_ids: None,
+                    record_keys: None,
+                })
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn public_query_rudp_is_multi_peer_and_survives_malformed_request() {
+        let (options, lock, desired, source, publisher, _root) = projection_fixture(false);
+        publisher
+            .publish_if_current(&options, &lock, &desired, &source, "2026-07-19T12:00:02Z")
+            .unwrap();
+        let server = IdunnPublicHealthSnapshotServer::new(
+            options.public_health_store_path.clone().unwrap(),
+            &[public_query_target(&desired)],
+        )
+        .unwrap();
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let server_addr = socket.local_addr().unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
+        let worker = thread::spawn(move || {
+            run_public_health_query_listener_loop(socket, server, Some(worker_stop))
+        });
+
+        let mut hostile = connect_public_query_client(server_addr);
+        hostile.send("schema", vec![0xc1]).unwrap();
+        assert!(matches!(
+            receive_public_query_message(&mut hostile),
+            CultNetMessage::Error { .. }
+        ));
+
+        let mut first = connect_public_query_client(server_addr);
+        let mut second = connect_public_query_client(server_addr);
+        for (client, id) in [(&mut first, "first-peer"), (&mut second, "second-peer")] {
+            let request = CultNetMessage::SnapshotRequest {
+                message_id: id.into(),
+                schema_ids: Some(vec![
+                    IDUNN_AUTHENTICATED_PROVIDER_HEALTH_PROJECTION_SCHEMA.into(),
+                ]),
+                record_keys: Some(vec![provider_health_projection_key(
+                    &desired.daemon_id,
+                    &desired.health_contract,
+                )]),
+            };
+            client
+                .send(
+                    "schema",
+                    encode_cultnet_message_to_vec(&request, CultNetWireContract::CultNetSchemaV0)
+                        .unwrap(),
+                )
+                .unwrap();
+            let CultNetMessage::SnapshotResponseRaw {
+                message_id,
+                documents,
+            } = receive_public_query_message(client)
+            else {
+                panic!("expected peer snapshot response");
+            };
+            assert_eq!(message_id, id);
+            assert_eq!(documents.len(), 1);
+        }
+        stop.store(true, Ordering::Release);
+        worker.join().unwrap().unwrap();
+    }
+
     #[test]
     fn projection_is_signed_canonical_public_state_without_provider_detail() {
         let (options, lock, desired, source, publisher, _root) = projection_fixture(false);
@@ -8608,7 +9225,8 @@ mod tests {
             payload: rmp_serde::to_vec(&corrupted).unwrap(),
             ..current_envelope.clone()
         };
-        assert!(backing
+        assert!(
+            backing
             .compare_exchange(
                 &[CultCacheExpectedEnvelope {
                     key: current_envelope.key.clone(),
@@ -8617,10 +9235,13 @@ mod tests {
                 }],
                 &[corrupted_envelope],
             )
-            .unwrap());
-        assert!(second
+                .unwrap()
+        );
+        assert!(
+            second
             .publish_if_current(&options, &lock, &desired, &source, "2026-07-19T12:00:04Z")
-            .is_err());
+                .is_err()
+        );
 
         let contaminated_path = root.path().join("contaminated-public.cc");
         SingleFileMessagePackBackingStore::new(&contaminated_path)
@@ -8841,6 +9462,7 @@ mod tests {
             daemon_health_trust_store_path: None,
             service_identity_store_path: None,
             public_health_store_path: None,
+            public_health_query_bind: None,
             execute: false,
             command_timeout_seconds: 1,
         };
@@ -9136,6 +9758,7 @@ mod tests {
             daemon_health_trust_store_path: None,
             service_identity_store_path: None,
             public_health_store_path: None,
+            public_health_query_bind: None,
             execute: false,
             command_timeout_seconds: 1,
         };

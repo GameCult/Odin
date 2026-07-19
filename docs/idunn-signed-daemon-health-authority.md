@@ -60,6 +60,15 @@ Consumers such as Epiphany Discord Status receive only the outward projection
 through CultNet/CultMesh and verify Idunn's pinned identity. Reading Idunn's
 private store is not a consumer protocol.
 
+The query transport is an explicit, read-only CultNet/RUDP listener enabled by
+`--public-health-query-bind <addr>`. It has no default and is valid only with
+`--swarm-profile`, `--service-identity-store`, and `--public-health-store`.
+The listener opens only the dedicated public store and derives its allowlist
+from the configured target catalog's daemon/health-contract pairs. It returns
+the exact stored projection payload bytes with fixed source runtime
+`idunn-daemon` and role `authenticated-provider-health-projector`. It has no
+handle to Idunn's private stores and accepts no mutation message.
+
 ## Derived state
 
 - Process and systemd observations are diagnostic evidence only.
@@ -142,14 +151,24 @@ and an expiry capped by the provider observation's managed-health silence
 window. Missing, legacy, unsigned, drifted, or mutated input cannot write,
 refresh, or delete a projection; an old row simply expires for consumers.
 
+The public projection has a dedicated multi-peer CultNet/RUDP snapshot
+listener. Startup synchronously binds the explicit address and validates the
+public store before target workers start. Bind failure or public-store
+contamination is fatal startup evidence. Each request rereads only that store
+and passes exact records through CultNet's read-only snapshot server with the
+target-derived `(schema,key)` allowlist. Unknown schema/key requests return no
+record. Malformed datagrams or messages are refused per peer without killing
+the daemon. No request can write, delete, import, or inspect private Idunn
+state.
+
 This source is deliberately not deployable yet: Bifrost and the remaining
 generic publishers still emit the unsigned diagnostic contract, production
-root trust and Idunn identity stores have not been installed, Epiphany still
-uses its signed v0 migration path, and the public projection has no CultNet
-query transport or consumer verifier. Deploying this intermediate source would
-correctly classify unmigrated daemons as missing health and could therefore
-actuate recovery. Publisher migration, trust enrollment, transport, and the
-consumer must land before promotion.
+root trust and Idunn identity stores have not been installed, and Epiphany
+still uses its signed v0 migration path. The query transport and Epiphany
+consumer verifier now exist in source, but neither makes an unmigrated
+publisher authoritative. Deploying this intermediate source would correctly
+classify unmigrated daemons as missing health and could therefore actuate
+recovery. Publisher migration and trust enrollment must land before promotion.
 
 ## Verification layer
 
