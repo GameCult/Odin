@@ -526,10 +526,17 @@ fn main() -> Result<()> {
     match &options.mode {
         Mode::Single(target) => {
             let store_lock = Arc::new(Mutex::new(()));
+            let actuation_gate = Mutex::new(());
             let now = timestamp()?;
             publish_runtime_transport_check(&options.common, &store_lock, &now)?;
             let mut missing_since = None;
-            run_target_cycle(target, &options.common, &store_lock, &mut missing_since)
+            run_target_cycle(
+                target,
+                &options.common,
+                &store_lock,
+                &actuation_gate,
+                &mut missing_since,
+            )
         }
         Mode::Swarm(swarm) => run_swarm(swarm, &options.common),
         Mode::LifecycleCommand(command) => publish_lifecycle_command(command, &options.common),
@@ -764,9 +771,13 @@ fn run_target_loop(
 ) -> Result<()> {
     let mut missing_since = None;
     loop {
-        if let Err(error) = with_target_actuation_gate(&actuation_gate, || {
-            run_target_cycle(&target, &options, &store_lock, &mut missing_since)
-        }) {
+        if let Err(error) = run_target_cycle(
+            &target,
+            &options,
+            &store_lock,
+            &actuation_gate,
+            &mut missing_since,
+        ) {
             eprintln!(
                 "Idunn swarm target {} cycle failed: {}",
                 target.daemon_id, error
@@ -790,6 +801,7 @@ fn run_target_cycle(
     target: &DaemonTarget,
     options: &CommonOptions,
     store_lock: &Arc<Mutex<()>>,
+    actuation_gate: &Mutex<()>,
     missing_since: &mut Option<Instant>,
 ) -> Result<()> {
     let now = timestamp()?;
@@ -863,6 +875,21 @@ fn run_target_cycle(
         }
         Ok(())
     })?;
+
+    // Observation and signed-health admission above must remain live while a
+    // manual command owns the actuator. Only consequence-bearing automatic
+    // work joins the per-target gate.
+    let _automatic_actuation = if plan.deployment_request.is_some()
+        || plan.restart_request.is_some()
+    {
+        Some(
+            actuation_gate
+                .lock()
+                .map_err(|_| anyhow!("Idunn target actuation gate is poisoned"))?,
+        )
+    } else {
+        None
+    };
 
     if let Some(request) = &plan.deployment_request {
         persist_current_deployment_request(options, store_lock, request)?;
