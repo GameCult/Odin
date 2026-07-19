@@ -617,7 +617,7 @@ mod tests {
             std::thread::spawn(move || { barrier.wait(); invoke(&binding_args("add-daemon-health-trust-binding", &path, id, daemon, runtime)) })
         });
         barrier.wait();
-        let wins = workers.into_iter().filter(|worker| worker.join().unwrap().is_ok()).count();
+        let wins = workers.into_iter().map(|worker| worker.join().unwrap()).filter(Result::is_ok).count();
         assert!((1..=2).contains(&wins));
         assert_eq!(SingleFileMessagePackBackingStore::new(&store).pull_all_read_only_snapshot()?.len(), 1 + wins);
         Ok(())
