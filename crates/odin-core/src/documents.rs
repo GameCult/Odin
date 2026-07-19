@@ -1,6 +1,13 @@
 use cultcache_rs::DatabaseEntry;
+pub use cultnet_rs::{
+    GAMECULT_SERVICE_TRUST_ANCHOR_SCHEMA, GameCultServiceTrustAnchorRecord,
+    IDUNN_AUTHENTICATED_PROVIDER_HEALTH_PROJECTION_SCHEMA,
+    IDUNN_AUTHENTICATED_PROVIDER_HEALTH_PROJECTION_SIGNING_PURPOSE, IDUNN_PROVIDER_ACTIVE_REASON,
+    IDUNN_PROVIDER_DEGRADED_REASON, IDUNN_PROVIDER_FAILED_REASON, IDUNN_PROVIDER_WARMING_REASON,
+    IdunnAuthenticatedProviderHealthProjectionRecord, authenticated_provider_health_reason_code,
+};
 use cultnet_rs::{
-    GameCultProviderHealthIdentity, IdunnServiceIdentity, derive_service_identity_id,
+    GameCultProviderHealthIdentity, derive_service_identity_id,
 };
 use serde_json::Value;
 
@@ -47,15 +54,6 @@ pub const IDUNN_AUTHENTICATED_DAEMON_HEALTH_ADMISSION_SCHEMA: &str =
     "idunn.authenticated_daemon_health_admission.v1";
 pub const IDUNN_UNSIGNED_DAEMON_HEALTH_DIAGNOSTIC_SCHEMA: &str =
     "idunn.unsigned_daemon_health_diagnostic.v1";
-pub const GAMECULT_SERVICE_TRUST_ANCHOR_SCHEMA: &str = "gamecult.service_trust_anchor.v1";
-pub const IDUNN_AUTHENTICATED_PROVIDER_HEALTH_PROJECTION_SCHEMA: &str =
-    "idunn.authenticated_provider_health_projection.v1";
-pub const IDUNN_AUTHENTICATED_PROVIDER_HEALTH_PROJECTION_SIGNING_PURPOSE: &str =
-    "idunn.authenticated-provider-health-projection.v1";
-pub const IDUNN_PROVIDER_ACTIVE_REASON: &str = "authenticated_provider_active";
-pub const IDUNN_PROVIDER_WARMING_REASON: &str = "authenticated_provider_warming";
-pub const IDUNN_PROVIDER_DEGRADED_REASON: &str = "authenticated_provider_degraded";
-pub const IDUNN_PROVIDER_FAILED_REASON: &str = "authenticated_provider_failed";
 pub const MUNINN_TELEMETRY_SURFACE_SCHEMA: &str = "muninn.telemetry_surface.v1";
 pub const MUNINN_CAPTURE_STREAM_SCHEMA: &str = "muninn.capture_stream.v1";
 pub const MUNINN_CAPTURE_STREAM_COMMAND_SCHEMA: &str = "muninn.capture_stream_command.v1";
@@ -610,208 +608,6 @@ impl IdunnUnsignedDaemonHealthDiagnosticRecord {
             || self.private_state_exposed
         {
             bail!("unsigned daemon health diagnostic shape is invalid");
-        }
-        Ok(())
-    }
-}
-
-/// Root-distributed public key binding for one service-owned signed contract.
-/// Consumers pin this document; a self-declared key inside a signed projection
-/// is never authority.
-#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
-#[cultcache(
-    type = "gamecult.service_trust_anchor",
-    schema = "gamecult.service_trust_anchor.v1"
-)]
-pub struct GameCultServiceTrustAnchorRecord {
-    #[cultcache(key = 0)]
-    pub schema_version: String,
-    #[cultcache(key = 1)]
-    pub trust_anchor_id: String,
-    #[cultcache(key = 2)]
-    pub service_id: String,
-    #[cultcache(key = 3)]
-    pub runtime_id: String,
-    #[cultcache(key = 4)]
-    pub signer_identity_id: String,
-    #[cultcache(key = 5)]
-    pub signer_public_key: Vec<u8>,
-    #[cultcache(key = 6)]
-    pub signature_algorithm: String,
-    #[cultcache(key = 7)]
-    pub signing_purpose: String,
-    #[cultcache(key = 8)]
-    pub signed_schema: String,
-    #[cultcache(key = 9)]
-    pub binding_authority: String,
-    #[cultcache(key = 10)]
-    pub bound_at_unix_millis: u64,
-    #[cultcache(key = 11)]
-    pub expires_at_unix_millis: Option<u64>,
-    #[cultcache(key = 12)]
-    pub private_state_exposed: bool,
-}
-
-impl GameCultServiceTrustAnchorRecord {
-    pub fn validate(&self) -> Result<()> {
-        if self.schema_version != GAMECULT_SERVICE_TRUST_ANCHOR_SCHEMA {
-            bail!("service trust anchor schema is unsupported");
-        }
-        validate_identifier(&self.trust_anchor_id, "trust anchor id")?;
-        validate_identifier(&self.service_id, "service id")?;
-        validate_identifier(&self.runtime_id, "runtime id")?;
-        validate_identifier(&self.signer_identity_id, "signer identity id")?;
-        validate_identifier(&self.signing_purpose, "signing purpose")?;
-        validate_identifier(&self.signed_schema, "signed schema")?;
-        if self.signer_public_key.len() != 32
-            || self.signature_algorithm != "ed25519"
-            || self.binding_authority != "root"
-            || self.bound_at_unix_millis == 0
-            || self
-                .expires_at_unix_millis
-                .is_some_and(|expires_at| expires_at <= self.bound_at_unix_millis)
-            || self.private_state_exposed
-        {
-            bail!("service trust anchor authority, key, lifetime, or privacy is invalid");
-        }
-        if self.signed_schema == IDUNN_AUTHENTICATED_PROVIDER_HEALTH_PROJECTION_SCHEMA
-            && (self.service_id != "idunn"
-                || self.signing_purpose
-                    != IDUNN_AUTHENTICATED_PROVIDER_HEALTH_PROJECTION_SIGNING_PURPOSE
-                || self.signer_identity_id
-                    != derive_service_identity_id::<IdunnServiceIdentity>(&self.signer_public_key)?)
-        {
-            bail!("Idunn provider-health trust anchor profile is invalid");
-        }
-        Ok(())
-    }
-}
-
-/// Idunn-owned, public, signed projection of one *current authenticated generic
-/// provider health admission*. Absence, release drift, and dependency failures
-/// produce no record; they are not provider states Idunn may manufacture.
-#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
-#[cultcache(
-    type = "idunn.authenticated_provider_health_projection",
-    schema = "idunn.authenticated_provider_health_projection.v1"
-)]
-pub struct IdunnAuthenticatedProviderHealthProjectionRecord {
-    #[cultcache(key = 0)]
-    pub schema_version: String,
-    #[cultcache(key = 1)]
-    pub projection_id: String,
-    #[cultcache(key = 2)]
-    pub daemon_id: String,
-    #[cultcache(key = 3)]
-    pub health_contract: String,
-    #[cultcache(key = 4)]
-    pub provider_state: String,
-    #[cultcache(key = 5)]
-    pub reason_code: String,
-    #[cultcache(key = 6)]
-    pub provider_observed_at_unix_millis: u64,
-    #[cultcache(key = 7)]
-    pub admitted_at_unix_millis: u64,
-    #[cultcache(key = 8)]
-    pub evaluated_at_unix_millis: u64,
-    #[cultcache(key = 9)]
-    pub trust_binding_id: String,
-    #[cultcache(key = 10)]
-    pub trust_binding_sha256: String,
-    #[cultcache(key = 11)]
-    pub signed_health_sha256: String,
-    #[cultcache(key = 12)]
-    pub authenticated_admission_sha256: String,
-    #[cultcache(key = 13)]
-    pub provider_signer_identity_id: String,
-    #[cultcache(key = 14)]
-    pub provider_incarnation_id: String,
-    #[cultcache(key = 15)]
-    pub provider_sequence: u64,
-    #[cultcache(key = 16)]
-    pub release_id: Option<String>,
-    #[cultcache(key = 17)]
-    pub release_witness_sha256: Option<String>,
-    #[cultcache(key = 18)]
-    pub source_commit: Option<String>,
-    #[cultcache(key = 19)]
-    pub deployment_id: Option<String>,
-    #[cultcache(key = 20)]
-    pub idunn_runtime_id: String,
-    #[cultcache(key = 21)]
-    pub idunn_signer_identity_id: String,
-    #[cultcache(key = 22)]
-    pub projection_incarnation_id: String,
-    #[cultcache(key = 23)]
-    pub projection_sequence: u64,
-    #[cultcache(key = 24)]
-    pub signature_algorithm: String,
-    #[cultcache(key = 25)]
-    pub signature: Vec<u8>,
-    #[cultcache(key = 26)]
-    pub private_state_exposed: bool,
-    #[cultcache(key = 27)]
-    pub expires_at_unix_millis: u64,
-}
-
-/// Closed derivation used by Idunn when projecting an authenticated provider
-/// state. `None` means there is no provider-health projection to publish.
-pub fn authenticated_provider_health_reason_code(state: &str) -> Option<&'static str> {
-    match state {
-        "active" => Some(IDUNN_PROVIDER_ACTIVE_REASON),
-        "warming" => Some(IDUNN_PROVIDER_WARMING_REASON),
-        "degraded" => Some(IDUNN_PROVIDER_DEGRADED_REASON),
-        "failed" => Some(IDUNN_PROVIDER_FAILED_REASON),
-        _ => None,
-    }
-}
-
-impl IdunnAuthenticatedProviderHealthProjectionRecord {
-    pub fn validate(&self) -> Result<()> {
-        if self.schema_version != IDUNN_AUTHENTICATED_PROVIDER_HEALTH_PROJECTION_SCHEMA {
-            bail!("authenticated provider health projection schema is unsupported");
-        }
-        validate_identifier(&self.projection_id, "projection id")?;
-        validate_identifier(&self.daemon_id, "daemon id")?;
-        validate_identifier(&self.health_contract, "health contract")?;
-        validate_identifier(&self.trust_binding_id, "trust binding id")?;
-        validate_identifier(
-            &self.provider_signer_identity_id,
-            "provider signer identity id",
-        )?;
-        validate_identifier(&self.provider_incarnation_id, "provider incarnation id")?;
-        validate_identifier(&self.idunn_runtime_id, "Idunn runtime id")?;
-        validate_identifier(&self.idunn_signer_identity_id, "Idunn signer identity id")?;
-        validate_identifier(&self.projection_incarnation_id, "projection incarnation id")?;
-        let state_reason_is_valid = authenticated_provider_health_reason_code(&self.provider_state)
-            .is_some_and(|reason| reason == self.reason_code);
-        if !state_reason_is_valid
-            || self.provider_observed_at_unix_millis == 0
-            || self.admitted_at_unix_millis < self.provider_observed_at_unix_millis
-            || self.evaluated_at_unix_millis < self.admitted_at_unix_millis
-            || self.expires_at_unix_millis <= self.evaluated_at_unix_millis
-            || self.provider_sequence == 0
-            || self.projection_sequence == 0
-            || !is_sha256(&self.trust_binding_sha256)
-            || !is_sha256(&self.signed_health_sha256)
-            || !is_sha256(&self.authenticated_admission_sha256)
-            || self.signature_algorithm != "ed25519"
-            || self.signature.len() != 64
-            || self.private_state_exposed
-        {
-            bail!(
-                "authenticated provider health projection shape, lineage, reason, signature, or privacy is invalid"
-            );
-        }
-        validate_optional_release_binding(
-            &self.release_id,
-            &self.release_witness_sha256,
-            &self.source_commit,
-        )?;
-        validate_optional_identifier(&self.deployment_id, "deployment id")?;
-        let release_binding_present = self.release_id.is_some();
-        if self.deployment_id.is_some() != release_binding_present {
-            bail!("authenticated provider health projection release lineage is partial");
         }
         Ok(())
     }
@@ -2211,7 +2007,7 @@ mod tests {
             trust_anchor_id: "root/idunn/authenticated-provider-health-projection".into(),
             service_id: "idunn".into(),
             runtime_id: "idunn-yggdrasil".into(),
-            signer_identity_id: derive_service_identity_id::<IdunnServiceIdentity>(
+            signer_identity_id: derive_service_identity_id::<cultnet_rs::IdunnServiceIdentity>(
                 &signer_public_key,
             )
             .unwrap(),
