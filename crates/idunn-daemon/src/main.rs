@@ -673,6 +673,12 @@ fn run_swarm(options: &SwarmOptions, common: &CommonOptions) -> Result<()> {
 
     let store_lock = Arc::new(Mutex::new(()));
     let now = timestamp()?;
+    let recovered = terminalize_interrupted_deployment_requests(common, &store_lock, &now)?;
+    if recovered > 0 {
+        println!(
+            "Idunn terminalized {recovered} deployment request(s) interrupted by the prior daemon incarnation."
+        );
+    }
     publish_runtime_transport_check(common, &store_lock, &now)?;
     start_rudp_health_ingress(common, &store_lock, &now)?;
     publish_surgery_plans(&options.profile, &targets, common, &store_lock, &now)?;
@@ -1432,6 +1438,123 @@ fn persist_current_deployment_request(
     Err(anyhow!(
         "deployment request head lost repeated cross-process contention"
     ))
+}
+
+/// On daemon startup no deployment actuator from the prior process can still
+/// be an Idunn-owned child. Close any exact current request that lacks a result
+/// before this incarnation launches workers. The current head remains durable
+/// history; its exact failed result permits ordinary CAS supersession.
+fn terminalize_interrupted_deployment_requests(
+    options: &CommonOptions,
+    store_lock: &Arc<Mutex<()>>,
+    completed_at: &str,
+) -> Result<usize> {
+    let _store_guard = store_lock
+        .lock()
+        .map_err(|_| anyhow!("Idunn store lock is poisoned"))?;
+    let backing = SingleFileMessagePackBackingStore::new(&options.store_path);
+    let opening = backing.pull_all()?;
+    let heads = opening
+        .iter()
+        .filter(|entry| entry.r#type == IdunnCurrentDeploymentRequestRecord::TYPE)
+        .collect::<Vec<_>>();
+    let mut recovered = 0;
+    for head_envelope in heads {
+        let head: IdunnCurrentDeploymentRequestRecord =
+            rmp_serde::from_slice(&head_envelope.payload)?;
+        if head.daemon_id.trim().is_empty()
+            || head.request_id.trim().is_empty()
+            || head.sequence == 0
+            || head_envelope.key != head.daemon_id
+        {
+            return Err(anyhow!(
+                "current deployment request head is invalid during startup recovery"
+            ));
+        }
+        let request_matches = opening
+            .iter()
+            .filter(|entry| {
+                entry.r#type == IdunnDeploymentRequestRecord::TYPE
+                    && entry.key == head.request_id
+            })
+            .collect::<Vec<_>>();
+        if request_matches.len() != 1 {
+            return Err(anyhow!(
+                "current deployment request {} lacks one exact request during startup recovery",
+                head.request_id
+            ));
+        }
+        let request_envelope = request_matches[0];
+        let request: IdunnDeploymentRequestRecord =
+            rmp_serde::from_slice(&request_envelope.payload)?;
+        if request.request_id != head.request_id || request.daemon_id != head.daemon_id {
+            return Err(anyhow!(
+                "current deployment request is substituted during startup recovery"
+            ));
+        }
+        let result_key = format!("result:{}", head.request_id);
+        let result_matches = opening
+            .iter()
+            .filter(|entry| {
+                entry.r#type == IdunnDeploymentResultRecord::TYPE && entry.key == result_key
+            })
+            .collect::<Vec<_>>();
+        if result_matches.len() > 1 {
+            return Err(anyhow!(
+                "current deployment request has duplicate results during startup recovery"
+            ));
+        }
+        if let Some(result_envelope) = result_matches.first() {
+            let result: IdunnDeploymentResultRecord =
+                rmp_serde::from_slice(&result_envelope.payload)?;
+            if result.result_id != result_key
+                || result.request_id != head.request_id
+                || result.daemon_id != head.daemon_id
+                || !matches!(result.state.as_str(), "succeeded" | "failed" | "skipped")
+            {
+                return Err(anyhow!(
+                    "current deployment request lacks an exact terminal result during startup recovery"
+                ));
+            }
+            continue;
+        }
+        let result = IdunnDeploymentResultRecord {
+            result_id: result_key.clone(),
+            request_id: head.request_id.clone(),
+            daemon_id: head.daemon_id.clone(),
+            state: "failed".to_string(),
+            detail: "deployment actuator was interrupted when the owning Idunn daemon incarnation stopped"
+                .to_string(),
+            completed_at: completed_at.to_string(),
+        };
+        let expected = [
+            CultCacheExpectedEnvelope {
+                key: head.daemon_id.clone(),
+                r#type: IdunnCurrentDeploymentRequestRecord::TYPE.into(),
+                current: Some(head_envelope.clone()),
+            },
+            CultCacheExpectedEnvelope {
+                key: head.request_id.clone(),
+                r#type: IdunnDeploymentRequestRecord::TYPE.into(),
+                current: Some(request_envelope.clone()),
+            },
+            CultCacheExpectedEnvelope {
+                key: result_key.clone(),
+                r#type: IdunnDeploymentResultRecord::TYPE.into(),
+                current: None,
+            },
+        ];
+        if !backing.compare_exchange(
+            &expected,
+            &[typed_envelope(&result_key, &result, completed_at)?],
+        )? {
+            return Err(anyhow!(
+                "interrupted deployment request changed during startup recovery"
+            ));
+        }
+        recovered += 1;
+    }
+    Ok(recovered)
 }
 
 fn release_authority_id(
@@ -7421,6 +7544,57 @@ mod tests {
         forged_wire.signature[0] ^= 1;
         document.payload = rmp_serde::to_vec_named(&forged_wire).unwrap();
         assert!(health_from_rudp_message(&forged, &forged_options).is_err());
+    }
+
+    #[test]
+    fn startup_terminalizes_interrupted_deployment_before_supersession() {
+        let (_message, options, _root) = signed_epiphany_health_fixture(1);
+        let lock = Arc::new(Mutex::new(()));
+        let prior = with_store_node(&options, &lock, |node| {
+            node.get::<IdunnDeploymentRequestRecord>(
+                "deploy:yggdrasil-epiphany:fixture",
+            )?
+            .ok_or_else(|| anyhow!("fixture request missing"))
+        })
+        .unwrap();
+
+        assert_eq!(
+            terminalize_interrupted_deployment_requests(
+                &options,
+                &lock,
+                "2026-07-16T00:02:00Z",
+            )
+            .unwrap(),
+            1
+        );
+        let result = with_store_node(&options, &lock, |node| {
+            node.get::<IdunnDeploymentResultRecord>(
+                "result:deploy:yggdrasil-epiphany:fixture",
+            )?
+            .ok_or_else(|| anyhow!("recovered result missing"))
+        })
+        .unwrap();
+        assert_eq!(result.request_id, prior.request_id);
+        assert_eq!(result.daemon_id, prior.daemon_id);
+        assert_eq!(result.state, "failed");
+        assert_eq!(result.completed_at, "2026-07-16T00:02:00Z");
+        assert!(result.detail.contains("owning Idunn daemon incarnation stopped"));
+        assert_eq!(
+            terminalize_interrupted_deployment_requests(
+                &options,
+                &lock,
+                "2026-07-16T00:03:00Z",
+            )
+            .unwrap(),
+            0
+        );
+
+        let mut successor = prior;
+        successor.request_id = "deploy:yggdrasil-epiphany:successor".into();
+        successor.requested_at = "2026-07-16T00:04:00Z".into();
+        let head = persist_current_deployment_request(&options, &lock, &successor).unwrap();
+        assert_eq!(head.request_id, successor.request_id);
+        assert_eq!(head.sequence, 2);
     }
 
     #[test]
