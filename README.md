@@ -54,6 +54,15 @@ Agents do not deploy daemons directly. They configure Idunn's target catalog,
 release targets, migration commands, and command boundaries so Idunn can run
 the shared rollout primitive and leave typed witnesses behind.
 
+Deployment consequence has one final owner: immediately before every migration,
+deploy, or restart process spawn, Idunn re-opens the root-owned deployment-brake
+CultCache and the dedicated operator public anchor. A released record must bind
+the canonical runtime (`yggdrasil` for `yggdrasil-local`), exact source revision
+(or `restart:<daemon>`), exact request id, operator, signature, and short expiry.
+Missing, corrupt, engaged, expired, foreign, wrong-scope, substituted, or
+badly-signed state fails closed. Planning and lifecycle-command publication do
+not bypass or cache this decision.
+
 Local package surfaces:
 
 - Organ contract: `docs/idunn.md`

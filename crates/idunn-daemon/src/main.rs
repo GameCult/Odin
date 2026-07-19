@@ -9,12 +9,14 @@ use cultnet_rs::{
     CultNetRawPayloadEncoding, CultNetReadOnlySnapshotPolicy, CultNetRudpPacketType,
     CultNetRudpSendOptions, CultNetRudpSession, CultNetRudpSessionOptions,
     CultNetRudpSocketTransportConnection, CultNetRudpSocketTransportOptions, CultNetWireContract,
-    GameCultProviderHealthIdentity, IdunnAuthenticatedProviderHealthProjectionPurpose,
-    IdunnServiceIdentity, IdunnSignedDaemonHealthPurpose, ServiceIdentitySignature,
-    ServiceIdentitySigner, decode_cultnet_message_from_slice, decode_rudp_packet,
-    derive_service_identity_id, encode_cultnet_message_to_vec, encode_rudp_packet,
-    open_service_identity_at, serve_read_only_raw_snapshot,
-    verify_service_identity_signature_with_public_key,
+    GameCultProviderHealthIdentity, IDUNN_DEPLOYMENT_BRAKE_SCHEMA,
+    IdunnAuthenticatedProviderHealthProjectionPurpose, IdunnDeploymentBrakeObservation,
+    IdunnDeploymentBrakeOperatorIdentity, IdunnDeploymentBrakeRecord, IdunnServiceIdentity,
+    IdunnSignedDaemonHealthPurpose, ServiceIdentityProfile, ServiceIdentitySignature,
+    ServiceIdentitySigner, ServiceIdentityTrustAnchor, decode_cultnet_message_from_slice,
+    decode_rudp_packet, derive_service_identity_id, encode_cultnet_message_to_vec,
+    encode_rudp_packet, evaluate_idunn_deployment_brake, open_service_identity_at,
+    serve_read_only_raw_snapshot, verify_service_identity_signature_with_public_key,
 };
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use odin_core::{
@@ -504,6 +506,9 @@ fn locally_supervised_health_contract(id: &str, default_failure_state: &str) -> 
 struct CommonOptions {
     store_path: PathBuf,
     release_authority_store_path: Option<PathBuf>,
+    deployment_brake_store_path: Option<PathBuf>,
+    deployment_brake_operator_anchor_path: Option<PathBuf>,
+    deployment_brake_runtime_id: Option<String>,
     operator_alarm_command: Option<String>,
     rudp_health_bind: Option<SocketAddr>,
     trusted_epiphany_health_identity_store: Option<PathBuf>,
@@ -1055,7 +1060,7 @@ fn finish_target_cycle(
                 target
                     .release
                     .as_ref()
-                    .and_then(|release| run_state_migration(target, release, now, options))
+                    .and_then(|release| run_state_migration(target, release, request, now, options))
             } else {
                 None
             };
@@ -1415,31 +1420,31 @@ fn persist_current_deployment_request(
             current_request_envelope,
         ) = with_store_node(options, store_lock, |node| {
             let head = node.get::<IdunnCurrentDeploymentRequestRecord>(&request.daemon_id)?;
-                Ok((
-                    head.clone(),
-                    node.cache()
-                        .get_envelope::<IdunnCurrentDeploymentRequestRecord>(&request.daemon_id)?,
-                    head.as_ref()
-                        .map(|head| {
-                            node.cache()
-                                .get_envelope::<IdunnDeploymentRequestRecord>(&head.request_id)
-                        })
-                        .transpose()?
-                        .flatten(),
-                    head.as_ref()
-                        .map(|head| {
+            Ok((
+                head.clone(),
+                node.cache()
+                    .get_envelope::<IdunnCurrentDeploymentRequestRecord>(&request.daemon_id)?,
+                head.as_ref()
+                    .map(|head| {
+                        node.cache()
+                            .get_envelope::<IdunnDeploymentRequestRecord>(&head.request_id)
+                    })
+                    .transpose()?
+                    .flatten(),
+                head.as_ref()
+                    .map(|head| {
                         node.cache()
                             .get_envelope::<IdunnDeploymentResultRecord>(&format!(
                                 "result:{}",
                                 head.request_id
                             ))
-                        })
-                        .transpose()?
-                        .flatten(),
-                    node.cache()
-                        .get_envelope::<IdunnDeploymentRequestRecord>(&request.request_id)?,
-                ))
-            })?;
+                    })
+                    .transpose()?
+                    .flatten(),
+                node.cache()
+                    .get_envelope::<IdunnDeploymentRequestRecord>(&request.request_id)?,
+            ))
+        })?;
         if let Some(existing) = current_request_envelope.as_ref() {
             let decoded: IdunnDeploymentRequestRecord = rmp_serde::from_slice(&existing.payload)?;
             if decoded != *request {
@@ -2365,7 +2370,7 @@ fn reject_store_aliases(
     }
     if private_paths.iter().enumerate().any(|(index, path)| {
         private_paths
-        .iter()
+            .iter()
             .skip(index + 1)
             .any(|other| other == path)
     }) {
@@ -2413,7 +2418,7 @@ impl IdunnProjectionPublisher {
             .ok_or_else(|| anyhow!("projection evaluation time is invalid"))?;
         let current =
             read_fresh_daemon_published_health(options, store_lock, desired, evaluated_at)?
-            .and_then(|managed| managed.projection_source)
+                .and_then(|managed| managed.projection_source)
                 .ok_or_else(|| {
                     anyhow!("authenticated provider health vanished before projection")
                 })?;
@@ -3554,8 +3559,8 @@ fn admit_generic_signed_health(
                             &admission.daemon_id,
                         )?,
                     node.cache().get_envelope::<IdunnSignedDaemonHealthRecord>(
-                            &admission.signed_health_sha256,
-                        )?,
+                        &admission.signed_health_sha256,
+                    )?,
                 ))
             })?;
         let expected = [
@@ -5325,6 +5330,9 @@ impl Options {
         });
         let mut store_path = PathBuf::from("scratch/idunn/idunn.keepalive.cc");
         let mut release_authority_store_path = None;
+        let mut deployment_brake_store_path = None;
+        let mut deployment_brake_operator_anchor_path = None;
+        let mut deployment_brake_runtime_id = None;
         let mut operator_alarm_command = None;
         let mut rudp_health_bind = None;
         let mut trusted_epiphany_health_identity_store = None;
@@ -5369,6 +5377,22 @@ impl Options {
                         &mut args,
                         "--release-authority-store",
                     )?))
+                }
+                "--deployment-brake-store" => {
+                    deployment_brake_store_path = Some(PathBuf::from(take_value(
+                        &mut args,
+                        "--deployment-brake-store",
+                    )?))
+                }
+                "--deployment-brake-operator-anchor" => {
+                    deployment_brake_operator_anchor_path = Some(PathBuf::from(take_value(
+                        &mut args,
+                        "--deployment-brake-operator-anchor",
+                    )?))
+                }
+                "--deployment-brake-runtime-id" => {
+                    deployment_brake_runtime_id =
+                        Some(take_value(&mut args, "--deployment-brake-runtime-id")?)
                 }
                 "--repository-full-name" => {
                     validation_repository_full_name =
@@ -5502,6 +5526,12 @@ impl Options {
         let common = CommonOptions {
             store_path,
             release_authority_store_path,
+            deployment_brake_store_path,
+            deployment_brake_operator_anchor_path,
+            deployment_brake_runtime_id: deployment_brake_runtime_id.or_else(|| {
+                (swarm_profile.as_deref() == Some("yggdrasil-local"))
+                    .then(|| "yggdrasil".to_string())
+            }),
             operator_alarm_command,
             rudp_health_bind,
             trusted_epiphany_health_identity_store,
@@ -5574,6 +5604,14 @@ impl Options {
         {
             return Err(anyhow!(
                 "--trusted-epiphany-health-identity-store is required for yggdrasil-local"
+            ));
+        }
+        if swarm_profile.as_deref() == Some("yggdrasil-local")
+            && (common.deployment_brake_store_path.is_none()
+                || common.deployment_brake_operator_anchor_path.is_none())
+        {
+            return Err(anyhow!(
+                "--deployment-brake-store and --deployment-brake-operator-anchor are required for yggdrasil-local"
             ));
         }
 
@@ -5695,7 +5733,13 @@ fn run_restart(
     options: &CommonOptions,
 ) -> IdunnRestartResultRecord {
     let result_id = format!("result:{}", request.request_id);
-    match run_shell(&request.command, options, None) {
+    match run_braked_shell(
+        &request.command,
+        options,
+        &format!("restart:{}", request.daemon_id),
+        &request.request_id,
+        None,
+    ) {
         Ok(output) if output.status.success() => IdunnRestartResultRecord {
             result_id,
             request_id: request.request_id.clone(),
@@ -5743,7 +5787,13 @@ fn run_deployment(
             completed_at: requested_at.to_string(),
         };
     }
-    match run_shell(&request.command, options, Some(request)) {
+    match run_braked_shell(
+        &request.command,
+        options,
+        &request.source_revision,
+        &request.request_id,
+        Some(request),
+    ) {
         Ok(output) if output.status.success() => IdunnDeploymentResultRecord {
             result_id,
             request_id: request.request_id.clone(),
@@ -5814,6 +5864,7 @@ fn truncate_detail(value: &str, max_chars: usize) -> String {
 fn run_state_migration(
     target: &DaemonTarget,
     release: &ReleaseTarget,
+    deployment: &IdunnDeploymentRequestRecord,
     requested_at: &str,
     options: &CommonOptions,
 ) -> Option<IdunnStateMigrationResultRecord> {
@@ -5829,7 +5880,15 @@ fn run_state_migration(
             completed_at: requested_at.to_string(),
         });
     };
-    match run_shell(command, options, None) {
+    // Migration is consequential deployment work. It consumes the same exact
+    // release/request grant as the deployment spawn that follows it.
+    match run_braked_shell(
+        command,
+        options,
+        &deployment.source_revision,
+        &deployment.request_id,
+        Some(deployment),
+    ) {
         Ok(output) if output.status.success() => Some(IdunnStateMigrationResultRecord {
             result_id,
             plan_id,
@@ -5891,6 +5950,8 @@ fn rollout_result_record(
 fn run_shell(
     command: &str,
     options: &CommonOptions,
+    release_id: &str,
+    deployment_id: &str,
     deployment: Option<&IdunnDeploymentRequestRecord>,
 ) -> Result<std::process::Output> {
     let mut process = if cfg!(windows) {
@@ -5946,6 +6007,9 @@ fn run_shell(
         .with_context(|| format!("creating {}", stderr_path.display()))?;
 
     configure_command_lifetime(&mut process);
+    // This is deliberately the last fallible authority read before spawn.
+    // Preparation above has no consequence outside Idunn's temporary files.
+    verify_deployment_brake(options, release_id, deployment_id)?;
     let child = process
         .stdout(Stdio::from(stdout_file))
         .stderr(Stdio::from(stderr_file))
@@ -5965,6 +6029,95 @@ fn run_shell(
         stdout,
         stderr,
     })
+}
+
+/// The single final consequence gate. Callers may plan and persist before this,
+/// but every migration, deployment, and restart re-opens both root-owned files
+/// here, immediately before `Command::spawn`.
+fn run_braked_shell(
+    command: &str,
+    options: &CommonOptions,
+    release_id: &str,
+    deployment_id: &str,
+    deployment: Option<&IdunnDeploymentRequestRecord>,
+) -> Result<std::process::Output> {
+    run_shell(command, options, release_id, deployment_id, deployment)
+}
+
+fn verify_deployment_brake(
+    options: &CommonOptions,
+    release_id: &str,
+    deployment_id: &str,
+) -> Result<()> {
+    let store_path = options
+        .deployment_brake_store_path
+        .as_ref()
+        .ok_or_else(|| anyhow!("--deployment-brake-store is required for actuation"))?;
+    let anchor_path = options
+        .deployment_brake_operator_anchor_path
+        .as_ref()
+        .ok_or_else(|| anyhow!("--deployment-brake-operator-anchor is required for actuation"))?;
+    let runtime_id = options
+        .deployment_brake_runtime_id
+        .as_deref()
+        .ok_or_else(|| anyhow!("deployment brake runtime id is not configured"))?;
+
+    let entries = SingleFileMessagePackBackingStore::new(store_path)
+        .pull_all_read_only_snapshot()
+        .with_context(|| format!("reading deployment brake {}", store_path.display()))?;
+    let observation = match entries.as_slice() {
+        [entry]
+            if entry.r#type == IdunnDeploymentBrakeRecord::TYPE
+                && entry.key == cultnet_rs::IDUNN_DEPLOYMENT_BRAKE_ID
+                && entry.schema_id.as_deref() == Some(IDUNN_DEPLOYMENT_BRAKE_SCHEMA) =>
+        {
+            match rmp_serde::from_slice::<IdunnDeploymentBrakeRecord>(&entry.payload) {
+                Ok(record)
+                    if rmp_serde::to_vec(&record).ok().as_deref()
+                        == Some(entry.payload.as_slice()) =>
+                {
+                    record
+                }
+                _ => return Err(anyhow!("deployment brake is corrupt")),
+            }
+        }
+        [] => return Err(anyhow!("deployment brake is missing")),
+        _ => return Err(anyhow!("deployment brake store is corrupt or ambiguous")),
+    };
+    let anchor_entries = SingleFileMessagePackBackingStore::new(anchor_path)
+        .pull_all_read_only_snapshot()
+        .with_context(|| {
+            format!(
+                "reading deployment brake operator anchor {}",
+                anchor_path.display()
+            )
+        })?;
+    let [anchor_entry] = anchor_entries.as_slice() else {
+        return Err(anyhow!(
+            "deployment brake operator anchor is missing or ambiguous"
+        ));
+    };
+    if anchor_entry.r#type != IdunnDeploymentBrakeOperatorIdentity::TRUST_ANCHOR_TYPE
+        || anchor_entry.key != IdunnDeploymentBrakeOperatorIdentity::TRUST_ANCHOR_KEY
+        || anchor_entry.schema_id.as_deref()
+            != Some(IdunnDeploymentBrakeOperatorIdentity::TRUST_ANCHOR_SCHEMA)
+    {
+        return Err(anyhow!("deployment brake operator anchor is foreign"));
+    }
+    let anchor: ServiceIdentityTrustAnchor = rmp_serde::from_slice(&anchor_entry.payload)
+        .context("decoding deployment brake operator anchor")?;
+    if rmp_serde::to_vec(&anchor)? != anchor_entry.payload {
+        return Err(anyhow!("deployment brake operator anchor is noncanonical"));
+    }
+    evaluate_idunn_deployment_brake(
+        IdunnDeploymentBrakeObservation::Present(&observation),
+        &anchor,
+        runtime_id,
+        release_id,
+        deployment_id,
+        unix_epoch_millis()?,
+    )
+    .map_err(|denial| anyhow!("deployment brake denied actuation: {denial:?}"))
 }
 
 fn actuator_idunn_rudp_health_endpoint(options: &CommonOptions) -> Option<String> {
@@ -6551,6 +6704,9 @@ mod tests {
         let options = CommonOptions {
             store_path: env::temp_dir().join("unused-idunn-store.cc"),
             release_authority_store_path: Some(path.clone()),
+            deployment_brake_store_path: None,
+            deployment_brake_operator_anchor_path: None,
+            deployment_brake_runtime_id: None,
             operator_alarm_command: None,
             rudp_health_bind: None,
             trusted_epiphany_health_identity_store: None,
@@ -7504,7 +7660,7 @@ mod tests {
         assert!(actuator.contains("/usr/local/bin/idunn validate-release-authority"));
         assert!(
             actuator.contains(
-            "epiphany|bifrost-persona-feedback) target_requires_bifrost_authority=true"
+                "epiphany|bifrost-persona-feedback) target_requires_bifrost_authority=true"
             )
         );
         assert!(actuator.contains(
@@ -7907,6 +8063,9 @@ mod tests {
         let options = CommonOptions {
             store_path: store_path.clone(),
             release_authority_store_path: None,
+            deployment_brake_store_path: None,
+            deployment_brake_operator_anchor_path: None,
+            deployment_brake_runtime_id: None,
             operator_alarm_command: None,
             rudp_health_bind: None,
             trusted_epiphany_health_identity_store: None,
@@ -7983,6 +8142,9 @@ mod tests {
         let options = CommonOptions {
             store_path: store_path.clone(),
             release_authority_store_path: None,
+            deployment_brake_store_path: None,
+            deployment_brake_operator_anchor_path: None,
+            deployment_brake_runtime_id: None,
             operator_alarm_command: None,
             rudp_health_bind: None,
             trusted_epiphany_health_identity_store: None,
@@ -8549,6 +8711,9 @@ mod tests {
         let options = CommonOptions {
             store_path: root.path().join("idunn.cc"),
             release_authority_store_path: None,
+            deployment_brake_store_path: None,
+            deployment_brake_operator_anchor_path: None,
+            deployment_brake_runtime_id: None,
             operator_alarm_command: None,
             rudp_health_bind: None,
             trusted_epiphany_health_identity_store: None,
@@ -8562,7 +8727,7 @@ mod tests {
         let lock = Arc::new(Mutex::new(()));
         let outcome =
             admit_health_from_rudp_message(&message, &options, &lock, "2026-06-15T00:00:01Z")
-        .unwrap();
+                .unwrap();
         assert_eq!(outcome.authority, "diagnostic-only");
         assert!(health_from_rudp_message(&message, &options).is_err());
         with_store_node(&options, &lock, |node| {
@@ -8619,8 +8784,8 @@ mod tests {
             .push(&typed_envelope(&binding.binding_id, &binding, "unix:1784483100").unwrap())
             .unwrap();
         let observed_at_unix_millis = chrono::DateTime::parse_from_rfc3339("2026-07-19T12:00:00Z")
-        .unwrap()
-        .timestamp_millis() as u64;
+            .unwrap()
+            .timestamp_millis() as u64;
         let mut statement = IdunnSignedDaemonHealthRecord {
             schema_version: odin_core::IDUNN_SIGNED_DAEMON_HEALTH_SCHEMA.into(),
             daemon_id: binding.daemon_id.clone(),
@@ -8691,6 +8856,9 @@ mod tests {
             CommonOptions {
                 store_path,
                 release_authority_store_path: None,
+                deployment_brake_store_path: None,
+                deployment_brake_operator_anchor_path: None,
+                deployment_brake_runtime_id: None,
                 operator_alarm_command: None,
                 rudp_health_bind: None,
                 trusted_epiphany_health_identity_store: None,
@@ -9227,19 +9395,19 @@ mod tests {
         };
         assert!(
             backing
-            .compare_exchange(
-                &[CultCacheExpectedEnvelope {
-                    key: current_envelope.key.clone(),
-                    r#type: current_envelope.r#type.clone(),
-                    current: Some(current_envelope),
-                }],
-                &[corrupted_envelope],
-            )
+                .compare_exchange(
+                    &[CultCacheExpectedEnvelope {
+                        key: current_envelope.key.clone(),
+                        r#type: current_envelope.r#type.clone(),
+                        current: Some(current_envelope),
+                    }],
+                    &[corrupted_envelope],
+                )
                 .unwrap()
         );
         assert!(
             second
-            .publish_if_current(&options, &lock, &desired, &source, "2026-07-19T12:00:04Z")
+                .publish_if_current(&options, &lock, &desired, &source, "2026-07-19T12:00:04Z")
                 .is_err()
         );
 
@@ -9456,6 +9624,9 @@ mod tests {
         let options = CommonOptions {
             store_path,
             release_authority_store_path: None,
+            deployment_brake_store_path: None,
+            deployment_brake_operator_anchor_path: None,
+            deployment_brake_runtime_id: None,
             operator_alarm_command: None,
             rudp_health_bind: None,
             trusted_epiphany_health_identity_store: Some(identity_path),
@@ -9752,6 +9923,9 @@ mod tests {
         let options = CommonOptions {
             store_path: root.path().join("idunn.cc"),
             release_authority_store_path: None,
+            deployment_brake_store_path: None,
+            deployment_brake_operator_anchor_path: None,
+            deployment_brake_runtime_id: None,
             operator_alarm_command: None,
             rudp_health_bind: None,
             trusted_epiphany_health_identity_store: None,

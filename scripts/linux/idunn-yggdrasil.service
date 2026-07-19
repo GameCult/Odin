@@ -10,7 +10,7 @@ User=idunn
 Group=idunn
 # Operational cancellation ceiling only. Target daemons own readiness through
 # typed health; this duration must never be interpreted as deployment success.
-ExecStart=/usr/local/bin/idunn --swarm-profile yggdrasil-local --repo-root /srv/odin/source --store /var/lib/gamecult/idunn/yggdrasil.keepalive.cc --release-authority-store /srv/bifrost/state/repository-release-authority.cc --rudp-health-bind 10.77.0.1:17870 --trusted-epiphany-health-identity-store /etc/gamecult/idunn/epiphany-health-identity.ccmp --command-timeout-seconds 21600 --execute
+ExecStart=/usr/local/bin/idunn --swarm-profile yggdrasil-local --repo-root /srv/odin/source --store /var/lib/gamecult/idunn/yggdrasil.keepalive.cc --release-authority-store /srv/bifrost/state/repository-release-authority.cc --deployment-brake-store /var/lib/gamecult/idunn/deployment-brake.cc --deployment-brake-operator-anchor /etc/gamecult/idunn/deployment-brake-operator-anchor.cc --rudp-health-bind 10.77.0.1:17870 --trusted-epiphany-health-identity-store /etc/gamecult/idunn/epiphany-health-identity.ccmp --command-timeout-seconds 21600 --execute
 Restart=always
 RestartSec=5
 TimeoutStopSec=20
