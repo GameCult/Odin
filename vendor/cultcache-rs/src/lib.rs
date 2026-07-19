@@ -136,6 +136,14 @@ impl SingleFileMessagePackBackingStore {
         &self.path
     }
 
+    /// Reads one atomically published snapshot without acquiring or creating
+    /// the sibling writer lock. This is for immutable, externally owned
+    /// documents such as pinned trust anchors where the reader has no write
+    /// authority over the containing directory.
+    pub fn pull_all_read_only_snapshot(&self) -> Result<Vec<CultCacheEnvelope>> {
+        self.read_all_unlocked()
+    }
+
     pub fn compare_exchange(
         &self,
         expected: &[CultCacheExpectedEnvelope],

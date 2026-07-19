@@ -2562,7 +2562,7 @@ fn validate_epiphany_signed_health_shape(signed: &EpiphanySignedRuntimeHealthWir
 }
 
 fn load_epiphany_health_identity(path: &std::path::Path) -> Result<EpiphanyHostIdentityWire> {
-    let entries = SingleFileMessagePackBackingStore::new(path).pull_all()?;
+    let entries = SingleFileMessagePackBackingStore::new(path).pull_all_read_only_snapshot()?;
     let envelope = entries
         .iter()
         .find(|entry| entry.r#type == HOST_IDENTITY_TYPE && entry.key == HOST_IDENTITY_KEY)
@@ -7421,6 +7421,52 @@ mod tests {
         forged_wire.signature[0] ^= 1;
         document.payload = rmp_serde::to_vec_named(&forged_wire).unwrap();
         assert!(health_from_rudp_message(&forged, &forged_options).is_err());
+    }
+
+    #[test]
+    fn pinned_epiphany_health_identity_load_is_read_only() {
+        let (_message, options, _root) = signed_epiphany_health_fixture(1);
+        let identity_path = options
+            .trusted_epiphany_health_identity_store
+            .as_deref()
+            .expect("fixture trust anchor");
+        let lock_path = identity_path.with_file_name(format!(
+            "{}.lock",
+            identity_path
+                .file_name()
+                .expect("trust anchor filename")
+                .to_string_lossy()
+        ));
+        if lock_path.exists() {
+            std::fs::remove_file(&lock_path).unwrap();
+        }
+        let mut permissions = std::fs::metadata(identity_path).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(identity_path, permissions).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                identity_path.parent().unwrap(),
+                std::fs::Permissions::from_mode(0o555),
+            )
+            .unwrap();
+        }
+
+        let identity = load_epiphany_health_identity(identity_path).unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                identity_path.parent().unwrap(),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+        }
+
+        assert_eq!(identity.schema_version, HOST_IDENTITY_TYPE);
+        assert!(!lock_path.exists());
     }
 
     #[test]
