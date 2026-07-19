@@ -1811,8 +1811,7 @@ fn read_fresh_daemon_published_health(
                 let (_, current_binding_sha256) =
                     load_daemon_health_trust_binding(options, &statement)?;
                 validate_generic_release_binding(node, &admission)?;
-                let now_millis = parse_timestamp_seconds(now)
-                    .and_then(|seconds| seconds.checked_mul(1000))
+                let now_millis = parse_timestamp_millis(now)
                     .ok_or_else(|| anyhow!("managed health clock is invalid"))?;
                 let statement_digest = format!(
                     "sha256-{:x}",
@@ -2090,6 +2089,16 @@ fn parse_unix_timestamp(value: &str) -> Option<u64> {
 
 fn parse_timestamp_seconds(value: &str) -> Option<u64> {
     parse_unix_timestamp(value).or_else(|| parse_utc_iso_timestamp_seconds(value))
+}
+
+fn parse_timestamp_millis(value: &str) -> Option<u64> {
+    if let Some(seconds) = parse_unix_timestamp(value) {
+        return seconds.checked_mul(1000);
+    }
+    let millis = chrono::DateTime::parse_from_rfc3339(value)
+        .ok()?
+        .timestamp_millis();
+    u64::try_from(millis).ok()
 }
 
 fn parse_utc_iso_timestamp_seconds(value: &str) -> Option<u64> {
@@ -2669,6 +2678,11 @@ fn authenticate_generic_signed_health(
 )> {
     let statement: IdunnSignedDaemonHealthRecord = rmp_serde::from_slice(&document.payload)
         .context("decoding generic signed daemon health")?;
+    if rmp_serde::to_vec(&statement)? != document.payload {
+        return Err(anyhow!(
+            "signed daemon health payload is not canonical positional MessagePack"
+        ));
+    }
     statement.validate()?;
     if document.record_key != statement.daemon_id
         || document.source_runtime_id.as_deref() != Some(statement.source_runtime_id.as_str())
@@ -2722,8 +2736,7 @@ fn authenticate_generic_signed_health(
             &Signature::from_bytes(&signature_bytes),
         )
         .context("signed daemon health signature is invalid")?;
-    let admitted_at_unix_millis = parse_timestamp_seconds(admitted_at)
-        .and_then(|seconds| seconds.checked_mul(1000))
+    let admitted_at_unix_millis = parse_timestamp_millis(admitted_at)
         .ok_or_else(|| anyhow!("signed daemon health admission time is invalid"))?;
     if statement.observed_at_unix_millis > admitted_at_unix_millis
         || admitted_at_unix_millis.saturating_sub(statement.observed_at_unix_millis)
@@ -2917,8 +2930,7 @@ fn validate_generic_release_binding(
     if current.request_id != request.request_id || current.sequence == 0 {
         return Err(anyhow!("signed daemon health names a superseded deployment"));
     }
-    let requested_at = parse_timestamp_seconds(&request.requested_at)
-        .and_then(|seconds| seconds.checked_mul(1000))
+    let requested_at = parse_timestamp_millis(&request.requested_at)
         .ok_or_else(|| anyhow!("deployment request timestamp is invalid"))?;
     if admission.observed_at_unix_millis < requested_at
         || admission.admitted_at_unix_millis < requested_at
@@ -2985,8 +2997,7 @@ fn decode_health_from_rudp_message(
             document.record_key, wire.daemon_id
         ));
     }
-    let received_at_unix_millis = parse_timestamp_seconds(admitted_at)
-        .and_then(|seconds| seconds.checked_mul(1000))
+    let received_at_unix_millis = parse_timestamp_millis(admitted_at)
         .ok_or_else(|| anyhow!("unsigned health diagnostic receive time is invalid"))?;
     let diagnostic = IdunnUnsignedDaemonHealthDiagnosticRecord {
         schema_version: IDUNN_UNSIGNED_DAEMON_HEALTH_DIAGNOSTIC_SCHEMA.into(),
@@ -7972,6 +7983,65 @@ mod tests {
             document.payload[0] ^= 1;
         }
         assert!(health_from_rudp_message(&forged, &options).is_err());
+    }
+
+    #[test]
+    fn generic_signed_health_requires_canonical_bytes_and_preserves_millisecond_clock() {
+        let (mut message, options, _root) = generic_signed_health_fixture(1);
+        let mut statement: IdunnSignedDaemonHealthRecord = match &message {
+            CultNetMessage::DocumentPutRaw { document, .. } => {
+                rmp_serde::from_slice(&document.payload).unwrap()
+            }
+            _ => unreachable!(),
+        };
+        statement.observed_at_unix_millis = chrono::DateTime::parse_from_rfc3339(
+            "2026-07-19T12:00:00.500Z",
+        )
+        .unwrap()
+        .timestamp_millis() as u64;
+        statement.signature.clear();
+        let key = SigningKey::from_bytes(&[31; 32]);
+        statement.signature = key
+            .sign(&host_signature_message(
+                SIGNED_DAEMON_HEALTH_TYPE,
+                &rmp_serde::to_vec(&statement).unwrap(),
+            ))
+            .to_bytes()
+            .to_vec();
+        let CultNetMessage::DocumentPutRaw { document, .. } = &mut message else {
+            unreachable!()
+        };
+        document.payload = rmp_serde::to_vec(&statement).unwrap();
+
+        admit_health_from_rudp_message(
+            &message,
+            &options,
+            &Arc::new(Mutex::new(())),
+            "2026-07-19T12:00:00.500Z",
+        )
+        .unwrap();
+
+        let CultNetMessage::DocumentPutRaw { document, .. } = &mut message else {
+            unreachable!()
+        };
+        let canonical = rmp_serde::to_vec(&statement).unwrap();
+        let string_marker_index = if canonical.first() == Some(&0xdc) { 3 } else { 1 };
+        let string_marker = canonical[string_marker_index];
+        assert!((0xa0..=0xbf).contains(&string_marker));
+        let string_length = string_marker & 0x1f;
+        let mut noncanonical = Vec::with_capacity(canonical.len() + 1);
+        noncanonical.extend_from_slice(&canonical[..string_marker_index]);
+        noncanonical.extend_from_slice(&[0xd9, string_length]);
+        noncanonical.extend_from_slice(&canonical[string_marker_index + 1..]);
+        document.payload = noncanonical;
+        let error = authenticate_generic_signed_health(
+            document,
+            &options,
+            "2026-07-19T12:00:00.500Z",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("canonical positional MessagePack"));
     }
 
     fn signed_epiphany_health_fixture(
