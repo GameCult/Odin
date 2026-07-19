@@ -16,7 +16,7 @@ use odin_core::{
     IdunnCurrentDeploymentRequestRecord, IdunnDaemonHealthRecord, IdunnDaemonSurgeryPlanRecord,
     IdunnDaemonTransportProfileRecord, IdunnDeploymentArtifactRecord, IdunnDeploymentRequestRecord,
     IdunnDeploymentResultRecord, IdunnDesiredDaemonRecord, IdunnLifecycleCommandRecord,
-    IdunnOperatorAlarmRecord, IdunnReleaseTargetRecord, IdunnRestartRequestRecord,
+    IdunnOperatorAlarmRecord, IdunnPlan, IdunnReleaseTargetRecord, IdunnRestartRequestRecord,
     IdunnRestartResultRecord, IdunnRolloutPlanRecord, IdunnRolloutResultRecord,
     IdunnRudpHealthIngressRecord, IdunnRuntimeTransportCheckRecord,
     IdunnSignedHealthAdmissionRecord, IdunnStateMigrationPlanRecord,
@@ -29,7 +29,7 @@ use std::fs::{self, File};
 use std::net::{SocketAddr, UdpSocket};
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -43,6 +43,17 @@ const EPIPHANY_SIGNED_RUNTIME_HEALTH_SCHEMA_VERSION: &str =
 const EPIPHANY_HEALTH_CONTRACT: &str = "epiphany.cultnet-rudp-runtime-health";
 const EPIPHANY_HEALTH_SOURCE_RUNTIME: &str = "epiphany-daemon-supervisor";
 const EPIPHANY_ADMISSION_MAX_AGE_SECONDS: u64 = 180;
+
+struct TargetActuationGate {
+    lock: Mutex<()>,
+    reserved: AtomicBool,
+}
+
+impl TargetActuationGate {
+    fn new() -> Self {
+        Self { lock: Mutex::new(()), reserved: AtomicBool::new(false) }
+    }
+}
 const HOST_IDENTITY_TYPE: &str = "epiphany.host_identity_trust_anchor.v0";
 const HOST_IDENTITY_KEY: &str = "host-incarnation-public";
 const HOST_SIGNATURE_DOMAIN: &[u8] = b"epiphany.host-incarnation.signature.v0\0";
@@ -526,7 +537,7 @@ fn main() -> Result<()> {
     match &options.mode {
         Mode::Single(target) => {
             let store_lock = Arc::new(Mutex::new(()));
-            let actuation_gate = Mutex::new(());
+            let actuation_gate = Arc::new(TargetActuationGate::new());
             let now = timestamp()?;
             publish_runtime_transport_check(&options.common, &store_lock, &now)?;
             let mut missing_since = None;
@@ -534,9 +545,13 @@ fn main() -> Result<()> {
                 target,
                 &options.common,
                 &store_lock,
-                &actuation_gate,
+                Arc::clone(&actuation_gate),
                 &mut missing_since,
-            )
+            )?;
+            while actuation_gate.reserved.load(Ordering::Acquire) {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Ok(())
         }
         Mode::Swarm(swarm) => run_swarm(swarm, &options.common),
         Mode::LifecycleCommand(command) => publish_lifecycle_command(command, &options.common),
@@ -668,7 +683,7 @@ fn run_swarm(options: &SwarmOptions, common: &CommonOptions) -> Result<()> {
     let actuation_gates = Arc::new(
         targets
             .iter()
-            .map(|target| (target.daemon_id.clone(), Arc::new(Mutex::new(()))))
+            .map(|target| (target.daemon_id.clone(), Arc::new(TargetActuationGate::new())))
             .collect::<HashMap<_, _>>(),
     );
 
@@ -717,16 +732,21 @@ fn run_lifecycle_command_loop(
     targets: Vec<DaemonTarget>,
     options: CommonOptions,
     store_lock: Arc<Mutex<()>>,
-    actuation_gates: Arc<HashMap<String, Arc<Mutex<()>>>>,
+    actuation_gates: Arc<HashMap<String, Arc<TargetActuationGate>>>,
 ) -> Result<()> {
     loop {
         for target in &targets {
             let gate = actuation_gates
                 .get(&target.daemon_id)
                 .ok_or_else(|| anyhow!("Idunn lifecycle target lost its actuation gate"))?;
-            if let Err(error) = with_target_actuation_gate(gate, || {
+            if gate.reserved.swap(true, Ordering::AcqRel) {
+                continue;
+            }
+            let result = with_target_actuation_gate(&gate.lock, || {
                 process_pending_lifecycle_commands(target, &options, &store_lock)
-            }) {
+            });
+            gate.reserved.store(false, Ordering::Release);
+            if let Err(error) = result {
                 eprintln!(
                     "Idunn lifecycle command cycle failed for {}: {}",
                     target.daemon_id, error
@@ -767,7 +787,7 @@ fn run_target_loop(
     target: DaemonTarget,
     options: CommonOptions,
     store_lock: Arc<Mutex<()>>,
-    actuation_gate: Arc<Mutex<()>>,
+    actuation_gate: Arc<TargetActuationGate>,
 ) -> Result<()> {
     let mut missing_since = None;
     loop {
@@ -775,7 +795,7 @@ fn run_target_loop(
             &target,
             &options,
             &store_lock,
-            &actuation_gate,
+            Arc::clone(&actuation_gate),
             &mut missing_since,
         ) {
             eprintln!(
@@ -801,7 +821,7 @@ fn run_target_cycle(
     target: &DaemonTarget,
     options: &CommonOptions,
     store_lock: &Arc<Mutex<()>>,
-    actuation_gate: &Mutex<()>,
+    actuation_gate: Arc<TargetActuationGate>,
     missing_since: &mut Option<Instant>,
 ) -> Result<()> {
     let now = timestamp()?;
@@ -876,20 +896,54 @@ fn run_target_cycle(
         Ok(())
     })?;
 
-    // Observation and signed-health admission above must remain live while a
-    // manual command owns the actuator. Only consequence-bearing automatic
-    // work joins the per-target gate.
-    let _automatic_actuation = if plan.deployment_request.is_some()
-        || plan.restart_request.is_some()
-    {
-        Some(
-            actuation_gate
-                .lock()
-                .map_err(|_| anyhow!("Idunn target actuation gate is poisoned"))?,
-        )
-    } else {
-        None
-    };
+    if plan.deployment_request.is_some() || plan.restart_request.is_some() {
+        schedule_automatic_actuation(
+            target.clone(), options.clone(), Arc::clone(store_lock), actuation_gate, plan, now,
+        );
+        return Ok(());
+    }
+
+    finish_target_cycle(target, options, store_lock, plan, &now)
+}
+
+fn schedule_automatic_actuation(
+    target: DaemonTarget,
+    options: CommonOptions,
+    store_lock: Arc<Mutex<()>>,
+    gate: Arc<TargetActuationGate>,
+    plan: IdunnPlan,
+    now: String,
+) {
+    let daemon_id = target.daemon_id.clone();
+    schedule_target_actuation(gate, daemon_id, move || {
+        finish_target_cycle(&target, &options, &store_lock, plan, &now)
+    });
+}
+
+fn schedule_target_actuation(
+    gate: Arc<TargetActuationGate>,
+    daemon_id: String,
+    action: impl FnOnce() -> Result<()> + Send + 'static,
+) {
+    if gate.reserved.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+        return;
+    }
+    thread::spawn(move || {
+        let result = with_target_actuation_gate(&gate.lock, action);
+        gate.reserved.store(false, Ordering::Release);
+        if let Err(error) = result {
+            eprintln!("Idunn automatic actuation failed for {}: {}", daemon_id, error);
+        }
+    });
+}
+
+fn finish_target_cycle(
+    target: &DaemonTarget,
+    options: &CommonOptions,
+    store_lock: &Arc<Mutex<()>>,
+    plan: IdunnPlan,
+    now: &str,
+) -> Result<()> {
 
     if let Some(request) = &plan.deployment_request {
         persist_current_deployment_request(options, store_lock, request)?;
@@ -902,7 +956,7 @@ fn run_target_cycle(
                 target
                     .release
                     .as_ref()
-                    .and_then(|release| run_state_migration(target, release, &now, options))
+                    .and_then(|release| run_state_migration(target, release, now, options))
             } else {
                 None
             };
@@ -924,7 +978,7 @@ fn run_target_cycle(
                     detail: format!(
                         "deployment authority revalidation failed before migration: {error:#}"
                     ),
-                    completed_at: now.clone(),
+                    completed_at: now.to_string(),
                 }
             } else if migration_failed {
                 IdunnDeploymentResultRecord {
@@ -933,10 +987,10 @@ fn run_target_cycle(
                     daemon_id: request.daemon_id.clone(),
                     state: "failed".to_string(),
                     detail: "state migration failed; deployment command was not run".to_string(),
-                    completed_at: now.clone(),
+                    completed_at: now.to_string(),
                 }
             } else {
-                run_deployment(request, &now, options, store_lock)
+                run_deployment(request, now, options, store_lock)
             };
             if result.state == "succeeded"
                 && let Some(release) = target.release.as_ref()
@@ -949,10 +1003,10 @@ fn run_target_cycle(
                 );
             }
             let rollout_result = target.release.as_ref().map(|release| {
-                rollout_result_record(target, release, &result, migration_result.as_ref(), &now)
+                rollout_result_record(target, release, &result, migration_result.as_ref(), now)
             });
             let alarm = if result.state != "succeeded" {
-                Some(deployment_failure_alarm(&result, &now))
+                Some(deployment_failure_alarm(&result, now))
             } else {
                 None
             };
@@ -987,9 +1041,9 @@ fn run_target_cycle(
 
     if let Some(request) = &plan.restart_request {
         if options.execute {
-            let result = run_restart(request, &now, options);
+            let result = run_restart(request, now, options);
             let alarm = if result.state != "succeeded" {
-                Some(restart_failure_alarm(&result, &now))
+                Some(restart_failure_alarm(&result, now))
             } else {
                 None
             };
@@ -4815,13 +4869,13 @@ mod tests {
 
     #[test]
     fn target_actuation_gate_serializes_request_owners() {
-        let gate = Arc::new(Mutex::new(()));
+        let gate = Arc::new(TargetActuationGate::new());
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let first_gate = Arc::clone(&gate);
         let first_entered = entered_tx.clone();
         let first = thread::spawn(move || {
-            with_target_actuation_gate(&first_gate, || {
+            with_target_actuation_gate(&first_gate.lock, || {
                 first_entered.send("manual").unwrap();
                 release_rx.recv().unwrap();
                 Ok(())
@@ -4833,7 +4887,7 @@ mod tests {
         let second_gate = Arc::clone(&gate);
         let second_entered = entered_tx;
         let second = thread::spawn(move || {
-            with_target_actuation_gate(&second_gate, || {
+            with_target_actuation_gate(&second_gate.lock, || {
                 second_entered.send("automatic").unwrap();
                 Ok(())
             })
@@ -4849,6 +4903,36 @@ mod tests {
         assert_eq!(entered_rx.recv().unwrap(), "automatic");
         first.join().unwrap();
         second.join().unwrap();
+    }
+
+    #[test]
+    fn blocked_actuation_does_not_block_observation_and_admission_work() {
+        let gate = Arc::new(TargetActuationGate::new());
+        assert!(!gate.reserved.swap(true, Ordering::AcqRel));
+        let manual_guard = gate.lock.lock().unwrap();
+        let (actuation_tx, actuation_rx) = std::sync::mpsc::channel();
+        schedule_target_actuation(Arc::clone(&gate), "epiphany".into(), move || {
+            actuation_tx.send("actuated").unwrap();
+            Ok(())
+        });
+
+        assert!(actuation_rx.recv_timeout(Duration::from_millis(100)).is_err());
+        // This is the target loop's independent signed-health admission lane:
+        // it does not acquire or await the consequence gate.
+        let admitted_health = "accepted";
+        assert_eq!(admitted_health, "accepted");
+
+        drop(manual_guard);
+        gate.reserved.store(false, Ordering::Release);
+        let (actuation_tx, actuation_rx) = std::sync::mpsc::channel();
+        schedule_target_actuation(Arc::clone(&gate), "epiphany".into(), move || {
+            actuation_tx.send("actuated").unwrap();
+            Ok(())
+        });
+        assert_eq!(actuation_rx.recv().unwrap(), "actuated");
+        while gate.reserved.load(Ordering::Acquire) {
+            thread::yield_now();
+        }
     }
 
     #[cfg(unix)]
