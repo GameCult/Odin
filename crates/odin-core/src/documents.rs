@@ -4,11 +4,10 @@ pub use cultnet_rs::{
     IDUNN_AUTHENTICATED_PROVIDER_HEALTH_PROJECTION_SCHEMA,
     IDUNN_AUTHENTICATED_PROVIDER_HEALTH_PROJECTION_SIGNING_PURPOSE, IDUNN_PROVIDER_ACTIVE_REASON,
     IDUNN_PROVIDER_DEGRADED_REASON, IDUNN_PROVIDER_FAILED_REASON, IDUNN_PROVIDER_WARMING_REASON,
-    IdunnAuthenticatedProviderHealthProjectionRecord, authenticated_provider_health_reason_code,
+    IDUNN_SIGNED_DAEMON_HEALTH_SCHEMA, IdunnAuthenticatedProviderHealthProjectionRecord,
+    IdunnSignedDaemonHealthRecord, authenticated_provider_health_reason_code,
 };
-use cultnet_rs::{
-    GameCultProviderHealthIdentity, derive_service_identity_id,
-};
+use cultnet_rs::{GameCultProviderHealthIdentity, derive_service_identity_id};
 use serde_json::Value;
 
 use anyhow::{Result, bail};
@@ -48,7 +47,6 @@ pub const IDUNN_DAEMON_TRANSPORT_PROFILE_SCHEMA: &str = "idunn.daemon_transport_
 pub const IDUNN_COMMAND_BOUNDARY_SCHEMA: &str = "idunn.command_boundary.v1";
 pub const IDUNN_RUNTIME_TRANSPORT_CHECK_SCHEMA: &str = "idunn.runtime_transport_check.v1";
 pub const IDUNN_RUDP_HEALTH_INGRESS_SCHEMA: &str = "idunn.rudp_health_ingress.v1";
-pub const IDUNN_SIGNED_DAEMON_HEALTH_SCHEMA: &str = "idunn.signed_daemon_health.v1";
 pub const IDUNN_DAEMON_HEALTH_TRUST_BINDING_SCHEMA: &str = "idunn.daemon_health_trust_binding.v1";
 pub const IDUNN_AUTHENTICATED_DAEMON_HEALTH_ADMISSION_SCHEMA: &str =
     "idunn.authenticated_daemon_health_admission.v1";
@@ -325,88 +323,6 @@ pub struct IdunnSignedHealthAdmissionRecord {
     pub signer_identity_id: String,
     #[cultcache(key = 13)]
     pub signed_health_sha256: String,
-}
-
-/// Provider-owned health statement. Ingress must verify `signature` over the
-/// complete document with an empty signature field before admitting it.
-#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
-#[cultcache(
-    type = "idunn.signed_daemon_health",
-    schema = "idunn.signed_daemon_health.v1"
-)]
-pub struct IdunnSignedDaemonHealthRecord {
-    #[cultcache(key = 0)]
-    pub schema_version: String,
-    #[cultcache(key = 1)]
-    pub daemon_id: String,
-    #[cultcache(key = 2)]
-    pub health_contract: String,
-    #[cultcache(key = 3)]
-    pub source_runtime_id: String,
-    #[cultcache(key = 4)]
-    pub state: String,
-    #[cultcache(key = 5)]
-    pub detail: String,
-    #[cultcache(key = 6)]
-    pub signer_identity_id: String,
-    #[cultcache(key = 7)]
-    pub publisher_incarnation_id: String,
-    #[cultcache(key = 8)]
-    pub publisher_sequence: u64,
-    #[cultcache(key = 9)]
-    pub observed_at_unix_millis: u64,
-    #[cultcache(key = 10)]
-    pub release_id: Option<String>,
-    #[cultcache(key = 11)]
-    pub release_witness_sha256: Option<String>,
-    #[cultcache(key = 12)]
-    pub source_commit: Option<String>,
-    #[cultcache(key = 13)]
-    pub deployment_id: Option<String>,
-    #[cultcache(key = 14)]
-    pub signature_algorithm: String,
-    #[cultcache(key = 15)]
-    pub signature: Vec<u8>,
-    #[cultcache(key = 16)]
-    pub private_state_exposed: bool,
-}
-
-impl IdunnSignedDaemonHealthRecord {
-    pub fn validate(&self) -> Result<()> {
-        if self.schema_version != IDUNN_SIGNED_DAEMON_HEALTH_SCHEMA {
-            bail!("signed daemon health schema is unsupported");
-        }
-        validate_identifier(&self.daemon_id, "daemon id")?;
-        validate_identifier(&self.health_contract, "health contract")?;
-        validate_identifier(&self.source_runtime_id, "source runtime id")?;
-        validate_identifier(&self.signer_identity_id, "signer identity id")?;
-        validate_identifier(&self.publisher_incarnation_id, "publisher incarnation id")?;
-        if !matches!(
-            self.state.as_str(),
-            "active" | "warming" | "degraded" | "failed"
-        ) {
-            bail!("signed daemon health state is invalid");
-        }
-        if self.detail.len() > 512 {
-            bail!("signed daemon health detail exceeds 512 bytes");
-        }
-        if self.signature_algorithm != "ed25519" || self.signature.len() != 64 {
-            bail!("signed daemon health signature shape is invalid");
-        }
-        if self.publisher_sequence == 0 || self.observed_at_unix_millis == 0 {
-            bail!("signed daemon health sequence or observation time is invalid");
-        }
-        validate_optional_release_binding(
-            &self.release_id,
-            &self.release_witness_sha256,
-            &self.source_commit,
-        )?;
-        validate_optional_identifier(&self.deployment_id, "deployment id")?;
-        if self.private_state_exposed {
-            bail!("signed daemon health exposes private state");
-        }
-        Ok(())
-    }
 }
 
 /// Root-owned admission binding. Store ownership is the physical authority;
