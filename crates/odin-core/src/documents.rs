@@ -44,6 +44,8 @@ pub const IDUNN_AUTHENTICATED_DAEMON_HEALTH_ADMISSION_SCHEMA: &str =
     "idunn.authenticated_daemon_health_admission.v1";
 pub const IDUNN_UNSIGNED_DAEMON_HEALTH_DIAGNOSTIC_SCHEMA: &str =
     "idunn.unsigned_daemon_health_diagnostic.v1";
+pub const GAMECULT_SERVICE_TRUST_ANCHOR_SCHEMA: &str = "gamecult.service_trust_anchor.v1";
+pub const IDUNN_MANAGED_HEALTH_PROJECTION_SCHEMA: &str = "idunn.managed_health_projection.v1";
 pub const MUNINN_TELEMETRY_SURFACE_SCHEMA: &str = "muninn.telemetry_surface.v1";
 pub const MUNINN_CAPTURE_STREAM_SCHEMA: &str = "muninn.capture_stream.v1";
 pub const MUNINN_CAPTURE_STREAM_COMMAND_SCHEMA: &str = "muninn.capture_stream_command.v1";
@@ -593,6 +595,187 @@ impl IdunnUnsignedDaemonHealthDiagnosticRecord {
             || self.private_state_exposed
         {
             bail!("unsigned daemon health diagnostic shape is invalid");
+        }
+        Ok(())
+    }
+}
+
+/// Root-distributed public key binding for one service-owned signed contract.
+/// Consumers pin this document; a self-declared key inside a signed projection
+/// is never authority.
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(
+    type = "gamecult.service_trust_anchor",
+    schema = "gamecult.service_trust_anchor.v1"
+)]
+pub struct GameCultServiceTrustAnchorRecord {
+    #[cultcache(key = 0)]
+    pub schema_version: String,
+    #[cultcache(key = 1)]
+    pub trust_anchor_id: String,
+    #[cultcache(key = 2)]
+    pub service_id: String,
+    #[cultcache(key = 3)]
+    pub runtime_id: String,
+    #[cultcache(key = 4)]
+    pub signer_identity_id: String,
+    #[cultcache(key = 5)]
+    pub signer_public_key: Vec<u8>,
+    #[cultcache(key = 6)]
+    pub signature_algorithm: String,
+    #[cultcache(key = 7)]
+    pub signing_purpose: String,
+    #[cultcache(key = 8)]
+    pub signed_schema: String,
+    #[cultcache(key = 9)]
+    pub binding_authority: String,
+    #[cultcache(key = 10)]
+    pub bound_at_unix_millis: u64,
+    #[cultcache(key = 11)]
+    pub expires_at_unix_millis: Option<u64>,
+    #[cultcache(key = 12)]
+    pub private_state_exposed: bool,
+}
+
+impl GameCultServiceTrustAnchorRecord {
+    pub fn validate(&self) -> Result<()> {
+        if self.schema_version != GAMECULT_SERVICE_TRUST_ANCHOR_SCHEMA {
+            bail!("service trust anchor schema is unsupported");
+        }
+        validate_identifier(&self.trust_anchor_id, "trust anchor id")?;
+        validate_identifier(&self.service_id, "service id")?;
+        validate_identifier(&self.runtime_id, "runtime id")?;
+        validate_identifier(&self.signer_identity_id, "signer identity id")?;
+        validate_identifier(&self.signing_purpose, "signing purpose")?;
+        validate_identifier(&self.signed_schema, "signed schema")?;
+        if self.signer_public_key.len() != 32
+            || self.signature_algorithm != "ed25519"
+            || self.binding_authority != "root"
+            || self.bound_at_unix_millis == 0
+            || self
+                .expires_at_unix_millis
+                .is_some_and(|expires_at| expires_at <= self.bound_at_unix_millis)
+            || self.private_state_exposed
+        {
+            bail!("service trust anchor authority, key, lifetime, or privacy is invalid");
+        }
+        Ok(())
+    }
+}
+
+/// Idunn-owned, public, signed judgment over one authenticated provider health
+/// admission. The signature covers the complete positional document with the
+/// signature field empty. Consumers verify it against a separately pinned
+/// `GameCultServiceTrustAnchorRecord` and apply their own freshness bound.
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(
+    type = "idunn.managed_health_projection",
+    schema = "idunn.managed_health_projection.v1"
+)]
+pub struct IdunnManagedHealthProjectionRecord {
+    #[cultcache(key = 0)]
+    pub schema_version: String,
+    #[cultcache(key = 1)]
+    pub projection_id: String,
+    #[cultcache(key = 2)]
+    pub daemon_id: String,
+    #[cultcache(key = 3)]
+    pub health_contract: String,
+    #[cultcache(key = 4)]
+    pub managed_state: String,
+    #[cultcache(key = 5)]
+    pub detail: String,
+    #[cultcache(key = 6)]
+    pub provider_observed_at_unix_millis: u64,
+    #[cultcache(key = 7)]
+    pub admitted_at_unix_millis: u64,
+    #[cultcache(key = 8)]
+    pub evaluated_at_unix_millis: u64,
+    #[cultcache(key = 9)]
+    pub trust_binding_id: String,
+    #[cultcache(key = 10)]
+    pub trust_binding_sha256: String,
+    #[cultcache(key = 11)]
+    pub signed_health_sha256: String,
+    #[cultcache(key = 12)]
+    pub authenticated_admission_sha256: String,
+    #[cultcache(key = 13)]
+    pub provider_signer_identity_id: String,
+    #[cultcache(key = 14)]
+    pub provider_incarnation_id: String,
+    #[cultcache(key = 15)]
+    pub provider_sequence: u64,
+    #[cultcache(key = 16)]
+    pub release_id: Option<String>,
+    #[cultcache(key = 17)]
+    pub release_witness_sha256: Option<String>,
+    #[cultcache(key = 18)]
+    pub source_commit: Option<String>,
+    #[cultcache(key = 19)]
+    pub deployment_id: Option<String>,
+    #[cultcache(key = 20)]
+    pub idunn_runtime_id: String,
+    #[cultcache(key = 21)]
+    pub idunn_signer_identity_id: String,
+    #[cultcache(key = 22)]
+    pub projection_incarnation_id: String,
+    #[cultcache(key = 23)]
+    pub projection_sequence: u64,
+    #[cultcache(key = 24)]
+    pub signature_algorithm: String,
+    #[cultcache(key = 25)]
+    pub signature: Vec<u8>,
+    #[cultcache(key = 26)]
+    pub private_state_exposed: bool,
+    #[cultcache(key = 27)]
+    pub expires_at_unix_millis: u64,
+}
+
+impl IdunnManagedHealthProjectionRecord {
+    pub fn validate(&self) -> Result<()> {
+        if self.schema_version != IDUNN_MANAGED_HEALTH_PROJECTION_SCHEMA {
+            bail!("managed health projection schema is unsupported");
+        }
+        validate_identifier(&self.projection_id, "projection id")?;
+        validate_identifier(&self.daemon_id, "daemon id")?;
+        validate_identifier(&self.health_contract, "health contract")?;
+        validate_identifier(&self.trust_binding_id, "trust binding id")?;
+        validate_identifier(
+            &self.provider_signer_identity_id,
+            "provider signer identity id",
+        )?;
+        validate_identifier(&self.provider_incarnation_id, "provider incarnation id")?;
+        validate_identifier(&self.idunn_runtime_id, "Idunn runtime id")?;
+        validate_identifier(&self.idunn_signer_identity_id, "Idunn signer identity id")?;
+        validate_identifier(&self.projection_incarnation_id, "projection incarnation id")?;
+        if !matches!(
+            self.managed_state.as_str(),
+            "active" | "warming" | "degraded" | "failed"
+        ) || self.detail.len() > 512
+            || self.provider_observed_at_unix_millis == 0
+            || self.admitted_at_unix_millis < self.provider_observed_at_unix_millis
+            || self.evaluated_at_unix_millis < self.admitted_at_unix_millis
+            || self.expires_at_unix_millis <= self.evaluated_at_unix_millis
+            || self.provider_sequence == 0
+            || self.projection_sequence == 0
+            || !is_sha256(&self.trust_binding_sha256)
+            || !is_sha256(&self.signed_health_sha256)
+            || !is_sha256(&self.authenticated_admission_sha256)
+            || self.signature_algorithm != "ed25519"
+            || self.signature.len() != 64
+            || self.private_state_exposed
+        {
+            bail!("managed health projection shape, lineage, signature, or privacy is invalid");
+        }
+        validate_optional_release_binding(
+            &self.release_id,
+            &self.release_witness_sha256,
+            &self.source_commit,
+        )?;
+        validate_optional_identifier(&self.deployment_id, "deployment id")?;
+        let release_binding_present = self.release_id.is_some();
+        if self.deployment_id.is_some() != release_binding_present {
+            bail!("managed health projection release lineage is partial");
         }
         Ok(())
     }
@@ -1856,6 +2039,8 @@ cultmesh_rs::cultmesh_documents!(OdinDocuments {
     IdunnDaemonHealthTrustBindingRecord => IDUNN_DAEMON_HEALTH_TRUST_BINDING_SCHEMA,
     IdunnAuthenticatedDaemonHealthAdmissionRecord => IDUNN_AUTHENTICATED_DAEMON_HEALTH_ADMISSION_SCHEMA,
     IdunnUnsignedDaemonHealthDiagnosticRecord => IDUNN_UNSIGNED_DAEMON_HEALTH_DIAGNOSTIC_SCHEMA,
+    GameCultServiceTrustAnchorRecord => GAMECULT_SERVICE_TRUST_ANCHOR_SCHEMA,
+    IdunnManagedHealthProjectionRecord => IDUNN_MANAGED_HEALTH_PROJECTION_SCHEMA,
     IdunnKeepaliveDecisionRecord => IDUNN_KEEPALIVE_DECISION_SCHEMA,
     IdunnRestartRequestRecord => IDUNN_RESTART_REQUEST_SCHEMA,
     IdunnRestartResultRecord => IDUNN_RESTART_RESULT_SCHEMA,
@@ -1977,6 +2162,130 @@ mod tests {
             deployment_id: health.deployment_id,
             private_state_exposed: false,
         }
+    }
+
+    fn service_trust_anchor_fixture() -> GameCultServiceTrustAnchorRecord {
+        GameCultServiceTrustAnchorRecord {
+            schema_version: GAMECULT_SERVICE_TRUST_ANCHOR_SCHEMA.into(),
+            trust_anchor_id: "root/idunn/managed-health-projection".into(),
+            service_id: "idunn".into(),
+            runtime_id: "idunn-yggdrasil".into(),
+            signer_identity_id: "idunn-yggdrasil-service-identity".into(),
+            signer_public_key: vec![5; 32],
+            signature_algorithm: "ed25519".into(),
+            signing_purpose: "idunn.managed_health_projection".into(),
+            signed_schema: IDUNN_MANAGED_HEALTH_PROJECTION_SCHEMA.into(),
+            binding_authority: "root".into(),
+            bound_at_unix_millis: 1_784_483_100_000,
+            expires_at_unix_millis: Some(1_815_000_000_000),
+            private_state_exposed: false,
+        }
+    }
+
+    fn managed_health_projection_fixture() -> IdunnManagedHealthProjectionRecord {
+        let health = signed_health_fixture();
+        let binding = trust_binding_fixture();
+        IdunnManagedHealthProjectionRecord {
+            schema_version: IDUNN_MANAGED_HEALTH_PROJECTION_SCHEMA.into(),
+            projection_id: format!("managed-health:{}", health.daemon_id),
+            daemon_id: health.daemon_id,
+            health_contract: health.health_contract,
+            managed_state: health.state,
+            detail: "Idunn admits current provider-authenticated health".into(),
+            provider_observed_at_unix_millis: health.observed_at_unix_millis,
+            admitted_at_unix_millis: health.observed_at_unix_millis + 1,
+            evaluated_at_unix_millis: health.observed_at_unix_millis + 2,
+            trust_binding_id: binding.binding_id,
+            trust_binding_sha256: format!("sha256-{}", "c".repeat(64)),
+            signed_health_sha256: format!("sha256-{}", "d".repeat(64)),
+            authenticated_admission_sha256: format!("sha256-{}", "e".repeat(64)),
+            provider_signer_identity_id: health.signer_identity_id,
+            provider_incarnation_id: health.publisher_incarnation_id,
+            provider_sequence: health.publisher_sequence,
+            release_id: health.release_id,
+            release_witness_sha256: health.release_witness_sha256,
+            source_commit: health.source_commit,
+            deployment_id: health.deployment_id,
+            idunn_runtime_id: "idunn-yggdrasil".into(),
+            idunn_signer_identity_id: "idunn-yggdrasil-service-identity".into(),
+            projection_incarnation_id: "idunn-yggdrasil/boot-3/process-8".into(),
+            projection_sequence: 7,
+            signature_algorithm: "ed25519".into(),
+            signature: vec![6; 64],
+            private_state_exposed: false,
+            expires_at_unix_millis: health.observed_at_unix_millis + 60_002,
+        }
+    }
+
+    #[test]
+    fn outward_managed_health_contracts_validate_and_round_trip() -> Result<()> {
+        let anchor = service_trust_anchor_fixture();
+        let projection = managed_health_projection_fixture();
+        anchor.validate()?;
+        projection.validate()?;
+
+        let temp = tempfile::tempdir()?;
+        let store_path = temp.path().join("managed-health-projection.cc");
+        let mut node = CultMesh::create_node(
+            &store_path,
+            OdinDocuments,
+            CultMeshNodeOptions {
+                runtime_id: "managed-health-contract-test".into(),
+                pull_on_start: true,
+            },
+        )?;
+        node.put(&anchor.trust_anchor_id, &anchor)?;
+        node.put(&projection.projection_id, &projection)?;
+        assert_eq!(
+            node.get_required::<GameCultServiceTrustAnchorRecord>(&anchor.trust_anchor_id)?,
+            anchor
+        );
+        assert_eq!(
+            node.get_required::<IdunnManagedHealthProjectionRecord>(&projection.projection_id)?,
+            projection
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn outward_managed_health_contracts_refuse_weak_authority_and_lineage() {
+        let mut anchor = service_trust_anchor_fixture();
+        anchor.binding_authority = "idunn".into();
+        assert!(anchor.validate().is_err());
+        anchor = service_trust_anchor_fixture();
+        anchor.signer_public_key = vec![5; 31];
+        assert!(anchor.validate().is_err());
+        anchor = service_trust_anchor_fixture();
+        anchor.expires_at_unix_millis = Some(anchor.bound_at_unix_millis);
+        assert!(anchor.validate().is_err());
+        anchor = service_trust_anchor_fixture();
+        anchor.private_state_exposed = true;
+        assert!(anchor.validate().is_err());
+
+        let mut projection = managed_health_projection_fixture();
+        projection.evaluated_at_unix_millis = projection.admitted_at_unix_millis - 1;
+        assert!(projection.validate().is_err());
+        projection = managed_health_projection_fixture();
+        projection.expires_at_unix_millis = projection.evaluated_at_unix_millis;
+        assert!(projection.validate().is_err());
+        projection = managed_health_projection_fixture();
+        projection.authenticated_admission_sha256 = "admitted".into();
+        assert!(projection.validate().is_err());
+        projection = managed_health_projection_fixture();
+        projection.projection_sequence = 0;
+        assert!(projection.validate().is_err());
+        projection = managed_health_projection_fixture();
+        projection.signature.clear();
+        assert!(projection.validate().is_err());
+        projection = managed_health_projection_fixture();
+        projection.release_witness_sha256 = None;
+        assert!(projection.validate().is_err());
+        projection = managed_health_projection_fixture();
+        projection.deployment_id = None;
+        assert!(projection.validate().is_err());
+        projection = managed_health_projection_fixture();
+        projection.private_state_exposed = true;
+        assert!(projection.validate().is_err());
     }
 
     #[test]
