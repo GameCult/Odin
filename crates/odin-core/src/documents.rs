@@ -40,6 +40,10 @@ pub const IDUNN_RUNTIME_TRANSPORT_CHECK_SCHEMA: &str = "idunn.runtime_transport_
 pub const IDUNN_RUDP_HEALTH_INGRESS_SCHEMA: &str = "idunn.rudp_health_ingress.v1";
 pub const IDUNN_SIGNED_DAEMON_HEALTH_SCHEMA: &str = "idunn.signed_daemon_health.v1";
 pub const IDUNN_DAEMON_HEALTH_TRUST_BINDING_SCHEMA: &str = "idunn.daemon_health_trust_binding.v1";
+pub const IDUNN_AUTHENTICATED_DAEMON_HEALTH_ADMISSION_SCHEMA: &str =
+    "idunn.authenticated_daemon_health_admission.v1";
+pub const IDUNN_UNSIGNED_DAEMON_HEALTH_DIAGNOSTIC_SCHEMA: &str =
+    "idunn.unsigned_daemon_health_diagnostic.v1";
 pub const MUNINN_TELEMETRY_SURFACE_SCHEMA: &str = "muninn.telemetry_surface.v1";
 pub const MUNINN_CAPTURE_STREAM_SCHEMA: &str = "muninn.capture_stream.v1";
 pub const MUNINN_CAPTURE_STREAM_COMMAND_SCHEMA: &str = "muninn.capture_stream_command.v1";
@@ -447,6 +451,148 @@ impl IdunnDaemonHealthTrustBindingRecord {
         }
         if self.private_state_exposed {
             bail!("daemon health trust binding exposes private state");
+        }
+        Ok(())
+    }
+}
+
+/// Idunn-owned judgment joining one verified provider statement to the exact
+/// root trust binding used to admit it. Managed-health reads must rejoin this
+/// record with both current objects; a health row by itself is not authority.
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(
+    type = "idunn.authenticated_daemon_health_admission",
+    schema = "idunn.authenticated_daemon_health_admission.v1"
+)]
+pub struct IdunnAuthenticatedDaemonHealthAdmissionRecord {
+    #[cultcache(key = 0)]
+    pub schema_version: String,
+    #[cultcache(key = 1)]
+    pub daemon_id: String,
+    #[cultcache(key = 2)]
+    pub health_contract: String,
+    #[cultcache(key = 3)]
+    pub source_runtime_id: String,
+    #[cultcache(key = 4)]
+    pub state: String,
+    #[cultcache(key = 5)]
+    pub observed_at_unix_millis: u64,
+    #[cultcache(key = 6)]
+    pub admitted_at_unix_millis: u64,
+    #[cultcache(key = 7)]
+    pub trust_binding_id: String,
+    #[cultcache(key = 8)]
+    pub trust_binding_sha256: String,
+    #[cultcache(key = 9)]
+    pub signer_identity_id: String,
+    #[cultcache(key = 10)]
+    pub publisher_incarnation_id: String,
+    #[cultcache(key = 11)]
+    pub publisher_sequence: u64,
+    #[cultcache(key = 12)]
+    pub signed_health_sha256: String,
+    #[cultcache(key = 13)]
+    pub release_id: Option<String>,
+    #[cultcache(key = 14)]
+    pub release_witness_sha256: Option<String>,
+    #[cultcache(key = 15)]
+    pub source_commit: Option<String>,
+    #[cultcache(key = 16)]
+    pub deployment_id: Option<String>,
+    #[cultcache(key = 17)]
+    pub private_state_exposed: bool,
+}
+
+impl IdunnAuthenticatedDaemonHealthAdmissionRecord {
+    pub fn validate(&self) -> Result<()> {
+        if self.schema_version != IDUNN_AUTHENTICATED_DAEMON_HEALTH_ADMISSION_SCHEMA {
+            bail!("authenticated daemon health admission schema is unsupported");
+        }
+        validate_identifier(&self.daemon_id, "daemon id")?;
+        validate_identifier(&self.health_contract, "health contract")?;
+        validate_identifier(&self.source_runtime_id, "source runtime id")?;
+        validate_identifier(&self.trust_binding_id, "trust binding id")?;
+        validate_identifier(&self.signer_identity_id, "signer identity id")?;
+        validate_identifier(&self.publisher_incarnation_id, "publisher incarnation id")?;
+        if !matches!(
+            self.state.as_str(),
+            "active" | "warming" | "degraded" | "failed"
+        ) || self.observed_at_unix_millis == 0
+            || self.admitted_at_unix_millis < self.observed_at_unix_millis
+            || self.publisher_sequence == 0
+            || !is_sha256(&self.trust_binding_sha256)
+            || !is_sha256(&self.signed_health_sha256)
+        {
+            bail!("authenticated daemon health admission shape is invalid");
+        }
+        validate_optional_release_binding(
+            &self.release_id,
+            &self.release_witness_sha256,
+            &self.source_commit,
+        )?;
+        validate_optional_identifier(&self.deployment_id, "deployment id")?;
+        if self.private_state_exposed {
+            bail!("authenticated daemon health admission exposes private state");
+        }
+        Ok(())
+    }
+}
+
+/// Quarantined observation of the retired unsigned wire contract. This may
+/// explain missing authenticated health but can never satisfy managed health.
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(
+    type = "idunn.unsigned_daemon_health_diagnostic",
+    schema = "idunn.unsigned_daemon_health_diagnostic.v1"
+)]
+pub struct IdunnUnsignedDaemonHealthDiagnosticRecord {
+    #[cultcache(key = 0)]
+    pub schema_version: String,
+    #[cultcache(key = 1)]
+    pub diagnostic_id: String,
+    #[cultcache(key = 2)]
+    pub daemon_id: String,
+    #[cultcache(key = 3)]
+    pub claimed_state: String,
+    #[cultcache(key = 4)]
+    pub claimed_detail: String,
+    #[cultcache(key = 5)]
+    pub claimed_observed_at: String,
+    #[cultcache(key = 6)]
+    pub claimed_health_contract: String,
+    #[cultcache(key = 7)]
+    pub transport_source_runtime_id: Option<String>,
+    #[cultcache(key = 8)]
+    pub transport_source_role: Option<String>,
+    #[cultcache(key = 9)]
+    pub received_at_unix_millis: u64,
+    #[cultcache(key = 10)]
+    pub authority: String,
+    #[cultcache(key = 11)]
+    pub private_state_exposed: bool,
+}
+
+impl IdunnUnsignedDaemonHealthDiagnosticRecord {
+    pub fn validate(&self) -> Result<()> {
+        if self.schema_version != IDUNN_UNSIGNED_DAEMON_HEALTH_DIAGNOSTIC_SCHEMA {
+            bail!("unsigned daemon health diagnostic schema is unsupported");
+        }
+        validate_identifier(&self.diagnostic_id, "diagnostic id")?;
+        validate_identifier(&self.daemon_id, "daemon id")?;
+        validate_identifier(&self.claimed_state, "claimed state")?;
+        validate_identifier(&self.claimed_health_contract, "claimed health contract")?;
+        validate_optional_identifier(
+            &self.transport_source_runtime_id,
+            "transport source runtime id",
+        )?;
+        validate_optional_identifier(&self.transport_source_role, "transport source role")?;
+        if self.claimed_detail.len() > 512
+            || self.claimed_observed_at.trim().is_empty()
+            || self.received_at_unix_millis == 0
+            || self.authority != "diagnostic-only"
+            || self.private_state_exposed
+        {
+            bail!("unsigned daemon health diagnostic shape is invalid");
         }
         Ok(())
     }
@@ -1708,6 +1854,8 @@ cultmesh_rs::cultmesh_documents!(OdinDocuments {
     IdunnSignedHealthAdmissionRecord => IDUNN_SIGNED_HEALTH_ADMISSION_SCHEMA,
     IdunnSignedDaemonHealthRecord => IDUNN_SIGNED_DAEMON_HEALTH_SCHEMA,
     IdunnDaemonHealthTrustBindingRecord => IDUNN_DAEMON_HEALTH_TRUST_BINDING_SCHEMA,
+    IdunnAuthenticatedDaemonHealthAdmissionRecord => IDUNN_AUTHENTICATED_DAEMON_HEALTH_ADMISSION_SCHEMA,
+    IdunnUnsignedDaemonHealthDiagnosticRecord => IDUNN_UNSIGNED_DAEMON_HEALTH_DIAGNOSTIC_SCHEMA,
     IdunnKeepaliveDecisionRecord => IDUNN_KEEPALIVE_DECISION_SCHEMA,
     IdunnRestartRequestRecord => IDUNN_RESTART_REQUEST_SCHEMA,
     IdunnRestartResultRecord => IDUNN_RESTART_RESULT_SCHEMA,
@@ -1806,12 +1954,39 @@ mod tests {
         }
     }
 
+    fn authenticated_admission_fixture() -> IdunnAuthenticatedDaemonHealthAdmissionRecord {
+        let health = signed_health_fixture();
+        let binding = trust_binding_fixture();
+        IdunnAuthenticatedDaemonHealthAdmissionRecord {
+            schema_version: IDUNN_AUTHENTICATED_DAEMON_HEALTH_ADMISSION_SCHEMA.into(),
+            daemon_id: health.daemon_id,
+            health_contract: health.health_contract,
+            source_runtime_id: health.source_runtime_id,
+            state: health.state,
+            observed_at_unix_millis: health.observed_at_unix_millis,
+            admitted_at_unix_millis: health.observed_at_unix_millis + 1,
+            trust_binding_id: binding.binding_id,
+            trust_binding_sha256: format!("sha256-{}", "c".repeat(64)),
+            signer_identity_id: health.signer_identity_id,
+            publisher_incarnation_id: health.publisher_incarnation_id,
+            publisher_sequence: health.publisher_sequence,
+            signed_health_sha256: format!("sha256-{}", "d".repeat(64)),
+            release_id: health.release_id,
+            release_witness_sha256: health.release_witness_sha256,
+            source_commit: health.source_commit,
+            deployment_id: health.deployment_id,
+            private_state_exposed: false,
+        }
+    }
+
     #[test]
     fn generic_signed_health_contracts_validate_and_round_trip() -> Result<()> {
         let health = signed_health_fixture();
         let binding = trust_binding_fixture();
+        let admission = authenticated_admission_fixture();
         health.validate()?;
         binding.validate()?;
+        admission.validate()?;
 
         let temp = tempfile::tempdir()?;
         let store_path = temp.path().join("signed-health.cc");
@@ -1825,6 +2000,7 @@ mod tests {
         )?;
         node.put(&health.daemon_id, &health)?;
         node.put(&binding.binding_id, &binding)?;
+        node.put(&admission.daemon_id, &admission)?;
         assert_eq!(
             node.get_required::<IdunnSignedDaemonHealthRecord>(&health.daemon_id)?,
             health
@@ -1832,6 +2008,12 @@ mod tests {
         assert_eq!(
             node.get_required::<IdunnDaemonHealthTrustBindingRecord>(&binding.binding_id)?,
             binding
+        );
+        assert_eq!(
+            node.get_required::<IdunnAuthenticatedDaemonHealthAdmissionRecord>(
+                &admission.daemon_id
+            )?,
+            admission
         );
         Ok(())
     }
@@ -1860,6 +2042,13 @@ mod tests {
         binding = trust_binding_fixture();
         binding.private_state_exposed = true;
         assert!(binding.validate().is_err());
+
+        let mut admission = authenticated_admission_fixture();
+        admission.trust_binding_sha256 = "ready".into();
+        assert!(admission.validate().is_err());
+        admission = authenticated_admission_fixture();
+        admission.admitted_at_unix_millis = admission.observed_at_unix_millis - 1;
+        assert!(admission.validate().is_err());
     }
 
     #[test]

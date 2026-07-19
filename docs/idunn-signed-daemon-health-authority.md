@@ -99,6 +99,34 @@ must absorb its invariants before the special path is deleted.
 The rebuild is incomplete while an unsigned packet can keep a managed daemon
 healthy or while a status consumer must inspect Idunn's private store.
 
+## Implemented cut (2026-07-19)
+
+The deployed-lineage source now has the first executable generic admission
+path. `idunn.signed_daemon_health.v1` is verified against an exact root-store
+daemon/contract/runtime binding, the signer identity is derived from the bound
+public key, the Ed25519 signature covers the positional empty-signature
+statement under the domain-separated document purpose, and Idunn atomically
+persists the signed statement, its generic admission, and the compatibility
+health row. Managed-health selection rejoins all three with the current root
+binding on every read; trust rotation invalidates old health. Sequence,
+incarnation, observation, freshness, and optional deployment lineage advance
+under CAS.
+
+Unsigned `idunn.daemon_health.v1` packets now persist only as
+`idunn.unsigned_daemon_health_diagnostic.v1` under `diagnostic:<daemon>`.
+They cannot overwrite the daemon health key, create an admission, reset the
+missing-publication clock, suppress recovery, or produce authenticated health.
+The evaluation clock is passed through the whole target cycle instead of being
+resampled inside the health selector.
+
+This source is deliberately not deployable yet: Bifrost and the remaining
+generic publishers still emit the unsigned diagnostic contract, the root trust
+store has not been installed, Epiphany still uses its signed v0 migration path,
+and Idunn has no signed outward status projection. Deploying this intermediate
+source would correctly classify unmigrated daemons as missing health and could
+therefore actuate recovery. Publisher migration and the outward projection must
+land before promotion.
+
 ## Verification layer
 
 Hostile tests must prove:

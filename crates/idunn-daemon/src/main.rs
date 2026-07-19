@@ -14,13 +14,18 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use odin_core::{
     BifrostRepositoryReleaseAuthorityRecord, IdunnCommandBoundaryRecord,
     IdunnCurrentDeploymentRequestRecord, IdunnDaemonHealthRecord, IdunnDaemonSurgeryPlanRecord,
+    IdunnAuthenticatedDaemonHealthAdmissionRecord, IdunnDaemonHealthTrustBindingRecord,
     IdunnDaemonTransportProfileRecord, IdunnDeploymentArtifactRecord, IdunnDeploymentRequestRecord,
     IdunnDeploymentResultRecord, IdunnDesiredDaemonRecord, IdunnLifecycleCommandRecord,
     IdunnOperatorAlarmRecord, IdunnPlan, IdunnReleaseTargetRecord, IdunnRestartRequestRecord,
     IdunnRestartResultRecord, IdunnRolloutPlanRecord, IdunnRolloutResultRecord,
     IdunnRudpHealthIngressRecord, IdunnRuntimeTransportCheckRecord,
     IdunnSignedHealthAdmissionRecord, IdunnStateMigrationPlanRecord,
-    IdunnStateMigrationResultRecord, IdunnSwarmSurgeryPlanRecord, OdinDocuments, plan_keepalive,
+    IdunnStateMigrationResultRecord, IdunnSwarmSurgeryPlanRecord,
+    IdunnSignedDaemonHealthRecord, IdunnUnsignedDaemonHealthDiagnosticRecord, OdinDocuments,
+    IDUNN_AUTHENTICATED_DAEMON_HEALTH_ADMISSION_SCHEMA,
+    IDUNN_SIGNED_DAEMON_HEALTH_SCHEMA, IDUNN_UNSIGNED_DAEMON_HEALTH_DIAGNOSTIC_SCHEMA,
+    plan_keepalive,
 };
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -43,6 +48,7 @@ const EPIPHANY_SIGNED_RUNTIME_HEALTH_SCHEMA_VERSION: &str =
 const EPIPHANY_HEALTH_CONTRACT: &str = "epiphany.cultnet-rudp-runtime-health";
 const EPIPHANY_HEALTH_SOURCE_RUNTIME: &str = "epiphany-daemon-supervisor";
 const EPIPHANY_ADMISSION_MAX_AGE_SECONDS: u64 = 180;
+const SIGNED_DAEMON_HEALTH_TYPE: &str = "idunn.signed_daemon_health";
 
 struct TargetActuationGate {
     lock: Mutex<()>,
@@ -69,6 +75,26 @@ struct IdunnDaemonHealthWireV1 {
     health_contract: String,
     publication_source: String,
     transport: String,
+}
+
+enum DecodedHealthIngress {
+    AuthenticatedLegacy {
+        health: IdunnDaemonHealthRecord,
+        admission: IdunnSignedHealthAdmissionRecord,
+    },
+    AuthenticatedGeneric {
+        health: IdunnDaemonHealthRecord,
+        statement: IdunnSignedDaemonHealthRecord,
+        admission: IdunnAuthenticatedDaemonHealthAdmissionRecord,
+    },
+    Diagnostic(IdunnUnsignedDaemonHealthDiagnosticRecord),
+}
+
+struct HealthIngressOutcome {
+    daemon_id: String,
+    state: String,
+    detail: String,
+    authority: &'static str,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -468,6 +494,7 @@ struct CommonOptions {
     operator_alarm_command: Option<String>,
     rudp_health_bind: Option<SocketAddr>,
     trusted_epiphany_health_identity_store: Option<PathBuf>,
+    daemon_health_trust_store_path: Option<PathBuf>,
     execute: bool,
     command_timeout_seconds: u64,
 }
@@ -848,9 +875,16 @@ fn run_target_cycle(
         observed_at: now.clone(),
     };
 
-    let (mut health_key, mut health) =
+    let (mut health_key, mut health, health_authenticated) =
         evaluate_target_health(target, options, store_lock, &desired, &now)?;
-    apply_missing_publication_grace(target, &desired, &mut health, missing_since, Instant::now());
+    apply_missing_publication_grace(
+        target,
+        &desired,
+        &mut health,
+        health_authenticated,
+        missing_since,
+        Instant::now(),
+    );
     let mut plan = plan_keepalive(&desired, &health, now.clone());
     if plan.restart_request.is_some() {
         let veto_now = timestamp()?;
@@ -1758,10 +1792,71 @@ fn read_fresh_daemon_published_health(
         let Some(health) = node.get::<IdunnDaemonHealthRecord>(&desired.daemon_id)? else {
             return Ok(None);
         };
-        if is_fresh_daemon_published_health(&health, desired, now) {
-            Ok(Some(health))
-        } else {
-            Ok(None)
+        if !is_fresh_daemon_published_health(&health, desired, now) {
+            return Ok(None);
+        }
+        match health.publication_source.as_str() {
+            "daemon-authenticated" => {
+                let Some(admission) = node
+                    .get::<IdunnAuthenticatedDaemonHealthAdmissionRecord>(&desired.daemon_id)?
+                else {
+                    return Ok(None);
+                };
+                admission.validate()?;
+                let Some(statement) = node.get::<IdunnSignedDaemonHealthRecord>(
+                    &admission.signed_health_sha256,
+                )? else {
+                    return Ok(None);
+                };
+                let (_, current_binding_sha256) =
+                    load_daemon_health_trust_binding(options, &statement)?;
+                validate_generic_release_binding(node, &admission)?;
+                let now_millis = parse_timestamp_seconds(now)
+                    .and_then(|seconds| seconds.checked_mul(1000))
+                    .ok_or_else(|| anyhow!("managed health clock is invalid"))?;
+                let statement_digest = format!(
+                    "sha256-{:x}",
+                    Sha256::digest(rmp_serde::to_vec(&statement)?)
+                );
+                if admission.daemon_id != health.daemon_id
+                    || admission.health_contract != health.health_contract
+                    || admission.state != health.state
+                    || admission.trust_binding_sha256 != current_binding_sha256
+                    || admission.signed_health_sha256 != statement_digest
+                    || admission.signer_identity_id != statement.signer_identity_id
+                    || admission.publisher_incarnation_id != statement.publisher_incarnation_id
+                    || admission.publisher_sequence != statement.publisher_sequence
+                    || admission.observed_at_unix_millis != statement.observed_at_unix_millis
+                    || now_millis < admission.admitted_at_unix_millis
+                    || now_millis.saturating_sub(admission.observed_at_unix_millis)
+                        > u64::from(desired.max_silence_seconds).saturating_mul(1000)
+                {
+                    return Ok(None);
+                }
+                Ok(Some(health))
+            }
+            "daemon-published" => {
+                let Some(admission) =
+                    node.get::<IdunnSignedHealthAdmissionRecord>(&desired.daemon_id)?
+                else {
+                    return Ok(None);
+                };
+                validate_admission_against_current_request(node, &admission)?;
+                validate_admission_fresh_at(
+                    &admission,
+                    now,
+                    u64::from(desired.max_silence_seconds),
+                )?;
+                if admission.daemon_id != health.daemon_id
+                    || admission.health_contract != health.health_contract
+                    || admission.state != health.state
+                    || admission.observed_at != health.observed_at
+                {
+                    return Ok(None);
+                }
+                Ok(Some(health))
+            }
+            _ => Ok(None),
         }
     })
 }
@@ -1772,25 +1867,24 @@ fn evaluate_target_health(
     store_lock: &Arc<Mutex<()>>,
     desired: &IdunnDesiredDaemonRecord,
     now: &str,
-) -> Result<(String, IdunnDaemonHealthRecord)> {
+) -> Result<(String, IdunnDaemonHealthRecord, bool)> {
     if let Some(release) = &target.release {
         if release.deployed_revision_witness.is_some() {
             if let Some(health) =
                 evaluate_release_drift(target, desired, release, &SystemReleaseStatePort, now)
             {
-                return Ok((supervisor_health_key(&desired.daemon_id), health));
+                return Ok((supervisor_health_key(&desired.daemon_id), health, false));
             }
         }
     }
-    if let Some(health) =
-        read_fresh_daemon_published_health(options, store_lock, desired, &timestamp()?)?
-    {
-        return Ok((desired.daemon_id.clone(), health));
+    if let Some(health) = read_fresh_daemon_published_health(options, store_lock, desired, now)? {
+        return Ok((desired.daemon_id.clone(), health, true));
     }
 
     Ok((
         supervisor_health_key(&desired.daemon_id),
         missing_daemon_published_health(target, desired, now),
+        false,
     ))
 }
 
@@ -1894,10 +1988,11 @@ fn apply_missing_publication_grace(
     target: &DaemonTarget,
     desired: &IdunnDesiredDaemonRecord,
     health: &mut IdunnDaemonHealthRecord,
+    health_authenticated: bool,
     missing_since: &mut Option<Instant>,
     now: Instant,
 ) {
-    if health.publication_source == "daemon-published" {
+    if health_authenticated {
         *missing_since = None;
         return;
     }
@@ -1968,7 +2063,10 @@ fn is_fresh_daemon_published_health(
     if health.health_contract != desired.health_contract {
         return false;
     }
-    if health.publication_source != "daemon-published" {
+    if !matches!(
+        health.publication_source.as_str(),
+        "daemon-authenticated" | "daemon-published"
+    ) {
         return false;
     }
     if health.transport != CULTNET_RUDP_PROTOCOL_ID {
@@ -2278,15 +2376,16 @@ fn run_rudp_health_ingress_loop(
                                 &store_lock,
                                 &observed_at,
                             ) {
-                                Ok(health) => {
+                                Ok(outcome) => {
                                     let bounded_detail =
-                                        health.detail.replace('\r', " ").replace('\n', " ");
+                                        outcome.detail.replace('\r', " ").replace('\n', " ");
                                     println!(
-                                        "Idunn accepted RUDP health for {} from {} over {} state={} detail={}",
-                                        health.daemon_id,
+                                        "Idunn recorded RUDP health input for {} from {} over {} state={} authority={} detail={}",
+                                        outcome.daemon_id,
                                         source,
                                         frame.channel_id,
-                                        health.state,
+                                        outcome.state,
+                                        outcome.authority,
                                         bounded_detail
                                     );
                                 }
@@ -2440,15 +2539,47 @@ fn admit_health_from_rudp_message(
     options: &CommonOptions,
     store_lock: &Arc<Mutex<()>>,
     admitted_at: &str,
-) -> Result<IdunnDaemonHealthRecord> {
-    let (health, admission) = decode_health_from_rudp_message(message, options, admitted_at)?;
-    let Some(admission) = admission else {
-        with_store_node(options, store_lock, |node| {
-            node.put(&health.daemon_id, &health)?;
-            Ok(())
-        })?;
-        return Ok(health);
+) -> Result<HealthIngressOutcome> {
+    let decoded = decode_health_from_rudp_message(message, options, admitted_at)?;
+    let (health, admission) = match decoded {
+        DecodedHealthIngress::Diagnostic(diagnostic) => {
+            diagnostic.validate()?;
+            let outcome = HealthIngressOutcome {
+                daemon_id: diagnostic.daemon_id.clone(),
+                state: diagnostic.claimed_state.clone(),
+                detail: diagnostic.claimed_detail.clone(),
+                authority: "diagnostic-only",
+            };
+            let key = diagnostic.diagnostic_id.clone();
+            // Unsigned input is quarantined under a distinct type and key. It
+            // cannot overwrite the managed-health row or admission.
+            with_store_node(options, store_lock, |node| {
+                node.put(&key, &diagnostic)?;
+                Ok(())
+            })?;
+            return Ok(outcome);
+        }
+        DecodedHealthIngress::AuthenticatedGeneric {
+            health,
+            statement,
+            admission,
+        } => {
+            return admit_generic_signed_health(
+                options,
+                store_lock,
+                admitted_at,
+                health,
+                statement,
+                admission,
+            );
+        }
+        DecodedHealthIngress::AuthenticatedLegacy { health, admission } => (health, admission),
     };
+    {
+        with_store_node(options, store_lock, |node| {
+            validate_admission_against_current_request(node, &admission)
+        })?;
+    }
     for _ in 0..8 {
         let (expected_health, expected_admission, expected_head, expected_request) =
             with_store_node(options, store_lock, |node| {
@@ -2500,7 +2631,12 @@ fn admit_health_from_rudp_message(
         if SingleFileMessagePackBackingStore::new(&options.store_path)
             .compare_exchange(&expected, &[health_envelope, admission_envelope])?
         {
-            return Ok(health);
+            return Ok(HealthIngressOutcome {
+                daemon_id: health.daemon_id,
+                state: health.state,
+                detail: health.detail,
+                authority: "authenticated",
+            });
         }
     }
     Err(anyhow!(
@@ -2522,32 +2658,314 @@ fn typed_envelope<T: DatabaseEntry>(
     })
 }
 
+fn authenticate_generic_signed_health(
+    document: &cultnet_rs::CultNetRawDocumentRecord,
+    options: &CommonOptions,
+    admitted_at: &str,
+) -> Result<(
+    IdunnDaemonHealthRecord,
+    IdunnSignedDaemonHealthRecord,
+    IdunnAuthenticatedDaemonHealthAdmissionRecord,
+)> {
+    let statement: IdunnSignedDaemonHealthRecord = rmp_serde::from_slice(&document.payload)
+        .context("decoding generic signed daemon health")?;
+    statement.validate()?;
+    if document.record_key != statement.daemon_id
+        || document.source_runtime_id.as_deref() != Some(statement.source_runtime_id.as_str())
+        || document.source_role.as_deref() != Some("daemon-health-publisher")
+    {
+        return Err(anyhow!("signed daemon health transport identity is invalid"));
+    }
+    let (binding, binding_sha256) = load_daemon_health_trust_binding(options, &statement)?;
+    if binding.release_binding_required {
+        if statement.release_id.is_none()
+            || statement.release_witness_sha256.is_none()
+            || statement.source_commit.is_none()
+            || statement.deployment_id.is_none()
+        {
+            return Err(anyhow!("signed daemon health lacks required release binding"));
+        }
+    } else if statement.release_id.is_some()
+        || statement.release_witness_sha256.is_some()
+        || statement.source_commit.is_some()
+        || statement.deployment_id.is_some()
+    {
+        return Err(anyhow!(
+            "signed daemon health carries release authority not declared by its trust binding"
+        ));
+    }
+    let key_bytes: [u8; 32] = binding
+        .signer_public_key
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow!("daemon health trust key length is invalid"))?;
+    let expected_identity = format!(
+        "{:x}",
+        Sha256::digest([HOST_IDENTITY_DOMAIN, binding.signer_public_key.as_slice()].concat())
+    );
+    if binding.signer_identity_id != expected_identity
+        || statement.signer_identity_id != binding.signer_identity_id
+    {
+        return Err(anyhow!("signed daemon health identity is not root-bound"));
+    }
+    let signature_bytes: [u8; 64] = statement
+        .signature
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow!("signed daemon health signature length is invalid"))?;
+    let mut unsigned = statement.clone();
+    unsigned.signature.clear();
+    let unsigned_payload = rmp_serde::to_vec(&unsigned)?;
+    VerifyingKey::from_bytes(&key_bytes)?
+        .verify(
+            &host_signature_message(SIGNED_DAEMON_HEALTH_TYPE, &unsigned_payload),
+            &Signature::from_bytes(&signature_bytes),
+        )
+        .context("signed daemon health signature is invalid")?;
+    let admitted_at_unix_millis = parse_timestamp_seconds(admitted_at)
+        .and_then(|seconds| seconds.checked_mul(1000))
+        .ok_or_else(|| anyhow!("signed daemon health admission time is invalid"))?;
+    if statement.observed_at_unix_millis > admitted_at_unix_millis
+        || admitted_at_unix_millis.saturating_sub(statement.observed_at_unix_millis)
+            > EPIPHANY_ADMISSION_MAX_AGE_SECONDS.saturating_mul(1000)
+    {
+        return Err(anyhow!("signed daemon health observation is future or stale"));
+    }
+    let signed_health_sha256 = format!("sha256-{:x}", Sha256::digest(&document.payload));
+    let observed_at = chrono::DateTime::from_timestamp_millis(
+        i64::try_from(statement.observed_at_unix_millis)
+            .map_err(|_| anyhow!("signed daemon health observation is out of range"))?,
+    )
+    .ok_or_else(|| anyhow!("signed daemon health observation is out of range"))?
+    .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let health = IdunnDaemonHealthRecord {
+        daemon_id: statement.daemon_id.clone(),
+        state: statement.state.clone(),
+        detail: statement.detail.clone(),
+        observed_at,
+        health_contract: statement.health_contract.clone(),
+        publication_source: "daemon-authenticated".into(),
+        transport: CULTNET_RUDP_PROTOCOL_ID.into(),
+    };
+    let admission = IdunnAuthenticatedDaemonHealthAdmissionRecord {
+        schema_version: IDUNN_AUTHENTICATED_DAEMON_HEALTH_ADMISSION_SCHEMA.into(),
+        daemon_id: statement.daemon_id.clone(),
+        health_contract: statement.health_contract.clone(),
+        source_runtime_id: statement.source_runtime_id.clone(),
+        state: statement.state.clone(),
+        observed_at_unix_millis: statement.observed_at_unix_millis,
+        admitted_at_unix_millis,
+        trust_binding_id: binding.binding_id,
+        trust_binding_sha256: binding_sha256,
+        signer_identity_id: statement.signer_identity_id.clone(),
+        publisher_incarnation_id: statement.publisher_incarnation_id.clone(),
+        publisher_sequence: statement.publisher_sequence,
+        signed_health_sha256,
+        release_id: statement.release_id.clone(),
+        release_witness_sha256: statement.release_witness_sha256.clone(),
+        source_commit: statement.source_commit.clone(),
+        deployment_id: statement.deployment_id.clone(),
+        private_state_exposed: false,
+    };
+    admission.validate()?;
+    Ok((health, statement, admission))
+}
+
+fn load_daemon_health_trust_binding(
+    options: &CommonOptions,
+    statement: &IdunnSignedDaemonHealthRecord,
+) -> Result<(IdunnDaemonHealthTrustBindingRecord, String)> {
+    let path = options
+        .daemon_health_trust_store_path
+        .as_deref()
+        .ok_or_else(|| anyhow!("signed daemon health has no root trust store"))?;
+    let entries = SingleFileMessagePackBackingStore::new(path).pull_all_read_only_snapshot()?;
+    let mut matches = Vec::new();
+    for entry in entries
+        .iter()
+        .filter(|entry| entry.r#type == IdunnDaemonHealthTrustBindingRecord::TYPE)
+    {
+        let binding: IdunnDaemonHealthTrustBindingRecord = rmp_serde::from_slice(&entry.payload)
+            .context("decoding root daemon health trust binding")?;
+        binding.validate()?;
+        if binding.daemon_id == statement.daemon_id
+            && binding.health_contract == statement.health_contract
+            && binding.source_runtime_id == statement.source_runtime_id
+        {
+            matches.push(binding);
+        }
+    }
+    let binding = matches
+        .pop()
+        .ok_or_else(|| anyhow!("signed daemon health has no exact root trust binding"))?;
+    if !matches.is_empty() {
+        return Err(anyhow!("signed daemon health trust binding is ambiguous"));
+    }
+    let digest = format!("sha256-{:x}", Sha256::digest(rmp_serde::to_vec(&binding)?));
+    Ok((binding, digest))
+}
+
+fn admit_generic_signed_health(
+    options: &CommonOptions,
+    store_lock: &Arc<Mutex<()>>,
+    admitted_at: &str,
+    health: IdunnDaemonHealthRecord,
+    statement: IdunnSignedDaemonHealthRecord,
+    admission: IdunnAuthenticatedDaemonHealthAdmissionRecord,
+) -> Result<HealthIngressOutcome> {
+    for _ in 0..8 {
+        let (expected_health, expected_admission, expected_statement) =
+            with_store_node(options, store_lock, |node| {
+                if let Some(existing) = node
+                    .get::<IdunnAuthenticatedDaemonHealthAdmissionRecord>(&admission.daemon_id)?
+                    && !generic_signed_health_advances(&existing, &admission)
+                {
+                    return Err(anyhow!("signed daemon health is replayed or regressed"));
+                }
+                validate_generic_release_binding(node, &admission)?;
+                Ok((
+                    node.cache()
+                        .get_envelope::<IdunnDaemonHealthRecord>(&health.daemon_id)?,
+                    node.cache()
+                        .get_envelope::<IdunnAuthenticatedDaemonHealthAdmissionRecord>(
+                            &admission.daemon_id,
+                        )?,
+                    node.cache()
+                        .get_envelope::<IdunnSignedDaemonHealthRecord>(
+                            &admission.signed_health_sha256,
+                        )?,
+                ))
+            })?;
+        let expected = [
+            CultCacheExpectedEnvelope {
+                key: health.daemon_id.clone(),
+                r#type: IdunnDaemonHealthRecord::TYPE.into(),
+                current: expected_health,
+            },
+            CultCacheExpectedEnvelope {
+                key: admission.daemon_id.clone(),
+                r#type: IdunnAuthenticatedDaemonHealthAdmissionRecord::TYPE.into(),
+                current: expected_admission,
+            },
+            CultCacheExpectedEnvelope {
+                key: admission.signed_health_sha256.clone(),
+                r#type: IdunnSignedDaemonHealthRecord::TYPE.into(),
+                current: expected_statement,
+            },
+        ];
+        let replacements = [
+            typed_envelope(&health.daemon_id, &health, admitted_at)?,
+            typed_envelope(&admission.daemon_id, &admission, admitted_at)?,
+            typed_envelope(&admission.signed_health_sha256, &statement, admitted_at)?,
+        ];
+        if SingleFileMessagePackBackingStore::new(&options.store_path)
+            .compare_exchange(&expected, &replacements)?
+        {
+            return Ok(HealthIngressOutcome {
+                daemon_id: health.daemon_id,
+                state: health.state,
+                detail: health.detail,
+                authority: "authenticated",
+            });
+        }
+    }
+    Err(anyhow!(
+        "signed daemon health admission lost repeated cross-process contention"
+    ))
+}
+
+fn generic_signed_health_advances(
+    existing: &IdunnAuthenticatedDaemonHealthAdmissionRecord,
+    candidate: &IdunnAuthenticatedDaemonHealthAdmissionRecord,
+) -> bool {
+    if existing.trust_binding_id != candidate.trust_binding_id
+        || existing.trust_binding_sha256 != candidate.trust_binding_sha256
+        || existing.signer_identity_id != candidate.signer_identity_id
+        || existing.daemon_id != candidate.daemon_id
+    {
+        return false;
+    }
+    if existing.publisher_incarnation_id == candidate.publisher_incarnation_id {
+        candidate.publisher_sequence > existing.publisher_sequence
+            && candidate.observed_at_unix_millis >= existing.observed_at_unix_millis
+    } else {
+        candidate.observed_at_unix_millis > existing.observed_at_unix_millis
+    }
+}
+
+fn validate_generic_release_binding(
+    node: &mut CultMeshNode,
+    admission: &IdunnAuthenticatedDaemonHealthAdmissionRecord,
+) -> Result<()> {
+    let Some(deployment_id) = admission.deployment_id.as_deref() else {
+        return Ok(());
+    };
+    let request = node
+        .get::<IdunnDeploymentRequestRecord>(deployment_id)?
+        .ok_or_else(|| anyhow!("signed daemon health names an unknown deployment request"))?;
+    if request.daemon_id != admission.daemon_id
+        || admission.source_commit.as_deref() != Some(request.source_revision.as_str())
+        || !request.requires_bifrost_authority
+        || request.release_authority_id.trim().is_empty()
+        || request.release_authority_envelope_sha256.trim().is_empty()
+    {
+        return Err(anyhow!("signed daemon health deployment authority is invalid"));
+    }
+    let current = node
+        .get::<IdunnCurrentDeploymentRequestRecord>(&admission.daemon_id)?
+        .ok_or_else(|| anyhow!("signed daemon health has no current deployment head"))?;
+    if current.request_id != request.request_id || current.sequence == 0 {
+        return Err(anyhow!("signed daemon health names a superseded deployment"));
+    }
+    let requested_at = parse_timestamp_seconds(&request.requested_at)
+        .and_then(|seconds| seconds.checked_mul(1000))
+        .ok_or_else(|| anyhow!("deployment request timestamp is invalid"))?;
+    if admission.observed_at_unix_millis < requested_at
+        || admission.admitted_at_unix_millis < requested_at
+    {
+        return Err(anyhow!("signed daemon health predates its deployment"));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 fn health_from_rudp_message(
     message: &CultNetMessage,
     options: &CommonOptions,
 ) -> Result<IdunnDaemonHealthRecord> {
-    Ok(decode_health_from_rudp_message(message, options, &timestamp()?)?.0)
+    match decode_health_from_rudp_message(message, options, &timestamp()?)? {
+        DecodedHealthIngress::AuthenticatedLegacy { health, .. }
+        | DecodedHealthIngress::AuthenticatedGeneric { health, .. } => Ok(health),
+        DecodedHealthIngress::Diagnostic(_) => {
+            Err(anyhow!("unsigned daemon health is diagnostic-only"))
+        }
+    }
 }
 
 fn decode_health_from_rudp_message(
     message: &CultNetMessage,
     options: &CommonOptions,
     admitted_at: &str,
-) -> Result<(
-    IdunnDaemonHealthRecord,
-    Option<IdunnSignedHealthAdmissionRecord>,
-)> {
+) -> Result<DecodedHealthIngress> {
     let CultNetMessage::DocumentPutRaw { document, .. } = message else {
         return Err(anyhow!("expected cultnet.document_put_raw.v0"));
     };
     if document.payload_encoding != CultNetRawPayloadEncoding::Messagepack {
         return Err(anyhow!("expected MessagePack raw payload encoding"));
     }
+    if document.schema_id == SIGNED_DAEMON_HEALTH_TYPE {
+        let (health, statement, admission) =
+            authenticate_generic_signed_health(document, options, admitted_at)?;
+        return Ok(DecodedHealthIngress::AuthenticatedGeneric {
+            health,
+            statement,
+            admission,
+        });
+    }
     if document.schema_id == EPIPHANY_SIGNED_RUNTIME_HEALTH_TYPE {
         let (health, admission) =
             authenticate_epiphany_signed_health(document, options, admitted_at)?;
-        return Ok((health, Some(admission)));
+        return Ok(DecodedHealthIngress::AuthenticatedLegacy { health, admission });
     }
     if document.schema_id != "idunn.daemon_health" {
         return Err(anyhow!(
@@ -2561,15 +2979,31 @@ fn decode_health_from_rudp_message(
             "Epiphany health requires its signed runtime-health schema"
         ));
     }
-    let health = legacy_health_record(wire);
-    if document.record_key != health.daemon_id {
+    if document.record_key != wire.daemon_id {
         return Err(anyhow!(
             "record key {} does not match health daemon_id {}",
-            document.record_key,
-            health.daemon_id
+            document.record_key, wire.daemon_id
         ));
     }
-    Ok((health, None))
+    let received_at_unix_millis = parse_timestamp_seconds(admitted_at)
+        .and_then(|seconds| seconds.checked_mul(1000))
+        .ok_or_else(|| anyhow!("unsigned health diagnostic receive time is invalid"))?;
+    let diagnostic = IdunnUnsignedDaemonHealthDiagnosticRecord {
+        schema_version: IDUNN_UNSIGNED_DAEMON_HEALTH_DIAGNOSTIC_SCHEMA.into(),
+        diagnostic_id: format!("diagnostic:{}", wire.daemon_id),
+        daemon_id: wire.daemon_id,
+        claimed_state: wire.state,
+        claimed_detail: wire.detail,
+        claimed_observed_at: wire.observed_at,
+        claimed_health_contract: wire.health_contract,
+        transport_source_runtime_id: document.source_runtime_id.clone(),
+        transport_source_role: document.source_role.clone(),
+        received_at_unix_millis,
+        authority: "diagnostic-only".into(),
+        private_state_exposed: false,
+    };
+    diagnostic.validate()?;
+    Ok(DecodedHealthIngress::Diagnostic(diagnostic))
 }
 
 fn authenticate_epiphany_signed_health(
@@ -2810,18 +3244,6 @@ fn validate_admission_fresh_at(
         return Err(anyhow!("signed health admission is stale"));
     }
     Ok(())
-}
-
-fn legacy_health_record(wire: IdunnDaemonHealthWireV1) -> IdunnDaemonHealthRecord {
-    IdunnDaemonHealthRecord {
-        daemon_id: wire.daemon_id,
-        state: wire.state,
-        detail: wire.detail,
-        observed_at: wire.observed_at,
-        health_contract: wire.health_contract,
-        publication_source: "daemon-published".into(),
-        transport: CULTNET_RUDP_PROTOCOL_ID.into(),
-    }
 }
 
 fn publish_surgery_plans(
@@ -4181,6 +4603,7 @@ impl Options {
         let mut operator_alarm_command = None;
         let mut rudp_health_bind = None;
         let mut trusted_epiphany_health_identity_store = None;
+        let mut daemon_health_trust_store_path = None;
         let mut execute = false;
         let mut command_timeout_seconds = 30;
         let mut daemon_id = None;
@@ -4285,6 +4708,12 @@ impl Options {
                         "--trusted-epiphany-health-identity-store",
                     )?));
                 }
+                "--daemon-health-trust-store" => {
+                    daemon_health_trust_store_path = Some(PathBuf::from(take_value(
+                        &mut args,
+                        "--daemon-health-trust-store",
+                    )?));
+                }
                 "--disabled" => enabled = false,
                 "--execute" => execute = true,
                 "--interval-seconds" => {
@@ -4327,6 +4756,7 @@ impl Options {
             operator_alarm_command,
             rudp_health_bind,
             trusted_epiphany_health_identity_store,
+            daemon_health_trust_store_path,
             execute,
             command_timeout_seconds,
         };
@@ -4983,7 +5413,7 @@ fn unix_epoch_millis() -> Result<u64> {
 }
 
 fn help_text() -> &'static str {
-    "Usage: idunn --daemon <id> [--name <name>] [--verse <verse>] [--store <path>] [--release-authority-store <path>] [--deploy-command <command>] [--restart-command <command>] [--operator-alarm-command <command>] [--rudp-health-bind <addr|none>] [--trusted-epiphany-health-identity-store <path>] [--execute] [--interval-seconds <seconds>] [--command-timeout-seconds <seconds>] [--repo-root <path>] [--swarm-profile <profile>]\n       idunn restart --daemon <id> [--store <path>] [--requested-by <who>] [--detail <text>]\n       idunn redeploy --daemon <id> [--store <path>] [--requested-by <who>] [--detail <text>]\n       idunn validate-health-admission --store <path> --daemon <id> --deployment-request-id <id> --release-id <id> --release-witness-sha256 <sha256> --source-revision <commit>\n\nIdunn supervises daemon-published CultNet/RUDP health with --daemon, or a built-in swarm supervisor with --swarm-profile starfire-local or yggdrasil-local. Yggdrasil release targets require an explicit Bifrost CultCache path via --release-authority-store. Epiphany health additionally requires a pinned host identity and a signed release-bound runtime-health document. RUDP health ingress is disabled unless --rudp-health-bind is supplied. The restart/redeploy verbs publish typed idunn.lifecycle_command.v1 records; the running supervisor claims them and executes only through its configured command boundary."
+    "Usage: idunn --daemon <id> [--name <name>] [--verse <verse>] [--store <path>] [--release-authority-store <path>] [--daemon-health-trust-store <path>] [--deploy-command <command>] [--restart-command <command>] [--operator-alarm-command <command>] [--rudp-health-bind <addr|none>] [--trusted-epiphany-health-identity-store <path>] [--execute] [--interval-seconds <seconds>] [--command-timeout-seconds <seconds>] [--repo-root <path>] [--swarm-profile <profile>]\n       idunn restart --daemon <id> [--store <path>] [--requested-by <who>] [--detail <text>]\n       idunn redeploy --daemon <id> [--store <path>] [--requested-by <who>] [--detail <text>]\n       idunn validate-health-admission --store <path> --daemon <id> --deployment-request-id <id> --release-id <id> --release-witness-sha256 <sha256> --source-revision <commit>\n\nIdunn supervises owner-authenticated CultNet/RUDP health with --daemon, or a built-in swarm supervisor with --swarm-profile starfire-local or yggdrasil-local. Generic signed health requires a root-owned CultCache trust store via --daemon-health-trust-store. Unsigned idunn.daemon_health packets are diagnostic-only and cannot satisfy lifecycle health. Yggdrasil release targets require an explicit Bifrost CultCache path via --release-authority-store. The Epiphany v0 migration path additionally requires its pinned host identity. RUDP health ingress is disabled unless --rudp-health-bind is supplied. The restart/redeploy verbs publish typed idunn.lifecycle_command.v1 records; the running supervisor claims them and executes only through its configured command boundary."
 }
 
 #[cfg(test)]
@@ -5348,6 +5778,7 @@ mod tests {
             operator_alarm_command: None,
             rudp_health_bind: None,
             trusted_epiphany_health_identity_store: None,
+            daemon_health_trust_store_path: None,
             execute: true,
             command_timeout_seconds: 1,
         };
@@ -6671,7 +7102,7 @@ mod tests {
     }
 
     #[test]
-    fn evaluate_target_health_keeps_fresh_daemon_published_record_on_owner_key() {
+    fn evaluate_target_health_refuses_bare_daemon_published_row_without_admission() {
         let now_seconds = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -6690,6 +7121,7 @@ mod tests {
             operator_alarm_command: None,
             rudp_health_bind: None,
             trusted_epiphany_health_identity_store: None,
+            daemon_health_trust_store_path: None,
             execute: false,
             command_timeout_seconds: 1,
         };
@@ -6736,11 +7168,13 @@ mod tests {
         })
         .unwrap();
 
-        let (health_key, selected) =
+        let (health_key, selected, authenticated) =
             evaluate_target_health(&target, &options, &store_lock, &desired, &now).unwrap();
 
-        assert_eq!(health_key, "test-daemon");
-        assert_eq!(selected.publication_source, "daemon-published");
+        assert_eq!(health_key, "observation:test-daemon");
+        assert_eq!(selected.publication_source, "idunn-supervisor-observation");
+        assert_ne!(selected.state, "active");
+        assert!(!authenticated);
 
         let _ = std::fs::remove_file(store_path);
     }
@@ -6760,6 +7194,7 @@ mod tests {
             operator_alarm_command: None,
             rudp_health_bind: None,
             trusted_epiphany_health_identity_store: None,
+            daemon_health_trust_store_path: None,
             execute: false,
             command_timeout_seconds: 1,
         };
@@ -6791,13 +7226,14 @@ mod tests {
             observed_at: "unix:100".to_string(),
         };
 
-        let (health_key, selected) =
+        let (health_key, selected, authenticated) =
             evaluate_target_health(&target, &options, &store_lock, &desired, "unix:100").unwrap();
 
         assert_eq!(health_key, "observation:test-daemon");
         assert_eq!(selected.state, "dependency-unavailable");
         assert_eq!(selected.publication_source, "idunn-supervisor-observation");
         assert_eq!(selected.transport, "cultmesh.missing-daemon-publication");
+        assert!(!authenticated);
         assert!(
             selected
                 .detail
@@ -6842,7 +7278,14 @@ mod tests {
         let mut missing_since = None;
         let mut health = missing_daemon_published_health(&target, &desired, "unix:100");
 
-        apply_missing_publication_grace(&target, &desired, &mut health, &mut missing_since, now);
+        apply_missing_publication_grace(
+            &target,
+            &desired,
+            &mut health,
+            false,
+            &mut missing_since,
+            now,
+        );
 
         assert_eq!(health.state, "degraded");
         assert!(missing_since.is_some());
@@ -6857,6 +7300,7 @@ mod tests {
             &target,
             &desired,
             &mut health,
+            false,
             &mut missing_since,
             now + Duration::from_secs(61),
         );
@@ -6870,7 +7314,7 @@ mod tests {
     }
 
     #[test]
-    fn daemon_publication_resets_missing_continuity() {
+    fn only_authenticated_daemon_publication_resets_missing_continuity() {
         let target = DaemonTarget {
             daemon_id: "test-daemon".to_string(),
             verse_id: "test.local".to_string(),
@@ -6915,12 +7359,22 @@ mod tests {
             &target,
             &desired,
             &mut health,
+            false,
             &mut missing_since,
             Instant::now(),
         );
 
-        assert!(missing_since.is_none());
+        assert!(missing_since.is_some());
         assert_eq!(health.state, "active");
+        apply_missing_publication_grace(
+            &target,
+            &desired,
+            &mut health,
+            true,
+            &mut missing_since,
+            Instant::now(),
+        );
+        assert!(missing_since.is_none());
     }
 
     #[test]
@@ -7262,7 +7716,7 @@ mod tests {
     }
 
     #[test]
-    fn rudp_health_ingress_accepts_raw_daemon_health_document() {
+    fn rudp_health_ingress_quarantines_unsigned_health_without_authority() {
         let health = IdunnDaemonHealthRecord {
             daemon_id: "test-daemon".to_string(),
             state: "active".to_string(),
@@ -7296,19 +7750,228 @@ mod tests {
             },
         };
 
+        let root = tempfile::tempdir().unwrap();
         let options = CommonOptions {
-            store_path: PathBuf::from("unused.cc"),
+            store_path: root.path().join("idunn.cc"),
             release_authority_store_path: None,
             operator_alarm_command: None,
             rudp_health_bind: None,
             trusted_epiphany_health_identity_store: None,
+            daemon_health_trust_store_path: None,
             execute: false,
             command_timeout_seconds: 1,
         };
-        assert_eq!(
-            health_from_rudp_message(&message, &options).unwrap(),
-            health
+        let lock = Arc::new(Mutex::new(()));
+        let outcome = admit_health_from_rudp_message(
+            &message,
+            &options,
+            &lock,
+            "2026-06-15T00:00:01Z",
+        )
+        .unwrap();
+        assert_eq!(outcome.authority, "diagnostic-only");
+        assert!(health_from_rudp_message(&message, &options).is_err());
+        with_store_node(&options, &lock, |node| {
+            assert!(node.get::<IdunnDaemonHealthRecord>(&health.daemon_id)?.is_none());
+            let diagnostic = node
+                .get::<IdunnUnsignedDaemonHealthDiagnosticRecord>(&format!(
+                    "diagnostic:{}",
+                    health.daemon_id
+                ))?
+                .expect("unsigned diagnostic");
+            assert_eq!(diagnostic.claimed_state, "active");
+            assert_eq!(diagnostic.authority, "diagnostic-only");
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    fn generic_signed_health_fixture(
+        sequence: u64,
+    ) -> (CultNetMessage, CommonOptions, tempfile::TempDir) {
+        let root = tempfile::tempdir().unwrap();
+        let trust_path = root.path().join("health-trust.cc");
+        let store_path = root.path().join("idunn.cc");
+        let key = SigningKey::from_bytes(&[31; 32]);
+        let public_key = key.verifying_key().to_bytes().to_vec();
+        let identity_id = format!(
+            "{:x}",
+            Sha256::digest([HOST_IDENTITY_DOMAIN, public_key.as_slice()].concat())
         );
+        let binding = IdunnDaemonHealthTrustBindingRecord {
+            schema_version: odin_core::IDUNN_DAEMON_HEALTH_TRUST_BINDING_SCHEMA.into(),
+            binding_id: "root/test-daemon/health".into(),
+            daemon_id: "test-daemon".into(),
+            health_contract: "test.signed-health".into(),
+            source_runtime_id: "test-runtime".into(),
+            signer_identity_id: identity_id.clone(),
+            signer_public_key: public_key,
+            binding_authority: "root".into(),
+            bound_at_unix_millis: 1_784_483_100_000,
+            release_binding_required: false,
+            private_state_exposed: false,
+        };
+        SingleFileMessagePackBackingStore::new(&trust_path)
+            .push(&typed_envelope(&binding.binding_id, &binding, "unix:1784483100").unwrap())
+            .unwrap();
+        let observed_at_unix_millis = chrono::DateTime::parse_from_rfc3339(
+            "2026-07-19T12:00:00Z",
+        )
+        .unwrap()
+        .timestamp_millis() as u64;
+        let mut statement = IdunnSignedDaemonHealthRecord {
+            schema_version: IDUNN_SIGNED_DAEMON_HEALTH_SCHEMA.into(),
+            daemon_id: binding.daemon_id.clone(),
+            health_contract: binding.health_contract.clone(),
+            source_runtime_id: binding.source_runtime_id.clone(),
+            state: "active".into(),
+            detail: "signed provider health".into(),
+            signer_identity_id: identity_id,
+            publisher_incarnation_id: "00000000-0000-4000-8000-000000000031".into(),
+            publisher_sequence: sequence,
+            observed_at_unix_millis,
+            release_id: None,
+            release_witness_sha256: None,
+            source_commit: None,
+            deployment_id: None,
+            signature_algorithm: "ed25519".into(),
+            signature: Vec::new(),
+            private_state_exposed: false,
+        };
+        let unsigned = rmp_serde::to_vec(&statement).unwrap();
+        statement.signature = key
+            .sign(&host_signature_message(SIGNED_DAEMON_HEALTH_TYPE, &unsigned))
+            .to_bytes()
+            .to_vec();
+        let message = CultNetMessage::DocumentPutRaw {
+            message_id: format!("signed-health-{sequence}"),
+            document: CultNetRawDocumentRecord {
+                schema_id: SIGNED_DAEMON_HEALTH_TYPE.into(),
+                record_key: statement.daemon_id.clone(),
+                stored_at: "2026-07-19T12:00:00Z".into(),
+                payload_encoding: CultNetRawPayloadEncoding::Messagepack,
+                payload: rmp_serde::to_vec(&statement).unwrap(),
+                source_runtime_id: Some(statement.source_runtime_id.clone()),
+                source_agent_id: Some(statement.signer_identity_id.clone()),
+                source_role: Some("daemon-health-publisher".into()),
+                tags: Some(vec![CULTNET_RUDP_PROTOCOL_ID.into()]),
+            },
+        };
+        (
+            message,
+            CommonOptions {
+                store_path,
+                release_authority_store_path: None,
+                operator_alarm_command: None,
+                rudp_health_bind: None,
+                trusted_epiphany_health_identity_store: None,
+                daemon_health_trust_store_path: Some(trust_path),
+                execute: false,
+                command_timeout_seconds: 1,
+            },
+            root,
+        )
+    }
+
+    #[test]
+    fn generic_signed_health_requires_root_binding_and_monotonic_admission() {
+        let (first, options, _root) = generic_signed_health_fixture(1);
+        let lock = Arc::new(Mutex::new(()));
+        let outcome = admit_health_from_rudp_message(
+            &first,
+            &options,
+            &lock,
+            "2026-07-19T12:00:01Z",
+        )
+        .unwrap();
+        assert_eq!(outcome.authority, "authenticated");
+        assert!(
+            admit_health_from_rudp_message(
+                &first,
+                &options,
+                &lock,
+                "2026-07-19T12:00:02Z"
+            )
+            .is_err()
+        );
+        with_store_node(&options, &lock, |node| {
+            let health = node
+                .get::<IdunnDaemonHealthRecord>("test-daemon")?
+                .expect("authenticated health");
+            assert_eq!(health.publication_source, "daemon-authenticated");
+            let admission = node
+                .get::<IdunnAuthenticatedDaemonHealthAdmissionRecord>("test-daemon")?
+                .expect("generic admission");
+            assert_eq!(admission.publisher_sequence, 1);
+            assert_eq!(admission.trust_binding_id, "root/test-daemon/health");
+            let statement = node
+                .get::<IdunnSignedDaemonHealthRecord>(&admission.signed_health_sha256)?
+                .expect("signed statement");
+            assert_eq!(
+                admission.signed_health_sha256,
+                format!(
+                    "sha256-{:x}",
+                    Sha256::digest(rmp_serde::to_vec(&statement)?)
+                )
+            );
+            let (_, binding_sha256) = load_daemon_health_trust_binding(&options, &statement)?;
+            assert_eq!(admission.trust_binding_sha256, binding_sha256);
+            Ok(())
+        })
+        .unwrap();
+        let target = DaemonTarget {
+            daemon_id: "test-daemon".into(),
+            verse_id: "test.local".into(),
+            name: "Test daemon".into(),
+            health_contract: health_contract("test.signed-health", "failed"),
+            deploy_command: None,
+            restart_command: Some("restart test".into()),
+            release: None,
+            enabled: true,
+            interval_seconds: 30,
+        };
+        let desired = IdunnDesiredDaemonRecord {
+            daemon_id: target.daemon_id.clone(),
+            verse_id: target.verse_id.clone(),
+            name: target.name.clone(),
+            enabled: true,
+            health_command: None,
+            restart_command: target.restart_command.clone(),
+            deploy_command: None,
+            authority: "idunn-supervisor-command".into(),
+            max_silence_seconds: 60,
+            observed_at: "2026-07-19T12:00:02Z".into(),
+            health_contract: target.health_contract.id.clone(),
+            transport_profile_id: transport_profile_id(&target),
+            command_boundary_id: command_boundary_id(&target),
+        };
+        let (health_key, selected, authenticated) = evaluate_target_health(
+            &target,
+            &options,
+            &lock,
+            &desired,
+            "2026-07-19T12:00:02Z",
+        )
+        .unwrap();
+        assert_eq!(health_key, "test-daemon");
+        assert_eq!(selected.publication_source, "daemon-authenticated");
+        assert!(authenticated);
+
+        let (mut forged, mut no_trust, _other_root) = generic_signed_health_fixture(2);
+        no_trust.daemon_health_trust_store_path = None;
+        assert!(
+            admit_health_from_rudp_message(
+                &forged,
+                &no_trust,
+                &Arc::new(Mutex::new(())),
+                "2026-07-19T12:00:01Z"
+            )
+            .is_err()
+        );
+        if let CultNetMessage::DocumentPutRaw { document, .. } = &mut forged {
+            document.payload[0] ^= 1;
+        }
+        assert!(health_from_rudp_message(&forged, &options).is_err());
     }
 
     fn signed_epiphany_health_fixture(
@@ -7396,6 +8059,7 @@ mod tests {
             operator_alarm_command: None,
             rudp_health_bind: None,
             trusted_epiphany_health_identity_store: Some(identity_path),
+            daemon_health_trust_store_path: None,
             execute: false,
             command_timeout_seconds: 1,
         };
@@ -7696,6 +8360,7 @@ mod tests {
             operator_alarm_command: None,
             rudp_health_bind: None,
             trusted_epiphany_health_identity_store: None,
+            daemon_health_trust_store_path: None,
             execute: false,
             command_timeout_seconds: 1,
         };
