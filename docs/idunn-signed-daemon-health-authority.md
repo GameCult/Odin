@@ -12,8 +12,9 @@ does not authenticate the publisher. It is diagnostic input until replaced.
 
 - Each daemon owns its health statement and signs it with its pinned service or
   host identity.
-- Idunn owns admission, freshness, monotonic lineage, managed-health judgment,
-  and the outward status projection.
+- Idunn owns admission, freshness, monotonic lineage, and the outward projection
+  of current authenticated provider health. Lifecycle judgment remains private
+  Idunn policy and is not smuggled into that provider-health statement.
 - Root deployment configuration owns the trust binding between daemon id,
   health contract, source runtime, and signer identity.
 
@@ -42,9 +43,18 @@ daemon/contract/runtime tuple and whether release identity is required.
 Idunn persists two separate facts:
 
 1. the admitted daemon-authored statement and its digest;
-2. an Idunn-authored outward status projection binding the trust record,
-   admission, managed target, current deployment lineage, freshness judgment,
-   and observation time.
+2. an Idunn-authored `idunn.authenticated_provider_health_projection.v1`
+   record binding the trust record, admission, exact provider lineage, and
+   freshness interval.
+
+The outward record exists only while a generic provider-authored admission is
+current and still matches its root trust and optional release binding. Missing
+publication, release drift, dependency failure, target absence, and recovery
+policy are absence of this projection. They are not synthetic provider states.
+The projected state is exactly the authenticated provider state. Its only
+explanation is a closed Idunn-generated reason code paired to that state:
+`authenticated_provider_active`, `_warming`, `_degraded`, or `_failed`.
+There is no free-text detail field.
 
 Consumers such as Epiphany Discord Status receive only the outward projection
 through CultNet/CultMesh and verify Idunn's pinned identity. Reading Idunn's
@@ -91,7 +101,9 @@ must absorb its invariants before the special path is deleted.
    incarnation, freshness, and release requirements.
 3. Migrate Epiphany and Bifrost publishers and install their root-owned trust
    bindings.
-4. Publish and verify Idunn's outward signed projection.
+4. Publish and verify Idunn's outward signed authenticated-provider-health
+   projection using the fixed CultNet signature profile
+   `idunn.authenticated-provider-health-projection.v1`.
 5. Point Discord Status at the outward projections.
 6. Delete generic unsigned health from managed-health authority and delete the
    Epiphany-only verifier after its last publisher migrates.
@@ -140,6 +152,11 @@ Hostile tests must prove:
   string cannot repair failed authentication;
 - one daemon's trust record cannot authenticate another daemon;
 - unsigned legacy health cannot suppress recovery or yield outward healthy;
-- outward status is signed by Idunn and binds the exact admitted statement;
+- outward provider health is signed by Idunn under the fixed, typed purpose and
+  binds the exact admitted statement;
+- missing health, release drift, and dependency failure remove the projection
+  instead of impersonating provider-authored states;
+- caller-selected signing purposes, signer ids, reason strings, and synthetic
+  states fail closed;
 - private detail and filesystem/process internals never enter the operator
   projection.

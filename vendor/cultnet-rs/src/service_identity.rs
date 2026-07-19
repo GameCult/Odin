@@ -35,6 +35,17 @@ pub trait ServiceSignaturePurpose<P: ServiceIdentityProfile>: Send + Sync + 'sta
 
 pub enum IdunnServiceIdentity {}
 
+/// The only signing purpose accepted for Idunn's public projection of a
+/// provider-authenticated health admission. Keeping this profile here makes
+/// purpose selection a compile-time protocol choice rather than caller text.
+pub struct IdunnAuthenticatedProviderHealthProjectionPurpose;
+
+impl ServiceSignaturePurpose<IdunnServiceIdentity>
+    for IdunnAuthenticatedProviderHealthProjectionPurpose
+{
+    const PURPOSE: &'static [u8] = b"idunn.authenticated-provider-health-projection.v1";
+}
+
 impl ServiceIdentityProfile for IdunnServiceIdentity {
     const PRIVATE_TYPE: &'static str = "idunn.service_identity.private.v1";
     const PRIVATE_SCHEMA: &'static str = "idunn.service_identity.private.v1";
@@ -269,15 +280,24 @@ fn validate_private<P: ServiceIdentityProfile>(entry: &ServiceIdentityPrivateEnt
 fn validate_anchor<P: ServiceIdentityProfile>(anchor: &ServiceIdentityTrustAnchor) -> Result<()> {
     if anchor.schema_version != P::TRUST_ANCHOR_SCHEMA
         || anchor.public_key.len() != 32
-        || identity_id::<P>(&anchor.public_key) != anchor.identity_id
+        || derive_service_identity_id::<P>(&anchor.public_key)? != anchor.identity_id
     {
         bail!("service identity trust anchor violates its profile schema");
     }
     Ok(())
 }
 
+/// Derives the profile-bound identity id from an exact Ed25519 public key.
+/// Consumers use this instead of accepting a caller-supplied identity string.
+pub fn derive_service_identity_id<P: ServiceIdentityProfile>(public_key: &[u8]) -> Result<String> {
+    if public_key.len() != 32 {
+        bail!("service identity public key has invalid length");
+    }
+    Ok(hex(&Sha256::digest([P::ID_DOMAIN, public_key].concat())))
+}
+
 fn identity_id<P: ServiceIdentityProfile>(key: &[u8]) -> String {
-    hex(&Sha256::digest([P::ID_DOMAIN, key].concat()))
+    derive_service_identity_id::<P>(key).expect("internal service identity key is Ed25519")
 }
 
 fn signing_message<P: ServiceIdentityProfile, S: ServiceSignaturePurpose<P>>(
@@ -471,10 +491,6 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    enum StatusProjection {}
-    impl ServiceSignaturePurpose<IdunnServiceIdentity> for StatusProjection {
-        const PURPOSE: &'static [u8] = b"idunn.managed-health-projection.v1";
-    }
     enum OtherPurpose {}
     impl ServiceSignaturePurpose<IdunnServiceIdentity> for OtherPurpose {
         const PURPOSE: &'static [u8] = b"idunn.other.v1";
@@ -485,17 +501,17 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let path = temp.path().join("idunn.ccmp");
         let signer = enroll_service_identity_at::<IdunnServiceIdentity>(&path)?;
-        let proof = signer.sign::<StatusProjection>(b"healthy");
+        let proof = signer.sign::<IdunnAuthenticatedProviderHealthProjectionPurpose>(b"healthy");
         let anchor = signer.trust_anchor()?;
-        verify_service_identity_signature::<IdunnServiceIdentity, StatusProjection>(
-            &anchor, b"healthy", &proof,
-        )?;
+        verify_service_identity_signature::<
+            IdunnServiceIdentity,
+            IdunnAuthenticatedProviderHealthProjectionPurpose,
+        >(&anchor, b"healthy", &proof)?;
         assert!(
-            verify_service_identity_signature::<IdunnServiceIdentity, StatusProjection>(
-                &anchor,
-                b"unhealthy",
-                &proof
-            )
+            verify_service_identity_signature::<
+                IdunnServiceIdentity,
+                IdunnAuthenticatedProviderHealthProjectionPurpose,
+            >(&anchor, b"unhealthy", &proof)
             .is_err()
         );
         assert!(
@@ -505,6 +521,11 @@ mod tests {
             .is_err()
         );
         assert!(enroll_service_identity_at::<IdunnServiceIdentity>(&path).is_err());
+        assert_eq!(
+            derive_service_identity_id::<IdunnServiceIdentity>(&anchor.public_key)?,
+            anchor.identity_id
+        );
+        assert!(derive_service_identity_id::<IdunnServiceIdentity>(&[0; 31]).is_err());
         assert_eq!(
             open_service_identity_at::<IdunnServiceIdentity>(&path)?.entry(),
             signer.entry()
@@ -556,11 +577,12 @@ mod tests {
         assert_eq!(bytes, std::fs::read(&output)?);
         let other =
             enroll_service_identity_at::<IdunnServiceIdentity>(&temp.path().join("other.ccmp"))?;
-        let proof = other.sign::<StatusProjection>(b"healthy");
+        let proof = other.sign::<IdunnAuthenticatedProviderHealthProjectionPurpose>(b"healthy");
         assert!(
-            verify_service_identity_signature::<IdunnServiceIdentity, StatusProjection>(
-                &anchor, b"healthy", &proof
-            )
+            verify_service_identity_signature::<
+                IdunnServiceIdentity,
+                IdunnAuthenticatedProviderHealthProjectionPurpose,
+            >(&anchor, b"healthy", &proof)
             .is_err()
         );
         Ok(())
