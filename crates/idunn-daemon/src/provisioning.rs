@@ -13,7 +13,7 @@ use odin_core::{
     IDUNN_AUTHENTICATED_PROVIDER_HEALTH_PROJECTION_SIGNING_PURPOSE,
     IDUNN_DAEMON_HEALTH_TRUST_BINDING_SCHEMA, IdunnDaemonHealthTrustBindingRecord,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 trait RootDistributionDocument: DatabaseEntry {
@@ -51,13 +51,10 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<()> {
             export_service_identity_trust_anchor(&signer, &public)?;
         }
         "create-daemon-health-trust-binding" => create_health_binding(&options)?,
+        "add-daemon-health-trust-binding" => add_health_binding(&options)?,
         "validate-daemon-health-trust-binding" => {
             require_only(&options, &["input"])?;
-            read_typed::<IdunnDaemonHealthTrustBindingRecord>(
-                &path(&options, "input")?,
-                IDUNN_DAEMON_HEALTH_TRUST_BINDING_SCHEMA,
-            )?
-            .validate()?;
+            validate_health_binding_store(&path(&options, "input")?)?;
         }
         "create-provider-projection-trust-anchor" => create_projection_anchor(&options)?,
         "validate-provider-projection-trust-anchor" => validate_projection_anchor(&options)?,
@@ -66,7 +63,52 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<()> {
     Ok(())
 }
 
+fn validate_health_binding_store(path: &Path) -> Result<()> {
+    let entries = SingleFileMessagePackBackingStore::new(path).pull_all_read_only_snapshot()?;
+    if entries.is_empty() {
+        bail!("daemon health trust store is empty");
+    }
+    let mut keys = BTreeSet::new();
+    let mut tuples = BTreeSet::new();
+    for envelope in entries {
+        if envelope.r#type != IdunnDaemonHealthTrustBindingRecord::TYPE
+            || envelope.schema_id.as_deref() != Some(IDUNN_DAEMON_HEALTH_TRUST_BINDING_SCHEMA)
+        {
+            bail!("trust store contains an alien type or schema");
+        }
+        let binding: IdunnDaemonHealthTrustBindingRecord =
+            rmp_serde::from_slice(&envelope.payload)?;
+        if rmp_serde::to_vec(&binding)? != envelope.payload || envelope.key != binding.binding_id {
+            bail!("trust store contains a noncanonical or mismatched binding");
+        }
+        binding.validate()?;
+        if !keys.insert(binding.binding_id.clone())
+            || !tuples.insert((
+                binding.daemon_id,
+                binding.health_contract,
+                binding.source_runtime_id,
+            ))
+        {
+            bail!("trust store contains a duplicate binding id or tuple");
+        }
+    }
+    Ok(())
+}
+
 fn create_health_binding(options: &BTreeMap<String, String>) -> Result<()> {
+    let record = health_binding(options)?;
+    write_new_typed(
+        &path(options, "output")?,
+        &record.binding_id,
+        &record,
+        IDUNN_DAEMON_HEALTH_TRUST_BINDING_SCHEMA,
+        record.bound_at_unix_millis,
+    )
+}
+
+fn health_binding(
+    options: &BTreeMap<String, String>,
+) -> Result<IdunnDaemonHealthTrustBindingRecord> {
     require_only(
         options,
         &[
@@ -97,13 +139,91 @@ fn create_health_binding(options: &BTreeMap<String, String>) -> Result<()> {
         private_state_exposed: false,
     };
     record.validate()?;
-    write_new_typed(
-        &path(options, "output")?,
+    Ok(record)
+}
+
+fn add_health_binding(options: &BTreeMap<String, String>) -> Result<()> {
+    let record = health_binding(options)?;
+    let output = path(options, "output")?;
+    let store = SingleFileMessagePackBackingStore::new(&output);
+    let existing = store.pull_all_read_only_snapshot()?;
+    if existing.is_empty() {
+        bail!("trust store must already exist; create the first binding explicitly");
+    }
+    let mut keys = BTreeSet::new();
+    let mut tuples = BTreeSet::new();
+    let mut expected = Vec::with_capacity(existing.len() + 1);
+    for envelope in existing {
+        if envelope.r#type != IdunnDaemonHealthTrustBindingRecord::TYPE
+            || envelope.schema_id.as_deref() != Some(IDUNN_DAEMON_HEALTH_TRUST_BINDING_SCHEMA)
+        {
+            bail!("trust store contains an alien type or schema");
+        }
+        let binding: IdunnDaemonHealthTrustBindingRecord =
+            rmp_serde::from_slice(&envelope.payload)?;
+        if rmp_serde::to_vec(&binding)? != envelope.payload || envelope.key != binding.binding_id {
+            bail!("trust store contains a noncanonical or mismatched binding");
+        }
+        binding.validate()?;
+        if !keys.insert(binding.binding_id.clone()) {
+            bail!("trust store contains duplicate binding ids");
+        }
+        if !tuples.insert((
+            binding.daemon_id,
+            binding.health_contract,
+            binding.source_runtime_id,
+        )) {
+            bail!("trust store contains duplicate daemon/contract/runtime tuples");
+        }
+        expected.push(CultCacheExpectedEnvelope {
+            r#type: envelope.r#type.clone(),
+            key: envelope.key.clone(),
+            current: Some(envelope),
+        });
+    }
+    if keys.contains(&record.binding_id) {
+        bail!("binding id already exists");
+    }
+    if tuples.contains(&(
+        record.daemon_id.clone(),
+        record.health_contract.clone(),
+        record.source_runtime_id.clone(),
+    )) {
+        bail!("daemon/contract/runtime tuple already exists");
+    }
+    expected.push(CultCacheExpectedEnvelope {
+        r#type: IdunnDaemonHealthTrustBindingRecord::TYPE.into(),
+        key: record.binding_id.clone(),
+        current: None,
+    });
+    let envelope = typed_envelope(
         &record.binding_id,
         &record,
         IDUNN_DAEMON_HEALTH_TRUST_BINDING_SCHEMA,
         record.bound_at_unix_millis,
-    )
+    )?;
+    if !store.compare_exchange(&expected, &[envelope])? {
+        bail!("trust store changed during validated append");
+    }
+    Ok(())
+}
+
+fn typed_envelope<T: DatabaseEntry>(
+    key: &str,
+    value: &T,
+    schema: &str,
+    millis: u64,
+) -> Result<CultCacheEnvelope> {
+    let stored_at = chrono::DateTime::from_timestamp_millis(i64::try_from(millis)?)
+        .ok_or_else(|| anyhow!("document timestamp is out of range"))?
+        .to_rfc3339();
+    Ok(CultCacheEnvelope {
+        key: key.into(),
+        r#type: T::TYPE.into(),
+        payload: rmp_serde::to_vec(value)?,
+        stored_at,
+        schema_id: Some(schema.into()),
+    })
 }
 
 fn create_projection_anchor(options: &BTreeMap<String, String>) -> Result<()> {
@@ -354,7 +474,7 @@ fn normalized(path: &Path) -> Result<PathBuf> {
 }
 
 fn usage() -> &'static str {
-    "Usage: idunn-provision enroll-idunn-identity --private-store <path>\n       idunn-provision export-idunn-public-anchor --private-store <path> --public-anchor <path>\n       idunn-provision create-daemon-health-trust-binding --output <path> --binding-id <id> --daemon <id> --health-contract <id> --source-runtime <id> --signer-public-key-hex <hex> --bound-at-unix-millis <u64> --release-binding-required <true|false>\n       idunn-provision validate-daemon-health-trust-binding --input <path>\n       idunn-provision create-provider-projection-trust-anchor --output <path> --trust-anchor-id <id> --runtime-id <id> --idunn-public-anchor <path> --bound-at-unix-millis <u64> --expires-at-unix-millis <u64>\n       idunn-provision validate-provider-projection-trust-anchor --input <path> --idunn-public-anchor <path>"
+    "Usage: idunn-provision enroll-idunn-identity --private-store <path>\n       idunn-provision export-idunn-public-anchor --private-store <path> --public-anchor <path>\n       idunn-provision create-daemon-health-trust-binding --output <path> --binding-id <id> --daemon <id> --health-contract <id> --source-runtime <id> --signer-public-key-hex <hex> --bound-at-unix-millis <u64> --release-binding-required <true|false>\n       idunn-provision add-daemon-health-trust-binding --output <path> --binding-id <id> --daemon <id> --health-contract <id> --source-runtime <id> --signer-public-key-hex <hex> --bound-at-unix-millis <u64> --release-binding-required <true|false>\n       idunn-provision validate-daemon-health-trust-binding --input <path>\n       idunn-provision create-provider-projection-trust-anchor --output <path> --trust-anchor-id <id> --runtime-id <id> --idunn-public-anchor <path> --bound-at-unix-millis <u64> --expires-at-unix-millis <u64>\n       idunn-provision validate-provider-projection-trust-anchor --input <path> --idunn-public-anchor <path>"
 }
 
 #[cfg(test)]
@@ -381,6 +501,108 @@ mod tests {
             stored_at: "2026-07-19T20:00:00Z".into(),
             schema_id: Some(schema.into()),
         })
+    }
+
+    fn binding_args<'a>(
+        command: &'a str,
+        output: &'a str,
+        id: &'a str,
+        daemon: &'a str,
+        runtime: &'a str,
+    ) -> Vec<&'a str> {
+        vec![
+            command,
+            "--output",
+            output,
+            "--binding-id",
+            id,
+            "--daemon",
+            daemon,
+            "--health-contract",
+            "provider.health",
+            "--source-runtime",
+            runtime,
+            "--signer-public-key-hex",
+            "1111111111111111111111111111111111111111111111111111111111111111",
+            "--bound-at-unix-millis",
+            "1784483100000",
+            "--release-binding-required",
+            "false",
+        ]
+    }
+
+    #[test]
+    fn append_health_binding_preserves_existing_and_rejects_collisions_and_aliens() -> Result<()> {
+        let temp = TempDir::new()?;
+        let store = temp.path().join("trust.cc");
+        let path = store.to_str().unwrap();
+        invoke(&binding_args(
+            "create-daemon-health-trust-binding",
+            path,
+            "one",
+            "daemon-one",
+            "runtime-one",
+        ))?;
+        let before = SingleFileMessagePackBackingStore::new(&store)
+            .pull_all_read_only_snapshot()?
+            .remove(0)
+            .payload;
+        invoke(&binding_args(
+            "add-daemon-health-trust-binding",
+            path,
+            "two",
+            "daemon-two",
+            "runtime-two",
+        ))?;
+        let entries =
+            SingleFileMessagePackBackingStore::new(&store).pull_all_read_only_snapshot()?;
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            entries
+                .iter()
+                .find(|entry| entry.key == "one")
+                .unwrap()
+                .payload,
+            before
+        );
+        assert!(
+            invoke(&binding_args(
+                "add-daemon-health-trust-binding",
+                path,
+                "two",
+                "daemon-three",
+                "runtime-three"
+            ))
+            .is_err()
+        );
+        assert!(
+            invoke(&binding_args(
+                "add-daemon-health-trust-binding",
+                path,
+                "three",
+                "daemon-one",
+                "runtime-one"
+            ))
+            .is_err()
+        );
+        SingleFileMessagePackBackingStore::new(&store).push(&CultCacheEnvelope {
+            key: "alien".into(),
+            r#type: "alien".into(),
+            payload: vec![],
+            stored_at: "2026-07-19T20:00:00Z".into(),
+            schema_id: Some("alien.v0".into()),
+        })?;
+        assert!(
+            invoke(&binding_args(
+                "add-daemon-health-trust-binding",
+                path,
+                "four",
+                "daemon-four",
+                "runtime-four"
+            ))
+            .is_err()
+        );
+        Ok(())
     }
 
     #[test]
