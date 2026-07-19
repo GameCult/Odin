@@ -4,6 +4,7 @@ mod replication;
 mod rudp;
 mod schema_discovery;
 mod security;
+mod service_identity;
 mod transport;
 
 pub use contracts::*;
@@ -12,4 +13,5 @@ pub use replication::*;
 pub use rudp::*;
 pub use schema_discovery::*;
 pub use security::*;
+pub use service_identity::*;
 pub use transport::*;
