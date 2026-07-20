@@ -1482,8 +1482,7 @@ fn process_lifecycle_command(
             };
             apply_release_authorization(&mut request, &authorization);
             request = stable_deployment_request(options, store_lock, &request)?;
-            persist_current_deployment_request(options, store_lock, &request)?;
-            let command = bind_lifecycle_deployment_request(
+            let command = persist_and_bind_lifecycle_deployment_request(
                 options,
                 store_lock,
                 &command,
@@ -1509,6 +1508,22 @@ fn process_lifecycle_command(
     }
 
     Ok(())
+}
+
+fn persist_and_bind_lifecycle_deployment_request(
+    options: &CommonOptions,
+    store_lock: &Arc<Mutex<()>>,
+    command: &IdunnLifecycleCommandRecord,
+    request: &IdunnDeploymentRequestRecord,
+    _bound_at: &str,
+) -> Result<IdunnLifecycleCommandRecord> {
+    let (_, bound) = persist_current_deployment_request_with_lifecycle(
+        options,
+        store_lock,
+        request,
+        Some(command),
+    )?;
+    bound.ok_or_else(|| anyhow!("atomic lifecycle occurrence binding was not produced"))
 }
 
 fn bind_lifecycle_deployment_request(
@@ -1673,6 +1688,16 @@ fn persist_current_deployment_request(
     store_lock: &Arc<Mutex<()>>,
     request: &IdunnDeploymentRequestRecord,
 ) -> Result<IdunnCurrentDeploymentRequestRecord> {
+    persist_current_deployment_request_with_lifecycle(options, store_lock, request, None)
+        .map(|(head, _)| head)
+}
+
+fn persist_current_deployment_request_with_lifecycle(
+    options: &CommonOptions,
+    store_lock: &Arc<Mutex<()>>,
+    request: &IdunnDeploymentRequestRecord,
+    lifecycle: Option<&IdunnLifecycleCommandRecord>,
+) -> Result<(IdunnCurrentDeploymentRequestRecord, Option<IdunnLifecycleCommandRecord>)> {
     for _ in 0..8 {
         let (
             current_head,
@@ -1707,6 +1732,13 @@ fn persist_current_deployment_request(
                     .get_envelope::<IdunnDeploymentRequestRecord>(&request.request_id)?,
             ))
         })?;
+        let lifecycle_envelope = if let Some(command) = lifecycle {
+            with_store_node(options, store_lock, |node| {
+                node.cache().get_envelope::<IdunnLifecycleCommandRecord>(&command.command_id)
+            })?
+        } else {
+            None
+        };
         if let Some(existing) = current_request_envelope.as_ref() {
             let decoded: IdunnDeploymentRequestRecord = rmp_serde::from_slice(&existing.payload)?;
             if decoded != *request {
@@ -1715,7 +1747,18 @@ fn persist_current_deployment_request(
             if let Some(head) = current_head.as_ref()
                 && head.request_id == request.request_id
             {
-                return Ok(head.clone());
+                let bound = lifecycle
+                    .map(|command| {
+                        bind_lifecycle_deployment_request(
+                            options,
+                            store_lock,
+                            command,
+                            request,
+                            &request.requested_at,
+                        )
+                    })
+                    .transpose()?;
+                return Ok((head.clone(), bound));
             }
             return Err(anyhow!(
                 "existing deployment request is not the current authority head"
@@ -1811,11 +1854,37 @@ fn persist_current_deployment_request(
         if let Some(result) = superseded_result.as_ref() {
             replacements.push(typed_envelope(&result.result_id, result, &request.requested_at)?);
         }
+        let mut bound_lifecycle = None;
+        if lifecycle.is_some() {
+            let envelope = lifecycle_envelope
+                .as_ref()
+                .ok_or_else(|| anyhow!("lifecycle command disappeared before atomic occurrence binding"))?;
+            let current: IdunnLifecycleCommandRecord = rmp_serde::from_slice(&envelope.payload)?;
+            if !current.deployment_request_id.is_empty() {
+                return Err(anyhow!("lifecycle command is already bound to another occurrence"));
+            }
+            let mut bound = current;
+            bound.deployment_request_id = request.request_id.clone();
+            bound.state = "awaiting-authorization".into();
+            bound.claimed_at.clear();
+            bound.result_id.clear();
+            expected.push(CultCacheExpectedEnvelope {
+                key: bound.command_id.clone(),
+                r#type: IdunnLifecycleCommandRecord::TYPE.into(),
+                current: Some(envelope.clone()),
+            });
+            replacements.push(typed_envelope(
+                &bound.command_id,
+                &bound,
+                &request.requested_at,
+            )?);
+            bound_lifecycle = Some(bound);
+        }
         if SingleFileMessagePackBackingStore::new(&options.store_path).compare_exchange(
             &expected,
             &replacements,
         )? {
-            return Ok(head);
+            return Ok((head, bound_lifecycle));
         }
     }
     Err(anyhow!(
@@ -10661,10 +10730,15 @@ mod tests {
         let (_message, mut options, _root) = signed_epiphany_health_fixture(1);
         options.execute = false;
         let lock = Arc::new(Mutex::new(()));
-        let request = with_store_node(&options, &lock, |node| {
+        let mut request = with_store_node(&options, &lock, |node| {
             node.get::<IdunnDeploymentRequestRecord>("deploy:yggdrasil-epiphany:fixture")?
                 .ok_or_else(|| anyhow!("fixture request missing"))
         }).unwrap();
+        request.request_id = "manual:redeploy:yggdrasil-epiphany:crash-fixture".into();
+        request.requested_at = "2026-07-16T00:05:00Z".into();
+        request.authority = "idunn-supervisor-command.manual".into();
+        request.source_revision = "e".repeat(40);
+        request = stable_deployment_request(&options, &lock, &request).unwrap();
         let command = IdunnLifecycleCommandRecord {
             command_id: "manual:redeploy:yggdrasil-epiphany:crash-fixture".into(),
             daemon_id: request.daemon_id.clone(),
@@ -10681,8 +10755,30 @@ mod tests {
             node.put(&command.command_id, &command)?;
             Ok(())
         }).unwrap();
-        let bound = bind_lifecycle_deployment_request(
+        let bound = persist_and_bind_lifecycle_deployment_request(
             &options, &lock, &command, &request, "2026-07-16T00:05:01Z"
+        ).unwrap();
+        let mut automatic = request.clone();
+        automatic.authority = "idunn-supervisor-command".into();
+        automatic.request_id = "automatic-interleaving-candidate".into();
+        automatic.requested_at = "2026-07-16T00:05:01Z".into();
+        let automatic = stable_deployment_request(&options, &lock, &automatic).unwrap();
+        assert_eq!(automatic.request_id, request.request_id);
+        assert_eq!(persist_current_deployment_request(&options, &lock, &automatic).unwrap().request_id, request.request_id);
+        let consequences = AtomicU64::new(0);
+        claim_verified_deployment_consequence(
+            &options,
+            &lock,
+            &request,
+            &VerifiedDeploymentGrant {
+                authorization_id: "authorization/already-issued".into(),
+                envelope_sha256: format!("sha256-{}", "7".repeat(64)),
+            },
+            "2026-07-16T00:05:02Z",
+            || {
+                consequences.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
         ).unwrap();
         let result = IdunnDeploymentResultRecord {
             result_id: format!("result:{}", request.request_id),
@@ -10724,10 +10820,11 @@ mod tests {
         assert_eq!(terminal.state, "succeeded");
         assert_eq!(terminal.result_id, result.result_id);
         assert_eq!(terminal.deployment_request_id, request.request_id);
+        assert_eq!(consequences.load(Ordering::SeqCst), 1);
         let requests = with_store_node(&options, &lock, |node| {
             Ok(node.cache().get_all::<IdunnDeploymentRequestRecord>()?)
         }).unwrap();
-        assert_eq!(requests.len(), 1);
+        assert_eq!(requests.iter().filter(|candidate| candidate.request_id == request.request_id).count(), 1);
     }
 
     #[test]
