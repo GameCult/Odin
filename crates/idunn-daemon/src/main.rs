@@ -1760,7 +1760,7 @@ fn stable_deployment_request(
             return Ok(existing);
         }
     }
-    let identity = [
+    let mut identity = vec![
         candidate.daemon_id.as_str(),
         candidate.command.as_str(),
         candidate.repository_full_name.as_str(),
@@ -1769,8 +1769,14 @@ fn stable_deployment_request(
         candidate.release_authority_id.as_str(),
         candidate.release_authority_envelope_sha256.as_str(),
         if candidate.requires_bifrost_authority { "true" } else { "false" },
-    ]
-    .join("\0");
+    ];
+    // Trigger provenance does not split a live canonical intent. Once the prior
+    // occurrence is terminal, however, an explicit manual command names a new
+    // authorized consequence generation and must not collide with old result state.
+    if candidate.authority == "idunn-supervisor-command.manual" {
+        identity.push(candidate.request_id.as_str());
+    }
+    let identity = identity.join("\0");
     let mut stable = candidate.clone();
     stable.request_id = format!(
         "deploy:{}:sha256-{:x}",
@@ -10434,26 +10440,33 @@ mod tests {
                 .ok_or_else(|| anyhow!("fixture request missing"))
         }).unwrap());
         let barrier = Arc::new(std::sync::Barrier::new(3));
+        let consequences = Arc::new(AtomicU64::new(0));
         let workers = (0..2).map(|worker| {
             let options = options.clone();
             let lock = lock.clone();
             let request = request.clone();
             let barrier = barrier.clone();
+            let consequences = consequences.clone();
             std::thread::spawn(move || {
                 barrier.wait();
-                update_deployment_head_state(
+                let outcome = update_deployment_head_state(
                     &options,
                     &lock,
                     &request,
                     "claimed",
                     &format!("worker {worker}"),
                     "2026-07-16T00:02:30Z",
-                )
+                );
+                if outcome.is_ok() {
+                    consequences.fetch_add(1, Ordering::SeqCst);
+                }
+                outcome
             })
         }).collect::<Vec<_>>();
         barrier.wait();
         let outcomes = workers.into_iter().map(|worker| worker.join().unwrap()).collect::<Vec<_>>();
         assert_eq!(outcomes.iter().filter(|outcome| outcome.is_ok()).count(), 1);
+        assert_eq!(consequences.load(Ordering::SeqCst), 1);
         let head = with_store_node(&options, &lock, |node| {
             node.get::<IdunnCurrentDeploymentRequestRecord>("yggdrasil-epiphany")?
                 .ok_or_else(|| anyhow!("fixture head missing"))
@@ -10498,6 +10511,34 @@ mod tests {
         manual.authority = "idunn-supervisor-command.manual".into();
         assert!(same_deployment_lineage(&automatic, &manual));
         assert_eq!(stable_deployment_request(&options, &lock, &manual).unwrap(), automatic);
+    }
+
+    #[test]
+    fn explicit_manual_redeploy_after_terminal_result_gets_new_occurrence() {
+        let (_message, options, _root) = signed_epiphany_health_fixture(1);
+        let lock = Arc::new(Mutex::new(()));
+        let automatic = with_store_node(&options, &lock, |node| {
+            node.get::<IdunnDeploymentRequestRecord>("deploy:yggdrasil-epiphany:fixture")?
+                .ok_or_else(|| anyhow!("fixture request missing"))
+        }).unwrap();
+        with_store_node(&options, &lock, |node| {
+            node.put(&format!("result:{}", automatic.request_id), &IdunnDeploymentResultRecord {
+                result_id: format!("result:{}", automatic.request_id),
+                request_id: automatic.request_id.clone(),
+                daemon_id: automatic.daemon_id.clone(),
+                state: "succeeded".into(),
+                detail: "terminal fixture".into(),
+                completed_at: "2026-07-16T00:04:00Z".into(),
+            })?;
+            Ok(())
+        }).unwrap();
+        let mut manual = automatic.clone();
+        manual.request_id = "manual:redeploy:yggdrasil-epiphany:command-2".into();
+        manual.requested_at = "2026-07-16T00:05:00Z".into();
+        manual.authority = "idunn-supervisor-command.manual".into();
+        let next = stable_deployment_request(&options, &lock, &manual).unwrap();
+        assert_ne!(next.request_id, automatic.request_id);
+        assert_ne!(next.request_id, manual.request_id);
     }
 
     #[test]
