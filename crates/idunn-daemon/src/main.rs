@@ -1104,12 +1104,13 @@ fn finish_target_cycle(
                 &request.request_id,
                 None,
                 |grant| {
-                    claim_deployment_head(
+                    claim_verified_deployment_consequence(
                         options,
                         store_lock,
                         request,
                         grant,
                         now,
+                        || Ok(()),
                     )
                 },
             ) {
@@ -1436,6 +1437,20 @@ fn process_lifecycle_command(
                 )?;
                 return Ok(());
             };
+            if !command.deployment_request_id.is_empty() {
+                let request = with_store_node(options, store_lock, |node| {
+                    node.get::<IdunnDeploymentRequestRecord>(&command.deployment_request_id)?
+                        .ok_or_else(|| anyhow!("bound lifecycle deployment request is absent"))
+                })?;
+                return reconcile_bound_lifecycle_deployment(
+                    target,
+                    options,
+                    store_lock,
+                    command,
+                    request,
+                    &claimed_at,
+                );
+            }
             let authorization = match authorize_release(target, options, store_lock) {
                 Ok(value) => value,
                 Err(error) => {
@@ -1467,54 +1482,22 @@ fn process_lifecycle_command(
             };
             apply_release_authorization(&mut request, &authorization);
             request = stable_deployment_request(options, store_lock, &request)?;
-            with_store_node(options, store_lock, |node| {
-                let mut waiting = command.clone();
-                waiting.state = "awaiting-authorization".to_string();
-                waiting.claimed_at.clear();
-                waiting.result_id.clear();
-                node.put(&waiting.command_id, &waiting)?;
-                Ok(())
-            })?;
-            finish_target_cycle(
+            persist_current_deployment_request(options, store_lock, &request)?;
+            let command = bind_lifecycle_deployment_request(
+                options,
+                store_lock,
+                &command,
+                &request,
+                &claimed_at,
+            )?;
+            reconcile_bound_lifecycle_deployment(
                 target,
                 options,
                 store_lock,
-                IdunnPlan {
-                    decision: IdunnKeepaliveDecisionRecord {
-                        decision_id: format!("manual:{}", command.command_id),
-                        daemon_id: target.daemon_id.clone(),
-                        action: "deploy".to_string(),
-                        reason: "operator requested deployment through the stable reconciler".to_string(),
-                        authority: "idunn-supervisor-command.manual".to_string(),
-                        decided_at: claimed_at.clone(),
-                    },
-                    deployment_request: Some(request.clone()),
-                    restart_request: None,
-                    operator_alarm: None,
-                },
+                command,
+                request,
                 &claimed_at,
             )?;
-            let result = with_store_node(options, store_lock, |node| {
-                node.get::<IdunnDeploymentResultRecord>(&format!("result:{}", request.request_id))
-            })?;
-            with_store_node(options, store_lock, |node| {
-                let mut completed = command.clone();
-                if let Some(result) = result.as_ref() {
-                    completed.state = result.state.clone();
-                    completed.claimed_at = claimed_at.clone();
-                    completed.result_id = result.result_id.clone();
-                } else {
-                    completed.state = "awaiting-authorization".to_string();
-                    completed.result_id.clear();
-                }
-                node.put(&completed.command_id, &completed)?;
-                Ok(())
-            })?;
-            println!(
-                "Idunn manual redeploy reconciled for {} request {} state {}",
-                request.daemon_id, request.request_id,
-                result.as_ref().map_or("awaiting-authorization", |value| value.state.as_str())
-            );
         }
         _ => reject_lifecycle_command(
             options,
@@ -1526,6 +1509,121 @@ fn process_lifecycle_command(
     }
 
     Ok(())
+}
+
+fn bind_lifecycle_deployment_request(
+    options: &CommonOptions,
+    store_lock: &Arc<Mutex<()>>,
+    command: &IdunnLifecycleCommandRecord,
+    request: &IdunnDeploymentRequestRecord,
+    bound_at: &str,
+) -> Result<IdunnLifecycleCommandRecord> {
+    let _guard = store_lock
+        .lock()
+        .map_err(|_| anyhow!("Idunn store lock is poisoned"))?;
+    let backing = SingleFileMessagePackBackingStore::new(&options.store_path);
+    let entries = backing.pull_all()?;
+    let command_envelope = entries.iter().find(|entry| {
+        entry.r#type == IdunnLifecycleCommandRecord::TYPE && entry.key == command.command_id
+    }).cloned().ok_or_else(|| anyhow!("lifecycle command disappeared before request binding"))?;
+    let current: IdunnLifecycleCommandRecord = rmp_serde::from_slice(&command_envelope.payload)?;
+    if !current.deployment_request_id.is_empty() {
+        if current.deployment_request_id == request.request_id {
+            return Ok(current);
+        }
+        return Err(anyhow!("lifecycle command is already bound to another deployment request"));
+    }
+    let request_envelope = entries.iter().find(|entry| {
+        entry.r#type == IdunnDeploymentRequestRecord::TYPE && entry.key == request.request_id
+    }).cloned().ok_or_else(|| anyhow!("stable deployment request is absent before lifecycle binding"))?;
+    let head_envelope = entries.iter().find(|entry| {
+        entry.r#type == IdunnCurrentDeploymentRequestRecord::TYPE && entry.key == request.daemon_id
+    }).cloned().ok_or_else(|| anyhow!("deployment head is absent before lifecycle binding"))?;
+    let head: IdunnCurrentDeploymentRequestRecord = rmp_serde::from_slice(&head_envelope.payload)?;
+    if head.request_id != request.request_id {
+        return Err(anyhow!("stable deployment request is not current before lifecycle binding"));
+    }
+    let mut bound = current;
+    bound.deployment_request_id = request.request_id.clone();
+    bound.state = "awaiting-authorization".into();
+    bound.claimed_at.clear();
+    bound.result_id.clear();
+    if !backing.compare_exchange(
+        &[
+            CultCacheExpectedEnvelope {
+                key: command.command_id.clone(),
+                r#type: IdunnLifecycleCommandRecord::TYPE.into(),
+                current: Some(command_envelope),
+            },
+            CultCacheExpectedEnvelope {
+                key: request.request_id.clone(),
+                r#type: IdunnDeploymentRequestRecord::TYPE.into(),
+                current: Some(request_envelope),
+            },
+            CultCacheExpectedEnvelope {
+                key: request.daemon_id.clone(),
+                r#type: IdunnCurrentDeploymentRequestRecord::TYPE.into(),
+                current: Some(head_envelope),
+            },
+        ],
+        &[typed_envelope(&bound.command_id, &bound, bound_at)?],
+    )? {
+        return Err(anyhow!("lifecycle deployment binding lost CAS contention"));
+    }
+    Ok(bound)
+}
+
+fn reconcile_bound_lifecycle_deployment(
+    target: &DaemonTarget,
+    options: &CommonOptions,
+    store_lock: &Arc<Mutex<()>>,
+    command: IdunnLifecycleCommandRecord,
+    request: IdunnDeploymentRequestRecord,
+    now: &str,
+) -> Result<()> {
+    if command.deployment_request_id != request.request_id {
+        return Err(anyhow!("lifecycle command/request binding is substituted"));
+    }
+    let mut result = with_store_node(options, store_lock, |node| {
+        node.get::<IdunnDeploymentResultRecord>(&format!("result:{}", request.request_id))
+    })?;
+    if result.is_none() {
+        finish_target_cycle(
+            target,
+            options,
+            store_lock,
+            IdunnPlan {
+                decision: IdunnKeepaliveDecisionRecord {
+                    decision_id: format!("manual:{}", command.command_id),
+                    daemon_id: target.daemon_id.clone(),
+                    action: "deploy".into(),
+                    reason: "operator requested deployment through the stable reconciler".into(),
+                    authority: "idunn-supervisor-command.manual".into(),
+                    decided_at: now.into(),
+                },
+                deployment_request: Some(request.clone()),
+                restart_request: None,
+                operator_alarm: None,
+            },
+            now,
+        )?;
+        result = with_store_node(options, store_lock, |node| {
+            node.get::<IdunnDeploymentResultRecord>(&format!("result:{}", request.request_id))
+        })?;
+    }
+    with_store_node(options, store_lock, |node| {
+        let mut projected = command.clone();
+        if let Some(result) = result.as_ref() {
+            projected.state = result.state.clone();
+            projected.claimed_at = now.into();
+            projected.result_id = result.result_id.clone();
+        } else {
+            projected.state = "awaiting-authorization".into();
+            projected.result_id.clear();
+        }
+        node.put(&projected.command_id, &projected)?;
+        Ok(())
+    })
 }
 
 fn reject_lifecycle_command(
@@ -1903,6 +2001,18 @@ fn claim_deployment_head(
         return Err(anyhow!("deployment claim lost CAS contention"));
     }
     Ok(())
+}
+
+fn claim_verified_deployment_consequence<T>(
+    options: &CommonOptions,
+    store_lock: &Arc<Mutex<()>>,
+    request: &IdunnDeploymentRequestRecord,
+    grant: &VerifiedDeploymentGrant,
+    claimed_at: &str,
+    consequence: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    claim_deployment_head(options, store_lock, request, grant, claimed_at)?;
+    consequence()
 }
 
 fn commit_deployment_terminal_state(
@@ -6176,6 +6286,7 @@ fn publish_lifecycle_command(
         detail: command.detail.clone(),
         claimed_at: String::new(),
         result_id: String::new(),
+        deployment_request_id: String::new(),
     };
     let store_lock = Arc::new(Mutex::new(()));
     with_store_node(options, &store_lock, |node| {
@@ -10441,26 +10552,30 @@ mod tests {
         }).unwrap());
         let barrier = Arc::new(std::sync::Barrier::new(3));
         let consequences = Arc::new(AtomicU64::new(0));
+        let grant = Arc::new(VerifiedDeploymentGrant {
+            authorization_id: "authorization/race".into(),
+            envelope_sha256: format!("sha256-{}", "9".repeat(64)),
+        });
         let workers = (0..2).map(|worker| {
             let options = options.clone();
             let lock = lock.clone();
             let request = request.clone();
             let barrier = barrier.clone();
             let consequences = consequences.clone();
+            let grant = grant.clone();
             std::thread::spawn(move || {
                 barrier.wait();
-                let outcome = update_deployment_head_state(
+                claim_verified_deployment_consequence(
                     &options,
                     &lock,
                     &request,
-                    "claimed",
-                    &format!("worker {worker}"),
+                    &grant,
                     "2026-07-16T00:02:30Z",
-                );
-                if outcome.is_ok() {
-                    consequences.fetch_add(1, Ordering::SeqCst);
-                }
-                outcome
+                    || {
+                        consequences.fetch_add(1, Ordering::SeqCst);
+                        Ok(worker)
+                    },
+                )
             })
         }).collect::<Vec<_>>();
         barrier.wait();
@@ -10472,7 +10587,7 @@ mod tests {
                 .ok_or_else(|| anyhow!("fixture head missing"))
         }).unwrap();
         assert_eq!(head.state, "claimed");
-        assert!(matches!(head.detail.as_str(), "worker 0" | "worker 1"));
+        assert_eq!(head.deployment_brake_authorization_id, grant.authorization_id);
     }
 
     #[test]
@@ -10539,6 +10654,80 @@ mod tests {
         let next = stable_deployment_request(&options, &lock, &manual).unwrap();
         assert_ne!(next.request_id, automatic.request_id);
         assert_ne!(next.request_id, manual.request_id);
+    }
+
+    #[test]
+    fn bound_lifecycle_command_converges_from_existing_terminal_result_without_replay() {
+        let (_message, mut options, _root) = signed_epiphany_health_fixture(1);
+        options.execute = false;
+        let lock = Arc::new(Mutex::new(()));
+        let request = with_store_node(&options, &lock, |node| {
+            node.get::<IdunnDeploymentRequestRecord>("deploy:yggdrasil-epiphany:fixture")?
+                .ok_or_else(|| anyhow!("fixture request missing"))
+        }).unwrap();
+        let command = IdunnLifecycleCommandRecord {
+            command_id: "manual:redeploy:yggdrasil-epiphany:crash-fixture".into(),
+            daemon_id: request.daemon_id.clone(),
+            action: "redeploy".into(),
+            state: "pending".into(),
+            requested_by: "operator/test".into(),
+            requested_at: "2026-07-16T00:05:00Z".into(),
+            detail: String::new(),
+            claimed_at: String::new(),
+            result_id: String::new(),
+            deployment_request_id: String::new(),
+        };
+        with_store_node(&options, &lock, |node| {
+            node.put(&command.command_id, &command)?;
+            Ok(())
+        }).unwrap();
+        let bound = bind_lifecycle_deployment_request(
+            &options, &lock, &command, &request, "2026-07-16T00:05:01Z"
+        ).unwrap();
+        let result = IdunnDeploymentResultRecord {
+            result_id: format!("result:{}", request.request_id),
+            request_id: request.request_id.clone(),
+            daemon_id: request.daemon_id.clone(),
+            state: "succeeded".into(),
+            detail: "deployment terminal commit survived crash".into(),
+            completed_at: "2026-07-16T00:05:02Z".into(),
+        };
+        with_store_node(&options, &lock, |node| {
+            node.put(&result.result_id, &result)?;
+            Ok(())
+        }).unwrap();
+        let target = DaemonTarget {
+            daemon_id: request.daemon_id.clone(),
+            verse_id: "fixture.local".into(),
+            name: "fixture".into(),
+            health_contract: health_contract("fixture.health", "failed"),
+            deploy_command: Some("must-not-spawn".into()),
+            restart_command: None,
+            release: None,
+            enabled: true,
+            interval_seconds: 30,
+        };
+        reconcile_bound_lifecycle_deployment(
+            &target, &options, &lock, bound.clone(), request.clone(), "2026-07-16T00:06:00Z"
+        ).unwrap();
+        let retried = with_store_node(&options, &lock, |node| {
+            node.get::<IdunnLifecycleCommandRecord>(&bound.command_id)?
+                .ok_or_else(|| anyhow!("bound command missing"))
+        }).unwrap();
+        reconcile_bound_lifecycle_deployment(
+            &target, &options, &lock, retried.clone(), request.clone(), "2026-07-16T00:07:00Z"
+        ).unwrap();
+        let terminal = with_store_node(&options, &lock, |node| {
+            node.get::<IdunnLifecycleCommandRecord>(&bound.command_id)?
+                .ok_or_else(|| anyhow!("terminal command missing"))
+        }).unwrap();
+        assert_eq!(terminal.state, "succeeded");
+        assert_eq!(terminal.result_id, result.result_id);
+        assert_eq!(terminal.deployment_request_id, request.request_id);
+        let requests = with_store_node(&options, &lock, |node| {
+            Ok(node.cache().get_all::<IdunnDeploymentRequestRecord>()?)
+        }).unwrap();
+        assert_eq!(requests.len(), 1);
     }
 
     #[test]

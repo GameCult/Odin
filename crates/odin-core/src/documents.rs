@@ -31,7 +31,7 @@ pub const IDUNN_RESTART_RESULT_SCHEMA: &str = "idunn.restart_result.v1";
 pub const IDUNN_DEPLOYMENT_REQUEST_SCHEMA: &str = "idunn.deployment_request.v2";
 pub const IDUNN_CURRENT_DEPLOYMENT_REQUEST_SCHEMA: &str = "idunn.current_deployment_request.v3";
 pub const IDUNN_DEPLOYMENT_RESULT_SCHEMA: &str = "idunn.deployment_result.v1";
-pub const IDUNN_LIFECYCLE_COMMAND_SCHEMA: &str = "idunn.lifecycle_command.v1";
+pub const IDUNN_LIFECYCLE_COMMAND_SCHEMA: &str = "idunn.lifecycle_command.v2";
 pub const IDUNN_RELEASE_TARGET_SCHEMA: &str = "idunn.release_target.v2";
 pub const IDUNN_DEPLOYMENT_ARTIFACT_SCHEMA: &str = "idunn.deployment_artifact.v2";
 pub const BIFROST_REPOSITORY_RELEASE_AUTHORITY_SCHEMA: &str =
@@ -725,7 +725,7 @@ pub struct IdunnDeploymentResultRecord {
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
 #[cultcache(
     type = "idunn.lifecycle_command",
-    schema = "idunn.lifecycle_command.v1"
+    schema = "idunn.lifecycle_command.v2"
 )]
 pub struct IdunnLifecycleCommandRecord {
     #[cultcache(key = 0)]
@@ -746,6 +746,8 @@ pub struct IdunnLifecycleCommandRecord {
     pub claimed_at: String,
     #[cultcache(key = 8, default)]
     pub result_id: String,
+    #[cultcache(key = 9, default)]
+    pub deployment_request_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
