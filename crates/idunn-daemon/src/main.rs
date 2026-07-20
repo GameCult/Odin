@@ -66,6 +66,12 @@ static IDUNN_INCARNATION_ID: OnceLock<String> = OnceLock::new();
 #[derive(Debug)]
 struct DeploymentBrakeDenied(IdunnDeploymentBrakeDenial);
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct VerifiedDeploymentGrant {
+    authorization_id: String,
+    envelope_sha256: String,
+}
+
 impl std::fmt::Display for DeploymentBrakeDenied {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "deployment-brake/{:?}", self.0)
@@ -73,6 +79,22 @@ impl std::fmt::Display for DeploymentBrakeDenied {
 }
 
 impl std::error::Error for DeploymentBrakeDenied {}
+
+#[derive(Debug)]
+struct DeploymentGrantBindingChanged;
+
+impl std::fmt::Display for DeploymentGrantBindingChanged {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("deployment-brake/grant-binding-changed")
+    }
+}
+
+impl std::error::Error for DeploymentGrantBindingChanged {}
+
+fn is_deployment_authorization_error(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<DeploymentBrakeDenied>().is_some()
+        || error.downcast_ref::<DeploymentGrantBindingChanged>().is_some()
+}
 
 fn idunn_incarnation_id() -> &'static str {
     IDUNN_INCARNATION_ID
@@ -1080,26 +1102,32 @@ fn finish_target_cycle(
                 options,
                 &request.source_revision,
                 &request.request_id,
-                || {
-                    update_deployment_head_state(
+                None,
+                |grant| {
+                    claim_deployment_head(
                         options,
                         store_lock,
                         request,
-                        "claimed",
-                        "matching deployment-brake grant claimed",
+                        grant,
                         now,
                     )
                 },
             ) {
                 let detail = format!("{error:#}");
-                update_deployment_head_state(
-                    options,
-                    store_lock,
-                    request,
-                    "awaiting-authorization",
-                    &detail,
-                    now,
-                )?;
+                if is_deployment_authorization_error(&error) {
+                    update_deployment_head_state(
+                        options,
+                        store_lock,
+                        request,
+                        "awaiting-authorization",
+                        "deployment authorization is absent or does not match",
+                        now,
+                    )?;
+                } else if detail.contains("deployment claim lost") {
+                    return Ok(());
+                } else {
+                    return Err(error.context("deployment authorization preflight failed"));
+                }
                 println!(
                     "Idunn deployment awaiting operator authorization for {} request {}: {}",
                     request.daemon_id, request.request_id, detail
@@ -1115,6 +1143,14 @@ fn finish_target_cycle(
                 now,
             )?;
             let authority_error = revalidate_deployment_request(request, options, store_lock).err();
+            update_deployment_head_state(
+                options,
+                store_lock,
+                request,
+                "executing",
+                "migration-spawning",
+                now,
+            )?;
             let migration_result = if authority_error.is_none() {
                 target
                     .release
@@ -1129,9 +1165,45 @@ fn finish_target_cycle(
                     Ok(())
                 })?;
             }
+            if migration_result
+                .as_ref()
+                .is_some_and(|result| result.state == "authorization-denied")
+            {
+                update_deployment_head_state(
+                    options,
+                    store_lock,
+                    request,
+                    "awaiting-authorization",
+                    "authorization changed before any deployment consequence",
+                    now,
+                )?;
+                return Ok(());
+            }
+            update_deployment_head_state(
+                options,
+                store_lock,
+                request,
+                "executing",
+                if migration_result.as_ref().is_some_and(|result| result.state == "succeeded") {
+                    "migration-complete"
+                } else {
+                    "deployment-spawning"
+                },
+                now,
+            )?;
             let migration_failed = migration_result
                 .as_ref()
                 .is_some_and(|result| result.state != "succeeded" && result.state != "noop");
+            if !migration_failed && authority_error.is_none() {
+                update_deployment_head_state(
+                    options,
+                    store_lock,
+                    request,
+                    "executing",
+                    "deployment-spawning",
+                    now,
+                )?;
+            }
             let mut result = if let Some(error) = authority_error {
                 IdunnDeploymentResultRecord {
                     result_id: format!("result:{}", request.request_id),
@@ -1155,6 +1227,25 @@ fn finish_target_cycle(
             } else {
                 run_deployment(request, now, options, store_lock)
             };
+            if result.state == "authorization-denied" {
+                if migration_result
+                    .as_ref()
+                    .is_some_and(|migration| migration.state == "succeeded")
+                {
+                    result.state = "consequence-unknown".into();
+                    result.detail = "authorization changed after migration consequence; deployment actuator was not spawned".into();
+                } else {
+                    update_deployment_head_state(
+                        options,
+                        store_lock,
+                        request,
+                        "awaiting-authorization",
+                        "authorization changed before any deployment consequence",
+                        now,
+                    )?;
+                    return Ok(());
+                }
+            }
             if result.state == "succeeded"
                 && let Some(release) = target.release.as_ref()
                 && release.deployed_revision_witness.is_some()
@@ -1586,6 +1677,10 @@ fn persist_current_deployment_request(
             owner_incarnation_id: idunn_incarnation_id().to_string(),
             result_state: String::new(),
             terminal_reason: String::new(),
+            deployment_brake_authorization_id: String::new(),
+            deployment_brake_envelope_sha256: String::new(),
+            execution_subphase: String::new(),
+            reason_code: "awaiting-authorization".into(),
         };
         let mut expected = vec![
             CultCacheExpectedEnvelope {
@@ -1636,7 +1731,6 @@ fn same_deployment_lineage(
 ) -> bool {
     left.daemon_id == right.daemon_id
         && left.command == right.command
-        && left.authority == right.authority
         && left.repository_full_name == right.repository_full_name
         && left.upstream_ref == right.upstream_ref
         && left.source_revision == right.source_revision
@@ -1669,7 +1763,6 @@ fn stable_deployment_request(
     let identity = [
         candidate.daemon_id.as_str(),
         candidate.command.as_str(),
-        candidate.authority.as_str(),
         candidate.repository_full_name.as_str(),
         candidate.upstream_ref.as_str(),
         candidate.source_revision.as_str(),
@@ -1713,6 +1806,8 @@ fn update_deployment_head_state(
                 | ("awaiting-authorization", "claimed")
                 | ("claimed", "executing")
                 | ("claimed", "consequence-unknown")
+                | ("executing", "awaiting-authorization")
+                | ("executing", "executing")
                 | ("executing", "succeeded" | "failed" | "consequence-unknown")
         );
         if !transition_allowed {
@@ -1720,12 +1815,27 @@ fn update_deployment_head_state(
         }
         head.state = state.to_string();
         head.detail = detail.to_string();
+        head.reason_code = match state {
+            "awaiting-authorization" => "authorization-required",
+            "claimed" => "grant-claimed",
+            "executing" => "consequence-running",
+            "succeeded" => "deployment-succeeded",
+            "failed" => "deployment-failed",
+            "consequence-unknown" => "consequence-unknown",
+            _ => "unknown",
+        }.into();
         head.updated_at = updated_at.to_string();
         if state == "claimed" {
             head.claimed_at = updated_at.to_string();
         }
         if state == "executing" {
             head.execution_started_at = updated_at.to_string();
+            head.execution_subphase = detail.to_string();
+        }
+        if state == "awaiting-authorization" {
+            head.deployment_brake_authorization_id.clear();
+            head.deployment_brake_envelope_sha256.clear();
+            head.owner_incarnation_id = idunn_incarnation_id().into();
         }
         if matches!(state, "succeeded" | "failed" | "consequence-unknown") {
             head.result_state = state.to_string();
@@ -1743,6 +1853,50 @@ fn update_deployment_head_state(
         }
     }
     Err(anyhow!("deployment head state lost repeated CAS contention"))
+}
+
+fn claim_deployment_head(
+    options: &CommonOptions,
+    store_lock: &Arc<Mutex<()>>,
+    request: &IdunnDeploymentRequestRecord,
+    grant: &VerifiedDeploymentGrant,
+    claimed_at: &str,
+) -> Result<()> {
+    let _guard = store_lock
+        .lock()
+        .map_err(|_| anyhow!("Idunn store lock is poisoned"))?;
+    let backing = SingleFileMessagePackBackingStore::new(&options.store_path);
+    let entries = backing.pull_all()?;
+    let envelope = entries
+        .into_iter()
+        .find(|entry| {
+            entry.r#type == IdunnCurrentDeploymentRequestRecord::TYPE
+                && entry.key == request.daemon_id
+        })
+        .ok_or_else(|| anyhow!("deployment head is absent"))?;
+    let mut head: IdunnCurrentDeploymentRequestRecord = rmp_serde::from_slice(&envelope.payload)?;
+    if head.request_id != request.request_id || head.state != "awaiting-authorization" {
+        return Err(anyhow!("deployment claim lost current-head ownership"));
+    }
+    head.state = "claimed".into();
+    head.reason_code = "grant-claimed".into();
+    head.detail = "matching deployment-brake grant claimed".into();
+    head.claimed_at = claimed_at.into();
+    head.updated_at = claimed_at.into();
+    head.owner_incarnation_id = idunn_incarnation_id().into();
+    head.deployment_brake_authorization_id = grant.authorization_id.clone();
+    head.deployment_brake_envelope_sha256 = grant.envelope_sha256.clone();
+    if !backing.compare_exchange(
+        &[CultCacheExpectedEnvelope {
+            key: request.daemon_id.clone(),
+            r#type: IdunnCurrentDeploymentRequestRecord::TYPE.into(),
+            current: Some(envelope),
+        }],
+        &[typed_envelope(&request.daemon_id, &head, claimed_at)?],
+    )? {
+        return Err(anyhow!("deployment claim lost CAS contention"));
+    }
+    Ok(())
 }
 
 fn commit_deployment_terminal_state(
@@ -1774,7 +1928,7 @@ fn commit_deployment_terminal_state(
             "deployment terminal commit requires the exact executing head"
         ));
     }
-    if !matches!(result.state.as_str(), "succeeded" | "failed")
+    if !matches!(result.state.as_str(), "succeeded" | "failed" | "consequence-unknown")
         || result.request_id != request.request_id
         || result.daemon_id != request.daemon_id
     {
@@ -6119,8 +6273,16 @@ fn run_deployment(
             result_id,
             request_id: request.request_id.clone(),
             daemon_id: request.daemon_id.clone(),
-            state: "failed".to_string(),
-            detail: format!("deployment command could not run: {error}"),
+            state: if is_deployment_authorization_error(&error) {
+                "authorization-denied"
+            } else {
+                "failed"
+            }.to_string(),
+            detail: if is_deployment_authorization_error(&error) {
+                "deployment authorization changed before actuator spawn".into()
+            } else {
+                format!("deployment command could not run: {error}")
+            },
             completed_at: requested_at.to_string(),
         },
     }
@@ -6214,8 +6376,16 @@ fn run_state_migration(
             result_id,
             plan_id,
             daemon_id: target.daemon_id.clone(),
-            state: "failed".to_string(),
-            detail: format!("state migration command could not run: {error}"),
+            state: if is_deployment_authorization_error(&error) {
+                "authorization-denied"
+            } else {
+                "failed"
+            }.to_string(),
+            detail: if is_deployment_authorization_error(&error) {
+                "deployment authorization changed before migration consequence".into()
+            } else {
+                format!("state migration command could not run: {error}")
+            },
             completed_at: requested_at.to_string(),
         }),
     }
@@ -6313,7 +6483,12 @@ fn run_shell(
     // An operator engage therefore wins before this gate or waits until the
     // already-authorized consequence has begun; captured release bytes cannot
     // race a later engage into a new spawn.
-    let child = with_verified_deployment_brake(options, release_id, deployment_id, || {
+    let expected_grant = if deployment.is_some() {
+        Some(load_claimed_deployment_grant(options, deployment_id)?)
+    } else {
+        None
+    };
+    let child = with_verified_deployment_brake(options, release_id, deployment_id, expected_grant.as_ref(), |_| {
         process
             .stdout(Stdio::from(stdout_file))
             .stderr(Stdio::from(stderr_file))
@@ -6336,6 +6511,32 @@ fn run_shell(
     })
 }
 
+fn load_claimed_deployment_grant(
+    options: &CommonOptions,
+    deployment_id: &str,
+) -> Result<VerifiedDeploymentGrant> {
+    let entries = SingleFileMessagePackBackingStore::new(&options.store_path).pull_all()?;
+    let mut matches = entries
+        .iter()
+        .filter(|entry| entry.r#type == IdunnCurrentDeploymentRequestRecord::TYPE)
+        .map(|entry| rmp_serde::from_slice::<IdunnCurrentDeploymentRequestRecord>(&entry.payload))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    matches.retain(|head| head.request_id == deployment_id);
+    let [head] = matches.as_slice() else {
+        return Err(anyhow!("exact claimed deployment head is absent or ambiguous"));
+    };
+    if !matches!(head.state.as_str(), "claimed" | "executing")
+        || head.deployment_brake_authorization_id.is_empty()
+        || head.deployment_brake_envelope_sha256.is_empty()
+    {
+        return Err(anyhow!("deployment head lacks a claimed grant binding"));
+    }
+    Ok(VerifiedDeploymentGrant {
+        authorization_id: head.deployment_brake_authorization_id.clone(),
+        envelope_sha256: head.deployment_brake_envelope_sha256.clone(),
+    })
+}
+
 /// The single final consequence gate. Callers may plan and persist before this,
 /// but every migration, deployment, and restart re-opens both root-owned files
 /// here, immediately before `Command::spawn`.
@@ -6353,7 +6554,8 @@ fn with_verified_deployment_brake<T>(
     options: &CommonOptions,
     release_id: &str,
     deployment_id: &str,
-    consequence: impl FnOnce() -> Result<T>,
+    expected_grant: Option<&VerifiedDeploymentGrant>,
+    consequence: impl FnOnce(&VerifiedDeploymentGrant) -> Result<T>,
 ) -> Result<T> {
     let store_path = options
         .deployment_brake_store_path
@@ -6361,8 +6563,11 @@ fn with_verified_deployment_brake<T>(
         .ok_or_else(|| anyhow!("--deployment-brake-store is required for actuation"))?;
     SingleFileMessagePackBackingStore::new(store_path)
         .with_read_only_shared_snapshot(|entries| {
-            verify_deployment_brake_snapshot(options, release_id, deployment_id, entries)?;
-            consequence()
+            let grant = verify_deployment_brake_snapshot(options, release_id, deployment_id, entries)?;
+            if expected_grant.is_some_and(|expected| expected != &grant) {
+                return Err(anyhow::Error::new(DeploymentGrantBindingChanged));
+            }
+            consequence(&grant)
         })
         .with_context(|| format!("reading deployment brake {}", store_path.display()))
 }
@@ -6372,7 +6577,7 @@ fn verify_deployment_brake_snapshot(
     release_id: &str,
     deployment_id: &str,
     entries: Vec<cultcache_rs::CultCacheEnvelope>,
-) -> Result<()> {
+) -> Result<VerifiedDeploymentGrant> {
     let anchor_path = options
         .deployment_brake_operator_anchor_path
         .as_ref()
@@ -6433,7 +6638,11 @@ fn verify_deployment_brake_snapshot(
         deployment_id,
         unix_epoch_millis()?,
     )
-    .map_err(|denial| anyhow::Error::new(DeploymentBrakeDenied(denial)))
+    .map_err(|denial| anyhow::Error::new(DeploymentBrakeDenied(denial)))?;
+    Ok(VerifiedDeploymentGrant {
+        authorization_id: observation.authorization_id.clone().unwrap_or_default(),
+        envelope_sha256: format!("sha256-{:x}", Sha256::digest(rmp_serde::to_vec(&entries[0])?)),
+    })
 }
 
 fn actuator_idunn_rudp_health_endpoint(options: &CommonOptions) -> Option<String> {
@@ -9176,6 +9385,10 @@ mod tests {
                 owner_incarnation_id: "00000000-0000-4000-8000-000000000099".into(),
                 result_state: String::new(),
                 terminal_reason: String::new(),
+                deployment_brake_authorization_id: String::new(),
+                deployment_brake_envelope_sha256: String::new(),
+                execution_subphase: String::new(),
+                reason_code: "awaiting-authorization".into(),
             };
             let mut backing = SingleFileMessagePackBackingStore::new(&store_path);
             backing
@@ -10247,6 +10460,44 @@ mod tests {
         }).unwrap();
         assert_eq!(head.state, "claimed");
         assert!(matches!(head.detail.as_str(), "worker 0" | "worker 1"));
+    }
+
+    #[test]
+    fn claim_binds_exact_grant_and_current_incarnation() {
+        let (_message, options, _root) = signed_epiphany_health_fixture(1);
+        let lock = Arc::new(Mutex::new(()));
+        let request = with_store_node(&options, &lock, |node| {
+            node.get::<IdunnDeploymentRequestRecord>("deploy:yggdrasil-epiphany:fixture")?
+                .ok_or_else(|| anyhow!("fixture request missing"))
+        }).unwrap();
+        let grant = VerifiedDeploymentGrant {
+            authorization_id: "authorization/a".into(),
+            envelope_sha256: format!("sha256-{}", "a".repeat(64)),
+        };
+        claim_deployment_head(&options, &lock, &request, &grant, "2026-07-16T00:02:00Z").unwrap();
+        let head = with_store_node(&options, &lock, |node| {
+            node.get::<IdunnCurrentDeploymentRequestRecord>(&request.daemon_id)?
+                .ok_or_else(|| anyhow!("claimed head missing"))
+        }).unwrap();
+        assert_eq!(head.deployment_brake_authorization_id, grant.authorization_id);
+        assert_eq!(head.deployment_brake_envelope_sha256, grant.envelope_sha256);
+        assert_eq!(head.owner_incarnation_id, idunn_incarnation_id());
+    }
+
+    #[test]
+    fn trigger_authority_does_not_change_canonical_deployment_intent() {
+        let (_message, options, _root) = signed_epiphany_health_fixture(1);
+        let lock = Arc::new(Mutex::new(()));
+        let automatic = with_store_node(&options, &lock, |node| {
+            node.get::<IdunnDeploymentRequestRecord>("deploy:yggdrasil-epiphany:fixture")?
+                .ok_or_else(|| anyhow!("fixture request missing"))
+        }).unwrap();
+        let mut manual = automatic.clone();
+        manual.request_id = "manual-transient-id".into();
+        manual.requested_at = "2026-07-16T00:03:00Z".into();
+        manual.authority = "idunn-supervisor-command.manual".into();
+        assert!(same_deployment_lineage(&automatic, &manual));
+        assert_eq!(stable_deployment_request(&options, &lock, &manual).unwrap(), automatic);
     }
 
     #[test]
