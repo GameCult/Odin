@@ -29,7 +29,7 @@ pub const IDUNN_KEEPALIVE_DECISION_SCHEMA: &str = "idunn.keepalive_decision.v1";
 pub const IDUNN_RESTART_REQUEST_SCHEMA: &str = "idunn.restart_request.v1";
 pub const IDUNN_RESTART_RESULT_SCHEMA: &str = "idunn.restart_result.v1";
 pub const IDUNN_DEPLOYMENT_REQUEST_SCHEMA: &str = "idunn.deployment_request.v2";
-pub const IDUNN_CURRENT_DEPLOYMENT_REQUEST_SCHEMA: &str = "idunn.current_deployment_request.v1";
+pub const IDUNN_CURRENT_DEPLOYMENT_REQUEST_SCHEMA: &str = "idunn.current_deployment_request.v2";
 pub const IDUNN_DEPLOYMENT_RESULT_SCHEMA: &str = "idunn.deployment_result.v1";
 pub const IDUNN_LIFECYCLE_COMMAND_SCHEMA: &str = "idunn.lifecycle_command.v1";
 pub const IDUNN_RELEASE_TARGET_SCHEMA: &str = "idunn.release_target.v2";
@@ -661,7 +661,7 @@ pub struct IdunnDeploymentRequestRecord {
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
 #[cultcache(
     type = "idunn.current_deployment_request",
-    schema = "idunn.current_deployment_request.v1"
+    schema = "idunn.current_deployment_request.v2"
 )]
 pub struct IdunnCurrentDeploymentRequestRecord {
     #[cultcache(key = 0)]
@@ -672,6 +672,26 @@ pub struct IdunnCurrentDeploymentRequestRecord {
     pub sequence: u64,
     #[cultcache(key = 3)]
     pub updated_at: String,
+    #[cultcache(key = 4, default)]
+    pub state: String,
+    #[cultcache(key = 5, default)]
+    pub detail: String,
+    #[cultcache(key = 6, default)]
+    pub claimed_at: String,
+    #[cultcache(key = 7, default)]
+    pub execution_started_at: String,
+    #[cultcache(key = 8, default)]
+    pub intent_sha256: String,
+    #[cultcache(key = 9, default)]
+    pub release_authority_id: String,
+    #[cultcache(key = 10, default)]
+    pub release_authority_envelope_sha256: String,
+    #[cultcache(key = 11, default)]
+    pub owner_incarnation_id: String,
+    #[cultcache(key = 12, default)]
+    pub result_state: String,
+    #[cultcache(key = 13, default)]
+    pub terminal_reason: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]

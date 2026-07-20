@@ -1224,6 +1224,24 @@ mod tests {
             ])
             .is_err()
         );
+        assert!(invoke(&[
+            "deployment-brake-status",
+            "--store", store.to_str().unwrap(),
+            "--operator-anchor", anchor.to_str().unwrap(),
+            "--runtime-id", "yggdrasil",
+            "--release-id", "commit-4",
+            "--deployment-id", "substituted",
+            "--now-unix-millis", "500",
+        ]).is_err());
+        assert!(invoke(&[
+            "deployment-brake-status",
+            "--store", store.to_str().unwrap(),
+            "--operator-anchor", anchor.to_str().unwrap(),
+            "--runtime-id", "yggdrasil",
+            "--release-id", "commit-4",
+            "--deployment-id", "request-4",
+            "--now-unix-millis", "900",
+        ]).is_err());
         Ok(())
     }
 

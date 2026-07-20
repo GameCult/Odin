@@ -10,7 +10,7 @@ use cultnet_rs::{
     CultNetRudpSendOptions, CultNetRudpSession, CultNetRudpSessionOptions,
     CultNetRudpSocketTransportConnection, CultNetRudpSocketTransportOptions, CultNetWireContract,
     GameCultProviderHealthIdentity, IDUNN_DEPLOYMENT_BRAKE_SCHEMA,
-    IdunnAuthenticatedProviderHealthProjectionPurpose, IdunnDeploymentBrakeObservation,
+    IdunnAuthenticatedProviderHealthProjectionPurpose, IdunnDeploymentBrakeDenial, IdunnDeploymentBrakeObservation,
     IdunnDeploymentBrakeOperatorIdentity, IdunnDeploymentBrakeRecord, IdunnServiceIdentity,
     IdunnSignedDaemonHealthPurpose, ServiceIdentityProfile, ServiceIdentitySignature,
     ServiceIdentitySigner, ServiceIdentityTrustAnchor, decode_cultnet_message_from_slice,
@@ -27,7 +27,7 @@ use odin_core::{
     IdunnCurrentDeploymentRequestRecord, IdunnDaemonHealthRecord,
     IdunnDaemonHealthTrustBindingRecord, IdunnDaemonSurgeryPlanRecord,
     IdunnDaemonTransportProfileRecord, IdunnDeploymentArtifactRecord, IdunnDeploymentRequestRecord,
-    IdunnDeploymentResultRecord, IdunnDesiredDaemonRecord, IdunnLifecycleCommandRecord,
+    IdunnDeploymentResultRecord, IdunnDesiredDaemonRecord, IdunnKeepaliveDecisionRecord, IdunnLifecycleCommandRecord,
     IdunnOperatorAlarmRecord, IdunnPlan, IdunnReleaseTargetRecord, IdunnRestartRequestRecord,
     IdunnRestartResultRecord, IdunnRolloutPlanRecord, IdunnRolloutResultRecord,
     IdunnRudpHealthIngressRecord, IdunnRuntimeTransportCheckRecord, IdunnSignedDaemonHealthRecord,
@@ -44,7 +44,7 @@ use std::net::{SocketAddr, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -61,6 +61,24 @@ const EPIPHANY_HEALTH_CONTRACT: &str = "epiphany.cultnet-rudp-runtime-health";
 const EPIPHANY_HEALTH_SOURCE_RUNTIME: &str = "epiphany-daemon-supervisor";
 const EPIPHANY_ADMISSION_MAX_AGE_SECONDS: u64 = 180;
 const SIGNED_DAEMON_HEALTH_TYPE: &str = "idunn.signed_daemon_health";
+static IDUNN_INCARNATION_ID: OnceLock<String> = OnceLock::new();
+
+#[derive(Debug)]
+struct DeploymentBrakeDenied(IdunnDeploymentBrakeDenial);
+
+impl std::fmt::Display for DeploymentBrakeDenied {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "deployment-brake/{:?}", self.0)
+    }
+}
+
+impl std::error::Error for DeploymentBrakeDenied {}
+
+fn idunn_incarnation_id() -> &'static str {
+    IDUNN_INCARNATION_ID
+        .get_or_init(|| uuid::Uuid::new_v4().to_string())
+        .as_str()
+}
 
 struct TargetActuationGate {
     lock: Mutex<()>,
@@ -945,7 +963,10 @@ fn run_target_cycle(
     }
     if let Some(request) = plan.deployment_request.as_mut() {
         match authorize_release(target, options, store_lock) {
-            Ok(authorization) => apply_release_authorization(request, &authorization),
+            Ok(authorization) => {
+                apply_release_authorization(request, &authorization);
+                *request = stable_deployment_request(options, store_lock, request)?;
+            }
             Err(error) => {
                 let reason = format!("deployment refused: {error:#}");
                 plan.deployment_request = None;
@@ -1055,6 +1076,44 @@ fn finish_target_cycle(
 
     if let Some(request) = &plan.deployment_request {
         if options.execute {
+            if let Err(error) = with_verified_deployment_brake(
+                options,
+                &request.source_revision,
+                &request.request_id,
+                || {
+                    update_deployment_head_state(
+                        options,
+                        store_lock,
+                        request,
+                        "claimed",
+                        "matching deployment-brake grant claimed",
+                        now,
+                    )
+                },
+            ) {
+                let detail = format!("{error:#}");
+                update_deployment_head_state(
+                    options,
+                    store_lock,
+                    request,
+                    "awaiting-authorization",
+                    &detail,
+                    now,
+                )?;
+                println!(
+                    "Idunn deployment awaiting operator authorization for {} request {}: {}",
+                    request.daemon_id, request.request_id, detail
+                );
+                return Ok(());
+            }
+            update_deployment_head_state(
+                options,
+                store_lock,
+                request,
+                "executing",
+                "deployment consequence has entered migration/actuator execution",
+                now,
+            )?;
             let authority_error = revalidate_deployment_request(request, options, store_lock).err();
             let migration_result = if authority_error.is_none() {
                 target
@@ -1114,16 +1173,15 @@ fn finish_target_cycle(
             } else {
                 None
             };
-            with_store_node(options, store_lock, |node| {
-                node.put(&result.result_id, &result)?;
-                if let Some(result) = &rollout_result {
-                    node.put(&result.result_id, result)?;
-                }
-                if let Some(alarm) = &alarm {
-                    node.put(&alarm.alarm_id, alarm)?;
-                }
-                Ok(())
-            })?;
+            commit_deployment_terminal_state(
+                options,
+                store_lock,
+                request,
+                &result,
+                rollout_result.as_ref(),
+                alarm.as_ref(),
+                now,
+            )?;
             println!(
                 "Idunn deployment {} for {}: {}",
                 result.state, result.daemon_id, result.detail
@@ -1201,7 +1259,7 @@ fn process_pending_lifecycle_commands(
         let mut commands = node.cache().get_all::<IdunnLifecycleCommandRecord>()?;
         commands.retain(|command| {
             command.daemon_id == target.daemon_id
-                && command.state == "pending"
+                && matches!(command.state.as_str(), "pending" | "awaiting-authorization")
                 && matches!(command.action.as_str(), "restart" | "redeploy")
         });
         commands.sort_by(|left, right| left.requested_at.cmp(&right.requested_at));
@@ -1317,39 +1375,54 @@ fn process_lifecycle_command(
                 requires_bifrost_authority: false,
             };
             apply_release_authorization(&mut request, &authorization);
+            request = stable_deployment_request(options, store_lock, &request)?;
             with_store_node(options, store_lock, |node| {
-                let mut running = command.clone();
-                running.state = "running".to_string();
-                running.claimed_at = claimed_at.clone();
-                node.put(&running.command_id, &running)?;
+                let mut waiting = command.clone();
+                waiting.state = "awaiting-authorization".to_string();
+                waiting.claimed_at.clear();
+                waiting.result_id.clear();
+                node.put(&waiting.command_id, &waiting)?;
                 Ok(())
             })?;
-            persist_current_deployment_request(options, store_lock, &request)?;
-            let result = if options.execute {
-                run_deployment(&request, &claimed_at, options, store_lock)
-            } else {
-                IdunnDeploymentResultRecord {
-                    result_id: format!("result:{}", request.request_id),
-                    request_id: request.request_id.clone(),
-                    daemon_id: request.daemon_id.clone(),
-                    state: "skipped".to_string(),
-                    detail: "manual redeploy command was claimed but --execute is not enabled"
-                        .to_string(),
-                    completed_at: claimed_at.clone(),
-                }
-            };
+            finish_target_cycle(
+                target,
+                options,
+                store_lock,
+                IdunnPlan {
+                    decision: IdunnKeepaliveDecisionRecord {
+                        decision_id: format!("manual:{}", command.command_id),
+                        daemon_id: target.daemon_id.clone(),
+                        action: "deploy".to_string(),
+                        reason: "operator requested deployment through the stable reconciler".to_string(),
+                        authority: "idunn-supervisor-command.manual".to_string(),
+                        decided_at: claimed_at.clone(),
+                    },
+                    deployment_request: Some(request.clone()),
+                    restart_request: None,
+                    operator_alarm: None,
+                },
+                &claimed_at,
+            )?;
+            let result = with_store_node(options, store_lock, |node| {
+                node.get::<IdunnDeploymentResultRecord>(&format!("result:{}", request.request_id))
+            })?;
             with_store_node(options, store_lock, |node| {
-                node.put(&result.result_id, &result)?;
                 let mut completed = command.clone();
-                completed.state = result.state.clone();
-                completed.claimed_at = claimed_at.clone();
-                completed.result_id = result.result_id.clone();
+                if let Some(result) = result.as_ref() {
+                    completed.state = result.state.clone();
+                    completed.claimed_at = claimed_at.clone();
+                    completed.result_id = result.result_id.clone();
+                } else {
+                    completed.state = "awaiting-authorization".to_string();
+                    completed.result_id.clear();
+                }
                 node.put(&completed.command_id, &completed)?;
                 Ok(())
             })?;
             println!(
-                "Idunn manual redeploy {} for {}: {}",
-                result.state, result.daemon_id, result.detail
+                "Idunn manual redeploy reconciled for {} request {} state {}",
+                request.daemon_id, request.request_id,
+                result.as_ref().map_or("awaiting-authorization", |value| value.state.as_str())
             );
         }
         _ => reject_lifecycle_command(
@@ -1459,6 +1532,7 @@ fn persist_current_deployment_request(
                 "existing deployment request is not the current authority head"
             ));
         }
+        let mut superseded_result = None;
         if let Some(current) = current_head.as_ref() {
             let prior_request_envelope = current_head_request_envelope
                 .as_ref()
@@ -1472,25 +1546,27 @@ fn persist_current_deployment_request(
                     "current deployment head request identity is substituted"
                 ));
             }
-            let prior_result_envelope = current_head_result_envelope.as_ref().ok_or_else(|| {
-                anyhow!(
-                    "current deployment request {} remains live; refusing supersession",
-                    current.request_id
-                )
-            })?;
-            let prior_result: IdunnDeploymentResultRecord =
-                rmp_serde::from_slice(&prior_result_envelope.payload)?;
-            if prior_result.result_id != format!("result:{}", current.request_id)
-                || prior_result.request_id != current.request_id
-                || prior_result.daemon_id != current.daemon_id
-                || !matches!(
-                    prior_result.state.as_str(),
-                    "succeeded" | "failed" | "skipped"
-                )
-            {
-                return Err(anyhow!(
-                    "current deployment request lacks an exact terminal result"
-                ));
+            if let Some(prior_result_envelope) = current_head_result_envelope.as_ref() {
+                let prior_result: IdunnDeploymentResultRecord =
+                    rmp_serde::from_slice(&prior_result_envelope.payload)?;
+                if prior_result.result_id != format!("result:{}", current.request_id)
+                    || prior_result.request_id != current.request_id
+                    || prior_result.daemon_id != current.daemon_id
+                    || !matches!(prior_result.state.as_str(), "succeeded" | "failed" | "skipped" | "consequence-unknown")
+                {
+                    return Err(anyhow!("current deployment request lacks an exact terminal result"));
+                }
+            } else if current.state == "awaiting-authorization" {
+                superseded_result = Some(IdunnDeploymentResultRecord {
+                    result_id: format!("result:{}", current.request_id),
+                    request_id: current.request_id.clone(),
+                    daemon_id: current.daemon_id.clone(),
+                    state: "skipped".to_string(),
+                    detail: format!("superseded by changed deployment intent {}", request.request_id),
+                    completed_at: request.requested_at.clone(),
+                });
+            } else {
+                return Err(anyhow!("current deployment request {} in state {} cannot be superseded", current.request_id, current.state));
             }
         }
         let head = IdunnCurrentDeploymentRequestRecord {
@@ -1500,6 +1576,16 @@ fn persist_current_deployment_request(
                 .as_ref()
                 .map_or(1, |head| head.sequence.saturating_add(1)),
             updated_at: request.requested_at.clone(),
+            state: "awaiting-authorization".to_string(),
+            detail: "deployment intent is durable and has not been authorized".to_string(),
+            claimed_at: String::new(),
+            execution_started_at: String::new(),
+            intent_sha256: format!("sha256-{:x}", Sha256::digest(rmp_serde::to_vec(request)?)),
+            release_authority_id: request.release_authority_id.clone(),
+            release_authority_envelope_sha256: request.release_authority_envelope_sha256.clone(),
+            owner_incarnation_id: idunn_incarnation_id().to_string(),
+            result_state: String::new(),
+            terminal_reason: String::new(),
         };
         let mut expected = vec![
             CultCacheExpectedEnvelope {
@@ -1525,12 +1611,16 @@ fn persist_current_deployment_request(
                 current: current_head_result_envelope,
             });
         }
+        let mut replacements = vec![
+            typed_envelope(&request.request_id, request, &request.requested_at)?,
+            typed_envelope(&head.daemon_id, &head, &request.requested_at)?,
+        ];
+        if let Some(result) = superseded_result.as_ref() {
+            replacements.push(typed_envelope(&result.result_id, result, &request.requested_at)?);
+        }
         if SingleFileMessagePackBackingStore::new(&options.store_path).compare_exchange(
             &expected,
-            &[
-                typed_envelope(&request.request_id, request, &request.requested_at)?,
-                typed_envelope(&head.daemon_id, &head, &request.requested_at)?,
-            ],
+            &replacements,
         )? {
             return Ok(head);
         }
@@ -1538,6 +1628,207 @@ fn persist_current_deployment_request(
     Err(anyhow!(
         "deployment request head lost repeated cross-process contention"
     ))
+}
+
+fn same_deployment_lineage(
+    left: &IdunnDeploymentRequestRecord,
+    right: &IdunnDeploymentRequestRecord,
+) -> bool {
+    left.daemon_id == right.daemon_id
+        && left.command == right.command
+        && left.authority == right.authority
+        && left.repository_full_name == right.repository_full_name
+        && left.upstream_ref == right.upstream_ref
+        && left.source_revision == right.source_revision
+        && left.release_authority_id == right.release_authority_id
+        && left.release_authority_envelope_sha256 == right.release_authority_envelope_sha256
+        && left.requires_bifrost_authority == right.requires_bifrost_authority
+}
+
+fn stable_deployment_request(
+    options: &CommonOptions,
+    store_lock: &Arc<Mutex<()>>,
+    candidate: &IdunnDeploymentRequestRecord,
+) -> Result<IdunnDeploymentRequestRecord> {
+    if let Some(existing) = with_store_node(options, store_lock, |node| {
+        let Some(head) = node.get::<IdunnCurrentDeploymentRequestRecord>(&candidate.daemon_id)? else {
+            return Ok(None);
+        };
+        if node
+            .get::<IdunnDeploymentResultRecord>(&format!("result:{}", head.request_id))?
+            .is_some()
+        {
+            return Ok(None);
+        }
+        node.get::<IdunnDeploymentRequestRecord>(&head.request_id)
+    })? {
+        if same_deployment_lineage(&existing, candidate) {
+            return Ok(existing);
+        }
+    }
+    let identity = [
+        candidate.daemon_id.as_str(),
+        candidate.command.as_str(),
+        candidate.authority.as_str(),
+        candidate.repository_full_name.as_str(),
+        candidate.upstream_ref.as_str(),
+        candidate.source_revision.as_str(),
+        candidate.release_authority_id.as_str(),
+        candidate.release_authority_envelope_sha256.as_str(),
+        if candidate.requires_bifrost_authority { "true" } else { "false" },
+    ]
+    .join("\0");
+    let mut stable = candidate.clone();
+    stable.request_id = format!(
+        "deploy:{}:sha256-{:x}",
+        candidate.daemon_id,
+        Sha256::digest(identity.as_bytes())
+    );
+    Ok(stable)
+}
+
+fn update_deployment_head_state(
+    options: &CommonOptions,
+    store_lock: &Arc<Mutex<()>>,
+    request: &IdunnDeploymentRequestRecord,
+    state: &str,
+    detail: &str,
+    updated_at: &str,
+) -> Result<()> {
+    let _guard = store_lock.lock().map_err(|_| anyhow!("Idunn store lock is poisoned"))?;
+    for _ in 0..8 {
+        let backing = SingleFileMessagePackBackingStore::new(&options.store_path);
+        let entries = backing.pull_all()?;
+        let envelope = entries
+            .into_iter()
+            .find(|entry| entry.r#type == IdunnCurrentDeploymentRequestRecord::TYPE && entry.key == request.daemon_id)
+            .ok_or_else(|| anyhow!("deployment head is absent"))?;
+        let mut head: IdunnCurrentDeploymentRequestRecord = rmp_serde::from_slice(&envelope.payload)?;
+        if head.request_id != request.request_id {
+            return Err(anyhow!("deployment head changed before state transition"));
+        }
+        let transition_allowed = matches!(
+            (head.state.as_str(), state),
+            ("awaiting-authorization", "awaiting-authorization")
+                | ("awaiting-authorization", "claimed")
+                | ("claimed", "executing")
+                | ("claimed", "consequence-unknown")
+                | ("executing", "succeeded" | "failed" | "consequence-unknown")
+        );
+        if !transition_allowed {
+            return Err(anyhow!("invalid deployment head transition {} -> {}", head.state, state));
+        }
+        head.state = state.to_string();
+        head.detail = detail.to_string();
+        head.updated_at = updated_at.to_string();
+        if state == "claimed" {
+            head.claimed_at = updated_at.to_string();
+        }
+        if state == "executing" {
+            head.execution_started_at = updated_at.to_string();
+        }
+        if matches!(state, "succeeded" | "failed" | "consequence-unknown") {
+            head.result_state = state.to_string();
+            head.terminal_reason = detail.to_string();
+        }
+        if backing.compare_exchange(
+            &[CultCacheExpectedEnvelope {
+                key: request.daemon_id.clone(),
+                r#type: IdunnCurrentDeploymentRequestRecord::TYPE.into(),
+                current: Some(envelope),
+            }],
+            &[typed_envelope(&request.daemon_id, &head, updated_at)?],
+        )? {
+            return Ok(());
+        }
+    }
+    Err(anyhow!("deployment head state lost repeated CAS contention"))
+}
+
+fn commit_deployment_terminal_state(
+    options: &CommonOptions,
+    store_lock: &Arc<Mutex<()>>,
+    request: &IdunnDeploymentRequestRecord,
+    result: &IdunnDeploymentResultRecord,
+    rollout_result: Option<&IdunnRolloutResultRecord>,
+    alarm: Option<&IdunnOperatorAlarmRecord>,
+    completed_at: &str,
+) -> Result<()> {
+    let _guard = store_lock
+        .lock()
+        .map_err(|_| anyhow!("Idunn store lock is poisoned"))?;
+    let backing = SingleFileMessagePackBackingStore::new(&options.store_path);
+    let entries = backing.pull_all()?;
+    let head_envelope = entries
+        .iter()
+        .find(|entry| {
+            entry.r#type == IdunnCurrentDeploymentRequestRecord::TYPE
+                && entry.key == request.daemon_id
+        })
+        .cloned()
+        .ok_or_else(|| anyhow!("deployment head is absent at terminal commit"))?;
+    let mut head: IdunnCurrentDeploymentRequestRecord =
+        rmp_serde::from_slice(&head_envelope.payload)?;
+    if head.request_id != request.request_id || head.state != "executing" {
+        return Err(anyhow!(
+            "deployment terminal commit requires the exact executing head"
+        ));
+    }
+    if !matches!(result.state.as_str(), "succeeded" | "failed")
+        || result.request_id != request.request_id
+        || result.daemon_id != request.daemon_id
+    {
+        return Err(anyhow!("deployment terminal result does not match its request"));
+    }
+
+    head.state = result.state.clone();
+    head.detail = result.detail.clone();
+    head.result_state = result.state.clone();
+    head.terminal_reason = result.detail.clone();
+    head.updated_at = completed_at.to_string();
+
+    let mut expected = vec![
+        CultCacheExpectedEnvelope {
+            key: request.daemon_id.clone(),
+            r#type: IdunnCurrentDeploymentRequestRecord::TYPE.into(),
+            current: Some(head_envelope),
+        },
+        CultCacheExpectedEnvelope {
+            key: result.result_id.clone(),
+            r#type: IdunnDeploymentResultRecord::TYPE.into(),
+            current: None,
+        },
+    ];
+    let mut replacements = vec![
+        typed_envelope(&request.daemon_id, &head, completed_at)?,
+        typed_envelope(&result.result_id, result, completed_at)?,
+    ];
+    if let Some(rollout_result) = rollout_result {
+        expected.push(CultCacheExpectedEnvelope {
+            key: rollout_result.result_id.clone(),
+            r#type: IdunnRolloutResultRecord::TYPE.into(),
+            current: None,
+        });
+        replacements.push(typed_envelope(
+            &rollout_result.result_id,
+            rollout_result,
+            completed_at,
+        )?);
+    }
+    if let Some(alarm) = alarm {
+        expected.push(CultCacheExpectedEnvelope {
+            key: alarm.alarm_id.clone(),
+            r#type: IdunnOperatorAlarmRecord::TYPE.into(),
+            current: None,
+        });
+        replacements.push(typed_envelope(&alarm.alarm_id, alarm, completed_at)?);
+    }
+    if !backing.compare_exchange(&expected, &replacements)? {
+        return Err(anyhow!(
+            "deployment terminal commit lost CAS contention; consequence was not replayed"
+        ));
+    }
+    Ok(())
 }
 
 /// On daemon startup no deployment actuator from the prior process can still
@@ -1591,6 +1882,9 @@ fn terminalize_interrupted_deployment_requests(
                 "current deployment request is substituted during startup recovery"
             ));
         }
+        if head.state == "awaiting-authorization" {
+            continue;
+        }
         let result_key = format!("result:{}", head.request_id);
         let result_matches = opening
             .iter()
@@ -1609,7 +1903,7 @@ fn terminalize_interrupted_deployment_requests(
             if result.result_id != result_key
                 || result.request_id != head.request_id
                 || result.daemon_id != head.daemon_id
-                || !matches!(result.state.as_str(), "succeeded" | "failed" | "skipped")
+                || !matches!(result.state.as_str(), "succeeded" | "failed" | "skipped" | "consequence-unknown")
             {
                 return Err(anyhow!(
                     "current deployment request lacks an exact terminal result during startup recovery"
@@ -1621,8 +1915,8 @@ fn terminalize_interrupted_deployment_requests(
             result_id: result_key.clone(),
             request_id: head.request_id.clone(),
             daemon_id: head.daemon_id.clone(),
-            state: "failed".to_string(),
-            detail: "deployment actuator was interrupted when the owning Idunn daemon incarnation stopped"
+            state: "consequence-unknown".to_string(),
+            detail: "claimed or executing deployment belonged to a prior Idunn incarnation; consequence was not replayed"
                 .to_string(),
             completed_at: completed_at.to_string(),
         };
@@ -1643,9 +1937,17 @@ fn terminalize_interrupted_deployment_requests(
                 current: None,
             },
         ];
+        let mut recovered_head = head.clone();
+        recovered_head.state = "consequence-unknown".to_string();
+        recovered_head.result_state = "consequence-unknown".to_string();
+        recovered_head.terminal_reason = result.detail.clone();
+        recovered_head.updated_at = completed_at.to_string();
         if !backing.compare_exchange(
             &expected,
-            &[typed_envelope(&result_key, &result, completed_at)?],
+            &[
+                typed_envelope(&result_key, &result, completed_at)?,
+                typed_envelope(&head.daemon_id, &recovered_head, completed_at)?,
+            ],
         )? {
             return Err(anyhow!(
                 "interrupted deployment request changed during startup recovery"
@@ -6131,7 +6433,7 @@ fn verify_deployment_brake_snapshot(
         deployment_id,
         unix_epoch_millis()?,
     )
-    .map_err(|denial| anyhow!("deployment brake denied actuation: {denial:?}"))
+    .map_err(|denial| anyhow::Error::new(DeploymentBrakeDenied(denial)))
 }
 
 fn actuator_idunn_rudp_health_endpoint(options: &CommonOptions) -> Option<String> {
@@ -8864,6 +9166,16 @@ mod tests {
                 request_id: request.request_id.clone(),
                 sequence: 1,
                 updated_at: "2026-07-19T11:59:00Z".into(),
+                state: "awaiting-authorization".into(),
+                detail: "fixture".into(),
+                claimed_at: String::new(),
+                execution_started_at: String::new(),
+                intent_sha256: format!("sha256-{}", "d".repeat(64)),
+                release_authority_id: request.release_authority_id.clone(),
+                release_authority_envelope_sha256: request.release_authority_envelope_sha256.clone(),
+                owner_incarnation_id: "00000000-0000-4000-8000-000000000099".into(),
+                result_state: String::new(),
+                terminal_reason: String::new(),
             };
             let mut backing = SingleFileMessagePackBackingStore::new(&store_path);
             backing
@@ -9745,26 +10057,16 @@ mod tests {
         .unwrap();
         newer.request_id = "deploy:yggdrasil-epiphany:aaa".into();
         newer.requested_at = "unix:1784160000".into();
-        let live_error = persist_current_deployment_request(&options, &lock, &newer)
-            .unwrap_err()
-            .to_string();
-        assert!(live_error.contains("remains live; refusing supersession"));
-        with_store_node(&options, &lock, |node| {
-            node.put(
+        let successor = persist_current_deployment_request(&options, &lock, &newer).unwrap();
+        assert_eq!(successor.sequence, 2);
+        let superseded = with_store_node(&options, &lock, |node| {
+            node.get::<IdunnDeploymentResultRecord>(
                 "result:deploy:yggdrasil-epiphany:fixture",
-                &IdunnDeploymentResultRecord {
-                    result_id: "result:deploy:yggdrasil-epiphany:fixture".into(),
-                    request_id: "deploy:yggdrasil-epiphany:fixture".into(),
-                    daemon_id: "yggdrasil-epiphany".into(),
-                    state: "succeeded".into(),
-                    detail: "fixture deployment completed".into(),
-                    completed_at: "unix:1784160001".into(),
-                },
-            )?;
-            Ok(())
+            )?
+            .ok_or_else(|| anyhow!("supersession result missing"))
         })
         .unwrap();
-        persist_current_deployment_request(&options, &lock, &newer).unwrap();
+        assert_eq!(superseded.state, "skipped");
         let stale_error = validate_health_admission_at(
             &HealthAdmissionValidationOptions {
                 daemon_id: "yggdrasil-epiphany".into(),
@@ -9807,7 +10109,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_terminalizes_interrupted_deployment_before_supersession() {
+    fn startup_preserves_waiting_and_quarantines_interrupted_consequence() {
         let (_message, options, _root) = signed_epiphany_health_fixture(1);
         let lock = Arc::new(Mutex::new(()));
         let prior = with_store_node(&options, &lock, |node| {
@@ -9819,8 +10121,22 @@ mod tests {
         assert_eq!(
             terminalize_interrupted_deployment_requests(&options, &lock, "2026-07-16T00:02:00Z",)
                 .unwrap(),
-            1
+            0
         );
+        assert!(with_store_node(&options, &lock, |node| {
+            node.get::<IdunnDeploymentResultRecord>("result:deploy:yggdrasil-epiphany:fixture")
+        }).unwrap().is_none());
+        update_deployment_head_state(
+            &options,
+            &lock,
+            &prior,
+            "claimed",
+            "fixture grant claimed",
+            "2026-07-16T00:02:30Z",
+        ).unwrap();
+        assert_eq!(terminalize_interrupted_deployment_requests(
+            &options, &lock, "2026-07-16T00:03:00Z"
+        ).unwrap(), 1);
         let result = with_store_node(&options, &lock, |node| {
             node.get::<IdunnDeploymentResultRecord>("result:deploy:yggdrasil-epiphany:fixture")?
                 .ok_or_else(|| anyhow!("recovered result missing"))
@@ -9828,25 +10144,109 @@ mod tests {
         .unwrap();
         assert_eq!(result.request_id, prior.request_id);
         assert_eq!(result.daemon_id, prior.daemon_id);
-        assert_eq!(result.state, "failed");
-        assert_eq!(result.completed_at, "2026-07-16T00:02:00Z");
+        assert_eq!(result.state, "consequence-unknown");
+        assert_eq!(result.completed_at, "2026-07-16T00:03:00Z");
         assert!(
             result
                 .detail
-                .contains("owning Idunn daemon incarnation stopped")
+                .contains("consequence was not replayed")
         );
         assert_eq!(
-            terminalize_interrupted_deployment_requests(&options, &lock, "2026-07-16T00:03:00Z",)
+            terminalize_interrupted_deployment_requests(&options, &lock, "2026-07-16T00:04:00Z",)
                 .unwrap(),
             0
         );
 
         let mut successor = prior;
         successor.request_id = "deploy:yggdrasil-epiphany:successor".into();
-        successor.requested_at = "2026-07-16T00:04:00Z".into();
+        successor.requested_at = "2026-07-16T00:05:00Z".into();
         let head = persist_current_deployment_request(&options, &lock, &successor).unwrap();
         assert_eq!(head.request_id, successor.request_id);
         assert_eq!(head.sequence, 2);
+    }
+
+    #[test]
+    fn one_hundred_planning_cycles_reuse_one_waiting_request() {
+        let (_message, options, _root) = signed_epiphany_health_fixture(1);
+        let lock = Arc::new(Mutex::new(()));
+        let original = with_store_node(&options, &lock, |node| {
+            node.get::<IdunnDeploymentRequestRecord>("deploy:yggdrasil-epiphany:fixture")?
+                .ok_or_else(|| anyhow!("fixture request missing"))
+        }).unwrap();
+        for cycle in 0..100 {
+            let mut candidate = original.clone();
+            candidate.request_id = format!("timestamp-owned-{cycle}");
+            candidate.requested_at = format!("unix:{}", 2000 + cycle);
+            let stable = stable_deployment_request(&options, &lock, &candidate).unwrap();
+            assert_eq!(stable, original);
+            assert_eq!(persist_current_deployment_request(&options, &lock, &stable).unwrap().request_id, original.request_id);
+        }
+        let heads = with_store_node(&options, &lock, |node| {
+            Ok(node.cache().get_all::<IdunnCurrentDeploymentRequestRecord>()?)
+        }).unwrap();
+        assert_eq!(heads.len(), 1);
+        assert_eq!(heads[0].state, "awaiting-authorization");
+    }
+
+    #[test]
+    fn changed_waiting_lineage_is_atomically_superseded() {
+        let (_message, options, _root) = signed_epiphany_health_fixture(1);
+        let lock = Arc::new(Mutex::new(()));
+        let prior = with_store_node(&options, &lock, |node| {
+            node.get::<IdunnDeploymentRequestRecord>("deploy:yggdrasil-epiphany:fixture")?
+                .ok_or_else(|| anyhow!("fixture request missing"))
+        }).unwrap();
+        let mut candidate = prior.clone();
+        candidate.source_revision = "e".repeat(40);
+        candidate.requested_at = "unix:3000".into();
+        candidate = stable_deployment_request(&options, &lock, &candidate).unwrap();
+        let head = persist_current_deployment_request(&options, &lock, &candidate).unwrap();
+        assert_eq!(head.sequence, 2);
+        assert_eq!(head.request_id, candidate.request_id);
+        let old = with_store_node(&options, &lock, |node| {
+            node.get::<IdunnDeploymentResultRecord>(&format!("result:{}", prior.request_id))?
+                .ok_or_else(|| anyhow!("supersession result missing"))
+        }).unwrap();
+        assert_eq!(old.state, "skipped");
+        assert!(old.detail.contains(&candidate.request_id));
+    }
+
+    #[test]
+    fn concurrent_claims_choose_one_owner() {
+        let (_message, options, _root) = signed_epiphany_health_fixture(1);
+        let options = Arc::new(options);
+        let lock = Arc::new(Mutex::new(()));
+        let request = Arc::new(with_store_node(&options, &lock, |node| {
+            node.get::<IdunnDeploymentRequestRecord>("deploy:yggdrasil-epiphany:fixture")?
+                .ok_or_else(|| anyhow!("fixture request missing"))
+        }).unwrap());
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let workers = (0..2).map(|worker| {
+            let options = options.clone();
+            let lock = lock.clone();
+            let request = request.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                update_deployment_head_state(
+                    &options,
+                    &lock,
+                    &request,
+                    "claimed",
+                    &format!("worker {worker}"),
+                    "2026-07-16T00:02:30Z",
+                )
+            })
+        }).collect::<Vec<_>>();
+        barrier.wait();
+        let outcomes = workers.into_iter().map(|worker| worker.join().unwrap()).collect::<Vec<_>>();
+        assert_eq!(outcomes.iter().filter(|outcome| outcome.is_ok()).count(), 1);
+        let head = with_store_node(&options, &lock, |node| {
+            node.get::<IdunnCurrentDeploymentRequestRecord>("yggdrasil-epiphany")?
+                .ok_or_else(|| anyhow!("fixture head missing"))
+        }).unwrap();
+        assert_eq!(head.state, "claimed");
+        assert!(matches!(head.detail.as_str(), "worker 0" | "worker 1"));
     }
 
     #[test]
