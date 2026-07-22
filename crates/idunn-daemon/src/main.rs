@@ -4269,7 +4269,6 @@ fn generic_signed_health_advances(
     candidate: &IdunnAuthenticatedDaemonHealthAdmissionRecord,
 ) -> bool {
     if existing.trust_binding_id != candidate.trust_binding_id
-        || existing.trust_binding_sha256 != candidate.trust_binding_sha256
         || existing.signer_identity_id != candidate.signer_identity_id
         || existing.daemon_id != candidate.daemon_id
     {
@@ -9664,6 +9663,19 @@ mod tests {
                 .expect("generic admission");
             assert_eq!(admission.publisher_sequence, 1);
             assert_eq!(admission.trust_binding_id, "root/test-daemon/health");
+            let mut rotated_binding = admission.clone();
+            rotated_binding.trust_binding_sha256 = format!("sha256-{}", "f".repeat(64));
+            rotated_binding.publisher_sequence += 1;
+            rotated_binding.observed_at_unix_millis += 1;
+            assert!(generic_signed_health_advances(
+                &admission,
+                &rotated_binding
+            ));
+            rotated_binding.signer_identity_id = "foreign-signer".into();
+            assert!(!generic_signed_health_advances(
+                &admission,
+                &rotated_binding
+            ));
             let statement = node
                 .get::<IdunnSignedDaemonHealthRecord>(&admission.signed_health_sha256)?
                 .expect("signed statement");
