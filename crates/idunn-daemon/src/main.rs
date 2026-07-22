@@ -670,57 +670,112 @@ fn validate_health_admission_at(
     now: &str,
 ) -> Result<()> {
     let lock = Arc::new(Mutex::new(()));
-    let admission = with_store_node(options, &lock, |node| {
-        let admission = node
-            .get::<IdunnSignedHealthAdmissionRecord>(&expected.daemon_id)?
-            .ok_or_else(|| {
-                anyhow!(
-                    "Idunn has no signed health admission for {}",
-                    expected.daemon_id
-                )
-            })?;
-        validate_admission_against_current_request(node, &admission)?;
+    let proof = with_store_node(options, &lock, |node| {
         let current_health = node
             .get::<IdunnDaemonHealthRecord>(&expected.daemon_id)?
             .ok_or_else(|| anyhow!("Idunn has no current health projection for admission"))?;
-        if current_health.state != admission.state
-            || current_health.observed_at != admission.observed_at
-            || current_health.health_contract != admission.health_contract
-            || current_health.publication_source != "daemon-published"
-            || current_health.transport != CULTNET_RUDP_PROTOCOL_ID
-        {
-            return Err(anyhow!(
-                "signed health admission is not the current daemon health observation"
-            ));
+        match current_health.publication_source.as_str() {
+            "daemon-authenticated" => {
+                let admission = node
+                    .get::<IdunnAuthenticatedDaemonHealthAdmissionRecord>(&expected.daemon_id)?
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "Idunn has no generic signed health admission for {}",
+                            expected.daemon_id
+                        )
+                    })?;
+                admission.validate()?;
+                validate_generic_release_binding(node, &admission)?;
+                let now_millis = parse_timestamp_millis(now)
+                    .ok_or_else(|| anyhow!("health admission validation clock is invalid"))?;
+                if current_health.state != admission.state
+                    || current_health.health_contract != admission.health_contract
+                    || current_health.transport != CULTNET_RUDP_PROTOCOL_ID
+                    || now_millis < admission.admitted_at_unix_millis
+                    || now_millis < admission.observed_at_unix_millis
+                    || now_millis.saturating_sub(admission.observed_at_unix_millis)
+                        > EPIPHANY_ADMISSION_MAX_AGE_SECONDS.saturating_mul(1000)
+                    || admission.state != "active"
+                    || admission.deployment_id.as_deref()
+                        != Some(expected.deployment_request_id.as_str())
+                    || admission.release_id.as_deref() != Some(expected.release_id.as_str())
+                    || admission.release_witness_sha256.as_deref()
+                        != Some(expected.release_witness_sha256.as_str())
+                    || admission.source_commit.as_deref()
+                        != Some(expected.source_commit.as_str())
+                {
+                    return Err(anyhow!(
+                        "generic signed health admission does not prove the exact active candidate"
+                    ));
+                }
+                Ok(format!(
+                    "validated generic signed Idunn health admission daemon={} state={} releaseId={} witnessSha256={} sourceCommit={} signedHealthSha256={} publisherIncarnation={} publisherSequence={}",
+                    admission.daemon_id,
+                    admission.state,
+                    admission.release_id.as_deref().unwrap_or_default(),
+                    admission.release_witness_sha256.as_deref().unwrap_or_default(),
+                    admission.source_commit.as_deref().unwrap_or_default(),
+                    admission.signed_health_sha256,
+                    admission.publisher_incarnation_id,
+                    admission.publisher_sequence,
+                ))
+            }
+            "daemon-published" => {
+                let admission = node
+                    .get::<IdunnSignedHealthAdmissionRecord>(&expected.daemon_id)?
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "Idunn has no legacy signed health admission for {}",
+                            expected.daemon_id
+                        )
+                    })?;
+                validate_admission_against_current_request(node, &admission)?;
+                if current_health.state != admission.state
+                    || current_health.observed_at != admission.observed_at
+                    || current_health.health_contract != admission.health_contract
+                    || current_health.transport != CULTNET_RUDP_PROTOCOL_ID
+                {
+                    return Err(anyhow!(
+                        "legacy signed health admission is not the current daemon health observation"
+                    ));
+                }
+                validate_admission_fresh_at(
+                    &admission,
+                    now,
+                    EPIPHANY_ADMISSION_MAX_AGE_SECONDS,
+                )?;
+                if admission.state != "active"
+                    || admission.deployment_request_id != expected.deployment_request_id
+                    || admission.release_id != expected.release_id
+                    || admission.release_witness_sha256 != expected.release_witness_sha256
+                    || admission.source_commit != expected.source_commit
+                    || admission.publisher_incarnation_id.is_empty()
+                    || admission.publisher_sequence == 0
+                    || admission.signed_health_sha256.is_empty()
+                    || admission.signer_identity_id.is_empty()
+                {
+                    return Err(anyhow!(
+                        "legacy signed health admission does not prove the exact active candidate"
+                    ));
+                }
+                Ok(format!(
+                    "validated legacy signed Idunn health admission daemon={} state={} releaseId={} witnessSha256={} sourceCommit={} signedHealthSha256={} publisherIncarnation={} publisherSequence={}",
+                    admission.daemon_id,
+                    admission.state,
+                    admission.release_id,
+                    admission.release_witness_sha256,
+                    admission.source_commit,
+                    admission.signed_health_sha256,
+                    admission.publisher_incarnation_id,
+                    admission.publisher_sequence,
+                ))
+            }
+            other => Err(anyhow!(
+                "current daemon health publication source {other:?} cannot prove deployment admission"
+            )),
         }
-        Ok(admission)
     })?;
-    validate_admission_fresh_at(&admission, now, EPIPHANY_ADMISSION_MAX_AGE_SECONDS)?;
-    if admission.state != "active"
-        || admission.deployment_request_id != expected.deployment_request_id
-        || admission.release_id != expected.release_id
-        || admission.release_witness_sha256 != expected.release_witness_sha256
-        || admission.source_commit != expected.source_commit
-        || admission.publisher_incarnation_id.is_empty()
-        || admission.publisher_sequence == 0
-        || admission.signed_health_sha256.is_empty()
-        || admission.signer_identity_id.is_empty()
-    {
-        return Err(anyhow!(
-            "Idunn admitted health does not prove the exact active candidate"
-        ));
-    }
-    println!(
-        "validated signed Idunn health admission daemon={} state={} releaseId={} witnessSha256={} sourceCommit={} signedHealthSha256={} publisherIncarnation={} publisherSequence={}",
-        admission.daemon_id,
-        admission.state,
-        admission.release_id,
-        admission.release_witness_sha256,
-        admission.source_commit,
-        admission.signed_health_sha256,
-        admission.publisher_incarnation_id,
-        admission.publisher_sequence,
-    );
+    println!("{proof}");
     Ok(())
 }
 
@@ -9739,6 +9794,31 @@ mod tests {
             document.payload[0] ^= 1;
         }
         assert!(health_from_rudp_message(&forged, &options).is_err());
+    }
+
+    #[test]
+    fn deployment_validator_uses_current_generic_signed_health_authority() {
+        let (message, options, _root) = generic_signed_health_fixture_with_release(1, true);
+        let lock = Arc::new(Mutex::new(()));
+        admit_health_from_rudp_message(
+            &message,
+            &options,
+            &lock,
+            "2026-07-19T12:00:00.500Z",
+        )
+        .unwrap();
+        validate_health_admission_at(
+            &HealthAdmissionValidationOptions {
+                daemon_id: "test-daemon".into(),
+                deployment_request_id: "deploy-test-1".into(),
+                release_id: "release-test-1".into(),
+                release_witness_sha256: format!("sha256-{}", "a".repeat(64)),
+                source_commit: "b".repeat(40),
+            },
+            &options,
+            "2026-07-19T12:00:01Z",
+        )
+        .unwrap();
     }
 
     fn projection_fixture(
