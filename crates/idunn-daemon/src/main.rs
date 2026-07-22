@@ -4166,7 +4166,29 @@ fn load_daemon_health_trust_binding(
     }
     let binding = matches
         .pop()
-        .ok_or_else(|| anyhow!("signed daemon health has no exact root trust binding"))?;
+        .ok_or_else(|| {
+            let available = entries
+                .iter()
+                .filter(|entry| entry.r#type == IdunnDaemonHealthTrustBindingRecord::TYPE)
+                .filter_map(|entry| {
+                    rmp_serde::from_slice::<IdunnDaemonHealthTrustBindingRecord>(&entry.payload)
+                        .ok()
+                })
+                .map(|binding| {
+                    format!(
+                        "{}/{}/{}",
+                        binding.daemon_id, binding.health_contract, binding.source_runtime_id
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            anyhow!(
+                "signed daemon health has no exact root trust binding for {}/{}/{}; available={available}",
+                statement.daemon_id,
+                statement.health_contract,
+                statement.source_runtime_id
+            )
+        })?;
     if !matches.is_empty() {
         return Err(anyhow!("signed daemon health trust binding is ambiguous"));
     }
