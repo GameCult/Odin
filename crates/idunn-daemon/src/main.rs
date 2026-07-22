@@ -3694,7 +3694,7 @@ fn run_rudp_health_ingress_loop(
     loop {
         match socket.recv_from(&mut buffer) {
             Ok((size, source)) => {
-                let observed_at = timestamp()?;
+                let observed_at = timestamp_with_millis();
                 if trace_ingress {
                     println!("Idunn RUDP health ingress received {size} bytes from {source}.");
                 }
@@ -7034,6 +7034,10 @@ fn timestamp() -> Result<String> {
     Ok(format!("unix:{seconds}"))
 }
 
+fn timestamp_with_millis() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
 fn unix_epoch_millis() -> Result<u64> {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -7049,6 +7053,16 @@ fn help_text() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rudp_admission_timestamp_preserves_millisecond_precision() {
+        let before = unix_epoch_millis().unwrap();
+        let timestamp = timestamp_with_millis();
+        let parsed = parse_timestamp_millis(&timestamp).unwrap();
+        let after = unix_epoch_millis().unwrap();
+        assert!(timestamp.contains('.'));
+        assert!(parsed >= before && parsed <= after);
+    }
 
     #[test]
     fn target_actuation_gate_serializes_request_owners() {
