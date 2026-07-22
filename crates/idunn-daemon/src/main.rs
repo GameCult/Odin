@@ -11093,7 +11093,7 @@ mod tests {
         )
         .unwrap_err()
         .to_string();
-        assert!(error.contains("no signed health admission"));
+        assert!(error.contains("no legacy signed health admission"));
     }
 
     #[test]
