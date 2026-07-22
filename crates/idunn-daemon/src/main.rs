@@ -938,7 +938,7 @@ fn run_target_cycle(
     projection_publisher: Option<&IdunnProjectionPublisher>,
     missing_since: &mut Option<Instant>,
 ) -> Result<()> {
-    let now = timestamp()?;
+    let now = timestamp_with_millis();
 
     let desired = IdunnDesiredDaemonRecord {
         daemon_id: target.daemon_id.clone(),
@@ -970,7 +970,7 @@ fn run_target_cycle(
     );
     let mut plan = plan_keepalive(&desired, &health, now.clone());
     if plan.restart_request.is_some() {
-        let veto_now = timestamp()?;
+        let veto_now = timestamp_with_millis();
         if let Some(fresh_health) =
             read_fresh_daemon_published_health(options, store_lock, &desired, &veto_now)?
         {
