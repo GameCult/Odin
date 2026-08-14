@@ -6,6 +6,7 @@ function defineOdinDocuments(defineDocumentType) {
   if (!defineDocumentType) {
     return {
       interfaceBindingDefinition: null,
+      eveSurfaceDefinition: null,
       idunnCommandBoundaryDefinition: null,
       idunnDaemonHealthDefinition: null,
       idunnTransportProfileDefinition: null,
@@ -25,6 +26,8 @@ function defineOdinDocuments(defineDocumentType) {
       muninnQuestAccessDefinition: null,
       muninnTelemetrySurfaceDefinition: null,
       muninnTransportProfileDefinition: null,
+      modelAtlasPublicationDefinition: null,
+      modelEntanglementProjectionDefinition: null,
       SleipnirInputMappingDefinition: null,
       aetheriaAssetManifestDefinition: null,
       aetheriaGravityViewportDefinition: null,
@@ -65,6 +68,15 @@ function defineOdinDocuments(defineDocumentType) {
       { slot: 4, memberName: "surface", typeName: "object" },
     ],
   });
+  const eveSurfaceDefinition = defineDocumentType({
+    type: "gamecult.eve.surface",
+    schemaName: "gamecult.eve.surface",
+    schemaId: "gamecult.eve.surface.v1",
+    schemaVersion: "gamecult.eve.surface.v1",
+    global: false,
+    name: (value) => value?.id || value?.surfaceId || value?.surface_id || "surface",
+    schema: parseObjectDocument("Eve surface"),
+  });
   const interfaceBindingDefinition = defineDocumentType({
     type: "gamecult.eve.interface_binding",
     schemaName: "gamecult.eve.interface_binding",
@@ -82,6 +94,24 @@ function defineOdinDocuments(defineDocumentType) {
     global: false,
     name: (value) => value?.providerId || value?.provider?.id || "provider",
     schema: parseObjectDocument("Eve provider advertisement"),
+  });
+  const modelAtlasPublicationDefinition = defineDocumentType({
+    type: "gamecult.model.atlas_publication",
+    schemaName: "gamecult.model.atlas_publication",
+    schemaId: "gamecult.model.atlas_publication.v0",
+    schemaVersion: "gamecult.model.atlas_publication.v0",
+    global: false,
+    name: (value) => value?.publicationId || value?.publication_id || value?.repositoryId || value?.repository_id || "model-atlas",
+    schema: parseObjectDocument("Model atlas publication"),
+  });
+  const modelEntanglementProjectionDefinition = defineDocumentType({
+    type: "gamecult.model.entanglement_projection",
+    schemaName: "gamecult.model.entanglement_projection",
+    schemaId: "gamecult.model.entanglement_projection.v0",
+    schemaVersion: "gamecult.model.entanglement_projection.v0",
+    global: false,
+    name: (value) => value?.projectionId || value?.projection_id || "model-entanglement",
+    schema: parseObjectDocument("Model entanglement projection"),
   });
   const interfaceLayoutDefinition = defineDocumentType({
     type: "odin.interface_layout",
@@ -445,6 +475,7 @@ function defineOdinDocuments(defineDocumentType) {
   });
 
   return {
+    eveSurfaceDefinition,
     interfaceBindingDefinition,
     interfaceLayoutDefinition,
     idunnCommandBoundaryDefinition,
@@ -465,6 +496,8 @@ function defineOdinDocuments(defineDocumentType) {
     muninnQuestAccessDefinition,
     muninnTelemetrySurfaceDefinition,
     muninnTransportProfileDefinition,
+    modelAtlasPublicationDefinition,
+    modelEntanglementProjectionDefinition,
     SleipnirInputMappingDefinition,
     aetheriaAssetManifestDefinition,
     aetheriaGravityViewportDefinition,
@@ -489,4 +522,13 @@ function defineOdinDocuments(defineDocumentType) {
   };
 }
 
-module.exports = { defineOdinDocuments };
+function documentDefinitionForSchema(documents, schemaId) {
+  return Object.values(documents || {}).find((definition) =>
+    definition?.schemaId === schemaId
+    || definition?.schemaVersion === schemaId
+    || definition?.schemaName === schemaId
+    || definition?.type === schemaId
+  ) || null;
+}
+
+module.exports = { defineOdinDocuments, documentDefinitionForSchema };

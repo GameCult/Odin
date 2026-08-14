@@ -6,7 +6,7 @@ const path = require("path");
 
 const { buildConfig, loadCultRuntime } = require("./odin/config.cjs");
 const { createCultMeshRudpDocumentServer } = require("./odin/cultnet-rudp.cjs");
-const { defineOdinDocuments } = require("./odin/documents.cjs");
+const { defineOdinDocuments, documentDefinitionForSchema } = require("./odin/documents.cjs");
 const { createInterfaceDiscovery } = require("./odin/interfaces.cjs");
 const { createIdunnRudpHealthPublisher, publishIdunnRudpHealth } = require("./odin/idunn-rudp.cjs");
 const { createLayoutStore } = require("./odin/layout.cjs");
@@ -101,19 +101,10 @@ async function main() {
 
 async function persistRudpDocumentPut(document) {
   if (!meshNodePromise || !document?.schemaId || !document?.recordKey) return;
-  const definition = documentDefinitionForSchema(document.schemaId);
+  const definition = documentDefinitionForSchema(documents, document.schemaId);
   if (!definition) return;
   const node = await meshNodePromise;
   await node.put(definition, document.recordKey, normalizeRudpPayload(document.payload));
-}
-
-function documentDefinitionForSchema(schemaId) {
-  return allDocumentDefinitions.find((definition) =>
-    definition?.schemaId === schemaId
-    || definition?.schemaVersion === schemaId
-    || definition?.schemaName === schemaId
-    || definition?.type === schemaId
-  );
 }
 
 function normalizeRudpPayload(payload) {

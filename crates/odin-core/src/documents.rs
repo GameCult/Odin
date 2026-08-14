@@ -7,9 +7,12 @@ pub const ODIN_SERVICE_SCHEMA: &str = "odin.service.v1";
 pub const ODIN_INTERFACE_SCHEMA: &str = "odin.interface.v1";
 pub const ODIN_OBSERVATION_STREAM_SCHEMA: &str = "odin.observation_stream.v1";
 pub const ODIN_TRANSLATION_ROUTE_SCHEMA: &str = "odin.translation_route.v1";
+pub const EVE_SURFACE_SCHEMA: &str = "gamecult.eve.surface.v1";
 pub const EVE_SURFACE_STATE_SCHEMA: &str = "gamecult.eve.surface_state.v1";
 pub const EVE_INTERFACE_BINDING_SCHEMA: &str = "gamecult.eve.interface_binding.v1";
 pub const EVE_PROVIDER_ADVERTISEMENT_SCHEMA: &str = "gamecult.eve.provider_advertisement.v1";
+pub const MODEL_ATLAS_PUBLICATION_SCHEMA: &str = "gamecult.model.atlas_publication.v0";
+pub const MODEL_ENTANGLEMENT_PROJECTION_SCHEMA: &str = "gamecult.model.entanglement_projection.v0";
 pub const VOIDBOT_SWARM_STATE_SNAPSHOT_SCHEMA: &str = "voidbot.swarm_state_snapshot.v1";
 pub const IDUNN_DESIRED_DAEMON_SCHEMA: &str = "idunn.desired_daemon.v1";
 pub const IDUNN_DAEMON_HEALTH_SCHEMA: &str = "idunn.daemon_health.v1";
@@ -188,6 +191,33 @@ pub struct EveSurfaceStateRecord {
     pub updated_at: String,
     #[cultcache(key = 4)]
     pub surface: Value,
+}
+
+#[derive(Clone, Debug, PartialEq, DatabaseEntry)]
+#[cultcache(type = "gamecult.eve.surface", schema = "gamecult.eve.surface.v1")]
+pub struct EveSurfaceCompatRecord {
+    #[cultcache(key = 0)]
+    pub value: Value,
+}
+
+#[derive(Clone, Debug, PartialEq, DatabaseEntry)]
+#[cultcache(
+    type = "gamecult.model.atlas_publication",
+    schema = "gamecult.model.atlas_publication.v0"
+)]
+pub struct ModelAtlasPublicationCompatRecord {
+    #[cultcache(key = 0)]
+    pub value: Value,
+}
+
+#[derive(Clone, Debug, PartialEq, DatabaseEntry)]
+#[cultcache(
+    type = "gamecult.model.entanglement_projection",
+    schema = "gamecult.model.entanglement_projection.v0"
+)]
+pub struct ModelEntanglementProjectionCompatRecord {
+    #[cultcache(key = 0)]
+    pub value: Value,
 }
 
 #[derive(Clone, Debug, PartialEq, DatabaseEntry)]
@@ -1415,9 +1445,12 @@ cultmesh_rs::cultmesh_documents!(OdinDocuments {
     OdinInterfaceRecord => ODIN_INTERFACE_SCHEMA,
     OdinObservationStreamRecord => ODIN_OBSERVATION_STREAM_SCHEMA,
     OdinTranslationRouteRecord => ODIN_TRANSLATION_ROUTE_SCHEMA,
+    EveSurfaceCompatRecord => EVE_SURFACE_SCHEMA,
     EveSurfaceStateRecord => EVE_SURFACE_STATE_SCHEMA,
     EveInterfaceBindingCompatRecord => EVE_INTERFACE_BINDING_SCHEMA,
     EveProviderAdvertisementRecord => EVE_PROVIDER_ADVERTISEMENT_SCHEMA,
+    ModelAtlasPublicationCompatRecord => MODEL_ATLAS_PUBLICATION_SCHEMA,
+    ModelEntanglementProjectionCompatRecord => MODEL_ENTANGLEMENT_PROJECTION_SCHEMA,
     VoidBotSwarmStateSnapshotCompatRecord => VOIDBOT_SWARM_STATE_SNAPSHOT_SCHEMA,
     IdunnDesiredDaemonRecord => IDUNN_DESIRED_DAEMON_SCHEMA,
     IdunnDaemonHealthRecord => IDUNN_DAEMON_HEALTH_SCHEMA,
@@ -1478,6 +1511,94 @@ mod tests {
     use super::*;
     use anyhow::Result;
     use cultmesh_rs::{CultMesh, CultMeshNodeOptions};
+    use serde_json::json;
+
+    #[test]
+    fn model_atlas_documents_round_trip_without_odin_authored_edges() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store_path = temp.path().join("model-atlas.cc");
+        let mut node = CultMesh::create_node(
+            &store_path,
+            OdinDocuments,
+            CultMeshNodeOptions {
+                runtime_id: "odin-model-atlas-test".to_string(),
+                pull_on_start: true,
+            },
+        )?;
+
+        let atlas = ModelAtlasPublicationCompatRecord {
+            value: json!({
+                "publicationId": "aetheria-atlas",
+                "repositoryId": "GameCult/Aetheria",
+                "nodes": [{ "id": "aetheria.runtime" }]
+            }),
+        };
+        let projection = ModelEntanglementProjectionCompatRecord {
+            value: json!({
+                "projectionId": "gamecult-model-entanglement",
+                "sourcePublicationIds": ["aetheria-atlas"],
+                "edges": []
+            }),
+        };
+        let surface = EveSurfaceCompatRecord {
+            value: json!({
+                "schema": EVE_SURFACE_SCHEMA,
+                "id": "gamecult.model.atlas.surface",
+                "root": { "id": "root", "kind": "dashboard", "children": [] }
+            }),
+        };
+
+        node.put("atlas:aetheria", &atlas)?;
+        node.put("entanglement:gamecult", &projection)?;
+        node.put("surface:model-atlas", &surface)?;
+
+        assert_eq!(
+            node.documents()
+                .binding("gamecult.model.atlas_publication")
+                .and_then(|binding| binding.payload_schema_version.clone())
+                .as_deref(),
+            Some(MODEL_ATLAS_PUBLICATION_SCHEMA)
+        );
+        assert_eq!(
+            node.documents()
+                .binding("gamecult.model.entanglement_projection")
+                .and_then(|binding| binding.payload_schema_version.clone())
+                .as_deref(),
+            Some(MODEL_ENTANGLEMENT_PROJECTION_SCHEMA)
+        );
+        assert_eq!(
+            node.documents()
+                .binding("gamecult.eve.surface")
+                .and_then(|binding| binding.payload_schema_version.clone())
+                .as_deref(),
+            Some(EVE_SURFACE_SCHEMA)
+        );
+        assert!(node.documents().binding("gamecult.model.unknown").is_none());
+
+        let reloaded = CultMesh::create_node(
+            &store_path,
+            OdinDocuments,
+            CultMeshNodeOptions {
+                runtime_id: "odin-model-atlas-test-reloaded".to_string(),
+                pull_on_start: true,
+            },
+        )?;
+        let reloaded_atlas = reloaded
+            .get_required::<ModelAtlasPublicationCompatRecord>("atlas:aetheria")?
+            .value;
+        let reloaded_projection = reloaded
+            .get_required::<ModelEntanglementProjectionCompatRecord>("entanglement:gamecult")?
+            .value;
+        assert!(reloaded_atlas.get("edges").is_none());
+        assert_eq!(reloaded_projection["edges"], json!([]));
+        assert_eq!(
+            reloaded
+                .get_required::<EveSurfaceCompatRecord>("surface:model-atlas")?
+                .value["id"],
+            "gamecult.model.atlas.surface"
+        );
+        Ok(())
+    }
 
     #[test]
     fn muninn_media_documents_round_trip_through_cultmesh() -> Result<()> {
