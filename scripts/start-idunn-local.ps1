@@ -1,6 +1,7 @@
 param(
   [int] $StaleAfterSeconds = 120,
-  [string] $StateDir = ""
+  [string] $StateDir = "",
+  [switch] $ObserveOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -128,11 +129,14 @@ $arguments = @(
   "--repo-root", $repoRoot,
   "--store", $storePath,
   "--rudp-health-bind", "0.0.0.0:17870",
-  "--command-timeout-seconds", "600",
-  "--execute"
+  "--command-timeout-seconds", "600"
 )
 
-if (Test-Path -LiteralPath $operatorAlarmCommand) {
+if (-not $ObserveOnly) {
+  $arguments += "--execute"
+}
+
+if (-not $ObserveOnly -and (Test-Path -LiteralPath $operatorAlarmCommand)) {
   $arguments += @("--operator-alarm-command", $operatorAlarmCommand)
 }
 
