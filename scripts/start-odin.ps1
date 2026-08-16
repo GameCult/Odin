@@ -1,5 +1,5 @@
 param(
-  [string] $StateDir = "E:\Projects\Odin\scratch\odin",
+  [string] $StateDir = "",
   [string] $CultNetRudpBind = "0.0.0.0:17871",
   [string] $IdunnRudpHealth = $(if ($env:ODIN_IDUNN_RUDP_HEALTH) { $env:ODIN_IDUNN_RUDP_HEALTH } else { $env:IDUNN_RUDP_HEALTH }),
   [string] $IdunnDaemon = "odin",
@@ -10,6 +10,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
+if ([string]::IsNullOrWhiteSpace($StateDir)) { $StateDir = Join-Path $repoRoot "scratch\odin" }
 $scriptPath = Join-Path $repoRoot "src\odin-coordinator.cjs"
 $pidPath = Join-Path $StateDir "odin.pid"
 $outLog = Join-Path $StateDir "odin.out.log"
@@ -39,7 +40,7 @@ if (Test-Path $pidPath) {
   Remove-Item -LiteralPath $pidPath -Force
 }
 
-$env:NODE_PATH = "E:\Projects\CultLib\packages"
+$env:NODE_PATH = Join-Path (Split-Path -Parent $repoRoot) "CultLib\packages"
 $args = @(
   $scriptPath,
   "--stateDir", $StateDir,

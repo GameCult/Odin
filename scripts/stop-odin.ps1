@@ -1,8 +1,10 @@
 param(
-  [string] $StateDir = "E:\Projects\Odin\scratch\odin"
+  [string] $StateDir = ""
 )
 
 $ErrorActionPreference = "Stop"
+$repoRoot = Split-Path -Parent $PSScriptRoot
+if ([string]::IsNullOrWhiteSpace($StateDir)) { $StateDir = Join-Path $repoRoot "scratch\odin" }
 
 $pidPath = Join-Path $StateDir "odin.pid"
 if (-not (Test-Path $pidPath)) {

@@ -1,11 +1,12 @@
 param(
   [int] $StaleAfterSeconds = 120,
-  [string] $StateDir = "E:\Projects\Odin\scratch\idunn"
+  [string] $StateDir = ""
 )
 
 $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
+if ([string]::IsNullOrWhiteSpace($StateDir)) { $StateDir = Join-Path $repoRoot "scratch\idunn" }
 $idunnExe = Join-Path $repoRoot "target\debug\idunn.exe"
 $operatorAlarmCommand = Join-Path $repoRoot "scripts\notify-idunn-operator-alarm.cmd"
 $pidPath = Join-Path $StateDir "idunn.pid"

@@ -1,10 +1,12 @@
 param(
-  [string] $StateDir = "E:\Projects\Odin\scratch\odin",
+  [string] $StateDir = "",
   [int] $MaxSilenceSeconds = 120,
   [string] $CultNetRudpBind = "0.0.0.0:17871"
 )
 
 $ErrorActionPreference = "Stop"
+$repoRoot = Split-Path -Parent $PSScriptRoot
+if ([string]::IsNullOrWhiteSpace($StateDir)) { $StateDir = Join-Path $repoRoot "scratch\odin" }
 
 $pidPath = Join-Path $StateDir "odin.pid"
 $outLog = Join-Path $StateDir "odin.out.log"
