@@ -2640,6 +2640,13 @@ fn parse_timestamp_millis(value: &str) -> Option<u64> {
     u64::try_from(millis).ok()
 }
 
+fn parse_admission_ceiling_millis(value: &str) -> Option<u64> {
+    if let Some(seconds) = parse_unix_timestamp(value) {
+        return seconds.checked_mul(1000)?.checked_add(999);
+    }
+    parse_timestamp_millis(value)
+}
+
 fn parse_utc_iso_timestamp_seconds(value: &str) -> Option<u64> {
     if value.len() < 19 {
         return None;
@@ -3451,7 +3458,7 @@ fn authenticate_generic_signed_health(
         },
     )
     .context("signed daemon health signature is invalid")?;
-    let admitted_at_unix_millis = parse_timestamp_millis(admitted_at)
+    let admitted_at_unix_millis = parse_admission_ceiling_millis(admitted_at)
         .ok_or_else(|| anyhow!("signed daemon health admission time is invalid"))?;
     if statement.observed_at_unix_millis > admitted_at_unix_millis
         || admitted_at_unix_millis.saturating_sub(statement.observed_at_unix_millis)
@@ -6350,6 +6357,16 @@ fn help_text() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn coarse_unix_admission_time_covers_its_whole_second() {
+        assert_eq!(parse_timestamp_millis("unix:42"), Some(42_000));
+        assert_eq!(parse_admission_ceiling_millis("unix:42"), Some(42_999));
+        assert_eq!(
+            parse_admission_ceiling_millis("2026-08-20T18:24:06.321Z"),
+            parse_timestamp_millis("2026-08-20T18:24:06.321Z")
+        );
+    }
 
     #[test]
     fn target_actuation_gate_serializes_request_owners() {
