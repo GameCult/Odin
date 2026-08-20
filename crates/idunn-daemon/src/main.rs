@@ -5599,13 +5599,9 @@ impl Options {
                 "--release-authority-store is required for yggdrasil-local release targets"
             ));
         }
-        if swarm_profile.as_deref() == Some("yggdrasil-local")
-            && common.trusted_epiphany_health_identity_store.is_none()
-        {
-            return Err(anyhow!(
-                "--trusted-epiphany-health-identity-store is required for yggdrasil-local"
-            ));
-        }
+        // Epiphany is one supervised target, not a prerequisite for Idunn.
+        // Without its migration trust anchor only Epiphany's legacy signed
+        // health is inadmissible; unrelated targets retain their authority.
         if swarm_profile.as_deref() == Some("yggdrasil-local")
             && (common.deployment_brake_store_path.is_none()
                 || common.deployment_brake_operator_anchor_path.is_none())
@@ -7675,9 +7671,7 @@ mod tests {
         assert!(
             !unit.contains("--deployment-brake-store /var/lib/gamecult/idunn/deployment-brake.cc")
         );
-        assert!(unit.contains(
-            "--trusted-epiphany-health-identity-store /etc/gamecult/idunn/epiphany-health-identity.ccmp"
-        ));
+        assert!(!unit.contains("--trusted-epiphany-health-identity-store"));
         assert!(actuator.contains("deploy:epiphany|restart:epiphany"));
         assert!(actuator.contains("/usr/local/bin/idunn validate-release-authority"));
         assert!(
