@@ -2913,7 +2913,8 @@ fn run_public_health_query_listener_loop(
             Err(error)
                 if matches!(
                     error.kind(),
-                    std::io::ErrorKind::WouldBlock
+                    std::io::ErrorKind::Interrupted
+                        | std::io::ErrorKind::WouldBlock
                         | std::io::ErrorKind::TimedOut
                         | std::io::ErrorKind::ConnectionReset
                         | std::io::ErrorKind::ConnectionAborted
@@ -3146,7 +3147,8 @@ fn run_rudp_health_ingress_loop(
             Err(error)
                 if matches!(
                     error.kind(),
-                    std::io::ErrorKind::WouldBlock
+                    std::io::ErrorKind::Interrupted
+                        | std::io::ErrorKind::WouldBlock
                         | std::io::ErrorKind::TimedOut
                         | std::io::ErrorKind::ConnectionReset
                         | std::io::ErrorKind::ConnectionAborted
