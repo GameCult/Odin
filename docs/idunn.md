@@ -99,18 +99,20 @@ Idunn now shares Odin's Rust body:
   executable manifest exists for that service under
   `/srv/odin/deploy-manifests`. It does not inherit Starfire paths, SSH keys,
   ADB authority, or Windows process ownership.
-- Release authority is explicit per target. Source-observed targets let Idunn
-  derive and freeze the desired commit from their admitted upstream ref.
-  Targets that still require a Bifrost receipt retain that separate gate; their
-  receipt fields cannot leak into a source-observed request.
-- For Epiphany, Idunn observes the explicitly admitted
-  `GameCult/Epiphany` `refs/heads/codex/epiphany-shakedown-live` ref. It derives
-  the desired release revision from the newest commit on that ref that changes
-  build or runtime source, so documentation and operator-ledger commits do not
-  impersonate a new binary generation. Idunn freezes that exact revision into
-  its typed deployment request and carries it across the narrow root actuator.
-  Bifrost does not authorize Epiphany releases. The admitted development ref is
-  a temporary shakedown boundary; changing it or promoting it to `main` is a
+- Release authority is explicit per target. Odin, Ghostlight, and Epiphany are
+  source-observed targets: Idunn derives the newest commit on each admitted ref
+  that changes build or runtime source, freezes that exact revision into its
+  typed deployment request, and carries it across the narrow root actuator.
+  Documentation, notes, state maps, ledgers, scratch state, and root Markdown
+  do not impersonate a new binary generation. The actuator independently proves
+  that the frozen commit belongs to the admitted ref, then verifies the exact
+  embedded commit and deployment witness after activation. Raw branch `HEAD` is
+  neither release authority nor a second opinion about the selected revision.
+- Targets that still require a Bifrost receipt retain that separate gate; their
+  receipt fields cannot leak into a source-observed request. Bifrost does not
+  authorize Epiphany releases. Epiphany's admitted
+  `GameCult/Epiphany` `refs/heads/codex/epiphany-shakedown-live` ref remains a
+  temporary shakedown boundary; changing it or promoting it to `main` is a
   separate source-governance act.
 
 The current typed records are:
