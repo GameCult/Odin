@@ -60,7 +60,7 @@ const EPIPHANY_SIGNED_RUNTIME_HEALTH_SCHEMA_VERSION: &str =
 const EPIPHANY_HEALTH_CONTRACT: &str = "epiphany.cultnet-rudp-runtime-health";
 const EPIPHANY_HEALTH_SOURCE_RUNTIME: &str = "epiphany-daemon-supervisor";
 const EPIPHANY_ADMISSION_MAX_AGE_SECONDS: u64 = 180;
-const SIGNED_DAEMON_HEALTH_TYPE: &str = "idunn.signed_daemon_health";
+const SIGNED_DAEMON_HEALTH_SCHEMA_ID: &str = odin_core::IDUNN_SIGNED_DAEMON_HEALTH_SCHEMA;
 
 struct TargetActuationGate {
     lock: Mutex<()>,
@@ -3696,7 +3696,7 @@ fn decode_health_from_rudp_message(
     if document.payload_encoding != CultNetRawPayloadEncoding::Messagepack {
         return Err(anyhow!("expected MessagePack raw payload encoding"));
     }
-    if document.schema_id == SIGNED_DAEMON_HEALTH_TYPE {
+    if document.schema_id == SIGNED_DAEMON_HEALTH_SCHEMA_ID {
         let (health, statement, admission) =
             authenticate_generic_signed_health(document, options, admitted_at)?;
         return Ok(DecodedHealthIngress::AuthenticatedGeneric {
@@ -9033,7 +9033,7 @@ mod tests {
         let message = CultNetMessage::DocumentPutRaw {
             message_id: format!("signed-health-{sequence}"),
             document: CultNetRawDocumentRecord {
-                schema_id: SIGNED_DAEMON_HEALTH_TYPE.into(),
+                schema_id: SIGNED_DAEMON_HEALTH_SCHEMA_ID.into(),
                 record_key: statement.daemon_id.clone(),
                 stored_at: "2026-07-19T12:00:00Z".into(),
                 payload_encoding: CultNetRawPayloadEncoding::Messagepack,
