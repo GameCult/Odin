@@ -1966,16 +1966,20 @@ fn evaluate_target_health(
     IdunnDaemonHealthRecord,
     Option<AuthenticatedProviderHealthSource>,
 )> {
-    if let Some(release) = &target.release {
-        if release.deployed_revision_witness.is_some() {
-            if let Some(health) =
-                evaluate_release_drift(target, desired, release, &SystemReleaseStatePort, now)
-            {
-                return Ok((supervisor_health_key(&desired.daemon_id), health, None));
-            }
-        }
-    }
     if let Some(managed) = read_fresh_daemon_published_health(options, store_lock, desired, now)? {
+        // Daemon-owned health decides continuity. Release inspection is a
+        // deployment concern and may refine a healthy target into a planned
+        // rollout, but an unavailable Git checkout or upstream can never mask
+        // a healthy body or prevent an unhealthy body from being restarted.
+        if health_state_is_healthy(&managed.health.state)
+            && let Some(release) = &target.release
+            && release.deployed_revision_witness.is_some()
+            && let Some(drift) =
+                evaluate_release_drift(target, desired, release, &SystemReleaseStatePort, now)
+            && drift.state == "stale-deployment"
+        {
+            return Ok((supervisor_health_key(&desired.daemon_id), drift, None));
+        }
         return Ok((
             desired.daemon_id.clone(),
             managed.health,
@@ -5738,13 +5742,7 @@ fn run_restart(
     options: &CommonOptions,
 ) -> IdunnRestartResultRecord {
     let result_id = format!("result:{}", request.request_id);
-    match run_braked_shell(
-        &request.command,
-        options,
-        &format!("restart:{}", request.daemon_id),
-        &request.request_id,
-        None,
-    ) {
+    match run_continuity_shell(&request.command, options, None) {
         Ok(output) if output.status.success() => IdunnRestartResultRecord {
             result_id,
             request_id: request.request_id.clone(),
@@ -5955,8 +5953,7 @@ fn rollout_result_record(
 fn run_shell(
     command: &str,
     options: &CommonOptions,
-    release_id: &str,
-    deployment_id: &str,
+    deployment_brake: Option<(&str, &str)>,
     deployment: Option<&IdunnDeploymentRequestRecord>,
 ) -> Result<std::process::Output> {
     let mut process = if cfg!(windows) {
@@ -6012,17 +6009,22 @@ fn run_shell(
         .with_context(|| format!("creating {}", stderr_path.display()))?;
 
     configure_command_lifetime(&mut process);
-    // Hold the root-owned authority lock from the final read through spawn.
-    // An operator engage therefore wins before this gate or waits until the
-    // already-authorized consequence has begun; captured release bytes cannot
-    // race a later engage into a new spawn.
-    let child = with_verified_deployment_brake(options, release_id, deployment_id, || {
+    let spawn = || {
         process
             .stdout(Stdio::from(stdout_file))
             .stderr(Stdio::from(stderr_file))
             .spawn()
             .with_context(|| format!("running command {command:?}"))
-    })?;
+    };
+    let child = if let Some((release_id, deployment_id)) = deployment_brake {
+        // Hold the root-owned deployment-authority lock from the final read
+        // through spawn. This gate owns artifact/configuration mutation only.
+        with_verified_deployment_brake(options, release_id, deployment_id, spawn)?
+    } else {
+        // Restarting an already-admitted body is continuity physiology. It
+        // deliberately does not consume deployment authority.
+        spawn()?
+    };
     let status = wait_for_child_status_with_timeout(
         child,
         Duration::from_secs(options.command_timeout_seconds),
@@ -6049,7 +6051,20 @@ fn run_braked_shell(
     deployment_id: &str,
     deployment: Option<&IdunnDeploymentRequestRecord>,
 ) -> Result<std::process::Output> {
-    run_shell(command, options, release_id, deployment_id, deployment)
+    run_shell(
+        command,
+        options,
+        Some((release_id, deployment_id)),
+        deployment,
+    )
+}
+
+fn run_continuity_shell(
+    command: &str,
+    options: &CommonOptions,
+    deployment: Option<&IdunnDeploymentRequestRecord>,
+) -> Result<std::process::Output> {
+    run_shell(command, options, None, deployment)
 }
 
 fn with_verified_deployment_brake<T>(
@@ -6357,6 +6372,52 @@ fn help_text() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn unconfigured_actuation_options(store_path: PathBuf) -> CommonOptions {
+        CommonOptions {
+            store_path,
+            release_authority_store_path: None,
+            deployment_brake_store_path: None,
+            deployment_brake_operator_anchor_path: None,
+            deployment_brake_runtime_id: None,
+            operator_alarm_command: None,
+            rudp_health_bind: None,
+            trusted_epiphany_health_identity_store: None,
+            daemon_health_trust_store_path: None,
+            service_identity_store_path: None,
+            public_health_store_path: None,
+            public_health_query_bind: None,
+            execute: true,
+            command_timeout_seconds: 2,
+        }
+    }
+
+    #[test]
+    fn continuity_restart_does_not_consume_deployment_brake_authority() {
+        let root = tempfile::tempdir().unwrap();
+        let options = unconfigured_actuation_options(root.path().join("idunn.cc"));
+        let request = IdunnRestartRequestRecord {
+            request_id: "restart:test:continuity".into(),
+            daemon_id: "test-daemon".into(),
+            command: "exit 0".into(),
+            authority: "idunn-supervisor-command.test".into(),
+            requested_at: "unix:100".into(),
+        };
+
+        let result = run_restart(&request, "unix:100", &options);
+
+        assert_eq!(result.state, "succeeded");
+        let deployment_error = run_braked_shell(
+            "exit 0",
+            &options,
+            "deployment-release",
+            "deployment-request",
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(deployment_error.contains("--deployment-brake-store is required"));
+    }
 
     #[test]
     fn coarse_unix_admission_time_covers_its_whole_second() {
@@ -8993,6 +9054,57 @@ mod tests {
             document.payload[0] ^= 1;
         }
         assert!(health_from_rudp_message(&forged, &options).is_err());
+    }
+
+    #[test]
+    fn unavailable_release_source_cannot_mask_authenticated_daemon_health() {
+        let (message, options, root) = generic_signed_health_fixture(1);
+        let lock = Arc::new(Mutex::new(()));
+        admit_health_from_rudp_message(&message, &options, &lock, "2026-07-19T12:00:01Z").unwrap();
+        let target = DaemonTarget {
+            daemon_id: "test-daemon".into(),
+            verse_id: "test.local".into(),
+            name: "Test daemon".into(),
+            health_contract: health_contract("test.signed-health", "failed"),
+            deploy_command: Some("deploy test".into()),
+            restart_command: Some("restart test".into()),
+            release: Some(with_deployed_revision_witness(
+                release_target(
+                    "Missing",
+                    root.path().join("missing-repository"),
+                    "restart-after-verified-build",
+                    None,
+                    "restart-required",
+                ),
+                root.path().join("missing-deployment-witness"),
+            )),
+            enabled: true,
+            interval_seconds: 30,
+        };
+        let desired = IdunnDesiredDaemonRecord {
+            daemon_id: target.daemon_id.clone(),
+            verse_id: target.verse_id.clone(),
+            name: target.name.clone(),
+            enabled: true,
+            health_command: None,
+            restart_command: target.restart_command.clone(),
+            deploy_command: target.deploy_command.clone(),
+            authority: "idunn-supervisor-command".into(),
+            max_silence_seconds: 60,
+            observed_at: "2026-07-19T12:00:02Z".into(),
+            health_contract: target.health_contract.id.clone(),
+            transport_profile_id: transport_profile_id(&target),
+            command_boundary_id: command_boundary_id(&target),
+        };
+
+        let (health_key, selected, authenticated) =
+            evaluate_target_health(&target, &options, &lock, &desired, "2026-07-19T12:00:02Z")
+                .unwrap();
+
+        assert_eq!(health_key, "test-daemon");
+        assert_eq!(selected.state, "active");
+        assert_eq!(selected.publication_source, "daemon-authenticated");
+        assert!(authenticated.is_some());
     }
 
     fn projection_fixture(

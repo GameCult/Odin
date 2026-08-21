@@ -230,6 +230,16 @@ idunn.rudp_health_ingress.v1
   restarting the stale artifact. If a target reports `dependency-unavailable`
   or `degraded`, Idunn must alarm instead of treating local deploy/restart as
   the owner.
+- Daemon-owned health is evaluated before release inspection. A missing Git
+  checkout, unreachable upstream, or unreadable deployment witness cannot mask
+  fresh authenticated health and cannot prevent an unhealthy admitted body
+  from reaching its continuity restart path. Release inspection may refine a
+  healthy body into `stale-deployment`; it does not own liveness.
+- Restarting an already-admitted installed body is continuity physiology and
+  does not consume deployment-brake authority. Artifact, configuration,
+  schema, unit, and authority-binding changes remain deployments and must pass
+  the deployment brake. A separate lifecycle brake is required if operators
+  need to suspend continuity actuation itself.
 - Idunn should fail closed when authority is unclear. Unknown ownership,
   repeated restart failure, missing command authority, or degraded health that
   needs a human becomes an operator alarm.

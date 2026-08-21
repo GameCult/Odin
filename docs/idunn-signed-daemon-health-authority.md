@@ -21,6 +21,12 @@ does not authenticate the publisher. It is diagnostic input until replaced.
 No renderer, transport peer, systemd unit, PID probe, caller boolean, or typed
 but unsigned packet owns health.
 
+Authenticated daemon health is selected before release-source inspection.
+Release state may request a rollout of an otherwise healthy body, but a missing
+checkout or upstream cannot replace the daemon's liveness statement or block
+restart of an unhealthy admitted body. Continuity restart and deployment are
+separate authorities: only the latter is gated by the deployment brake.
+
 ## Inputs
 
 The daemon-authored statement binds:
