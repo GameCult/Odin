@@ -61,6 +61,15 @@ const EPIPHANY_HEALTH_CONTRACT: &str = "epiphany.cultnet-rudp-runtime-health";
 const EPIPHANY_HEALTH_SOURCE_RUNTIME: &str = "epiphany-daemon-supervisor";
 const EPIPHANY_ADMISSION_MAX_AGE_SECONDS: u64 = 180;
 const SIGNED_DAEMON_HEALTH_SCHEMA_ID: &str = odin_core::IDUNN_SIGNED_DAEMON_HEALTH_SCHEMA;
+const DEPLOYABLE_SOURCE_PATHS: &[&str] = &[
+    ".",
+    ":(exclude)docs/**",
+    ":(exclude)notes/**",
+    ":(exclude)state/ledgers.msgpack",
+    ":(exclude)state/map.yaml",
+    ":(exclude)state/scratch*",
+    ":(exclude)*.md",
+];
 
 struct TargetActuationGate {
     lock: Mutex<()>,
@@ -4995,16 +5004,19 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 ),
                 deploy_command: Some(yggdrasil_actuator("deploy", "odin")),
                 restart_command: Some(yggdrasil_actuator("restart", "odin")),
-                release: Some(with_deployed_revision_witness(
-                    release_target_on_branch(
-                        "Odin",
-                        PathBuf::from("/srv/build/Odin"),
-                        "codex/ygg-idunn-independent-bootstrap",
-                        "restart-after-verified-build",
-                        None,
-                        "restart-required",
+                release: Some(with_source_change_pathspecs(
+                    with_deployed_revision_witness(
+                        release_target_on_branch(
+                            "Odin",
+                            PathBuf::from("/srv/build/Odin"),
+                            "codex/ygg-idunn-independent-bootstrap",
+                            "restart-after-verified-build",
+                            None,
+                            "restart-required",
+                        ),
+                        PathBuf::from("/srv/odin/deploy/deployment.env"),
                     ),
-                    PathBuf::from("/srv/odin/deploy/deployment.env"),
+                    DEPLOYABLE_SOURCE_PATHS,
                 )),
                 enabled: true,
                 interval_seconds: 30,
@@ -5019,16 +5031,19 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 ),
                 deploy_command: Some(yggdrasil_actuator("deploy", "ghostlight")),
                 restart_command: Some(yggdrasil_actuator("restart", "ghostlight")),
-                release: Some(with_deployed_revision_witness(
-                    release_target_on_branch(
-                        "Ghostlight",
-                        PathBuf::from("/srv/build/Ghostlight"),
-                        "codex/ghostlight-dungeon-mvp",
-                        "restart-after-verified-build",
-                        None,
-                        "restart-required",
+                release: Some(with_source_change_pathspecs(
+                    with_deployed_revision_witness(
+                        release_target_on_branch(
+                            "Ghostlight",
+                            PathBuf::from("/srv/build/Ghostlight"),
+                            "codex/ghostlight-dungeon-mvp",
+                            "restart-after-verified-build",
+                            None,
+                            "restart-required",
+                        ),
+                        PathBuf::from("/srv/ghostlight/deploy/deployment.env"),
                     ),
-                    PathBuf::from("/srv/ghostlight/deploy/deployment.env"),
+                    DEPLOYABLE_SOURCE_PATHS,
                 )),
                 // The admitted native body now publishes authenticated health;
                 // Idunn owns its continuity and later release deployment.
@@ -5091,15 +5106,7 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                         ),
                         PathBuf::from("/srv/epiphany/deploy/deployment.env"),
                     ),
-                    &[
-                        ".",
-                        ":(exclude)docs/**",
-                        ":(exclude)notes/**",
-                        ":(exclude)state/ledgers.msgpack",
-                        ":(exclude)state/map.yaml",
-                        ":(exclude)state/scratch*",
-                        ":(exclude)*.md",
-                    ],
+                    DEPLOYABLE_SOURCE_PATHS,
                 )),
                 enabled: true,
                 interval_seconds: 300,
@@ -6560,6 +6567,69 @@ mod tests {
     }
 
     #[test]
+    fn deployable_source_authority_ignores_documentation_only_commits() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().to_path_buf();
+        let git = |args: &[&str]| {
+            let status = Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git command failed: {args:?}");
+        };
+
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.email", "idunn-test@gamecult.org"]);
+        git(&["config", "user.name", "Idunn Test"]);
+        fs::create_dir_all(repo.join("crates/runtime")).unwrap();
+        fs::write(repo.join("crates/runtime/lib.rs"), "pub fn live() {}\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "runtime"]);
+        let runtime_commit = git_revision(&repo, "HEAD").unwrap();
+
+        fs::create_dir_all(repo.join("docs")).unwrap();
+        fs::write(repo.join("docs/status.md"), "runtime is live\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "docs"]);
+        let documentation_commit = git_revision(&repo, "HEAD").unwrap();
+        assert_ne!(documentation_commit, runtime_commit);
+        git(&[
+            "update-ref",
+            "refs/remotes/origin/main",
+            &documentation_commit,
+        ]);
+
+        let release = with_source_change_pathspecs(
+            release_target("Test", repo.clone(), "restart", None, "restart"),
+            DEPLOYABLE_SOURCE_PATHS,
+        );
+        assert_eq!(
+            SystemReleaseStatePort.desired_revision(&release).unwrap(),
+            runtime_commit
+        );
+
+        fs::write(
+            repo.join("crates/runtime/lib.rs"),
+            "pub fn live() { println!(\"awake\"); }\n",
+        )
+        .unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "runtime change"]);
+        let changed_runtime_commit = git_revision(&repo, "HEAD").unwrap();
+        git(&[
+            "update-ref",
+            "refs/remotes/origin/main",
+            &changed_runtime_commit,
+        ]);
+        assert_eq!(
+            SystemReleaseStatePort.desired_revision(&release).unwrap(),
+            changed_runtime_commit
+        );
+    }
+
+    #[test]
     fn target_actuation_gate_serializes_request_owners() {
         let gate = Arc::new(TargetActuationGate::new());
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
@@ -7971,6 +8041,7 @@ mod tests {
                 Some(PathBuf::from(witness))
             );
             assert!(!release.requires_bifrost_authority);
+            assert_eq!(release.source_change_pathspecs, DEPLOYABLE_SOURCE_PATHS);
             assert!(target.enabled);
         }
 
