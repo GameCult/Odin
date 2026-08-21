@@ -7814,6 +7814,8 @@ mod tests {
             "--release-authority-store /srv/bifrost/state/repository-release-authority.cc"
         ));
         assert!(unit.contains("--command-timeout-seconds 21600"));
+        assert!(unit.contains("--repo-root /var/lib/gamecult/idunn"));
+        assert!(!unit.contains("--repo-root /srv/odin/source"));
         assert!(unit.contains(
             "--deployment-brake-store /var/lib/gamecult/idunn-authority/deployment-brake.cc"
         ));

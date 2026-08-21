@@ -243,6 +243,9 @@ idunn.rudp_health_ingress.v1
   schema, unit, and authority-binding changes remain deployments and must pass
   the deployment brake. A separate lifecycle brake is required if operators
   need to suspend continuity actuation itself.
+- Yggdrasil's `--repo-root` is Idunn-owned state, not Odin's live release.
+  The hosted profile uses explicit build-repository and root-manifest paths;
+  Idunn startup and recovery therefore do not read `/srv/odin/current`.
 - Idunn should fail closed when authority is unclear. Unknown ownership,
   repeated restart failure, missing command authority, or degraded health that
   needs a human becomes an operator alarm.
