@@ -6481,11 +6481,14 @@ fn command_output_path(kind: &str) -> Result<PathBuf> {
 }
 
 fn timestamp() -> Result<String> {
-    let seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .context("system clock is before Unix epoch")?
-        .as_secs();
-    Ok(format!("unix:{seconds}"))
+    timestamp_from_unix_millis(unix_epoch_millis()?)
+}
+
+fn timestamp_from_unix_millis(millis: u64) -> Result<String> {
+    let millis = i64::try_from(millis).context("system clock milliseconds exceeded i64")?;
+    let timestamp = chrono::DateTime::from_timestamp_millis(millis)
+        .ok_or_else(|| anyhow!("system clock milliseconds are out of range"))?;
+    Ok(timestamp.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
 }
 
 fn unix_epoch_millis() -> Result<u64> {
@@ -6564,6 +6567,15 @@ mod tests {
             parse_admission_ceiling_millis("2026-08-20T18:24:06.321Z"),
             parse_timestamp_millis("2026-08-20T18:24:06.321Z")
         );
+    }
+
+    #[test]
+    fn runtime_timestamp_preserves_the_health_admission_millisecond() {
+        let timestamp = timestamp_from_unix_millis(42_123).unwrap();
+
+        assert_eq!(timestamp, "1970-01-01T00:00:42.123Z");
+        assert_eq!(parse_timestamp_millis(&timestamp), Some(42_123));
+        assert_eq!(parse_admission_ceiling_millis(&timestamp), Some(42_123));
     }
 
     #[test]
