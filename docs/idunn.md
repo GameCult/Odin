@@ -99,23 +99,19 @@ Idunn now shares Odin's Rust body:
   executable manifest exists for that service under
   `/srv/odin/deploy-manifests`. It does not inherit Starfire paths, SSH keys,
   ADB authority, or Windows process ownership.
-- Release authorization is adopted per target. Epiphany requires an exact
-  `bifrost.repository_release_authority.v1` receipt from the explicitly
-  configured Bifrost store before migration or deployment; its request,
-  artifact, and remote manifest lineage freeze that authorized commit. The
-  older Yggdrasil targets remain marked `legacy-unmigrated` until Bifrost
-  authorities are issued for them, so installing the Epiphany gate does not
-  silently disable their existing lifecycle paths. Git branch position alone
-  never satisfies the Epiphany gate.
-- For Epiphany, Bifrost's one current authorized record for
-  `GameCult/Epiphany` and `refs/heads/main` selects the release commit. The
-  current remote branch head is observed separately and may advance without
-  changing an already authorized deployment. Zero or multiple current
-  authorities fail closed. Idunn freezes the selected SHA and receipt digest
-  into the deployment request, then the root Yggdrasil actuator invokes
-  Idunn's narrow `validate-release-authority` posture against the live Bifrost
-  store immediately before the service manifest executes. Environment values
-  carry lineage across sudo; they do not grant it.
+- Release authority is explicit per target. Source-observed targets let Idunn
+  derive and freeze the desired commit from their admitted upstream ref.
+  Targets that still require a Bifrost receipt retain that separate gate; their
+  receipt fields cannot leak into a source-observed request.
+- For Epiphany, Idunn observes the explicitly admitted
+  `GameCult/Epiphany` `refs/heads/codex/epiphany-shakedown-live` ref. It derives
+  the desired release revision from the newest commit on that ref that changes
+  build or runtime source, so documentation and operator-ledger commits do not
+  impersonate a new binary generation. Idunn freezes that exact revision into
+  its typed deployment request and carries it across the narrow root actuator.
+  Bifrost does not authorize Epiphany releases. The admitted development ref is
+  a temporary shakedown boundary; changing it or promoting it to `main` is a
+  separate source-governance act.
 
 The current typed records are:
 

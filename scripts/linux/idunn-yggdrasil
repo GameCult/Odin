@@ -19,8 +19,8 @@ compose=/srv/compose/yggdrasil-apps.yaml
 
 require_release_lineage() {
   case "$target" in
-    epiphany|bifrost-persona-feedback) target_requires_bifrost_authority=true ;;
-    voidbot|heimdall|repixelizer|streampixels|odin|ghostlight) target_requires_bifrost_authority=false ;;
+    bifrost-persona-feedback) target_requires_bifrost_authority=true ;;
+    epiphany|voidbot|heimdall|repixelizer|streampixels|odin|ghostlight) target_requires_bifrost_authority=false ;;
     *) echo "deployment target has no release-authority policy: $target" >&2; exit 1 ;;
   esac
   if [ "$requires_bifrost_authority" != "$target_requires_bifrost_authority" ]; then
@@ -52,8 +52,8 @@ require_release_lineage() {
         --release-authority-sha256 "$release_authority_sha256"
       ;;
     false)
-      [ -z "$release_authority_id" ] || { echo "legacy release cannot claim Bifrost authority id" >&2; exit 1; }
-      [ -z "$release_authority_sha256" ] || { echo "legacy release cannot claim Bifrost authority digest" >&2; exit 1; }
+      [ -z "$release_authority_id" ] || { echo "source-observed release cannot claim Bifrost authority id" >&2; exit 1; }
+      [ -z "$release_authority_sha256" ] || { echo "source-observed release cannot claim Bifrost authority digest" >&2; exit 1; }
       ;;
     *) echo "invalid Bifrost authority requirement mode" >&2; exit 1 ;;
   esac

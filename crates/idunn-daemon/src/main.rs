@@ -167,6 +167,7 @@ struct ReleaseTarget {
     zero_downtime_capability: String,
     deployed_revision_witness: Option<PathBuf>,
     requires_bifrost_authority: bool,
+    source_change_pathspecs: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -434,13 +435,17 @@ struct SystemReleaseStatePort;
 
 impl ReleaseStatePort for SystemReleaseStatePort {
     fn fetch(&self, release: &ReleaseTarget) -> Result<()> {
+        let fetch_refspec = format!(
+            "refs/heads/{}:refs/remotes/{}/{}",
+            release.upstream_branch, release.upstream_remote, release.upstream_branch
+        );
         let status = Command::new("git")
             .arg("-C")
             .arg(&release.repo_path)
             .arg("fetch")
             .arg("--quiet")
             .arg(&release.upstream_remote)
-            .arg(&release.upstream_branch)
+            .arg(&fetch_refspec)
             .status()
             .with_context(|| {
                 format!(
@@ -457,17 +462,44 @@ impl ReleaseStatePort for SystemReleaseStatePort {
     }
 
     fn desired_revision(&self, release: &ReleaseTarget) -> Result<String> {
-        git_revision(
-            &release.repo_path,
-            &format!("{}/{}", release.upstream_remote, release.upstream_branch),
-        )
-        .ok_or_else(|| {
-            anyhow!(
-                "cannot resolve {}/{}",
-                release.upstream_remote,
-                release.upstream_branch
-            )
-        })
+        let upstream = format!("{}/{}", release.upstream_remote, release.upstream_branch);
+        if release.source_change_pathspecs.is_empty() {
+            return git_revision(&release.repo_path, &upstream).ok_or_else(|| {
+                anyhow!(
+                    "cannot resolve {}/{}",
+                    release.upstream_remote,
+                    release.upstream_branch
+                )
+            });
+        }
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&release.repo_path)
+            .arg("log")
+            .arg("-1")
+            .arg("--format=%H")
+            .arg(&upstream)
+            .arg("--")
+            .args(&release.source_change_pathspecs)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .with_context(|| {
+                format!(
+                    "resolving source-changing revision for {}/{}",
+                    release.upstream_remote, release.upstream_branch
+                )
+            })?;
+        if !output.status.success() {
+            return Err(anyhow!(
+                "git log exited with {} while resolving source-changing revision: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        let revision = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        validate_commit_sha(&revision)?;
+        Ok(revision)
     }
 
     fn deployed_revision(&self, release: &ReleaseTarget) -> Result<String> {
@@ -1816,7 +1848,7 @@ fn revalidate_deployment_request(
             || !request.release_authority_envelope_sha256.is_empty()
         {
             return Err(anyhow!(
-                "legacy release request cannot carry Bifrost authority claims"
+                "source-observed release request cannot carry Bifrost authority claims"
             ));
         }
         return Ok(());
@@ -3643,11 +3675,16 @@ fn validate_generic_release_binding(
     let request = node
         .get::<IdunnDeploymentRequestRecord>(deployment_id)?
         .ok_or_else(|| anyhow!("signed daemon health names an unknown deployment request"))?;
+    let authority_shape_is_valid = if request.requires_bifrost_authority {
+        !request.release_authority_id.trim().is_empty()
+            && !request.release_authority_envelope_sha256.trim().is_empty()
+    } else {
+        request.release_authority_id.is_empty()
+            && request.release_authority_envelope_sha256.is_empty()
+    };
     if request.daemon_id != admission.daemon_id
         || admission.source_commit.as_deref() != Some(request.source_revision.as_str())
-        || !request.requires_bifrost_authority
-        || request.release_authority_id.trim().is_empty()
-        || request.release_authority_envelope_sha256.trim().is_empty()
+        || !authority_shape_is_valid
     {
         return Err(anyhow!(
             "signed daemon health deployment authority is invalid"
@@ -3933,14 +3970,14 @@ fn validate_admission_against_current_request(
         .ok_or_else(|| anyhow!("signed health names an unknown deployment request"))?;
     if request.daemon_id != admission.daemon_id
         || request.source_revision != admission.source_commit
-        || !request.requires_bifrost_authority
         || request.repository_full_name != "GameCult/Epiphany"
-        || request.upstream_ref != "refs/heads/main"
-        || request.release_authority_id.trim().is_empty()
-        || request.release_authority_envelope_sha256.trim().is_empty()
+        || request.upstream_ref != "refs/heads/codex/epiphany-shakedown-live"
+        || request.requires_bifrost_authority
+        || !request.release_authority_id.is_empty()
+        || !request.release_authority_envelope_sha256.is_empty()
     {
         return Err(anyhow!(
-            "signed health does not match an exact Bifrost-authorized Epiphany deployment request"
+            "signed health does not match an exact Idunn source-observed Epiphany deployment request"
         ));
     }
     let request_time = parse_timestamp_seconds(&request.requested_at)
@@ -4154,6 +4191,7 @@ fn release_target(
         zero_downtime_capability: zero_downtime_capability.to_string(),
         deployed_revision_witness: None,
         requires_bifrost_authority: false,
+        source_change_pathspecs: Vec::new(),
     }
 }
 
@@ -4183,6 +4221,11 @@ fn requiring_bifrost_authority(mut release: ReleaseTarget) -> ReleaseTarget {
 
 fn with_deployed_revision_witness(mut release: ReleaseTarget, path: PathBuf) -> ReleaseTarget {
     release.deployed_revision_witness = Some(path);
+    release
+}
+
+fn with_source_change_pathspecs(mut release: ReleaseTarget, pathspecs: &[&str]) -> ReleaseTarget {
+    release.source_change_pathspecs = pathspecs.iter().map(|value| (*value).to_string()).collect();
     release
 }
 
@@ -4231,7 +4274,7 @@ fn release_target_record(
         if release.requires_bifrost_authority {
             "tracked-authorized"
         } else {
-            "tracked-legacy-authority"
+            "tracked-source-authority"
         }
     } else {
         "release-authority-unavailable"
@@ -4246,7 +4289,7 @@ fn release_target_record(
         upstream_branch: release.upstream_branch.clone(),
         desired_revision,
         deployed_revision,
-        artifact_strategy: "source-archive-from-upstream-main".to_string(),
+        artifact_strategy: "source-archive-from-observed-ref".to_string(),
         rollout_strategy: release.rollout_strategy.clone(),
         state_migration_authority: if release.state_migration_command.is_some() {
             "daemon-owned-command"
@@ -4270,7 +4313,7 @@ fn release_target_record(
         release_authority_status: if authorization.is_some() {
             "authorized"
         } else if !release.requires_bifrost_authority {
-            "legacy-unmigrated"
+            "source-observed"
         } else {
             "unavailable"
         }
@@ -4344,7 +4387,7 @@ fn rollout_plan_record(
     planned_at: &str,
 ) -> IdunnRolloutPlanRecord {
     let mut phases = vec![
-        "fetch upstream main into a managed release view".to_string(),
+        "fetch the admitted upstream ref into a managed release view".to_string(),
         "build source artifact from the desired upstream revision".to_string(),
         "snapshot state before any non-noop migration".to_string(),
         "run daemon-owned migration command when declared".to_string(),
@@ -5037,17 +5080,28 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 health_contract: health_contract("epiphany.cultnet-rudp-runtime-health", "failed"),
                 deploy_command: Some(yggdrasil_actuator("deploy", "epiphany")),
                 restart_command: Some(yggdrasil_actuator("restart", "epiphany")),
-                release: Some(requiring_bifrost_authority(with_deployed_revision_witness(
-                    release_target_on_branch(
-                        "Epiphany",
-                        PathBuf::from("/srv/build/Epiphany"),
-                        "codex/epiphany-shakedown-live",
-                        "restart-after-verified-build",
-                        None,
-                        "restart-required",
+                release: Some(with_source_change_pathspecs(
+                    with_deployed_revision_witness(
+                        release_target_on_branch(
+                            "Epiphany",
+                            PathBuf::from("/srv/build/Epiphany"),
+                            "codex/epiphany-shakedown-live",
+                            "restart-after-verified-build",
+                            None,
+                            "restart-required",
+                        ),
+                        PathBuf::from("/srv/epiphany/deploy/deployment.env"),
                     ),
-                    PathBuf::from("/srv/epiphany/deploy/deployment.env"),
-                ))),
+                    &[
+                        ".",
+                        ":(exclude)docs/**",
+                        ":(exclude)notes/**",
+                        ":(exclude)state/ledgers.msgpack",
+                        ":(exclude)state/map.yaml",
+                        ":(exclude)state/scratch*",
+                        ":(exclude)*.md",
+                    ],
+                )),
                 enabled: true,
                 interval_seconds: 300,
             },
@@ -6437,7 +6491,13 @@ fn unix_epoch_millis() -> Result<u64> {
 }
 
 fn help_text() -> &'static str {
-    "Usage: idunn --daemon <id> [--name <name>] [--verse <verse>] [--store <path>] [--release-authority-store <path>] [--daemon-health-trust-store <path>] [--deploy-command <command>] [--restart-command <command>] [--operator-alarm-command <command>] [--rudp-health-bind <addr|none>] [--trusted-epiphany-health-identity-store <path>] [--execute] [--interval-seconds <seconds>] [--command-timeout-seconds <seconds>] [--repo-root <path>] [--swarm-profile <profile>] [--service-identity-store <path>] [--public-health-store <path>] [--public-health-query-bind <addr>]\n       idunn restart --daemon <id> [--store <path>] [--requested-by <who>] [--detail <text>]\n       idunn redeploy --daemon <id> [--store <path>] [--requested-by <who>] [--detail <text>]\n       idunn validate-health-admission --store <path> --daemon <id> --deployment-request-id <id> --release-id <id> --release-witness-sha256 <sha256> --source-revision <commit>\n\nIdunn supervises owner-authenticated CultNet/RUDP health with --daemon, or a built-in swarm supervisor with --swarm-profile starfire-local or yggdrasil-local. Generic signed health requires a root-owned CultCache trust store via --daemon-health-trust-store. Unsigned idunn.daemon_health packets are diagnostic-only and cannot satisfy lifecycle health. Yggdrasil release targets require an explicit Bifrost CultCache path via --release-authority-store. The Epiphany v0 migration path additionally requires its pinned host identity. RUDP health ingress is disabled unless --rudp-health-bind is supplied. The read-only outward projection listener is disabled unless --public-health-query-bind is supplied with the dedicated public store and Idunn service identity; it serves only target-catalog authenticated-provider projection keys and never opens private Idunn state. The restart/redeploy verbs publish typed idunn.lifecycle_command.v1 records; the running supervisor claims them and executes only through its configured command boundary."
+    concat!(
+        "Usage: idunn --daemon <id> [--name <name>] [--verse <verse>] [--store <path>] [--release-authority-store <path>] [--daemon-health-trust-store <path>] [--deploy-command <command>] [--restart-command <command>] [--operator-alarm-command <command>] [--rudp-health-bind <addr|none>] [--trusted-epiphany-health-identity-store <path>] [--execute] [--interval-seconds <seconds>] [--command-timeout-seconds <seconds>] [--repo-root <path>] [--swarm-profile <profile>] [--service-identity-store <path>] [--public-health-store <path>] [--public-health-query-bind <addr>]\n",
+        "       idunn restart --daemon <id> [--store <path>] [--requested-by <who>] [--detail <text>]\n",
+        "       idunn redeploy --daemon <id> [--store <path>] [--requested-by <who>] [--detail <text>]\n",
+        "       idunn validate-health-admission --store <path> --daemon <id> --deployment-request-id <id> --release-id <id> --release-witness-sha256 <sha256> --source-revision <commit>\n\n",
+        "Idunn supervises owner-authenticated CultNet/RUDP health with --daemon, or a built-in swarm supervisor with --swarm-profile starfire-local or yggdrasil-local. Generic signed health requires a root-owned CultCache trust store via --daemon-health-trust-store. Unsigned idunn.daemon_health packets are diagnostic-only and cannot satisfy lifecycle health. Yggdrasil release targets that require Bifrost authorization need an explicit CultCache path via --release-authority-store; source-observed targets do not borrow that authority. The Epiphany v0 migration path additionally requires its pinned host identity. RUDP health ingress is disabled unless --rudp-health-bind is supplied. The read-only outward projection listener is disabled unless --public-health-query-bind is supplied with the dedicated public store and Idunn service identity; it serves only target-catalog authenticated-provider projection keys and never opens private Idunn state. The restart/redeploy verbs publish typed idunn.lifecycle_command.v1 records; the running supervisor claims them and executes only through its configured command boundary."
+    )
 }
 
 #[cfg(test)]
@@ -7742,7 +7802,7 @@ mod tests {
     }
 
     #[test]
-    fn epiphany_yggdrasil_target_requires_bifrost_authority_and_exact_witness() {
+    fn epiphany_yggdrasil_target_uses_source_change_authority_and_exact_witness() {
         let yggdrasil = swarm_targets(&SwarmOptions {
             profile: "yggdrasil-local".to_string(),
             repo_root: PathBuf::from("/srv/odin/source"),
@@ -7785,21 +7845,33 @@ mod tests {
             release.deployed_revision_witness,
             Some(PathBuf::from("/srv/epiphany/deploy/deployment.env"))
         );
-        assert!(release.requires_bifrost_authority);
+        assert!(!release.requires_bifrost_authority);
+        assert_eq!(
+            release.source_change_pathspecs,
+            vec![
+                ".",
+                ":(exclude)docs/**",
+                ":(exclude)notes/**",
+                ":(exclude)state/ledgers.msgpack",
+                ":(exclude)state/map.yaml",
+                ":(exclude)state/scratch*",
+                ":(exclude)*.md",
+            ]
+        );
 
         for legacy in yggdrasil
             .iter()
             .filter(|target| {
                 !matches!(
                     target.daemon_id.as_str(),
-                    "yggdrasil-epiphany" | "yggdrasil-bifrost-persona-feedback"
+                    "yggdrasil-bifrost-persona-feedback"
                 )
             })
             .filter_map(|target| target.release.as_ref())
         {
             assert!(
                 !legacy.requires_bifrost_authority,
-                "{} must stay on its explicit legacy authority posture",
+                "{} must stay on its explicit source authority posture",
                 legacy.repo
             );
         }
@@ -7828,12 +7900,10 @@ mod tests {
         assert!(actuator.contains("deploy:epiphany|restart:epiphany"));
         assert!(actuator.contains("/usr/local/bin/idunn validate-release-authority"));
         assert!(
-            actuator.contains(
-                "epiphany|bifrost-persona-feedback) target_requires_bifrost_authority=true"
-            )
+            actuator.contains("bifrost-persona-feedback) target_requires_bifrost_authority=true")
         );
         assert!(actuator.contains(
-            "voidbot|heimdall|repixelizer|streampixels|odin|ghostlight) target_requires_bifrost_authority=false"
+            "epiphany|voidbot|heimdall|repixelizer|streampixels|odin|ghostlight) target_requires_bifrost_authority=false"
         ));
         assert!(
             actuator
@@ -9919,11 +9989,11 @@ mod tests {
                 authority: "idunn-supervisor-command.manual".into(),
                 requested_at: "unix:1784160000".into(),
                 repository_full_name: "GameCult/Epiphany".into(),
-                upstream_ref: "refs/heads/main".into(),
+                upstream_ref: "refs/heads/codex/epiphany-shakedown-live".into(),
                 source_revision: "b".repeat(40),
-                release_authority_id: "authority-fixture".into(),
-                release_authority_envelope_sha256: format!("sha256-{}", "d".repeat(64)),
-                requires_bifrost_authority: true,
+                release_authority_id: String::new(),
+                release_authority_envelope_sha256: String::new(),
+                requires_bifrost_authority: false,
             },
         )
         .unwrap();
