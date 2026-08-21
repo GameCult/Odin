@@ -4987,10 +4987,9 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                     ),
                     PathBuf::from("/srv/ghostlight/deploy/deployment.env"),
                 )),
-                // Ghostlight becomes a continuity target only after its Linux
-                // body and signed-health identity have been admitted.  A
-                // missing service is not an unhealthy installed service.
-                enabled: false,
+                // The admitted native body now publishes authenticated health;
+                // Idunn owns its continuity and later release deployment.
+                enabled: true,
                 interval_seconds: 30,
             },
             DaemonTarget {
@@ -7902,7 +7901,7 @@ mod tests {
                 Some(PathBuf::from(witness))
             );
             assert!(!release.requires_bifrost_authority);
-            assert_eq!(target.enabled, daemon_id == "yggdrasil-odin");
+            assert!(target.enabled);
         }
 
         let actuator = include_str!("../../../scripts/linux/idunn-yggdrasil");
