@@ -20,7 +20,7 @@ compose=/srv/compose/yggdrasil-apps.yaml
 require_release_lineage() {
   case "$target" in
     epiphany|bifrost-persona-feedback) target_requires_bifrost_authority=true ;;
-    voidbot|heimdall|repixelizer|streampixels) target_requires_bifrost_authority=false ;;
+    voidbot|heimdall|repixelizer|streampixels|odin|ghostlight) target_requires_bifrost_authority=false ;;
     *) echo "deployment target has no release-authority policy: $target" >&2; exit 1 ;;
   esac
   if [ "$requires_bifrost_authority" != "$target_requires_bifrost_authority" ]; then
@@ -69,7 +69,7 @@ case "$action:$target" in
   restart:streampixels)
     docker compose -f "$compose" restart streampixels-service streampixels-web
     ;;
-  deploy:voidbot|restart:voidbot|deploy:epiphany|restart:epiphany)
+  deploy:voidbot|restart:voidbot|deploy:epiphany|restart:epiphany|deploy:odin|restart:odin|deploy:ghostlight|restart:ghostlight)
     manifest="/srv/odin/deploy-manifests/$target"
     if [ ! -x "$manifest" ] || [ ! -O "$manifest" ]; then
       echo "root-owned executable deploy manifest is not installed: $manifest" >&2

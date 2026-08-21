@@ -4157,6 +4157,25 @@ fn release_target(
     }
 }
 
+fn release_target_on_branch(
+    repo: &str,
+    repo_path: PathBuf,
+    upstream_branch: &str,
+    rollout_strategy: &str,
+    state_migration_command: Option<&str>,
+    zero_downtime_capability: &str,
+) -> ReleaseTarget {
+    let mut target = release_target(
+        repo,
+        repo_path,
+        rollout_strategy,
+        state_migration_command,
+        zero_downtime_capability,
+    );
+    target.upstream_branch = upstream_branch.to_string();
+    target
+}
+
 fn requiring_bifrost_authority(mut release: ReleaseTarget) -> ReleaseTarget {
     release.requires_bifrost_authority = true;
     release
@@ -4924,6 +4943,57 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
     match options.profile.as_str() {
         "yggdrasil-local" => Ok(vec![
             DaemonTarget {
+                daemon_id: "yggdrasil-odin".to_string(),
+                verse_id: "yggdrasil.local".to_string(),
+                name: "Yggdrasil Odin all-seer".to_string(),
+                health_contract: locally_supervised_health_contract(
+                    "odin.cultnet-rudp-provider-health",
+                    "failed",
+                ),
+                deploy_command: Some(yggdrasil_actuator("deploy", "odin")),
+                restart_command: Some(yggdrasil_actuator("restart", "odin")),
+                release: Some(with_deployed_revision_witness(
+                    release_target_on_branch(
+                        "Odin",
+                        PathBuf::from("/srv/build/Odin"),
+                        "codex/ygg-idunn-independent-bootstrap",
+                        "restart-after-verified-build",
+                        None,
+                        "restart-required",
+                    ),
+                    PathBuf::from("/srv/odin/deploy/deployment.env"),
+                )),
+                enabled: true,
+                interval_seconds: 30,
+            },
+            DaemonTarget {
+                daemon_id: "yggdrasil-ghostlight".to_string(),
+                verse_id: "yggdrasil.local".to_string(),
+                name: "Yggdrasil Ghostlight Dungeon".to_string(),
+                health_contract: locally_supervised_health_contract(
+                    "ghostlight.cultnet-rudp-service-health",
+                    "failed",
+                ),
+                deploy_command: Some(yggdrasil_actuator("deploy", "ghostlight")),
+                restart_command: Some(yggdrasil_actuator("restart", "ghostlight")),
+                release: Some(with_deployed_revision_witness(
+                    release_target_on_branch(
+                        "Ghostlight",
+                        PathBuf::from("/srv/build/Ghostlight"),
+                        "codex/ghostlight-dungeon-mvp",
+                        "restart-after-verified-build",
+                        None,
+                        "restart-required",
+                    ),
+                    PathBuf::from("/srv/ghostlight/deploy/deployment.env"),
+                )),
+                // Ghostlight becomes a continuity target only after its Linux
+                // body and signed-health identity have been admitted.  A
+                // missing service is not an unhealthy installed service.
+                enabled: false,
+                interval_seconds: 30,
+            },
+            DaemonTarget {
                 daemon_id: "yggdrasil-voidbot".to_string(),
                 verse_id: "yggdrasil.local".to_string(),
                 name: "Yggdrasil VoidBot".to_string(),
@@ -4968,9 +5038,10 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 deploy_command: Some(yggdrasil_actuator("deploy", "epiphany")),
                 restart_command: Some(yggdrasil_actuator("restart", "epiphany")),
                 release: Some(requiring_bifrost_authority(with_deployed_revision_witness(
-                    release_target(
+                    release_target_on_branch(
                         "Epiphany",
                         PathBuf::from("/srv/build/Epiphany"),
+                        "codex/epiphany-shakedown-live",
                         "restart-after-verified-build",
                         None,
                         "restart-required",
@@ -7706,7 +7777,7 @@ mod tests {
         assert_eq!(release.repository_full_name, "GameCult/Epiphany");
         assert_eq!(release.repo_path, PathBuf::from("/srv/build/Epiphany"));
         assert_eq!(release.upstream_remote, "origin");
-        assert_eq!(release.upstream_branch, "main");
+        assert_eq!(release.upstream_branch, "codex/epiphany-shakedown-live");
         assert_eq!(release.rollout_strategy, "restart-after-verified-build");
         assert_eq!(release.state_migration_command, None);
         assert_eq!(release.zero_downtime_capability, "restart-required");
@@ -7760,7 +7831,7 @@ mod tests {
             )
         );
         assert!(actuator.contains(
-            "voidbot|heimdall|repixelizer|streampixels) target_requires_bifrost_authority=false"
+            "voidbot|heimdall|repixelizer|streampixels|odin|ghostlight) target_requires_bifrost_authority=false"
         ));
         assert!(
             actuator
@@ -7783,6 +7854,58 @@ mod tests {
         assert!(
             actuator.contains("IDUNN_REQUIRES_BIFROST_AUTHORITY=\"$requires_bifrost_authority\"")
         );
+    }
+
+    #[test]
+    fn yggdrasil_runtime_catalog_includes_discovery_and_dungeon_bodies() {
+        let targets = swarm_targets(&SwarmOptions {
+            profile: "yggdrasil-local".to_string(),
+            repo_root: PathBuf::from("/srv/odin/source"),
+        })
+        .expect("yggdrasil-local targets");
+
+        for (daemon_id, repo, branch, witness, actuator_name) in [
+            (
+                "yggdrasil-odin",
+                "Odin",
+                "codex/ygg-idunn-independent-bootstrap",
+                "/srv/odin/deploy/deployment.env",
+                "odin",
+            ),
+            (
+                "yggdrasil-ghostlight",
+                "Ghostlight",
+                "codex/ghostlight-dungeon-mvp",
+                "/srv/ghostlight/deploy/deployment.env",
+                "ghostlight",
+            ),
+        ] {
+            let target = targets
+                .iter()
+                .find(|target| target.daemon_id == daemon_id)
+                .unwrap_or_else(|| panic!("missing {daemon_id}"));
+            assert!(target.health_contract.restart_on_missing_publication);
+            assert_eq!(
+                target.restart_command.as_deref(),
+                Some(format!(
+                    "sudo -n /usr/local/libexec/idunn-yggdrasil restart {actuator_name}"
+                ))
+                .as_deref()
+            );
+            let release = target.release.as_ref().expect("release target");
+            assert_eq!(release.repo, repo);
+            assert_eq!(release.upstream_branch, branch);
+            assert_eq!(
+                release.deployed_revision_witness,
+                Some(PathBuf::from(witness))
+            );
+            assert!(!release.requires_bifrost_authority);
+            assert_eq!(target.enabled, daemon_id == "yggdrasil-odin");
+        }
+
+        let actuator = include_str!("../../../scripts/linux/idunn-yggdrasil");
+        assert!(actuator.contains("deploy:odin|restart:odin"));
+        assert!(actuator.contains("deploy:ghostlight|restart:ghostlight"));
     }
 
     struct FakeReleaseStatePort {

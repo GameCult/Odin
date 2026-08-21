@@ -1,6 +1,8 @@
 "use strict";
 
 const dgram = require("dgram");
+const crypto = require("crypto");
+const fs = require("fs");
 const path = require("path");
 const { createRequire } = require("module");
 
@@ -26,15 +28,32 @@ const { encode } = requireCultNet("@msgpack/msgpack");
 
 const CULTNET_RUDP_PROTOCOL_ID = "cultnet.transport.rudp.v0";
 const IDUNN_HEALTH_RUDP_CONNECTION_ID = 0x1d0d0001;
+const SIGNED_HEALTH_SCHEMA = "idunn.signed_daemon_health.v1";
+const SIGNATURE_DOMAIN = Buffer.from("gamecult.provider-health.signature.v1\0", "utf8");
+const ID_DOMAIN = Buffer.from("gamecult.provider-health.identity.v1\0", "utf8");
+const SIGNING_PURPOSE = Buffer.from(SIGNED_HEALTH_SCHEMA, "utf8");
 
 function createIdunnRudpHealthPublisher(options) {
   if (!options) return null;
   const endpoint = parseEndpoint(options.endpoint);
-  return {
+  const publisher = {
     daemonId: options.daemonId,
     endpoint,
     healthContract: options.healthContract,
+    publisherIncarnationId: crypto.randomUUID(),
+    publisherSequence: 0,
+    sourceRuntimeId: options.sourceRuntimeId || "odin-coordinator",
   };
+  if (options.privateKeyPath) {
+    publisher.privateKey = crypto.createPrivateKey(fs.readFileSync(options.privateKeyPath));
+    publisher.publicKey = rawEd25519PublicKey(publisher.privateKey);
+    publisher.signerIdentityId = crypto
+      .createHash("sha256")
+      .update(ID_DOMAIN)
+      .update(publisher.publicKey)
+      .digest("hex");
+  }
+  return publisher;
 }
 
 async function publishIdunnRudpHealth(publisher, health) {
@@ -61,34 +80,28 @@ async function publishIdunnRudpHealth(publisher, health) {
     );
 
     const observedAt = health.observedAt || new Date().toISOString();
-    const record = {
-      daemonId: publisher.daemonId,
-      state: health.state,
-      detail: health.detail,
+    const signed = publisher.privateKey
+      ? signedHealthPayload(publisher, health, observedAt)
+      : null;
+    const payload = signed?.payload || encode([
+      publisher.daemonId,
+      health.state,
+      String(health.detail || "").slice(0, 512),
       observedAt,
-      healthContract: publisher.healthContract,
-      publicationSource: "daemon-published",
-      transport: CULTNET_RUDP_PROTOCOL_ID,
-    };
-    const payload = encode([
-      record.daemonId,
-      record.state,
-      record.detail,
-      record.observedAt,
-      record.healthContract,
-      record.publicationSource,
-      record.transport,
+      publisher.healthContract,
+      "daemon-published",
+      CULTNET_RUDP_PROTOCOL_ID,
     ]);
     const message = {
       schemaVersion: "cultnet.document_put_raw.v0",
       messageId: `odin-health:${publisher.daemonId}:${observedAt.replace(/[:.]/g, "-")}`,
       document: {
-        schemaId: "idunn.daemon_health",
+        schemaId: signed ? SIGNED_HEALTH_SCHEMA : "idunn.daemon_health",
         recordKey: publisher.daemonId,
         storedAt: observedAt,
         payloadEncoding: "messagepack",
         payload,
-        sourceRuntimeId: "odin-coordinator",
+        sourceRuntimeId: publisher.sourceRuntimeId,
         sourceRole: "daemon-health-publisher",
         tags: [CULTNET_RUDP_PROTOCOL_ID],
       },
@@ -115,6 +128,58 @@ async function publishIdunnRudpHealth(publisher, health) {
     receiver.close();
     socket.close();
   }
+}
+
+function signedHealthPayload(publisher, health, observedAt) {
+  publisher.publisherSequence += 1;
+  const observedAtUnixMillis = Date.parse(observedAt);
+  if (!Number.isSafeInteger(observedAtUnixMillis) || observedAtUnixMillis <= 0) {
+    throw new Error("Idunn signed health observation time is invalid.");
+  }
+  const unsigned = [
+    SIGNED_HEALTH_SCHEMA,
+    publisher.daemonId,
+    publisher.healthContract,
+    publisher.sourceRuntimeId,
+    health.state,
+    String(health.detail || "").slice(0, 512),
+    publisher.signerIdentityId,
+    publisher.publisherIncarnationId,
+    publisher.publisherSequence,
+    observedAtUnixMillis,
+    null,
+    null,
+    null,
+    null,
+    "ed25519",
+    new Uint8Array(),
+    false,
+  ];
+  const unsignedPayload = encode(unsigned);
+  const signature = crypto.sign(null, signingMessage(unsignedPayload), publisher.privateKey);
+  const statement = unsigned.slice();
+  statement[15] = new Uint8Array(signature);
+  return { payload: encode(statement), statement, unsignedPayload };
+}
+
+function signingMessage(payload) {
+  const purposeLength = Buffer.alloc(8);
+  purposeLength.writeBigUInt64BE(BigInt(SIGNING_PURPOSE.length));
+  const payloadLength = Buffer.alloc(8);
+  payloadLength.writeBigUInt64BE(BigInt(payload.length));
+  return Buffer.concat([
+    SIGNATURE_DOMAIN,
+    purposeLength,
+    SIGNING_PURPOSE,
+    payloadLength,
+    Buffer.from(payload),
+  ]);
+}
+
+function rawEd25519PublicKey(privateKey) {
+  const der = crypto.createPublicKey(privateKey).export({ type: "spki", format: "der" });
+  if (der.length < 32) throw new Error("Ed25519 public key export is too short.");
+  return Buffer.from(der.subarray(der.length - 32));
 }
 
 async function bindSocket(socket, endpoint) {
@@ -254,4 +319,6 @@ module.exports = {
   CULTNET_RUDP_PROTOCOL_ID,
   createIdunnRudpHealthPublisher,
   publishIdunnRudpHealth,
+  signedHealthPayload,
+  signingMessage,
 };

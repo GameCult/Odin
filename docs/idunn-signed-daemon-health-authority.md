@@ -44,6 +44,13 @@ The daemon-authored statement binds:
 The Idunn trust binding names the only public key allowed to speak for that
 daemon/contract/runtime tuple and whether release identity is required.
 
+Yggdrasil Odin uses the generic signed contract with daemon
+`yggdrasil-odin`, source runtime `odin-yggdrasil`, and a root-provisioned
+Ed25519 key readable only by the Odin runtime group. Its health signature owns
+liveness. Exact Odin and CultLib revisions remain deployment authority in the
+immutable release and `/srv/odin/deploy/deployment.env`; neither Docker health
+nor the signed liveness statement may rewrite that witness.
+
 ## Outputs
 
 Idunn persists two separate facts:

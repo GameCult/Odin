@@ -55,7 +55,9 @@ instead of building one more private watchdog.
 Idunn is a Rust daemon inside Odin's Cargo workspace. Starfire and Yggdrasil
 run separate host-local swarm profiles. Starfire owns its local adjunct daemons
 and remote display/telemetry lanes. Yggdrasil owns its hosted release targets,
-including VoidBot. Each target declares a daemon-owned health contract and keeps
+including Odin and VoidBot. Idunn starts independently of every managed target,
+so an Odin outage cannot remove the organ responsible for recovering Odin.
+Each target declares a daemon-owned health contract and keeps
 its own interval and deploy/restart authority. Daemon truth comes from typed
 CultNet/RUDP publication and daemon-owned boundary stores. Shell scripts remain
 deployment, restart, and manual diagnostic lowerings only; they do not satisfy
@@ -177,7 +179,9 @@ The enforced targets are Nightwing Gjallar plus the Yggdrasil source artifact
 lanes whose ops runbooks can produce and verify deployment manifests. Each
 enforced target must declare upstream remote/branch, rollout strategy, state
 migration authority, and zero-downtime capability. Idunn deploys the declared
-upstream `main` revision, not arbitrary local `HEAD`. Bifrost is blocked until
+declared upstream revision, not arbitrary local `HEAD`. Ghostlight's catalog
+entry remains disabled until its Linux body and signed health identity are
+admitted. Bifrost is blocked until
 its production database migration path is coherent; mobile device installs
 remain blocked at their physical approval boundaries; GitHub Pages remains
 external-owned.

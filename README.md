@@ -80,6 +80,11 @@ Local package surfaces:
 - Hosted VoidBot release: upstream `main` -> Yggdrasil-local Idunn -> the
   root-owned `/srv/odin/deploy-manifests/voidbot` actuator. Local checkouts are
   development and diagnostics only; do not create a local deployment.
+- Hosted Odin release: branch `codex/ygg-idunn-independent-bootstrap` plus the
+  exact CultLib commit in `deploy/cultlib.commit` -> one immutable
+  `/srv/odin/releases/<commit>` body -> `/srv/odin/current`. Odin signs its own
+  liveness to Idunn, while Idunn starts independently and owns later restart or
+  deployment actuation.
 - Operator escalation: Bifrost-owned CultMesh crossing; current compatibility
   delivery calls `scripts\notify-idunn-operator-alarm.ps1`, which asks Bifrost
   to publish a typed `gamecult.operator_dm_request.v1` CultMesh command document

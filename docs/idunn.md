@@ -13,10 +13,11 @@ escalation, and continuity witness state.
 
 ## Authority Map
 
-- Owner: Idunn owns daemon lifecycle management after Odin has accepted where a
-  daemon lives: bring-up after host reboot, deployment freshness, crash
+- Owner: Idunn owns daemon lifecycle management from its root-admitted target
+  catalog: bring-up after host reboot, deployment freshness, crash
   recovery, health watching, deploy/restart policy, and operator escalation.
-- Inputs: Odin's accepted service records, provider advertisements, `.cc`
+- Inputs: its admitted target catalog, Odin's accepted service records when
+  Odin is available, provider advertisements, `.cc`
   witnesses, advertised command boundaries, CultNet/RUDP health contracts,
   freshness windows, operator policy, local service manager state, and explicit
   deployment/debug witnesses that cannot satisfy daemon health.
@@ -35,6 +36,8 @@ escalation, and continuity witness state.
   Agents are also forbidden deploy writers: they configure Idunn release
   targets, command boundaries, migration commands, and rollout policy, then let
   Idunn actuate and witness deployment. They do not run deploy scripts by hand.
+  Odin is itself an Idunn target; Odin discovery is never a prerequisite for
+  starting Idunn or recovering Odin.
 - Shared paths: manual operator deploy/restart, scheduled deploy/restart,
   degraded-health repair, boot rehydration, and future remote worker recovery
   must pass through the same Idunn command primitive.
@@ -317,8 +320,13 @@ idunn.rudp_health_ingress.v1
   lacks hot reload, blue/green routing, rolling instances, or another named
   in-place swap mechanism, Idunn records `restart-required` and verifies the
   restart path honestly.
-- Yggdrasil Heimdall, repixelizer, and StreamPixels are enforced through the
+- Yggdrasil Odin, Heimdall, repixelizer, and StreamPixels are enforced through the
   generic source artifact lane and their existing `gamecult-ops` runbooks.
+  Odin publishes `idunn.signed_daemon_health.v1` with its root-bound Ed25519
+  identity. Its immutable release pins both the Odin commit and the exact
+  CultLib commit, then switches them through one `/srv/odin/current` link.
+  Ghostlight is present but disabled in the catalog until its Linux runtime and
+  signed-health identity are admitted; absence is not treated as failed health.
   Bifrost is explicitly blocked as of 2026-06-09: committed Bifrost `HEAD`
   expects `UserAccounts.HeimdallAccountId`, while Yggdrasil's production
   database lacks that column and EF reports no pending migration. Idunn must
