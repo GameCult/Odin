@@ -8048,7 +8048,16 @@ mod tests {
             "--deployment-brake-store /var/lib/gamecult/idunn-authority/deployment-brake.cc"
         ));
         assert!(unit.contains("ReadOnlyPaths=/var/lib/gamecult/idunn-authority"));
-        assert!(!unit.contains("ReadWritePaths=/var/lib/gamecult/idunn-authority"));
+        assert!(
+            unit.contains(
+                "ReadWritePaths=/var/lib/gamecult/idunn-authority/deployment-brake.cc.lock"
+            )
+        );
+        assert!(
+            !unit
+                .lines()
+                .any(|line| line == "ReadWritePaths=/var/lib/gamecult/idunn-authority")
+        );
         assert!(unit.contains("/etc/gamecult/ghostlight"));
         assert!(unit.contains("/etc/systemd/system/epiphany-swarm.service"));
         assert!(unit.contains("/etc/systemd/system/ghostlight-dungeon.service"));
