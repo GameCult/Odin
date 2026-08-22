@@ -6,6 +6,9 @@ function defineOdinDocuments(defineDocumentType) {
   if (!defineDocumentType) {
     return {
       interfaceBindingDefinition: null,
+      evePluginAdvertisementDefinition: null,
+      heimdallCommandBoundaryDefinition: null,
+      heimdallTransportProfileDefinition: null,
       idunnCommandBoundaryDefinition: null,
       idunnDaemonHealthDefinition: null,
       idunnTransportProfileDefinition: null,
@@ -82,6 +85,33 @@ function defineOdinDocuments(defineDocumentType) {
     global: false,
     name: (value) => value?.providerId || value?.provider?.id || "provider",
     schema: parseObjectDocument("Eve provider advertisement"),
+  });
+  const evePluginAdvertisementDefinition = defineDocumentType({
+    type: "gamecult.eve.plugin_advertisement",
+    schemaName: "gamecult.eve.plugin_advertisement",
+    schemaId: "gamecult.eve.plugin_advertisement.v1",
+    schemaVersion: "gamecult.eve.plugin_advertisement.v1",
+    global: false,
+    name: (value) => value?.pluginId || value?.plugin?.id || "plugin",
+    schema: parseObjectDocument("Eve plugin advertisement"),
+  });
+  const heimdallCommandBoundaryDefinition = defineDocumentType({
+    type: "heimdall.command_boundary",
+    schemaName: "heimdall.command_boundary",
+    schemaId: "heimdall.command_boundary.v1",
+    schemaVersion: "heimdall.command_boundary.v1",
+    global: false,
+    name: (value) => value?.boundaryId || value?.daemonId || "heimdall",
+    schema: parseObjectDocument("Heimdall command boundary"),
+  });
+  const heimdallTransportProfileDefinition = defineDocumentType({
+    type: "heimdall.transport_profile",
+    schemaName: "heimdall.transport_profile",
+    schemaId: "heimdall.transport_profile.v1",
+    schemaVersion: "heimdall.transport_profile.v1",
+    global: false,
+    name: (value) => value?.profileId || value?.daemonId || "heimdall",
+    schema: parseObjectDocument("Heimdall transport profile"),
   });
   const interfaceLayoutDefinition = defineDocumentType({
     type: "odin.interface_layout",
@@ -446,6 +476,9 @@ function defineOdinDocuments(defineDocumentType) {
 
   return {
     interfaceBindingDefinition,
+    evePluginAdvertisementDefinition,
+    heimdallCommandBoundaryDefinition,
+    heimdallTransportProfileDefinition,
     interfaceLayoutDefinition,
     idunnCommandBoundaryDefinition,
     idunnDaemonHealthDefinition,
