@@ -3659,12 +3659,17 @@ fn generic_signed_health_advances(
     existing: &IdunnAuthenticatedDaemonHealthAdmissionRecord,
     candidate: &IdunnAuthenticatedDaemonHealthAdmissionRecord,
 ) -> bool {
-    if existing.trust_binding_id != candidate.trust_binding_id
-        || existing.trust_binding_sha256 != candidate.trust_binding_sha256
-        || existing.signer_identity_id != candidate.signer_identity_id
-        || existing.daemon_id != candidate.daemon_id
-    {
+    if existing.daemon_id != candidate.daemon_id {
         return false;
+    }
+    let same_trust_binding = existing.trust_binding_id == candidate.trust_binding_id
+        && existing.trust_binding_sha256 == candidate.trust_binding_sha256
+        && existing.signer_identity_id == candidate.signer_identity_id;
+    if !same_trust_binding {
+        // `candidate` has already been verified against the one exact binding
+        // in the current root-owned trust store. The previous admission is
+        // replay memory, not authority over a legitimate signer rotation.
+        return candidate.observed_at_unix_millis > existing.observed_at_unix_millis;
     }
     if existing.publisher_incarnation_id == candidate.publisher_incarnation_id {
         candidate.publisher_sequence > existing.publisher_sequence
@@ -9403,6 +9408,56 @@ mod tests {
         assert_eq!(selected.state, "active");
         assert_eq!(selected.publication_source, "daemon-authenticated");
         assert!(authenticated.is_some());
+    }
+
+    #[test]
+    fn current_root_authorized_signer_rotation_supersedes_stale_admission() {
+        let existing = IdunnAuthenticatedDaemonHealthAdmissionRecord {
+            schema_version: IDUNN_AUTHENTICATED_DAEMON_HEALTH_ADMISSION_SCHEMA.into(),
+            daemon_id: "test-daemon".into(),
+            health_contract: "test.signed-health".into(),
+            source_runtime_id: "test-runtime".into(),
+            state: "active".into(),
+            observed_at_unix_millis: 100,
+            admitted_at_unix_millis: 101,
+            trust_binding_id: "root/test-daemon/health".into(),
+            trust_binding_sha256: format!("sha256-{}", "a".repeat(64)),
+            signer_identity_id: "old-signer".into(),
+            publisher_incarnation_id: "old-incarnation".into(),
+            publisher_sequence: 49,
+            signed_health_sha256: format!("sha256-{}", "b".repeat(64)),
+            release_id: None,
+            release_witness_sha256: None,
+            source_commit: None,
+            deployment_id: None,
+            private_state_exposed: false,
+        };
+
+        let mut same_incarnation = existing.clone();
+        same_incarnation.publisher_sequence += 1;
+        assert!(generic_signed_health_advances(&existing, &same_incarnation));
+        same_incarnation.publisher_sequence = existing.publisher_sequence;
+        assert!(!generic_signed_health_advances(
+            &existing,
+            &same_incarnation
+        ));
+
+        let mut rotated = existing.clone();
+        rotated.trust_binding_sha256 = format!("sha256-{}", "c".repeat(64));
+        rotated.signer_identity_id = "current-root-signer".into();
+        rotated.publisher_incarnation_id = "new-incarnation".into();
+        rotated.publisher_sequence = 1;
+        rotated.observed_at_unix_millis = 102;
+        rotated.admitted_at_unix_millis = 103;
+        assert!(generic_signed_health_advances(&existing, &rotated));
+
+        rotated.observed_at_unix_millis = existing.observed_at_unix_millis;
+        assert!(!generic_signed_health_advances(&existing, &rotated));
+        rotated.observed_at_unix_millis = existing.observed_at_unix_millis - 1;
+        assert!(!generic_signed_health_advances(&existing, &rotated));
+        rotated.observed_at_unix_millis = 102;
+        rotated.daemon_id = "other-daemon".into();
+        assert!(!generic_signed_health_advances(&existing, &rotated));
     }
 
     fn projection_fixture(
