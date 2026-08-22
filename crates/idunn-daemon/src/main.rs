@@ -7985,6 +7985,9 @@ mod tests {
         ));
         assert!(unit.contains("ReadOnlyPaths=/var/lib/gamecult/idunn-authority"));
         assert!(!unit.contains("ReadWritePaths=/var/lib/gamecult/idunn-authority"));
+        assert!(unit.contains("/etc/gamecult/ghostlight"));
+        assert!(unit.contains("/etc/systemd/system/ghostlight-dungeon.service"));
+        assert!(!unit.contains("ReadWritePaths=/etc "));
         assert!(
             !unit.contains("--deployment-brake-store /var/lib/gamecult/idunn/deployment-brake.cc")
         );
