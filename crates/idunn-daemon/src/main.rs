@@ -37,7 +37,7 @@ use odin_core::{
     authenticated_provider_health_reason_code, plan_keepalive,
 };
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env;
 use std::fs::{self, File};
 use std::net::{SocketAddr, UdpSocket};
@@ -835,6 +835,13 @@ fn run_swarm(
 
     let store_lock = Arc::new(Mutex::new(()));
     let now = timestamp()?;
+    let compacted_health_statements =
+        compact_authenticated_health_statement_history(common, &store_lock)?;
+    if compacted_health_statements > 0 {
+        println!(
+            "Idunn compacted {compacted_health_statements} obsolete authenticated health statement(s)."
+        );
+    }
     let recovered = terminalize_interrupted_deployment_requests(common, &store_lock, &now)?;
     if recovered > 0 {
         println!(
@@ -1974,7 +1981,7 @@ fn read_fresh_daemon_published_health(
                 };
                 admission.validate()?;
                 let Some(statement) =
-                    node.get::<IdunnSignedDaemonHealthRecord>(&admission.signed_health_sha256)?
+                    node.get::<IdunnSignedDaemonHealthRecord>(&admission.daemon_id)?
                 else {
                     return Ok(None);
                 };
@@ -3495,6 +3502,81 @@ fn typed_envelope<T: DatabaseEntry>(
     })
 }
 
+fn compact_authenticated_health_statement_history(
+    options: &CommonOptions,
+    store_lock: &Arc<Mutex<()>>,
+) -> Result<usize> {
+    let _store_guard = store_lock
+        .lock()
+        .map_err(|_| anyhow!("Idunn store lock is poisoned"))?;
+    let backing = SingleFileMessagePackBackingStore::new(&options.store_path);
+    for _ in 0..8 {
+        let expected = backing.pull_all()?;
+        let admissions = expected
+            .iter()
+            .filter(|entry| entry.r#type == IdunnAuthenticatedDaemonHealthAdmissionRecord::TYPE)
+            .map(|entry| {
+                let admission: IdunnAuthenticatedDaemonHealthAdmissionRecord =
+                    rmp_serde::from_slice(&entry.payload)
+                        .context("decoding current authenticated health admission")?;
+                admission.validate()?;
+                Ok((admission.daemon_id.clone(), admission))
+            })
+            .collect::<Result<BTreeMap<_, _>>>()?;
+        let statements = expected
+            .iter()
+            .filter(|entry| entry.r#type == IdunnSignedDaemonHealthRecord::TYPE)
+            .map(|entry| (entry.key.clone(), entry))
+            .collect::<BTreeMap<_, _>>();
+        let mut current_statements = Vec::with_capacity(admissions.len());
+        for (daemon_id, admission) in &admissions {
+            let entry = statements
+                .get(daemon_id)
+                .or_else(|| statements.get(&admission.signed_health_sha256))
+                .ok_or_else(|| {
+                    anyhow!(
+                        "authenticated health admission for {daemon_id} lost its signed statement"
+                    )
+                })?;
+            let statement: IdunnSignedDaemonHealthRecord = rmp_serde::from_slice(&entry.payload)
+                .context("decoding current signed daemon health")?;
+            statement.validate()?;
+            let digest = format!(
+                "sha256-{:x}",
+                Sha256::digest(rmp_serde::to_vec(&statement)?)
+            );
+            if statement.daemon_id != *daemon_id || digest != admission.signed_health_sha256 {
+                return Err(anyhow!(
+                    "authenticated health admission for {daemon_id} does not bind its signed statement"
+                ));
+            }
+            let mut current = (*entry).clone();
+            current.key.clone_from(daemon_id);
+            current_statements.push(current);
+        }
+        let statement_count = statements.len();
+        let already_compact = statement_count == current_statements.len()
+            && current_statements
+                .iter()
+                .all(|entry| statements.contains_key(&entry.key));
+        if already_compact {
+            return Ok(0);
+        }
+        let mut replacement = expected
+            .iter()
+            .filter(|entry| entry.r#type != IdunnSignedDaemonHealthRecord::TYPE)
+            .cloned()
+            .collect::<Vec<_>>();
+        replacement.extend(current_statements);
+        if backing.compare_exchange_snapshot(&expected, &replacement)? {
+            return Ok(statement_count.saturating_sub(admissions.len()));
+        }
+    }
+    Err(anyhow!(
+        "authenticated health statement compaction lost repeated cross-process contention"
+    ))
+}
+
 fn authenticate_generic_signed_health(
     document: &cultnet_rs::CultNetRawDocumentRecord,
     options: &CommonOptions,
@@ -3676,9 +3758,8 @@ fn admit_generic_signed_health(
                         .get_envelope::<IdunnAuthenticatedDaemonHealthAdmissionRecord>(
                             &admission.daemon_id,
                         )?,
-                    node.cache().get_envelope::<IdunnSignedDaemonHealthRecord>(
-                        &admission.signed_health_sha256,
-                    )?,
+                    node.cache()
+                        .get_envelope::<IdunnSignedDaemonHealthRecord>(&admission.daemon_id)?,
                 ))
             })?;
         let expected = [
@@ -3693,7 +3774,7 @@ fn admit_generic_signed_health(
                 current: expected_admission,
             },
             CultCacheExpectedEnvelope {
-                key: admission.signed_health_sha256.clone(),
+                key: admission.daemon_id.clone(),
                 r#type: IdunnSignedDaemonHealthRecord::TYPE.into(),
                 current: expected_statement,
             },
@@ -3701,7 +3782,7 @@ fn admit_generic_signed_health(
         let replacements = [
             typed_envelope(&health.daemon_id, &health, admitted_at)?,
             typed_envelope(&admission.daemon_id, &admission, admitted_at)?,
-            typed_envelope(&admission.signed_health_sha256, &statement, admitted_at)?,
+            typed_envelope(&admission.daemon_id, &statement, admitted_at)?,
         ];
         if SingleFileMessagePackBackingStore::new(&options.store_path)
             .compare_exchange(&expected, &replacements)?
@@ -9344,6 +9425,35 @@ mod tests {
         )
     }
 
+    fn advance_generic_signed_health_fixture(
+        message: &CultNetMessage,
+        root: &Path,
+        sequence: u64,
+    ) -> CultNetMessage {
+        let CultNetMessage::DocumentPutRaw { document, .. } = message else {
+            panic!("signed health fixture must be a raw document");
+        };
+        let signer = open_service_identity_at::<GameCultProviderHealthIdentity>(
+            &root.join("provider-health-identity.cc"),
+        )
+        .unwrap();
+        let mut statement: IdunnSignedDaemonHealthRecord =
+            rmp_serde::from_slice(&document.payload).unwrap();
+        statement.publisher_sequence = sequence;
+        statement.signature.clear();
+        let unsigned = rmp_serde::to_vec(&statement).unwrap();
+        statement.signature = signer
+            .sign::<IdunnSignedDaemonHealthPurpose>(&unsigned)
+            .signature;
+        CultNetMessage::DocumentPutRaw {
+            message_id: format!("signed-health-{sequence}"),
+            document: CultNetRawDocumentRecord {
+                payload: rmp_serde::to_vec(&statement).unwrap(),
+                ..document.clone()
+            },
+        }
+    }
+
     #[test]
     fn generic_signed_health_requires_root_binding_and_monotonic_admission() {
         let (first, options, _root) = generic_signed_health_fixture(1);
@@ -9367,7 +9477,7 @@ mod tests {
             assert_eq!(admission.publisher_sequence, 1);
             assert_eq!(admission.trust_binding_id, "root/test-daemon/health");
             let statement = node
-                .get::<IdunnSignedDaemonHealthRecord>(&admission.signed_health_sha256)?
+                .get::<IdunnSignedDaemonHealthRecord>(&admission.daemon_id)?
                 .expect("signed statement");
             assert_eq!(
                 admission.signed_health_sha256,
@@ -9429,6 +9539,98 @@ mod tests {
             document.payload[0] ^= 1;
         }
         assert!(health_from_rudp_message(&forged, &options).is_err());
+    }
+
+    #[test]
+    fn generic_health_replaces_one_daemon_keyed_statement_instead_of_growing_history() {
+        let (first, options, root) = generic_signed_health_fixture(1);
+        let second = advance_generic_signed_health_fixture(&first, root.path(), 2);
+        let lock = Arc::new(Mutex::new(()));
+        admit_health_from_rudp_message(&first, &options, &lock, "2026-07-19T12:00:01Z").unwrap();
+        admit_health_from_rudp_message(&second, &options, &lock, "2026-07-19T12:00:02Z").unwrap();
+
+        let entries = SingleFileMessagePackBackingStore::new(&options.store_path)
+            .pull_all_read_only_snapshot()
+            .unwrap();
+        let statements = entries
+            .iter()
+            .filter(|entry| entry.r#type == IdunnSignedDaemonHealthRecord::TYPE)
+            .collect::<Vec<_>>();
+        assert_eq!(statements.len(), 1);
+        assert_eq!(statements[0].key, "test-daemon");
+        let admission = entries
+            .iter()
+            .find(|entry| {
+                entry.r#type == IdunnAuthenticatedDaemonHealthAdmissionRecord::TYPE
+                    && entry.key == "test-daemon"
+            })
+            .map(|entry| {
+                rmp_serde::from_slice::<IdunnAuthenticatedDaemonHealthAdmissionRecord>(
+                    &entry.payload,
+                )
+                .unwrap()
+            })
+            .unwrap();
+        assert_eq!(admission.publisher_sequence, 2);
+        let statement: IdunnSignedDaemonHealthRecord =
+            rmp_serde::from_slice(&statements[0].payload).unwrap();
+        assert_eq!(statement.publisher_sequence, 2);
+        assert_eq!(
+            admission.signed_health_sha256,
+            format!(
+                "sha256-{:x}",
+                Sha256::digest(rmp_serde::to_vec(&statement).unwrap())
+            )
+        );
+    }
+
+    #[test]
+    fn startup_compaction_keeps_only_each_admissions_exact_signed_statement() {
+        let (message, options, _root) = generic_signed_health_fixture(1);
+        let lock = Arc::new(Mutex::new(()));
+        admit_health_from_rudp_message(&message, &options, &lock, "2026-07-19T12:00:01Z").unwrap();
+        let mut backing = SingleFileMessagePackBackingStore::new(&options.store_path);
+        let mut entries = backing.pull_all_read_only_snapshot().unwrap();
+        let admission = entries
+            .iter()
+            .find(|entry| entry.r#type == IdunnAuthenticatedDaemonHealthAdmissionRecord::TYPE)
+            .map(|entry| {
+                rmp_serde::from_slice::<IdunnAuthenticatedDaemonHealthAdmissionRecord>(
+                    &entry.payload,
+                )
+                .unwrap()
+            })
+            .unwrap();
+        let current_index = entries
+            .iter()
+            .position(|entry| entry.r#type == IdunnSignedDaemonHealthRecord::TYPE)
+            .unwrap();
+        let mut legacy_current = entries.remove(current_index);
+        legacy_current.key = admission.signed_health_sha256.clone();
+        let mut obsolete = legacy_current.clone();
+        obsolete.key = format!("sha256-{}", "d".repeat(64));
+        entries.push(legacy_current);
+        entries.push(obsolete);
+        backing.push_all(&entries, Default::default()).unwrap();
+
+        assert_eq!(
+            compact_authenticated_health_statement_history(&options, &lock).unwrap(),
+            1
+        );
+        assert_eq!(
+            compact_authenticated_health_statement_history(&options, &lock).unwrap(),
+            0
+        );
+        let compacted = backing.pull_all_read_only_snapshot().unwrap();
+        let statements = compacted
+            .iter()
+            .filter(|entry| entry.r#type == IdunnSignedDaemonHealthRecord::TYPE)
+            .collect::<Vec<_>>();
+        assert_eq!(statements.len(), 1);
+        assert_eq!(statements[0].key, "test-daemon");
+        let statement: IdunnSignedDaemonHealthRecord =
+            rmp_serde::from_slice(&statements[0].payload).unwrap();
+        assert_eq!(statement.publisher_sequence, 1);
     }
 
     #[test]

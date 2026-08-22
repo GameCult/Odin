@@ -53,12 +53,20 @@ nor the signed liveness statement may rewrite that witness.
 
 ## Outputs
 
-Idunn persists two separate facts:
+Idunn persists two separate current facts per daemon:
 
-1. the admitted daemon-authored statement and its digest;
+1. one admitted daemon-authored statement, keyed by daemon id, plus its exact
+   digest in the admission;
 2. an Idunn-authored `idunn.authenticated_provider_health_projection.v1`
    record binding the trust record, admission, exact provider lineage, and
    freshness interval.
+
+Signed heartbeats are current liveness state, not an append-only event ledger.
+Advancing a daemon's publisher sequence atomically replaces that daemon's prior
+statement, admission, and compatibility health row. Startup atomically compacts
+legacy digest-keyed statement history to the one exact statement named by each
+current admission. A missing or digest-mismatched witness fails closed; it is
+never reconstructed from process probes or a later heartbeat.
 
 The outward record exists only while a generic provider-authored admission is
 current and still matches its root trust and optional release binding. Missing
@@ -205,3 +213,8 @@ Hostile tests must prove:
   states fail closed;
 - private detail and filesystem/process internals never enter the operator
   projection.
+- repeated signed heartbeats keep exactly one signed statement per admitted
+  daemon rather than growing the monolithic keepalive store;
+- startup compaction keeps only the exact statement named by each admission,
+  is idempotent, and loses cleanly to a concurrent whole-store mutation rather
+  than overwriting it.

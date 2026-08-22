@@ -237,6 +237,38 @@ impl SingleFileMessagePackBackingStore {
         })
     }
 
+    /// Atomically replaces an entire snapshot only when the persisted entries
+    /// still exactly match `expected`. This is the bounded migration primitive
+    /// for removing obsolete identities without racing another writer between
+    /// a read and a whole-store rewrite.
+    pub fn compare_exchange_snapshot(
+        &self,
+        expected: &[CultCacheEnvelope],
+        replacements: &[CultCacheEnvelope],
+    ) -> Result<bool> {
+        self.with_exclusive_lock(|| {
+            let current = self.read_all_unlocked()?;
+            if current != expected {
+                return Ok(false);
+            }
+            let mut replacement_ids = BTreeSet::new();
+            for replacement in replacements {
+                if replacement.key.trim().is_empty() || replacement.r#type.trim().is_empty() {
+                    return Err(anyhow!("CultCache snapshot replacement identity is empty"));
+                }
+                if !replacement_ids.insert(entry_id(replacement)) {
+                    return Err(anyhow!(
+                        "CultCache snapshot replacement contains a duplicate identity"
+                    ));
+                }
+            }
+            let mut ordered = replacements.to_vec();
+            ordered.sort_by_key(entry_id);
+            self.write_all_unlocked(&ordered)?;
+            Ok(true)
+        })
+    }
+
     fn read_all_unlocked(&self) -> Result<Vec<CultCacheEnvelope>> {
         if !self.path.exists() {
             return Ok(Vec::new());
@@ -943,6 +975,45 @@ mod tests {
 
         assert_eq!(result?, 42);
         assert_eq!(diagnostic.as_deref(), Some("injected post-action unlock failure"));
+        Ok(())
+    }
+
+    #[test]
+    fn whole_snapshot_replacement_is_atomic_and_rejects_stale_or_duplicate_inputs() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store_path = temp.path().join("compact.cc");
+        let mut store = SingleFileMessagePackBackingStore::new(&store_path);
+        let first = CultCacheEnvelope {
+            key: "first".into(),
+            r#type: "note".into(),
+            payload: b"old".to_vec(),
+            stored_at: "2026-08-23T00:00:00Z".into(),
+            schema_id: Some("note.v1".into()),
+        };
+        let obsolete = CultCacheEnvelope {
+            key: "obsolete".into(),
+            payload: b"discard".to_vec(),
+            ..first.clone()
+        };
+        store.push(&first)?;
+        store.push(&obsolete)?;
+        let expected = store.pull_all_read_only_snapshot()?;
+        let replacement = CultCacheEnvelope {
+            payload: b"current".to_vec(),
+            ..first.clone()
+        };
+
+        assert!(store.compare_exchange_snapshot(&expected, std::slice::from_ref(&replacement))?);
+        assert_eq!(store.pull_all_read_only_snapshot()?, [replacement.clone()]);
+        assert!(!store.compare_exchange_snapshot(&expected, &[])?);
+        assert!(
+            store
+                .compare_exchange_snapshot(
+                    std::slice::from_ref(&replacement),
+                    &[replacement.clone(), replacement.clone()]
+                )
+                .is_err()
+        );
         Ok(())
     }
 

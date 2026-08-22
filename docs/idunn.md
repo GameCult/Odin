@@ -158,6 +158,12 @@ idunn.rudp_health_ingress.v1
   Odin refresh or manual click, Idunn's ownership path is still incomplete.
 - Restart attempts must be witnessed: requested by whom, against which service,
   through which command boundary, with what result and timestamp.
+- Authenticated signed health is bounded current state: Idunn stores one exact
+  statement per daemon, keyed by daemon id, while the admission carries its
+  digest and monotonic lineage. Heartbeat publication must replace that trio
+  atomically; it must not append one store row per pulse. Startup compacts the
+  former digest-keyed history through a whole-snapshot compare/exchange before
+  scheduler workers start.
 - Health command exit status is not daemon awareness. Every Idunn
   target must declare a daemon-owned CultNet/RUDP health contract naming what
   health publication should prove and what unmarked failure means.
