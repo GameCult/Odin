@@ -76,6 +76,17 @@ Odin's executable body is split by ownership:
 - `src/odin/state.cjs`: one refresh's input records into Odin's provider catalog/proxy state.
 The entrypoint is not allowed to grow new probe, surface, provider, layout, or renderer policy. If a new owner is needed, name the owner and its invariant before adding code.
 
+The accepted document registry is also the persistence admission boundary.
+Unknown schemas may be observed for diagnostics but are not silently persisted
+as untyped truth. Heimdall access discovery therefore registers
+`gamecult.eve.provider_advertisement.v1`,
+`heimdall.command_boundary.v1`,
+`gamecult.eve.plugin_advertisement.v1`, and
+`heimdall.transport_profile.v1`. Their globally unique record keys prevent one
+schema from overwriting another in the shared catalog. Odin returns the
+redacted route metadata; it does not proxy private auth operations or own any
+claim, completion, token, or app secret.
+
 Gjallar is the Nightwing-resident terminal compositor for what Odin can show.
 Its runtime lives in `E:\Projects\Gjallar` and consumes Odin's accepted
 provider-state snapshot over CultNet/RUDP.
