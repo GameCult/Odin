@@ -76,6 +76,7 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<()> {
         "deployment-brake-status" => deployment_brake_status(&options)?,
         "create-daemon-health-trust-binding" => create_health_binding(&options)?,
         "add-daemon-health-trust-binding" => add_health_binding(&options)?,
+        "rotate-daemon-health-trust-signer" => rotate_health_binding_signer(&options)?,
         "validate-daemon-health-trust-binding" => {
             require_only(&options, &["input"])?;
             validate_health_binding_store(&path(&options, "input")?)?;
@@ -430,6 +431,62 @@ fn add_health_binding(options: &BTreeMap<String, String>) -> Result<()> {
     Ok(())
 }
 
+fn rotate_health_binding_signer(options: &BTreeMap<String, String>) -> Result<()> {
+    require_only(
+        options,
+        &[
+            "output",
+            "binding-id",
+            "signer-public-key-hex",
+            "bound-at-unix-millis",
+        ],
+    )?;
+    let output = path(options, "output")?;
+    validate_health_binding_store(&output)?;
+    let store = SingleFileMessagePackBackingStore::new(&output);
+    let existing = store.pull_all_read_only_snapshot()?;
+    let binding_id = required(options, "binding-id")?;
+    let public_key = decode_public_key(required(options, "signer-public-key-hex")?)?;
+    let bound_at = parse_u64(options, "bound-at-unix-millis")?;
+    let mut expected = Vec::with_capacity(existing.len());
+    let mut replacement = None;
+    for envelope in existing {
+        let binding: IdunnDaemonHealthTrustBindingRecord =
+            rmp_serde::from_slice(&envelope.payload)?;
+        if binding.binding_id == binding_id {
+            if bound_at <= binding.bound_at_unix_millis {
+                bail!("rotated signer binding time must advance");
+            }
+            if binding.signer_public_key == public_key {
+                bail!("rotated signer must differ from the current signer");
+            }
+            let mut rotated = binding.clone();
+            rotated.signer_identity_id =
+                derive_service_identity_id::<GameCultProviderHealthIdentity>(&public_key)?;
+            rotated.signer_public_key = public_key.clone();
+            rotated.bound_at_unix_millis = bound_at;
+            rotated.validate()?;
+            replacement = Some(rotated);
+        }
+        expected.push(CultCacheExpectedEnvelope {
+            r#type: envelope.r#type.clone(),
+            key: envelope.key.clone(),
+            current: Some(envelope),
+        });
+    }
+    let replacement = replacement.ok_or_else(|| anyhow!("binding id does not exist"))?;
+    let envelope = typed_envelope(
+        &replacement.binding_id,
+        &replacement,
+        IDUNN_DAEMON_HEALTH_TRUST_BINDING_SCHEMA,
+        bound_at,
+    )?;
+    if !store.compare_exchange(&expected, &[envelope])? {
+        bail!("trust store changed during validated signer rotation");
+    }
+    validate_health_binding_store(&output)
+}
+
 fn typed_envelope<T: DatabaseEntry>(
     key: &str,
     value: &T,
@@ -703,7 +760,7 @@ fn normalized(path: &Path) -> Result<PathBuf> {
 }
 
 fn usage() -> &'static str {
-    "Usage: idunn-provision enroll-idunn-identity --private-store <path>\n       idunn-provision export-idunn-public-anchor --private-store <path> --public-anchor <path>\n       idunn-provision enroll-deployment-brake-operator --private-store <path>\n       idunn-provision export-deployment-brake-operator-anchor --private-store <path> --public-anchor <path>\n       idunn-provision deployment-brake-engage --store <path> --runtime-id <id> --owner <principal> --reason <text> --observed-at-unix-millis <u64>\n       idunn-provision deployment-brake-release --store <path> --private-store <path> --runtime-id <id> --owner <principal> --reason <text> --authorization-id <id> --release-id <id> --deployment-id <id> --issued-at-unix-millis <u64> --expires-at-unix-millis <u64>\n       idunn-provision deployment-brake-status --store <path> --operator-anchor <path> --runtime-id <id> [--release-id <id> --deployment-id <id> --now-unix-millis <u64>]\n       idunn-provision create-daemon-health-trust-binding --output <path> --binding-id <id> --daemon <id> --health-contract <id> --source-runtime <id> --signer-public-key-hex <hex> --bound-at-unix-millis <u64> --release-binding-required <true|false>\n       idunn-provision add-daemon-health-trust-binding --output <path> --binding-id <id> --daemon <id> --health-contract <id> --source-runtime <id> --signer-public-key-hex <hex> --bound-at-unix-millis <u64> --release-binding-required <true|false>\n       idunn-provision validate-daemon-health-trust-binding --input <path>\n       idunn-provision create-provider-projection-trust-anchor --output <path> --trust-anchor-id <id> --runtime-id <id> --idunn-public-anchor <path> --bound-at-unix-millis <u64> --expires-at-unix-millis <u64>\n       idunn-provision validate-provider-projection-trust-anchor --input <path> --idunn-public-anchor <path>"
+    "Usage: idunn-provision enroll-idunn-identity --private-store <path>\n       idunn-provision export-idunn-public-anchor --private-store <path> --public-anchor <path>\n       idunn-provision enroll-deployment-brake-operator --private-store <path>\n       idunn-provision export-deployment-brake-operator-anchor --private-store <path> --public-anchor <path>\n       idunn-provision deployment-brake-engage --store <path> --runtime-id <id> --owner <principal> --reason <text> --observed-at-unix-millis <u64>\n       idunn-provision deployment-brake-release --store <path> --private-store <path> --runtime-id <id> --owner <principal> --reason <text> --authorization-id <id> --release-id <id> --deployment-id <id> --issued-at-unix-millis <u64> --expires-at-unix-millis <u64>\n       idunn-provision deployment-brake-status --store <path> --operator-anchor <path> --runtime-id <id> [--release-id <id> --deployment-id <id> --now-unix-millis <u64>]\n       idunn-provision create-daemon-health-trust-binding --output <path> --binding-id <id> --daemon <id> --health-contract <id> --source-runtime <id> --signer-public-key-hex <hex> --bound-at-unix-millis <u64> --release-binding-required <true|false>\n       idunn-provision add-daemon-health-trust-binding --output <path> --binding-id <id> --daemon <id> --health-contract <id> --source-runtime <id> --signer-public-key-hex <hex> --bound-at-unix-millis <u64> --release-binding-required <true|false>\n       idunn-provision rotate-daemon-health-trust-signer --output <path> --binding-id <id> --signer-public-key-hex <hex> --bound-at-unix-millis <u64>\n       idunn-provision validate-daemon-health-trust-binding --input <path>\n       idunn-provision create-provider-projection-trust-anchor --output <path> --trust-anchor-id <id> --runtime-id <id> --idunn-public-anchor <path> --bound-at-unix-millis <u64> --expires-at-unix-millis <u64>\n       idunn-provision validate-provider-projection-trust-anchor --input <path> --idunn-public-anchor <path>"
 }
 
 #[cfg(test)]
@@ -1134,6 +1191,73 @@ mod tests {
         let mut partial = base.to_vec();
         partial.extend(["--release-binding-required", "sometimes"]);
         assert!(invoke(&partial).is_err());
+    }
+
+    #[test]
+    fn signer_rotation_changes_only_the_named_trust_binding_signer() -> Result<()> {
+        let temp = TempDir::new()?;
+        let output = temp.path().join("binding.cc");
+        invoke(&[
+            "create-daemon-health-trust-binding",
+            "--output",
+            output.to_str().unwrap(),
+            "--binding-id",
+            "heimdall-yggdrasil-provider-health",
+            "--daemon",
+            "yggdrasil-heimdall",
+            "--health-contract",
+            "heimdall.cultnet-rudp-provider-health",
+            "--source-runtime",
+            "heimdall-service",
+            "--signer-public-key-hex",
+            "0707070707070707070707070707070707070707070707070707070707070707",
+            "--bound-at-unix-millis",
+            "100",
+            "--release-binding-required",
+            "false",
+        ])?;
+        assert!(
+            invoke(&[
+                "rotate-daemon-health-trust-signer",
+                "--output",
+                output.to_str().unwrap(),
+                "--binding-id",
+                "heimdall-yggdrasil-provider-health",
+                "--signer-public-key-hex",
+                "0808080808080808080808080808080808080808080808080808080808080808",
+                "--bound-at-unix-millis",
+                "100",
+            ])
+            .is_err()
+        );
+        invoke(&[
+            "rotate-daemon-health-trust-signer",
+            "--output",
+            output.to_str().unwrap(),
+            "--binding-id",
+            "heimdall-yggdrasil-provider-health",
+            "--signer-public-key-hex",
+            "0808080808080808080808080808080808080808080808080808080808080808",
+            "--bound-at-unix-millis",
+            "101",
+        ])?;
+        let [envelope] = SingleFileMessagePackBackingStore::new(&output)
+            .pull_all_read_only_snapshot()?
+            .try_into()
+            .map_err(|_| anyhow!("expected one trust binding"))?;
+        let binding: IdunnDaemonHealthTrustBindingRecord =
+            rmp_serde::from_slice(&envelope.payload)?;
+        assert_eq!(binding.binding_id, "heimdall-yggdrasil-provider-health");
+        assert_eq!(binding.daemon_id, "yggdrasil-heimdall");
+        assert_eq!(
+            binding.health_contract,
+            "heimdall.cultnet-rudp-provider-health"
+        );
+        assert_eq!(binding.source_runtime_id, "heimdall-service");
+        assert_eq!(binding.signer_public_key, vec![8; 32]);
+        assert_eq!(binding.bound_at_unix_millis, 101);
+        assert!(!binding.release_binding_required);
+        validate_health_binding_store(&output)
     }
 
     #[test]

@@ -309,6 +309,12 @@ idunn.rudp_health_ingress.v1
   `IDUNN_COMMAND_AUTHORITY=idunn-daemon`. Agent work is to update the target
   catalog, release target, command boundary, migration plan, and daemon
   publication surfaces so Idunn can run the shared command primitive.
+- Provider-health signer rotation is a root authority transaction over one
+  existing named trust binding. `idunn-provision
+  rotate-daemon-health-trust-signer` changes only that binding's public signer,
+  derived identity, and advancing bind time through a validated CultCache CAS;
+  daemon, contract, runtime, release policy, and every other binding remain
+  unchanged.
 - Manual lifecycle requests are typed Idunn command records, not direct script
   execution. Operators publish `idunn.lifecycle_command.v1` with `idunn restart
   --daemon <id>` or `idunn redeploy --daemon <id>`. The running supervisor
