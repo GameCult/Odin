@@ -671,6 +671,70 @@ fn validate_health_admission_at(
     now: &str,
 ) -> Result<()> {
     let lock = Arc::new(Mutex::new(()));
+    let has_generic_admission = with_store_node(options, &lock, |node| {
+        Ok(node
+            .get::<IdunnAuthenticatedDaemonHealthAdmissionRecord>(&expected.daemon_id)?
+            .is_some())
+    })?;
+    if has_generic_admission {
+        let desired = with_store_node(options, &lock, |node| {
+            node.get::<IdunnDesiredDaemonRecord>(&expected.daemon_id)?
+                .ok_or_else(|| {
+                    anyhow!(
+                        "Idunn has no desired daemon record for {}",
+                        expected.daemon_id
+                    )
+                })
+        })?;
+        let managed = read_fresh_daemon_published_health(options, &lock, &desired, now)?
+            .ok_or_else(|| {
+                anyhow!(
+                    "Idunn has no fresh authenticated health admission for {}",
+                    expected.daemon_id
+                )
+            })?;
+        let source = managed.projection_source.ok_or_else(|| {
+            anyhow!(
+                "Idunn current health for {} is not the generic authenticated admission",
+                expected.daemon_id
+            )
+        })?;
+        let admission = source.admission;
+        if admission.state != "active"
+            || admission.deployment_id.as_deref() != Some(expected.deployment_request_id.as_str())
+            || admission.release_id.as_deref() != Some(expected.release_id.as_str())
+            || admission.release_witness_sha256.as_deref()
+                != Some(expected.release_witness_sha256.as_str())
+            || admission.source_commit.as_deref() != Some(expected.source_commit.as_str())
+            || admission.publisher_incarnation_id.is_empty()
+            || admission.publisher_sequence == 0
+            || admission.signed_health_sha256.is_empty()
+            || admission.signer_identity_id.is_empty()
+        {
+            return Err(anyhow!(
+                "Idunn admitted health does not prove the exact active candidate"
+            ));
+        }
+        println!(
+            "validated authenticated Idunn health admission daemon={} state={} releaseId={} witnessSha256={} sourceCommit={} signedHealthSha256={} publisherIncarnation={} publisherSequence={}",
+            admission.daemon_id,
+            admission.state,
+            admission.release_id.as_deref().unwrap_or_default(),
+            admission
+                .release_witness_sha256
+                .as_deref()
+                .unwrap_or_default(),
+            admission.source_commit.as_deref().unwrap_or_default(),
+            admission.signed_health_sha256,
+            admission.publisher_incarnation_id,
+            admission.publisher_sequence,
+        );
+        return Ok(());
+    }
+
+    // The old Epiphany-specific health contract remains a sealed read path for
+    // already-admitted releases. New publishers use the generic authenticated
+    // daemon-health contract above.
     let admission = with_store_node(options, &lock, |node| {
         let admission = node
             .get::<IdunnSignedHealthAdmissionRecord>(&expected.daemon_id)?
@@ -9331,6 +9395,51 @@ mod tests {
             document.payload[0] ^= 1;
         }
         assert!(health_from_rudp_message(&forged, &options).is_err());
+    }
+
+    #[test]
+    fn deployment_validator_accepts_exact_generic_authenticated_health() {
+        let (message, options, _root) = generic_signed_health_fixture_with_release(1, true);
+        let lock = Arc::new(Mutex::new(()));
+        with_store_node(&options, &lock, |node| {
+            node.put(
+                "test-daemon",
+                &IdunnDesiredDaemonRecord {
+                    daemon_id: "test-daemon".into(),
+                    verse_id: "test.local".into(),
+                    name: "Test daemon".into(),
+                    enabled: true,
+                    health_command: None,
+                    restart_command: None,
+                    deploy_command: Some("deploy test".into()),
+                    authority: "idunn-supervisor-command".into(),
+                    max_silence_seconds: 60,
+                    observed_at: "2026-07-19T12:00:00Z".into(),
+                    health_contract: "test.signed-health".into(),
+                    transport_profile_id: "test-transport".into(),
+                    command_boundary_id: "test-command".into(),
+                },
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        admit_health_from_rudp_message(&message, &options, &lock, "2026-07-19T12:00:01Z").unwrap();
+
+        let exact = HealthAdmissionValidationOptions {
+            daemon_id: "test-daemon".into(),
+            deployment_request_id: "deploy-test-1".into(),
+            release_id: "release-test-1".into(),
+            release_witness_sha256: format!("sha256-{}", "a".repeat(64)),
+            source_commit: "b".repeat(40),
+        };
+        validate_health_admission_at(&exact, &options, "2026-07-19T12:00:02Z").unwrap();
+
+        let mut substituted = exact;
+        substituted.release_witness_sha256 = format!("sha256-{}", "f".repeat(64));
+        let error = validate_health_admission_at(&substituted, &options, "2026-07-19T12:00:02Z")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("does not prove the exact active candidate"));
     }
 
     #[test]
