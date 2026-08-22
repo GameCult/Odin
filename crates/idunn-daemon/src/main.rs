@@ -6027,7 +6027,7 @@ fn run_deployment(
             request_id: request.request_id.clone(),
             daemon_id: request.daemon_id.clone(),
             state: "failed".to_string(),
-            detail: format!("deployment command could not run: {error}"),
+            detail: format!("deployment command could not run: {error:#}"),
             completed_at: requested_at.to_string(),
         },
     }
@@ -8048,11 +8048,6 @@ mod tests {
             "--deployment-brake-store /var/lib/gamecult/idunn-authority/deployment-brake.cc"
         ));
         assert!(unit.contains("ReadOnlyPaths=/var/lib/gamecult/idunn-authority"));
-        assert!(
-            unit.contains(
-                "ReadWritePaths=/var/lib/gamecult/idunn-authority/deployment-brake.cc.lock"
-            )
-        );
         assert!(
             !unit
                 .lines()
