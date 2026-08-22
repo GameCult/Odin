@@ -5077,12 +5077,18 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 health_contract: health_contract("heimdall.cultnet-rudp-provider-health", "failed"),
                 deploy_command: Some(yggdrasil_actuator("deploy", "heimdall")),
                 restart_command: Some(yggdrasil_actuator("restart", "heimdall")),
-                release: Some(release_target(
-                    "Heimdall",
-                    PathBuf::from("/srv/build/Heimdall"),
-                    "restart-after-verified-build",
-                    None,
-                    "restart-required",
+                release: Some(with_source_change_pathspecs(
+                    with_deployed_revision_witness(
+                        release_target(
+                            "Heimdall",
+                            PathBuf::from("/srv/build/Heimdall"),
+                            "restart-after-verified-build",
+                            None,
+                            "restart-required",
+                        ),
+                        PathBuf::from("/srv/heimdall/deploy/deployment.env"),
+                    ),
+                    DEPLOYABLE_SOURCE_PATHS,
                 )),
                 enabled: true,
                 interval_seconds: 300,
@@ -8010,20 +8016,21 @@ mod tests {
     }
 
     #[test]
-    fn yggdrasil_runtime_catalog_includes_discovery_and_dungeon_bodies() {
+    fn yggdrasil_runtime_catalog_binds_discovery_auth_and_dungeon_releases() {
         let targets = swarm_targets(&SwarmOptions {
             profile: "yggdrasil-local".to_string(),
             repo_root: PathBuf::from("/srv/odin/source"),
         })
         .expect("yggdrasil-local targets");
 
-        for (daemon_id, repo, branch, witness, actuator_name) in [
+        for (daemon_id, repo, branch, witness, actuator_name, restart_on_missing) in [
             (
                 "yggdrasil-odin",
                 "Odin",
                 "codex/ygg-idunn-independent-bootstrap",
                 "/srv/odin/deploy/deployment.env",
                 "odin",
+                true,
             ),
             (
                 "yggdrasil-ghostlight",
@@ -8031,13 +8038,25 @@ mod tests {
                 "codex/ghostlight-dungeon-mvp",
                 "/srv/ghostlight/deploy/deployment.env",
                 "ghostlight",
+                true,
+            ),
+            (
+                "yggdrasil-heimdall",
+                "Heimdall",
+                "main",
+                "/srv/heimdall/deploy/deployment.env",
+                "heimdall",
+                false,
             ),
         ] {
             let target = targets
                 .iter()
                 .find(|target| target.daemon_id == daemon_id)
                 .unwrap_or_else(|| panic!("missing {daemon_id}"));
-            assert!(target.health_contract.restart_on_missing_publication);
+            assert_eq!(
+                target.health_contract.restart_on_missing_publication,
+                restart_on_missing
+            );
             assert_eq!(
                 target.restart_command.as_deref(),
                 Some(format!(
@@ -8060,6 +8079,8 @@ mod tests {
         let actuator = include_str!("../../../scripts/linux/idunn-yggdrasil");
         assert!(actuator.contains("deploy:odin|restart:odin"));
         assert!(actuator.contains("deploy:ghostlight|restart:ghostlight"));
+        assert!(actuator.contains("restart:heimdall"));
+        assert!(actuator.contains("deploy:heimdall"));
     }
 
     struct FakeReleaseStatePort {

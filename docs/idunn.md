@@ -321,13 +321,19 @@ idunn.rudp_health_ingress.v1
   lacks hot reload, blue/green routing, rolling instances, or another named
   in-place swap mechanism, Idunn records `restart-required` and verifies the
   restart path honestly.
-- Yggdrasil Odin, Heimdall, repixelizer, and StreamPixels are enforced through the
-  generic source artifact lane and their existing `gamecult-ops` runbooks.
+- Yggdrasil Odin, Heimdall, Ghostlight, repixelizer, and StreamPixels are
+  enforced through Idunn's source-selected release lane and their existing
+  `gamecult-ops` actuators. Heimdall and Ghostlight publish exact deployed
+  revisions in `/srv/heimdall/deploy/deployment.env` and
+  `/srv/ghostlight/deploy/deployment.env`; documentation-only commits cannot
+  become desired executable generations.
   Odin publishes `idunn.signed_daemon_health.v1` with its root-bound Ed25519
   identity. Its immutable release pins both the Odin commit and the exact
   CultLib commit, then switches them through one `/srv/odin/current` link.
-  Ghostlight is present but disabled in the catalog until its Linux runtime and
-  signed-health identity are admitted; absence is not treated as failed health.
+  Ghostlight's Linux runtime and signed-health identity are admitted. Heimdall
+  publishes its own daemon health and private authentication command listener;
+  its HTTP and loopback listener probes remain deployment witnesses rather than
+  release or health authority.
   Bifrost is explicitly blocked as of 2026-06-09: committed Bifrost `HEAD`
   expects `UserAccounts.HeimdallAccountId`, while Yggdrasil's production
   database lacks that column and EF reports no pending migration. Idunn must
