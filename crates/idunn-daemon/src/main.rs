@@ -8050,6 +8050,7 @@ mod tests {
         assert!(unit.contains("ReadOnlyPaths=/var/lib/gamecult/idunn-authority"));
         assert!(!unit.contains("ReadWritePaths=/var/lib/gamecult/idunn-authority"));
         assert!(unit.contains("/etc/gamecult/ghostlight"));
+        assert!(unit.contains("/etc/systemd/system/epiphany-swarm.service"));
         assert!(unit.contains("/etc/systemd/system/ghostlight-dungeon.service"));
         assert!(!unit.contains("ReadWritePaths=/etc "));
         assert!(
