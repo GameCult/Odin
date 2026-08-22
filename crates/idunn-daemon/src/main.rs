@@ -60,6 +60,9 @@ const EPIPHANY_SIGNED_RUNTIME_HEALTH_SCHEMA_VERSION: &str =
 const EPIPHANY_HEALTH_CONTRACT: &str = "epiphany.cultnet-rudp-runtime-health";
 const EPIPHANY_HEALTH_SOURCE_RUNTIME: &str = "epiphany-daemon-supervisor";
 const EPIPHANY_ADMISSION_MAX_AGE_SECONDS: u64 = 180;
+const IDUNN_OPERATIONAL_STORE_COMPACTION_BYTES: u64 = 1024 * 1024;
+const IDUNN_OPERATIONAL_HISTORY_PER_DAEMON: usize = 8;
+const IDUNN_LIFECYCLE_HISTORY_PER_DAEMON: usize = 32;
 const SIGNED_DAEMON_HEALTH_SCHEMA_ID: &str = odin_core::IDUNN_SIGNED_DAEMON_HEALTH_SCHEMA;
 const DEPLOYABLE_SOURCE_PATHS: &[&str] = &[
     ".",
@@ -842,6 +845,12 @@ fn run_swarm(
             "Idunn compacted {compacted_health_statements} obsolete authenticated health statement(s)."
         );
     }
+    let compacted_operational_records = compact_operational_history(common, &store_lock)?;
+    if compacted_operational_records > 0 {
+        println!(
+            "Idunn compacted {compacted_operational_records} obsolete operational history record(s)."
+        );
+    }
     let recovered = terminalize_interrupted_deployment_requests(common, &store_lock, &now)?;
     if recovered > 0 {
         println!(
@@ -1010,6 +1019,7 @@ fn run_target_cycle(
     projection_publisher: Option<&IdunnProjectionPublisher>,
     missing_since: &mut Option<Instant>,
 ) -> Result<()> {
+    compact_operational_history_if_needed(options, store_lock)?;
     let now = timestamp()?;
 
     let desired = IdunnDesiredDaemonRecord {
@@ -3384,6 +3394,7 @@ fn admit_health_from_rudp_message(
     store_lock: &Arc<Mutex<()>>,
     admitted_at: &str,
 ) -> Result<HealthIngressOutcome> {
+    compact_operational_history_if_needed(options, store_lock)?;
     let decoded = decode_health_from_rudp_message(message, options, admitted_at)?;
     let (health, admission) = match decoded {
         DecodedHealthIngress::Diagnostic(diagnostic) => {
@@ -3574,6 +3585,240 @@ fn compact_authenticated_health_statement_history(
     }
     Err(anyhow!(
         "authenticated health statement compaction lost repeated cross-process contention"
+    ))
+}
+
+fn operational_history_coordinates(
+    entry: &CultCacheEnvelope,
+) -> Result<Option<(String, String, usize)>> {
+    let coordinates = match entry.r#type.as_str() {
+        kind if kind == odin_core::IdunnKeepaliveDecisionRecord::TYPE => {
+            let record: odin_core::IdunnKeepaliveDecisionRecord =
+                rmp_serde::from_slice(&entry.payload)?;
+            (
+                record.daemon_id,
+                record.decided_at,
+                IDUNN_OPERATIONAL_HISTORY_PER_DAEMON,
+            )
+        }
+        kind if kind == IdunnOperatorAlarmRecord::TYPE => {
+            let record: IdunnOperatorAlarmRecord = rmp_serde::from_slice(&entry.payload)?;
+            (
+                record.daemon_id,
+                record.raised_at,
+                IDUNN_OPERATIONAL_HISTORY_PER_DAEMON,
+            )
+        }
+        kind if kind == IdunnDeploymentRequestRecord::TYPE => {
+            let record: IdunnDeploymentRequestRecord = rmp_serde::from_slice(&entry.payload)?;
+            (
+                record.daemon_id,
+                record.requested_at,
+                IDUNN_OPERATIONAL_HISTORY_PER_DAEMON,
+            )
+        }
+        kind if kind == IdunnDeploymentResultRecord::TYPE => {
+            let record: IdunnDeploymentResultRecord = rmp_serde::from_slice(&entry.payload)?;
+            (
+                record.daemon_id,
+                record.completed_at,
+                IDUNN_OPERATIONAL_HISTORY_PER_DAEMON,
+            )
+        }
+        kind if kind == IdunnRestartRequestRecord::TYPE => {
+            let record: IdunnRestartRequestRecord = rmp_serde::from_slice(&entry.payload)?;
+            (
+                record.daemon_id,
+                record.requested_at,
+                IDUNN_OPERATIONAL_HISTORY_PER_DAEMON,
+            )
+        }
+        kind if kind == IdunnRestartResultRecord::TYPE => {
+            let record: IdunnRestartResultRecord = rmp_serde::from_slice(&entry.payload)?;
+            (
+                record.daemon_id,
+                record.completed_at,
+                IDUNN_OPERATIONAL_HISTORY_PER_DAEMON,
+            )
+        }
+        kind if kind == IdunnStateMigrationResultRecord::TYPE => {
+            let record: IdunnStateMigrationResultRecord = rmp_serde::from_slice(&entry.payload)?;
+            (
+                record.daemon_id,
+                record.completed_at,
+                IDUNN_OPERATIONAL_HISTORY_PER_DAEMON,
+            )
+        }
+        kind if kind == IdunnRolloutResultRecord::TYPE => {
+            let record: IdunnRolloutResultRecord = rmp_serde::from_slice(&entry.payload)?;
+            (
+                record.daemon_id,
+                record.completed_at,
+                IDUNN_OPERATIONAL_HISTORY_PER_DAEMON,
+            )
+        }
+        kind if kind == IdunnLifecycleCommandRecord::TYPE => {
+            let record: IdunnLifecycleCommandRecord = rmp_serde::from_slice(&entry.payload)?;
+            (
+                record.daemon_id,
+                record.requested_at,
+                IDUNN_LIFECYCLE_HISTORY_PER_DAEMON,
+            )
+        }
+        _ => return Ok(None),
+    };
+    if coordinates.0.trim().is_empty() || coordinates.1.trim().is_empty() {
+        return Err(anyhow!(
+            "Idunn operational history record has an empty daemon or timestamp"
+        ));
+    }
+    Ok(Some(coordinates))
+}
+
+fn compact_operational_history_if_needed(
+    options: &CommonOptions,
+    store_lock: &Arc<Mutex<()>>,
+) -> Result<()> {
+    if fs::metadata(&options.store_path)
+        .map(|metadata| metadata.len() > IDUNN_OPERATIONAL_STORE_COMPACTION_BYTES)
+        .unwrap_or(false)
+    {
+        let removed = compact_operational_history(options, store_lock)?;
+        if removed > 0 {
+            println!("Idunn compacted {removed} obsolete operational history record(s).");
+        }
+    }
+    Ok(())
+}
+
+fn compact_operational_history(
+    options: &CommonOptions,
+    store_lock: &Arc<Mutex<()>>,
+) -> Result<usize> {
+    let _store_guard = store_lock
+        .lock()
+        .map_err(|_| anyhow!("Idunn store lock is poisoned"))?;
+    let backing = SingleFileMessagePackBackingStore::new(&options.store_path);
+    for _ in 0..8 {
+        let expected = backing.pull_all()?;
+        let mut keep = BTreeSet::<(String, String)>::new();
+        let mut groups = BTreeMap::<(String, String, usize), Vec<(String, String)>>::new();
+        for entry in &expected {
+            if let Some((daemon_id, timestamp, limit)) = operational_history_coordinates(entry)? {
+                groups
+                    .entry((entry.r#type.clone(), daemon_id, limit))
+                    .or_default()
+                    .push((timestamp, entry.key.clone()));
+            } else {
+                keep.insert((entry.r#type.clone(), entry.key.clone()));
+            }
+        }
+        for ((kind, _, limit), candidates) in &mut groups {
+            candidates.sort_by(|left, right| right.cmp(left));
+            for (_, key) in candidates.iter().take(*limit) {
+                keep.insert((kind.clone(), key.clone()));
+            }
+        }
+
+        for entry in expected
+            .iter()
+            .filter(|entry| entry.r#type == IdunnCurrentDeploymentRequestRecord::TYPE)
+        {
+            let head: IdunnCurrentDeploymentRequestRecord = rmp_serde::from_slice(&entry.payload)?;
+            if head.daemon_id.trim().is_empty() || head.request_id.trim().is_empty() {
+                return Err(anyhow!(
+                    "current deployment request head is invalid during operational compaction"
+                ));
+            }
+            keep.insert((
+                IdunnDeploymentRequestRecord::TYPE.into(),
+                head.request_id.clone(),
+            ));
+            keep.insert((
+                IdunnDeploymentResultRecord::TYPE.into(),
+                format!("result:{}", head.request_id),
+            ));
+        }
+        for entry in expected
+            .iter()
+            .filter(|entry| entry.r#type == IdunnAuthenticatedDaemonHealthAdmissionRecord::TYPE)
+        {
+            let admission: IdunnAuthenticatedDaemonHealthAdmissionRecord =
+                rmp_serde::from_slice(&entry.payload)?;
+            admission.validate()?;
+            if let Some(deployment_id) = admission.deployment_id {
+                keep.insert((
+                    IdunnDeploymentRequestRecord::TYPE.into(),
+                    deployment_id.clone(),
+                ));
+                keep.insert((
+                    IdunnDeploymentResultRecord::TYPE.into(),
+                    format!("result:{deployment_id}"),
+                ));
+            }
+        }
+        for entry in expected
+            .iter()
+            .filter(|entry| entry.r#type == IdunnSignedHealthAdmissionRecord::TYPE)
+        {
+            let admission: IdunnSignedHealthAdmissionRecord =
+                rmp_serde::from_slice(&entry.payload)?;
+            if admission.deployment_request_id.trim().is_empty() {
+                return Err(anyhow!(
+                    "signed health admission lost its deployment request during operational compaction"
+                ));
+            }
+            keep.insert((
+                IdunnDeploymentRequestRecord::TYPE.into(),
+                admission.deployment_request_id.clone(),
+            ));
+            keep.insert((
+                IdunnDeploymentResultRecord::TYPE.into(),
+                format!("result:{}", admission.deployment_request_id),
+            ));
+        }
+        let retained_commands = expected
+            .iter()
+            .filter(|entry| entry.r#type == IdunnLifecycleCommandRecord::TYPE)
+            .filter(|entry| keep.contains(&(entry.r#type.clone(), entry.key.clone())))
+            .cloned()
+            .collect::<Vec<_>>();
+        for entry in retained_commands {
+            let command: IdunnLifecycleCommandRecord = rmp_serde::from_slice(&entry.payload)?;
+            if command.result_id.trim().is_empty() {
+                continue;
+            }
+            let request_id = command
+                .result_id
+                .strip_prefix("result:")
+                .unwrap_or(&command.result_id)
+                .to_string();
+            keep.insert((
+                IdunnDeploymentRequestRecord::TYPE.into(),
+                request_id.clone(),
+            ));
+            keep.insert((IdunnRestartRequestRecord::TYPE.into(), request_id));
+            keep.insert((
+                IdunnDeploymentResultRecord::TYPE.into(),
+                command.result_id.clone(),
+            ));
+            keep.insert((IdunnRestartResultRecord::TYPE.into(), command.result_id));
+        }
+
+        let replacement = expected
+            .iter()
+            .filter(|entry| keep.contains(&(entry.r#type.clone(), entry.key.clone())))
+            .cloned()
+            .collect::<Vec<_>>();
+        if replacement.len() == expected.len() {
+            return Ok(0);
+        }
+        if backing.compare_exchange_snapshot(&expected, &replacement)? {
+            return Ok(expected.len().saturating_sub(replacement.len()));
+        }
+    }
+    Err(anyhow!(
+        "operational history compaction lost repeated cross-process contention"
     ))
 }
 
@@ -9631,6 +9876,111 @@ mod tests {
         let statement: IdunnSignedDaemonHealthRecord =
             rmp_serde::from_slice(&statements[0].payload).unwrap();
         assert_eq!(statement.publisher_sequence, 1);
+    }
+
+    #[test]
+    fn operational_history_compaction_is_bounded_and_keeps_the_current_deployment_chain() {
+        let (_message, options, _root) = generic_signed_health_fixture(1);
+        let mut entries = Vec::new();
+        for daemon_id in ["alpha", "beta"] {
+            for index in 0..12 {
+                let observed_at = format!("2026-08-23T00:00:{index:02}Z");
+                let decision = odin_core::IdunnKeepaliveDecisionRecord {
+                    decision_id: format!("decision:{daemon_id}:{index:02}"),
+                    daemon_id: daemon_id.into(),
+                    action: "observe".into(),
+                    reason: "fixture".into(),
+                    authority: "idunn-supervisor-command".into(),
+                    decided_at: observed_at.clone(),
+                };
+                entries
+                    .push(typed_envelope(&decision.decision_id, &decision, &observed_at).unwrap());
+                let alarm = IdunnOperatorAlarmRecord {
+                    alarm_id: format!("alarm:{daemon_id}:{index:02}"),
+                    daemon_id: daemon_id.into(),
+                    severity: "operator-action-required".into(),
+                    reason: "fixture".into(),
+                    escalation_target: "bifrost.operator-notification".into(),
+                    raised_at: observed_at.clone(),
+                };
+                entries.push(typed_envelope(&alarm.alarm_id, &alarm, &observed_at).unwrap());
+                let request = IdunnDeploymentRequestRecord {
+                    request_id: format!("deploy:{daemon_id}:{index:02}"),
+                    daemon_id: daemon_id.into(),
+                    command: "deploy fixture".into(),
+                    authority: "idunn-supervisor-command".into(),
+                    requested_at: observed_at.clone(),
+                    repository_full_name: "GameCult/Fixture".into(),
+                    upstream_ref: "refs/heads/main".into(),
+                    source_revision: "a".repeat(40),
+                    release_authority_id: "release:fixture".into(),
+                    release_authority_envelope_sha256: format!("sha256-{}", "a".repeat(64)),
+                    requires_bifrost_authority: false,
+                };
+                entries.push(typed_envelope(&request.request_id, &request, &observed_at).unwrap());
+                let result = IdunnDeploymentResultRecord {
+                    result_id: format!("result:{}", request.request_id),
+                    request_id: request.request_id,
+                    daemon_id: daemon_id.into(),
+                    state: "failed".into(),
+                    detail: "fixture".into(),
+                    completed_at: observed_at.clone(),
+                };
+                entries.push(typed_envelope(&result.result_id, &result, &observed_at).unwrap());
+            }
+            for index in 0..40 {
+                let requested_at = format!("2026-08-23T00:01:{index:02}Z");
+                let command = IdunnLifecycleCommandRecord {
+                    command_id: format!("command:{daemon_id}:{index:02}"),
+                    daemon_id: daemon_id.into(),
+                    action: "restart".into(),
+                    state: "rejected".into(),
+                    requested_by: "fixture".into(),
+                    requested_at: requested_at.clone(),
+                    detail: "fixture".into(),
+                    claimed_at: requested_at.clone(),
+                    result_id: String::new(),
+                };
+                entries.push(typed_envelope(&command.command_id, &command, &requested_at).unwrap());
+            }
+        }
+        let head = IdunnCurrentDeploymentRequestRecord {
+            daemon_id: "alpha".into(),
+            request_id: "deploy:alpha:00".into(),
+            sequence: 1,
+            updated_at: "2026-08-23T00:00:00Z".into(),
+        };
+        entries.push(typed_envelope(&head.daemon_id, &head, &head.updated_at).unwrap());
+        let mut backing = SingleFileMessagePackBackingStore::new(&options.store_path);
+        backing.push_all(&entries, Default::default()).unwrap();
+
+        assert!(compact_operational_history(&options, &Arc::new(Mutex::new(()))).unwrap() > 0);
+        assert_eq!(
+            compact_operational_history(&options, &Arc::new(Mutex::new(()))).unwrap(),
+            0
+        );
+        let compacted = backing.pull_all_read_only_snapshot().unwrap();
+        let count = |kind: &str| {
+            compacted
+                .iter()
+                .filter(|entry| entry.r#type == kind)
+                .count()
+        };
+        assert_eq!(count(odin_core::IdunnKeepaliveDecisionRecord::TYPE), 16);
+        assert_eq!(count(IdunnOperatorAlarmRecord::TYPE), 16);
+        assert_eq!(count(IdunnLifecycleCommandRecord::TYPE), 64);
+        assert_eq!(count(IdunnDeploymentRequestRecord::TYPE), 17);
+        assert_eq!(count(IdunnDeploymentResultRecord::TYPE), 17);
+        assert!(compacted.iter().any(|entry| {
+            entry.r#type == IdunnDeploymentRequestRecord::TYPE && entry.key == "deploy:alpha:00"
+        }));
+        assert!(compacted.iter().any(|entry| {
+            entry.r#type == IdunnDeploymentResultRecord::TYPE
+                && entry.key == "result:deploy:alpha:00"
+        }));
+        assert!(compacted.iter().any(|entry| {
+            entry.r#type == IdunnCurrentDeploymentRequestRecord::TYPE && entry.key == "alpha"
+        }));
     }
 
     #[test]

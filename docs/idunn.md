@@ -164,6 +164,14 @@ idunn.rudp_health_ingress.v1
   atomically; it must not append one store row per pulse. Startup compacts the
   former digest-keyed history through a whole-snapshot compare/exchange before
   scheduler workers start.
+- The keepalive store is current operational authority with bounded diagnostic
+  history, not an event archive. Idunn retains the latest eight decisions,
+  alarms, automatic deployment/restart receipts, migration results, and
+  rollout results per daemon, plus the latest thirty-two operator lifecycle
+  commands. Exact current deployment heads, their request/result chain, active
+  health bindings, and recent command-linked receipts are pinned regardless of
+  age. Startup compacts legacy history atomically; later writes reapply the
+  same policy before the single-file store can exceed 1 MiB for long.
 - Health command exit status is not daemon awareness. Every Idunn
   target must declare a daemon-owned CultNet/RUDP health contract naming what
   health publication should prove and what unmarked failure means.

@@ -68,6 +68,13 @@ legacy digest-keyed statement history to the one exact statement named by each
 current admission. A missing or digest-mismatched witness fails closed; it is
 never reconstructed from process probes or a later heartbeat.
 
+The surrounding keepalive store follows a separate bounded-retention policy.
+It keeps exact current authority plus small per-daemon diagnostic windows;
+historical pulse decisions, repeated alarms, and superseded actuation receipts
+cannot make authentication fsync cost grow with host age. The current
+deployment head and every record required to rejoin active signed health remain
+pinned through compaction.
+
 The outward record exists only while a generic provider-authored admission is
 current and still matches its root trust and optional release binding. Missing
 publication, release drift, dependency failure, target absence, and recovery
