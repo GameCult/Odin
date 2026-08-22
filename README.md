@@ -24,6 +24,17 @@ the Nightwing-resident terminal compositor in `E:\Projects\Gjallar` that
 consumes Odin's accepted `gamecult.eve.surface_state` snapshot over CultNet/RUDP
 and renders the live display.
 
+## Typed access discovery
+
+Odin persists only document schemas it has registered. That is a deliberate
+typed-store boundary, not a license to accept anonymous blobs and hope later
+code understands them. The live Yggdrasil body at
+`b4f9a2e95f0b41cebdeddc49223781d1d3c7b42a` registers Heimdall's provider,
+command-boundary, Eve-plugin, and transport-profile documents. Heimdall owns
+their contents; Odin owns catalog acceptance and exact retrieval. Sensitive
+auth commands and claims travel directly between the consuming app and
+Heimdall, never through Odin.
+
 ## Gjallar
 
 Gjallar is the herald display daemon that runs on Nightwing. Odin sees the
