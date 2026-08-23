@@ -29,11 +29,13 @@ and renders the live display.
 Odin persists only document schemas it has registered. That is a deliberate
 typed-store boundary, not a license to accept anonymous blobs and hope later
 code understands them. The live Yggdrasil body at
-`b4f9a2e95f0b41cebdeddc49223781d1d3c7b42a` registers Heimdall's provider,
-command-boundary, Eve-plugin, and transport-profile documents. Heimdall owns
-their contents; Odin owns catalog acceptance and exact retrieval. Sensitive
-auth commands and claims travel directly between the consuming app and
-Heimdall, never through Odin.
+`ba76a7239a7bb40aa1774df7d93b9388dc27b222`, using CultLib
+`75c180782aeba7cfd22d6412877397708a4ed28f`, registers Heimdall's provider,
+command-boundary, Eve-plugin, and transport-profile documents plus
+Ghostlight's public catalog envelope. Provider daemons own those documents;
+Odin owns typed catalog acceptance, ordered durable persistence, and exact
+retrieval. Sensitive auth commands and claims travel directly between the
+consuming app and Heimdall, never through Odin.
 
 Ghostlight publishes a `ghostlight.schema_catalog.v1` envelope containing only
 the state contracts named by its public provider surface. Odin registers that
