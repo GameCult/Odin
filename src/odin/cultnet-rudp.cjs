@@ -77,8 +77,9 @@ function createCultMeshRudpDocumentServer(options) {
       },
       onDocumentPutRaw: (document) => {
         if (typeof options.onDocumentPutRaw === "function") {
-          options.onDocumentPutRaw(document);
+          return options.onDocumentPutRaw(document);
         }
+        return undefined;
       },
     },
   );
