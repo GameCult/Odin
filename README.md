@@ -35,6 +35,11 @@ their contents; Odin owns catalog acceptance and exact retrieval. Sensitive
 auth commands and claims travel directly between the consuming app and
 Heimdall, never through Odin.
 
+Ghostlight publishes a `ghostlight.schema_catalog.v1` envelope containing only
+the state contracts named by its public provider surface. Odin registers that
+envelope so it can persist and return the provider-owned catalog; it does not
+register every private Ghostlight receipt, transition, or simulation schema.
+
 ## Gjallar
 
 Gjallar is the herald display daemon that runs on Nightwing. Odin sees the

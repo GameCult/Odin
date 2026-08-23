@@ -7,6 +7,7 @@ function defineOdinDocuments(defineDocumentType) {
     return {
       interfaceBindingDefinition: null,
       evePluginAdvertisementDefinition: null,
+      ghostlightSchemaCatalogDefinition: null,
       heimdallCommandBoundaryDefinition: null,
       heimdallTransportProfileDefinition: null,
       idunnCommandBoundaryDefinition: null,
@@ -94,6 +95,15 @@ function defineOdinDocuments(defineDocumentType) {
     global: false,
     name: (value) => value?.pluginId || value?.plugin?.id || "plugin",
     schema: parseObjectDocument("Eve plugin advertisement"),
+  });
+  const ghostlightSchemaCatalogDefinition = defineDocumentType({
+    type: "ghostlight.schema_catalog",
+    schemaName: "ghostlight.schema_catalog",
+    schemaId: "ghostlight.schema_catalog.v1",
+    schemaVersion: "ghostlight.schema_catalog.v1",
+    global: false,
+    name: (value) => value?.providerId || "gamecult.ghostlight.dungeon",
+    schema: parseObjectDocument("Ghostlight public schema catalog"),
   });
   const heimdallCommandBoundaryDefinition = defineDocumentType({
     type: "heimdall.command_boundary",
@@ -477,6 +487,7 @@ function defineOdinDocuments(defineDocumentType) {
   return {
     interfaceBindingDefinition,
     evePluginAdvertisementDefinition,
+    ghostlightSchemaCatalogDefinition,
     heimdallCommandBoundaryDefinition,
     heimdallTransportProfileDefinition,
     interfaceLayoutDefinition,
