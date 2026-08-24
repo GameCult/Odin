@@ -293,7 +293,7 @@ idunn.rudp_health_ingress.v1
   part of Idunn's ops role. The daemon publishes
   `gjallar.cultnet-rudp-composition-health`; Idunn's Yggdrasil actuator admits
   immutable releases through the Gjallar deploy manifest and restarts
-  `gjallar.service`. Nightwing has no Gjallar deployment or restart authority.
+  `gjallar-yggdrasil.service`. Nightwing has no Gjallar deployment or restart authority.
 - Swarm-wide deployment ownership means Idunn owns the target catalog and the
   freshness contract for the repo swarm. For enforced deploy targets, the
   catalog must name upstream remote/branch, rollout strategy, state migration
