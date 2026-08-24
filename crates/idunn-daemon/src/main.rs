@@ -5416,6 +5416,33 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 interval_seconds: 30,
             },
             DaemonTarget {
+                daemon_id: "yggdrasil-codex-connector".to_string(),
+                verse_id: "yggdrasil.local".to_string(),
+                name: "Yggdrasil Codex Connector".to_string(),
+                health_contract: locally_supervised_health_contract(
+                    "codex-connector.cultnet-rudp-service-health",
+                    "failed",
+                ),
+                deploy_command: Some(yggdrasil_actuator("deploy", "codex-connector")),
+                restart_command: Some(yggdrasil_actuator("restart", "codex-connector")),
+                release: Some(with_source_change_pathspecs(
+                    with_deployed_revision_witness(
+                        release_target_on_branch(
+                            "CodexConnector",
+                            PathBuf::from("/srv/build/CodexConnector"),
+                            "main",
+                            "restart-after-verified-build",
+                            None,
+                            "restart-required",
+                        ),
+                        PathBuf::from("/srv/codex-connector/deploy/deployment.env"),
+                    ),
+                    DEPLOYABLE_SOURCE_PATHS,
+                )),
+                enabled: true,
+                interval_seconds: 30,
+            },
+            DaemonTarget {
                 daemon_id: "yggdrasil-ghostlight".to_string(),
                 verse_id: "yggdrasil.local".to_string(),
                 name: "Yggdrasil Ghostlight Dungeon".to_string(),
@@ -8386,7 +8413,9 @@ mod tests {
                 .lines()
                 .any(|line| line == "ReadWritePaths=/var/lib/gamecult/idunn-authority")
         );
+        assert!(unit.contains("/etc/gamecult/codex-connector"));
         assert!(unit.contains("/etc/gamecult/ghostlight"));
+        assert!(unit.contains("/etc/systemd/system/codex-connector.service"));
         assert!(unit.contains("/etc/systemd/system/epiphany-swarm.service"));
         assert!(unit.contains("/etc/systemd/system/ghostlight-dungeon.service"));
         assert!(!unit.contains("ReadWritePaths=/etc "));
@@ -8400,7 +8429,7 @@ mod tests {
             actuator.contains("bifrost-persona-feedback) target_requires_bifrost_authority=true")
         );
         assert!(actuator.contains(
-            "epiphany|voidbot|heimdall|repixelizer|streampixels|odin|ghostlight|gjallar) target_requires_bifrost_authority=false"
+            "epiphany|voidbot|heimdall|repixelizer|streampixels|odin|codex-connector|ghostlight|gjallar) target_requires_bifrost_authority=false"
         ));
         assert!(
             actuator
@@ -8440,6 +8469,14 @@ mod tests {
                 "codex/ygg-idunn-independent-bootstrap",
                 "/srv/odin/deploy/deployment.env",
                 "odin",
+                true,
+            ),
+            (
+                "yggdrasil-codex-connector",
+                "CodexConnector",
+                "main",
+                "/srv/codex-connector/deploy/deployment.env",
+                "codex-connector",
                 true,
             ),
             (
@@ -8496,6 +8533,7 @@ mod tests {
 
         let actuator = include_str!("../../../scripts/linux/idunn-yggdrasil");
         assert!(actuator.contains("deploy:odin|restart:odin"));
+        assert!(actuator.contains("deploy:codex-connector|restart:codex-connector"));
         assert!(actuator.contains("deploy:ghostlight|restart:ghostlight"));
         assert!(actuator.contains("restart:heimdall"));
         assert!(actuator.contains("deploy:heimdall"));
