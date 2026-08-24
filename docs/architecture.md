@@ -33,7 +33,7 @@ Verse / host / device / provider inputs
   -> CultCache .cc persistence
   -> CultNet/CultMesh document registry
   -> Odin Eve/CultUI deck projection
-  -> Gjallar Nightwing composition and framebuffer lowering
+  -> Gjallar Yggdrasil aggregate Eve composition
   -> compact display feeds
 ```
 
@@ -87,14 +87,12 @@ schema from overwriting another in the shared catalog. Odin returns the
 redacted route metadata; it does not proxy private auth operations or own any
 claim, completion, token, or app secret.
 
-Gjallar is the Nightwing-resident terminal compositor for what Odin can show.
-Its runtime lives in `E:\Projects\Gjallar` and consumes Odin's accepted
-provider-state snapshot over CultNet/RUDP.
-Odin owns canonical marquee content; Gjallar owns provider enumeration for
-display, panel packing, marquee lowering, glyph/color/framebuffer lowering,
-frame stats, and the multi-scale terminal product. It must not own the
-underlying registry, probe, provider truth, canonical marquee content, or
-translation decisions.
+Gjallar is the Yggdrasil-resident aggregate compositor for what Odin can show.
+Its runtime lives in `/srv/gjallar/current` and consumes Odin's accepted
+provider-state snapshot. Gjallar owns enumeration, tiling, and publication of
+the typed `gjallar.overview` Eve surface. Eve clients own graphical, terminal,
+and framebuffer lowering. Gjallar must not own the underlying registry, probe,
+provider truth, client pixels, or translation decisions.
 
 Idunn is the named keepalive organ for daemon continuity. Its current Rust
 body lives in `crates/idunn-daemon` and `crates/odin-core/src/idunn.rs`. Idunn may read
@@ -229,11 +227,11 @@ Odin currently publishes service squares for:
   StreamPixels, Heimdall, Repixelizer, and Bifrost systemd state until those
   daemon surfaces publish health and command boundaries over CultNet RUDP.
 
-Gjallar consumes Odin's accepted CultMesh/Eve state and composes these surfaces
-into the Nightwing display. Nightwing is the host/body; Gjallar is the terminal product running
-there. If Odin starts deciding framebuffer composition, the renderer owner has
-leaked upward. If individual providers start tuning themselves for Nightwing
-instead of emitting clean Eve/CultUI surfaces, provider truth has leaked
+Gjallar consumes Odin's accepted CultMesh/Eve state and composes every visible
+provider surface into one typed aggregate on Yggdrasil. EveCanvas, browser, and
+TUI clients lower that aggregate. If Odin starts deciding tile composition, the
+composition owner has leaked upward. If providers tune themselves for one
+client instead of emitting clean Eve/CultUI surfaces, provider truth has leaked
 downward.
 
 ## Current Interface Surface

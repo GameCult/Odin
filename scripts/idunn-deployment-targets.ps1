@@ -136,24 +136,6 @@ $IdunnDeploymentTargets = @(
     Reason = "Central Idunn reaches Raven over SSH and keeps Sleipnir's hidden scheduled task alive while Sleipnir publishes daemon-owned RUDP health."
   },
   [pscustomobject]@{
-    Id = "nightwing-gjallar"
-    Repo = "Gjallar"
-    LocalPath = "E:\Projects\Gjallar"
-    Host = "nightwing"
-    Service = "gjallar.service"
-    Status = "enforced"
-    Health = "daemon-published-rudp:gjallar.cultnet-rudp-framebuffer-composition-health"
-    Deploy = "$repoRoot\scripts\deploy-nightwing-gjallar.ps1"
-    Restart = "$repoRoot\scripts\restart-nightwing-gjallar.ps1"
-    Aliases = @("$repoRoot\scripts\deploy-nightwing-gjallar.cmd", "$repoRoot\scripts\restart-nightwing-gjallar.cmd")
-    UpstreamRemote = "origin"
-    UpstreamBranch = "main"
-    RolloutStrategy = "restart-after-verified-build"
-    StateMigration = "daemon-owned-noop"
-    ZeroDowntime = "restart-required"
-    Reason = "Nightwing framebuffer compositor has a committed artifact manifest and automatic Idunn deploy lane."
-  },
-  [pscustomobject]@{
     Id = "yggdrasil-voidbot"
     Repo = "VoidBot"
     LocalPath = "/srv/build/VoidBot"

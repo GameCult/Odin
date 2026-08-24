@@ -4862,10 +4862,10 @@ fn daemon_transport_profile(
             "partial-rudp-health-and-provider-store-live",
             "VoidBot stack health is published over CultNet/RUDP from the local orchestrator pulse, and the daemon-owned CultMesh witness store at E:\\Projects\\VoidBot\\.voidbot\\status\\cultmesh\\voidbot-swarm-state.cc carries provider advertisement catalog, provider advertisement, command_boundary, and transport_profile records. The operations probe is a debug witness only.",
         ),
-        "nightwing-gjallar" => (
-            "daemon-published-rudp-health + daemon-owned-cultcache-service-boundary + native-odin-cultnet-rudp-snapshot-input",
+        "yggdrasil-gjallar" => (
+            "daemon-published-rudp-health + daemon-owned-cultcache-aggregate-surface + local-odin-cultnet-rudp-snapshot-input",
             "partial-rudp-health-and-provider-store-live",
-            "Gjallar framebuffer composition health is published over CultNet/RUDP from Nightwing, the daemon-owned boundary store at /var/lib/gamecult/gjallar/cultcache/gjallar.service.cc carries provider advertisement, runtime_config, frame_status, gamecult.eve.surface_state, command_boundary, transport_profile, and daemon-health summary state, and live composition consumes Odin's accepted surface:gamecult.network.status snapshot over CultNet/RUDP. The service/status probe is a debug witness only.",
+            "Gjallar composition health and its typed aggregate Eve surface are published from Yggdrasil beside Odin. The daemon owns tiling and aggregation; clients own pixel lowering, and no framebuffer is opened by the daemon.",
         ),
         "nightwing-eve-dashboard" => (
             "daemon-published-rudp-health + daemon-owned-cultmesh-state + daemon-owned-cultcache-boundary-store",
@@ -5024,26 +5024,25 @@ fn daemon_surgery_plan(target: &DaemonTarget, updated_at: &str) -> IdunnDaemonSu
                 "Make Odin ingest RUDP provider advertisements directly into its accepted service/catalog surface."
                     .to_string();
         }
-        "nightwing-gjallar" => {
+        "yggdrasil-gjallar" => {
             status = "partial-rudp-health-and-provider-store-live";
             severity = "critical";
-            owner = "Gjallar C# runtime plus Odin accepted snapshot surface";
+            owner = "Gjallar Yggdrasil composition runtime plus Odin accepted snapshot surface";
             current_mechanism =
-                "Nightwing Gjallar publishes gjallar.cultnet-rudp-framebuffer-composition-health over CultNet/RUDP from the C# runtime, the daemon-owned boundary store at /var/lib/gamecult/gjallar/cultcache/gjallar.service.cc now contains provider advertisement, gamecult.eve.surface_state, runtime_config, frame_status, command_boundary, transport_profile, and daemon-health summary records, and the live compositor polls Odin's accepted surface:gamecult.network.status snapshot over a configured cultnet.transport.rudp.v0 endpoint. Live Odin ingests that witness store without advertising a deck bridge as transport authority."
+                "Gjallar runs headless beside Odin and Idunn on Yggdrasil, consumes Odin's accepted provider snapshot, and publishes one typed aggregate Eve surface plus composition health without opening a framebuffer."
                     .to_string();
             intended_authority =
-                "Gjallar consumes Odin's accepted provider surface snapshot over CultNet/RUDP and publishes framebuffer composition health, provider advertisement, provider-owned Eve surface, runtime config, command boundary, and transport profile as typed CultMesh/CultNet state."
+                "Gjallar consumes Odin's accepted provider surface snapshot and publishes the composed aggregate, provider advertisement, runtime config, command boundary, transport profile, and health as typed CultMesh/CultNet state. Eve clients own graphical lowering."
                     .to_string();
             cut_line =
-                "Keep the service/status probe as a debug witness only; the daemon-owned witness now owns provider advertisement, gamecult.eve.surface_state, command_boundary, and transport_profile truth, live input now comes from Odin's accepted CultNet/RUDP snapshot surface through the configured Gjallar Odin endpoint, and live Gjallar daemon health now keys off snapshot freshness through receive.status, lastAttemptStatus, lastSuccessfulAtUtc, staleAfterSeconds, and consecutiveFailures so retained panels cannot masquerade as healthy after input goes stale."
+                "Retire the Nightwing service and framebuffer actuator. Keep one Yggdrasil daemon publishing the aggregate tree and freshness health; clients lower that tree without becoming aggregation owners."
                     .to_string();
             steps = vec![
-                "Keep live gjallar.cultnet-rudp-framebuffer-composition-health publication running from Nightwing's Gjallar service.".to_string(),
-                "Keep Gjallar's daemon-owned boundary store at /var/lib/gamecult/gjallar/cultcache/gjallar.service.cc publishing provider advertisement, gamecult.eve.surface_state, runtime_config, frame_status, command_boundary, transport_profile, and daemon-health summary records.".to_string(),
-                "Keep the native C# CultNet/RUDP snapshot polling path pointed at Odin's accepted surface:gamecult.network.status surface through the configured Gjallar Odin endpoint; no baked Starfire LAN endpoint is allowed.".to_string(),
-                "Keep Gjallar's receive-freshness daemon health live on Nightwing so daemon-published health degrades when Odin snapshot success goes stale instead of keying only off rendered frames.".to_string(),
-                "Keep Gjallar renderer output derived from the daemon-owned CultMesh/Eve witness; do not advertise a deck bridge as service input or discovery authority.".to_string(),
-                "Keep the .ps1 lifecycle bodies as explicit witness/restart bodies and keep health .cmd wrappers archived so they cannot masquerade as Idunn health truth.".to_string(),
+                "Run Gjallar as yggdrasil-gjallar beside Odin and Idunn with its framebuffer backend disabled.".to_string(),
+                "Publish the full gjallar.overview Eve surface and daemon-owned boundary records from /var/lib/gamecult/gjallar/gjallar.service.cc.".to_string(),
+                "Keep the local CultNet/RUDP snapshot input pointed at Odin's accepted surface:gamecult.network.status.".to_string(),
+                "Key daemon health to snapshot and aggregate publication freshness rather than rendered frames.".to_string(),
+                "Retire the Nightwing deployment target and stop its gjallar.service before admitting the Yggdrasil body.".to_string(),
             ];
         }
         "raven-sleipnir" => {
@@ -5575,6 +5574,33 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 enabled: true,
                 interval_seconds: 300,
             },
+            DaemonTarget {
+                daemon_id: "yggdrasil-gjallar".to_string(),
+                verse_id: "yggdrasil.local".to_string(),
+                name: "Yggdrasil Gjallar Eve surface compositor".to_string(),
+                health_contract: locally_supervised_health_contract(
+                    "gjallar.cultnet-rudp-composition-health",
+                    "dependency-unavailable",
+                ),
+                deploy_command: Some(yggdrasil_actuator("deploy", "gjallar")),
+                restart_command: Some(yggdrasil_actuator("restart", "gjallar")),
+                release: Some(with_source_change_pathspecs(
+                    with_deployed_revision_witness(
+                        release_target_on_branch(
+                            "Gjallar",
+                            PathBuf::from("/srv/build/Gjallar"),
+                            "codex/yggdrasil-aggregate-daemon",
+                            "restart-after-verified-build",
+                            None,
+                            "restart-required",
+                        ),
+                        PathBuf::from("/srv/gjallar/deploy/deployment.env"),
+                    ),
+                    DEPLOYABLE_SOURCE_PATHS,
+                )),
+                enabled: true,
+                interval_seconds: 30,
+            },
         ]),
         "starfire-local" => Ok(vec![
             DaemonTarget {
@@ -5755,26 +5781,6 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 )),
                 enabled: true,
                 interval_seconds: 300,
-            },
-            DaemonTarget {
-                daemon_id: "nightwing-gjallar".to_string(),
-                verse_id: "nightwing.local".to_string(),
-                name: "Nightwing Gjallar framebuffer compositor".to_string(),
-                health_contract: health_contract(
-                    "gjallar.cultnet-rudp-framebuffer-composition-health",
-                    "dependency-unavailable",
-                ),
-                deploy_command: Some(script("deploy-nightwing-gjallar.ps1")),
-                restart_command: Some(script("restart-nightwing-gjallar.ps1")),
-                release: Some(release_target(
-                    "Gjallar",
-                    project("Gjallar"),
-                    "restart-after-verified-build",
-                    None,
-                    "restart-required",
-                )),
-                enabled: true,
-                interval_seconds: 30,
             },
             DaemonTarget {
                 daemon_id: "nightwing-muninn".to_string(),
@@ -7658,16 +7664,13 @@ mod tests {
             enabled: true,
             interval_seconds: 60,
         };
-        let nightwing_gjallar = DaemonTarget {
-            daemon_id: "nightwing-gjallar".to_string(),
-            verse_id: "nightwing.local".to_string(),
-            name: "Nightwing Gjallar framebuffer compositor".to_string(),
-            health_contract: health_contract(
-                "gjallar.cultnet-rudp-framebuffer-composition-health",
-                "failed",
-            ),
-            deploy_command: Some("deploy-nightwing-gjallar.ps1".to_string()),
-            restart_command: Some("restart-nightwing-gjallar.ps1".to_string()),
+        let yggdrasil_gjallar = DaemonTarget {
+            daemon_id: "yggdrasil-gjallar".to_string(),
+            verse_id: "yggdrasil.local".to_string(),
+            name: "Yggdrasil Gjallar Eve surface compositor".to_string(),
+            health_contract: health_contract("gjallar.cultnet-rudp-composition-health", "failed"),
+            deploy_command: Some("idunn-yggdrasil deploy gjallar".to_string()),
+            restart_command: Some("idunn-yggdrasil restart gjallar".to_string()),
             release: None,
             enabled: true,
             interval_seconds: 30,
@@ -7777,7 +7780,7 @@ mod tests {
             stonks,
             weksa.clone(),
             voidbot.clone(),
-            nightwing_gjallar.clone(),
+            yggdrasil_gjallar.clone(),
             starfire_muninn.clone(),
             nightwing_muninn.clone(),
             raven_muninn.clone(),
@@ -8065,7 +8068,7 @@ mod tests {
                 .contains("operations probe as a debug witness")
         );
 
-        let gjallar_plan = daemon_surgery_plan(&nightwing_gjallar, "unix:100");
+        let gjallar_plan = daemon_surgery_plan(&yggdrasil_gjallar, "unix:100");
         assert_eq!(
             gjallar_plan.status,
             "partial-rudp-health-and-provider-store-live"
@@ -8073,13 +8076,17 @@ mod tests {
         assert!(
             gjallar_plan
                 .current_mechanism
-                .contains("gjallar.cultnet-rudp-framebuffer-composition-health")
+                .contains("runs headless beside Odin and Idunn")
         );
-        assert!(gjallar_plan.cut_line.contains("gamecult.eve.surface_state"));
+        assert!(
+            gjallar_plan
+                .cut_line
+                .contains("Retire the Nightwing service")
+        );
         assert!(
             gjallar_plan
                 .current_mechanism
-                .contains("surface:gamecult.network.status")
+                .contains("accepted provider snapshot")
         );
 
         let nightwing_eve_dashboard_plan =
@@ -8393,7 +8400,7 @@ mod tests {
             actuator.contains("bifrost-persona-feedback) target_requires_bifrost_authority=true")
         );
         assert!(actuator.contains(
-            "epiphany|voidbot|heimdall|repixelizer|streampixels|odin|ghostlight) target_requires_bifrost_authority=false"
+            "epiphany|voidbot|heimdall|repixelizer|streampixels|odin|ghostlight|gjallar) target_requires_bifrost_authority=false"
         ));
         assert!(
             actuator
@@ -8451,6 +8458,14 @@ mod tests {
                 "heimdall",
                 false,
             ),
+            (
+                "yggdrasil-gjallar",
+                "Gjallar",
+                "codex/yggdrasil-aggregate-daemon",
+                "/srv/gjallar/deploy/deployment.env",
+                "gjallar",
+                true,
+            ),
         ] {
             let target = targets
                 .iter()
@@ -8484,6 +8499,8 @@ mod tests {
         assert!(actuator.contains("deploy:ghostlight|restart:ghostlight"));
         assert!(actuator.contains("restart:heimdall"));
         assert!(actuator.contains("deploy:heimdall"));
+        assert!(actuator.contains("restart:gjallar"));
+        assert!(actuator.contains("deploy:gjallar"));
     }
 
     struct FakeReleaseStatePort {
@@ -9301,15 +9318,12 @@ mod tests {
     #[test]
     fn gjallar_transport_profile_marks_partial_rudp_health() {
         let gjallar = DaemonTarget {
-            daemon_id: "nightwing-gjallar".to_string(),
-            verse_id: "nightwing.local".to_string(),
-            name: "Nightwing Gjallar framebuffer compositor".to_string(),
-            health_contract: health_contract(
-                "gjallar.cultnet-rudp-framebuffer-composition-health",
-                "failed",
-            ),
-            deploy_command: Some("deploy-nightwing-gjallar.ps1".to_string()),
-            restart_command: Some("restart-nightwing-gjallar.ps1".to_string()),
+            daemon_id: "yggdrasil-gjallar".to_string(),
+            verse_id: "yggdrasil.local".to_string(),
+            name: "Yggdrasil Gjallar Eve surface compositor".to_string(),
+            health_contract: health_contract("gjallar.cultnet-rudp-composition-health", "failed"),
+            deploy_command: Some("idunn-yggdrasil deploy gjallar".to_string()),
+            restart_command: Some("idunn-yggdrasil restart gjallar".to_string()),
             release: None,
             enabled: true,
             interval_seconds: 30,
@@ -9320,14 +9334,10 @@ mod tests {
         assert_eq!(profile.state, "partial-rudp-health-and-provider-store-live");
         assert_eq!(
             profile.current_transport,
-            "daemon-published-rudp-health + daemon-owned-cultcache-service-boundary + native-odin-cultnet-rudp-snapshot-input"
+            "daemon-published-rudp-health + daemon-owned-cultcache-aggregate-surface + local-odin-cultnet-rudp-snapshot-input"
         );
-        assert!(
-            profile
-                .cut_line
-                .contains("Gjallar framebuffer composition health is published over CultNet/RUDP")
-        );
-        assert!(profile.cut_line.contains("surface:gamecult.network.status"));
+        assert!(profile.cut_line.contains("typed aggregate Eve surface"));
+        assert!(profile.cut_line.contains("no framebuffer"));
     }
 
     #[test]

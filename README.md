@@ -20,9 +20,9 @@ The first Rust core lives in `crates/odin-core` and already separates typed
 documents, ingest ports, normalization, and repository persistence so unit tests
 can use mocked inputs and pipeline smokes can prove typed handoff without
 booting the whole daemon. Gjallar is not part of that Rust record spine: it is
-the Nightwing-resident terminal compositor in `E:\Projects\Gjallar` that
-consumes Odin's accepted `gamecult.eve.surface_state` snapshot over CultNet/RUDP
-and renders the live display.
+the Yggdrasil-resident C# composition daemon in `F:\Projects\Gjallar`. It
+consumes Odin's accepted provider snapshot and publishes one tiled
+`gjallar.overview` Eve surface for GUI, TUI, and agent lowerers.
 
 ## Typed access discovery
 
@@ -44,18 +44,16 @@ register every private Ghostlight receipt, transition, or simulation schema.
 
 ## Gjallar
 
-Gjallar is the herald display daemon that runs on Nightwing. Odin sees the
-Verses, accepts provider surfaces, and publishes the `odin.providers` catalog.
-Gjallar consumes Odin's accepted surface snapshot over CultNet/RUDP, composes
-the multi-scale tiled dashboard from that typed state, lowers Odin's canonical
-marquee tape into continuous gutter text, owns dense character-level update
-behavior, and writes the visible framebuffer.
+Gjallar is the herald composition daemon that runs beside Odin and Idunn on
+Yggdrasil. Odin sees the Verses and accepts provider surfaces. Gjallar consumes
+that accepted snapshot and publishes one multi-scale tiled Eve surface. Eve
+clients—including EveCanvas—own graphical and TUI lowering.
 
 Local package surfaces:
 
 - Organ contract: `docs/gjallar.md`
 - Branding Persona state: `personas/gjallar.persona_state.cc`
-- Runtime source: `E:\Projects\Gjallar`
+- Runtime source: `F:\Projects\Gjallar`
 - Avatar asset: `assets/personas/gjallar-avatar.png`
 - Pixel avatar: `assets/personas/gjallar-avatar-pixel-256.png`
 
@@ -117,7 +115,7 @@ Local package surfaces:
 - Outputs: CultCache-backed Odin state, CultMesh documents, and CultNet
   schema/catalog messages. Browser, GUI, TUI, and framebuffer renderers lower
   those documents outside Odin instead of asking Odin to host web surfaces.
-- Derived state: Gjallar's attached Nightwing display, browser dashboards, and future Eve clients are projections of Odin state and provider-owned Eve/CultUI surfaces.
+- Derived state: Gjallar's aggregate surface is derived from Odin/provider state; Eve clients derive pixels from that aggregate.
 - Forbidden writers: renderers do not probe the network or decide Verse truth; individual projects do not maintain private incompatible discovery ledgers once Odin can see them.
 - Shared paths: human dashboards, worker schedulers, Verse bootstrap code, and compact TUI views consume the same registry and schema catalog.
 - Deletion line: old per-host coordinator scripts should be deleted or reduced to deployment wrappers that start Odin.

@@ -289,19 +289,11 @@ idunn.rudp_health_ingress.v1
   terminals or interactive windows on that host. The Raven Muninn restart path
   uses a hidden WScript/PowerShell trampoline; replacing it with an interactive
   console launch violates the ops contract.
-- Nightwing Gjallar deployment freshness and visible composition health are now
-  part of Idunn's ops role. `health-nightwing-gjallar.ps1` verifies
-  `gjallar.service` liveness, the remote deployment manifest at
-  `/opt/gamecult/gjallar/gamecult-gjallar-deploy-manifest.txt`. A missing or
-  stale manifest emits `idunn.health.state=stale-deployment`; Idunn then runs
-  `deploy-nightwing-gjallar.ps1`, which publishes the committed local Gjallar
-  revision, writes `gamecult.gjallar.deployment_manifest.v1`, restarts
-  `gjallar.service`, and leaves deployment request/result records in its
-  keepalive `.cc`. The same health probe also reads `/var/log/gjallar.status`;
-  an empty catalog, failed receive loop, stale status witness, or zero composed
-  provider panels is unhealthy even when the process is alive. Upstream deck
-  failure emits `idunn.health.state=dependency-unavailable` so Idunn does not
-  redeploy Gjallar for an Odin/provider input outage.
+- Yggdrasil Gjallar deployment freshness and aggregate composition health are
+  part of Idunn's ops role. The daemon publishes
+  `gjallar.cultnet-rudp-composition-health`; Idunn's Yggdrasil actuator admits
+  immutable releases through the Gjallar deploy manifest and restarts
+  `gjallar.service`. Nightwing has no Gjallar deployment or restart authority.
 - Swarm-wide deployment ownership means Idunn owns the target catalog and the
   freshness contract for the repo swarm. For enforced deploy targets, the
   catalog must name upstream remote/branch, rollout strategy, state migration
@@ -405,9 +397,8 @@ Stonks publishes `stonks.cultnet-rudp-market-health` after each serialized
 market refresh. Weksa publishes `weksa.cultnet-rudp-provider-health` after each
 serialized provider witness refresh. VoidBot publishes
 `voidbot.cultnet-rudp-stack-health` after each GameCult Local Orchestrator
-pulse. Gjallar publishes
-`gjallar.cultnet-rudp-framebuffer-composition-health` from the C# Nightwing
-framebuffer service. Mimir Eve dashboard publishes
+pulse. Gjallar publishes `gjallar.cultnet-rudp-composition-health` from the C#
+Yggdrasil aggregate compositor. Mimir Eve dashboard publishes
 `mimir.cultnet-rudp-provider-health` from the Nightwing systemd broker, and the
 same process publishes `nightwing.cultnet-rudp-eve-dashboard-health` for the
 Nightwing dashboard service itself. The Nightwing Eve browser reference now runs
