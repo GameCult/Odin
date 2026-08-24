@@ -5578,7 +5578,7 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 daemon_id: "yggdrasil-gjallar".to_string(),
                 verse_id: "yggdrasil.local".to_string(),
                 name: "Yggdrasil Gjallar Eve surface compositor".to_string(),
-                health_contract: locally_supervised_health_contract(
+                health_contract: health_contract(
                     "gjallar.cultnet-rudp-composition-health",
                     "dependency-unavailable",
                 ),
@@ -8464,7 +8464,7 @@ mod tests {
                 "codex/yggdrasil-aggregate-daemon",
                 "/srv/gjallar/deploy/deployment.env",
                 "gjallar",
-                true,
+                false,
             ),
         ] {
             let target = targets

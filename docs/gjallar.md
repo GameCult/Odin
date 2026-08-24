@@ -38,6 +38,9 @@ clients, and agent readers lower the same aggregate without becoming its owner.
 - State: `/var/lib/gamecult/gjallar/gjallar.service.cc`.
 - Deployment: immutable source/dependency pins, a digest-pinned .NET SDK image,
   and Idunn's root-owned `gjallar` actuator manifest.
+- Continuity: systemd restarts the admitted release. Until Gjallar publishes
+  authenticated C# health, Idunn observes its diagnostic health but does not
+  restart merely because authenticated publication is missing.
 
 ## Runtime Contract
 
