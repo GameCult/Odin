@@ -5564,11 +5564,11 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 interval_seconds: 300,
             },
             DaemonTarget {
-                daemon_id: "yggdrasil-epiphany-ox17".to_string(),
+                daemon_id: "yggdrasil-epiphany-capstone-17".to_string(),
                 verse_id: "yggdrasil.local".to_string(),
-                name: "Yggdrasil Epiphany Ox17 candidate".to_string(),
-                health_contract: health_contract("epiphany.ox17-capstone-admission", "failed"),
-                deploy_command: Some(yggdrasil_actuator("deploy", "epiphany-ox17")),
+                name: "Yggdrasil Epiphany Capstone 17 candidate".to_string(),
+                health_contract: health_contract("epiphany.capstone-17-admission", "failed"),
+                deploy_command: Some(yggdrasil_actuator("deploy", "epiphany-capstone-17")),
                 restart_command: None,
                 release: Some(with_source_change_pathspecs(
                     with_container_artifact_witness(
@@ -5581,13 +5581,13 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                                 None,
                                 "one-shot-no-restart",
                             ),
-                            PathBuf::from("/srv/epiphany/ox17/deployment.env"),
+                            PathBuf::from("/srv/epiphany/capstone-17/deployment.env"),
                         ),
                         PathBuf::from("/srv/epiphany/artifacts"),
                     ),
                     DEPLOYABLE_SOURCE_PATHS,
                 )),
-                // Ox17 is an explicitly requested one-shot admission target. It
+                // Capstone 17 is an explicitly requested one-shot admission target. It
                 // never participates in daemon continuity or automatic rollout.
                 enabled: false,
                 interval_seconds: 300,
@@ -8450,28 +8450,28 @@ mod tests {
             ]
         );
 
-        let ox17 = yggdrasil
+        let capstone_17 = yggdrasil
             .iter()
-            .find(|target| target.daemon_id == "yggdrasil-epiphany-ox17")
-            .expect("Yggdrasil Epiphany Ox17 target");
-        assert!(!ox17.enabled, "Ox17 must never auto-actuate");
-        assert!(ox17.restart_command.is_none());
+            .find(|target| target.daemon_id == "yggdrasil-epiphany-capstone-17")
+            .expect("Yggdrasil Epiphany Capstone 17 target");
+        assert!(!capstone_17.enabled, "Capstone 17 must never auto-actuate");
+        assert!(capstone_17.restart_command.is_none());
         assert_eq!(
-            ox17.deploy_command.as_deref(),
+            capstone_17.deploy_command.as_deref(),
             Some(
-                "sudo -n /usr/local/libexec/idunn-yggdrasil deploy epiphany-ox17 \"$IDUNN_SOURCE_COMMIT\" \"$IDUNN_REPOSITORY_FULL_NAME\" \"$IDUNN_UPSTREAM_REF\" \"$BIFROST_RELEASE_AUTHORITY_ID\" \"$BIFROST_RELEASE_AUTHORITY_SHA256\" \"$IDUNN_DEPLOYMENT_REQUEST_ID\" \"$IDUNN_REQUIRES_BIFROST_AUTHORITY\""
+                "sudo -n /usr/local/libexec/idunn-yggdrasil deploy epiphany-capstone-17 \"$IDUNN_SOURCE_COMMIT\" \"$IDUNN_REPOSITORY_FULL_NAME\" \"$IDUNN_UPSTREAM_REF\" \"$BIFROST_RELEASE_AUTHORITY_ID\" \"$BIFROST_RELEASE_AUTHORITY_SHA256\" \"$IDUNN_DEPLOYMENT_REQUEST_ID\" \"$IDUNN_REQUIRES_BIFROST_AUTHORITY\""
             )
         );
-        let ox17_release = ox17.release.as_ref().expect("Ox17 release target");
-        assert_eq!(ox17_release.rollout_strategy, "fresh-container-capstone");
-        assert_eq!(ox17_release.artifact_strategy, "immutable-docker-image-id");
+        let capstone_17_release = capstone_17.release.as_ref().expect("Capstone 17 release target");
+        assert_eq!(capstone_17_release.rollout_strategy, "fresh-container-capstone");
+        assert_eq!(capstone_17_release.artifact_strategy, "immutable-docker-image-id");
         assert_eq!(
-            ox17_release.artifact_witness_root,
+            capstone_17_release.artifact_witness_root,
             Some(PathBuf::from("/srv/epiphany/artifacts"))
         );
         assert_eq!(
-            ox17_release.deployed_revision_witness,
-            Some(PathBuf::from("/srv/epiphany/ox17/deployment.env"))
+            capstone_17_release.deployed_revision_witness,
+            Some(PathBuf::from("/srv/epiphany/capstone-17/deployment.env"))
         );
 
         for legacy in yggdrasil
@@ -8541,13 +8541,13 @@ mod tests {
             !unit.contains("--deployment-brake-store /var/lib/gamecult/idunn/deployment-brake.cc")
         );
         assert!(!unit.contains("--trusted-epiphany-health-identity-store"));
-        assert!(actuator.contains("deploy:epiphany|restart:epiphany|deploy:epiphany-ox17"));
+        assert!(actuator.contains("deploy:epiphany|restart:epiphany|deploy:epiphany-capstone-17"));
         assert!(actuator.contains("/usr/local/bin/idunn validate-release-authority"));
         assert!(
             actuator.contains("bifrost-persona-feedback) target_requires_bifrost_authority=true")
         );
         assert!(actuator.contains(
-            "epiphany|epiphany-ox17|voidbot|heimdall|repixelizer|streampixels|odin|codex-connector|ghostlight|gjallar) target_requires_bifrost_authority=false"
+            "epiphany|epiphany-capstone-17|voidbot|heimdall|repixelizer|streampixels|odin|codex-connector|ghostlight|gjallar) target_requires_bifrost_authority=false"
         ));
         assert!(
             actuator
