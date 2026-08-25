@@ -5570,22 +5570,19 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                 health_contract: health_contract("epiphany.capstone-17-admission", "failed"),
                 deploy_command: Some(yggdrasil_actuator("deploy", "epiphany-capstone-17")),
                 restart_command: None,
-                release: Some(with_source_change_pathspecs(
-                    with_container_artifact_witness(
-                        with_deployed_revision_witness(
-                            release_target_on_branch(
-                                "Epiphany",
-                                PathBuf::from("/srv/build/Epiphany"),
-                                "codex/epiphany-shakedown-live",
-                                "fresh-container-capstone",
-                                None,
-                                "one-shot-no-restart",
-                            ),
-                            PathBuf::from("/srv/epiphany/capstone-17/deployment.env"),
+                release: Some(with_container_artifact_witness(
+                    with_deployed_revision_witness(
+                        release_target_on_branch(
+                            "Epiphany",
+                            PathBuf::from("/srv/build/Epiphany"),
+                            "codex/epiphany-shakedown-live",
+                            "fresh-container-capstone",
+                            None,
+                            "one-shot-no-restart",
                         ),
-                        PathBuf::from("/srv/epiphany/artifacts"),
+                        PathBuf::from("/srv/epiphany/capstone-17/deployment.env"),
                     ),
-                    DEPLOYABLE_SOURCE_PATHS,
+                    PathBuf::from("/srv/epiphany/artifacts"),
                 )),
                 // Capstone 17 is an explicitly requested one-shot admission target. It
                 // never participates in daemon continuity or automatic rollout.
@@ -8465,6 +8462,7 @@ mod tests {
         let capstone_17_release = capstone_17.release.as_ref().expect("Capstone 17 release target");
         assert_eq!(capstone_17_release.rollout_strategy, "fresh-container-capstone");
         assert_eq!(capstone_17_release.artifact_strategy, "immutable-docker-image-id");
+        assert!(capstone_17_release.source_change_pathspecs.is_empty());
         assert_eq!(
             capstone_17_release.artifact_witness_root,
             Some(PathBuf::from("/srv/epiphany/artifacts"))
