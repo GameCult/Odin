@@ -4512,11 +4512,20 @@ fn swarm_surgery_plan(
             "5. Delete or demote debug probes once every target has daemon-owned publication and advertised lifecycle authority.".to_string(),
         ],
         current_phase:
-            "Phase 25: Nightwing Gjallar now consumes Odin's accepted gamecult.eve.surface_state snapshot over CultNet/RUDP, so every active Starfire-local daemon target publishes daemon-owned RUDP health and typed boundary state; the remaining debt is demoting debug probes and bridge-only lowerings without letting them retake ownership."
+            "Phase 25: Yggdrasil Gjallar now consumes Odin's accepted gamecult.eve.surface_state snapshot over CultNet/RUDP and publishes the headless aggregate; Nightwing's framebuffer units are retired, and the remaining debt is demoting debug probes and bridge-only lowerings without letting them retake ownership."
                 .to_string(),
         next_target: next_target.to_string(),
         cut_line:
-            "Muninn, Vili, Idunn, Odin, Stonks, Weksa, VoidBot, Nightwing Gjallar, Mimir Eve dashboard, Nightwing Eve dashboard, Nightwing Eve browser reference, yggdrasil-streampixels, yggdrasil-heimdall, and yggdrasil-repixelizer now exercise daemon-owned RUDP health. Raven GameCult\\Vili has been refreshed from Odin, the hidden scheduled task now launches start-vili-daemon.ps1 with explicit Idunn RUDP arguments, and live Idunn accepts vili.cultnet-rudp-animation-health through the configured health route. VoidBot publishes daemon-owned provider catalog, provider advertisement, command_boundary, and transport_profile records from E:\\Projects\\VoidBot\\.voidbot\\status\\cultmesh\\voidbot-swarm-state.cc while health-voidbot.cmd is archived. Raven Muninn publishes provider advertisement, command_boundary, and transport_profile records from C:\\Meta\\Odin\\state\\muninn.telemetry.cc, keeps activation commands in C:\\Meta\\Odin\\state\\muninn.activate.cc, and no longer lets plain serve infer ambient Move runtime authority from platform defaults. Starfire Muninn publishes the same daemon-owned witness records from C:\\Meta\\Odin\\state\\starfire.muninn.telemetry.cc, Nightwing Muninn publishes the same daemon-owned witness records from /home/metacrat/.local/state/gamecult/muninn/muninn.telemetry.cc, and live Idunn accepts Muninn-family daemon health by daemon id and configured health contract rather than source-address folklore. Nightwing's restart wrapper makes Move runtime authority explicit with -DiscoverMoveState -ClaimUsbMoves instead of silently adding Move evidence on plain serve. Raven's GameCult-Muninn, GameCult-Muninn-Activate, and GameCult-Muninn-VideoProof tasks execute wscript.exe actions whose hidden VBS launchers call noninteractive hidden PowerShell entrypoints directly; health .cmd wrappers are archived instead of command-probe health paths. Live yggdrasil-streampixels publishes streampixels.cultnet-rudp-service-health through its configured Yggdrasil health route, live yggdrasil-heimdall publishes heimdall.cultnet-rudp-provider-health with a boundary store at /srv/heimdall/cultcache/heimdall.service.cc, live yggdrasil-repixelizer publishes repixelizer.cultnet-rudp-service-health with a boundary store at /srv/repixelizer/cultcache/repixelizer.service.cc, live Nightwing Gjallar publishes a boundary store at /var/lib/gamecult/gjallar/cultcache/gjallar.service.cc plus a daemon-owned gamecult.eve.surface_state witness, live Gjallar consumes Odin's accepted surface:gamecult.network.status snapshot through the configured Gjallar Odin endpoint, and live Odin ingests remote Raven Vili and Nightwing Gjallar witness stores into the accepted provider catalog. Live Mimir Eve dashboard publishes CultMesh state at /var/lib/gamecult/eve-dashboard/cultmesh/eve-dashboard.ccmp plus a boundary store at /var/lib/gamecult/eve-dashboard/cultcache/eve-dashboard.service.cc while health-nightwing-eve-dashboard.ps1 inspects those witnesses directly, and live Nightwing Eve browser reference publishes a boundary store at /var/lib/gamecult/eve-browser-reference/cultcache/eve-browser-reference.service.cc while health-nightwing-eve-browser-reference.ps1 inspects that store directly. The remaining debt is deleting bridge-only lowerings where they are no longer useful and keeping debug probes unable to own daemon truth."
+            concat!(
+                "Muninn, Vili, Idunn, Odin, Stonks, Weksa, VoidBot, Yggdrasil Gjallar, Mimir Eve dashboard, Nightwing Eve dashboard, Nightwing Eve browser reference, yggdrasil-streampixels, yggdrasil-heimdall, and yggdrasil-repixelizer now exercise daemon-owned RUDP health. ",
+                "Raven GameCult\\Vili has been refreshed from Odin, the hidden scheduled task now launches start-vili-daemon.ps1 with explicit Idunn RUDP arguments, and live Idunn accepts vili.cultnet-rudp-animation-health through the configured health route. ",
+                "VoidBot publishes daemon-owned provider catalog, provider advertisement, command_boundary, and transport_profile records from E:\\Projects\\VoidBot\\.voidbot\\status\\cultmesh\\voidbot-swarm-state.cc while health-voidbot.cmd is archived. ",
+                "Raven Muninn publishes provider advertisement, command_boundary, and transport_profile records from C:\\Meta\\Odin\\state\\muninn.telemetry.cc, keeps activation commands in C:\\Meta\\Odin\\state\\muninn.activate.cc, and no longer lets plain serve infer ambient Move runtime authority from platform defaults. Starfire Muninn publishes the same daemon-owned witness records from C:\\Meta\\Odin\\state\\starfire.muninn.telemetry.cc, Nightwing Muninn publishes the same daemon-owned witness records from /home/metacrat/.local/state/gamecult/muninn/muninn.telemetry.cc, and live Idunn accepts Muninn-family daemon health by daemon id and configured health contract rather than source-address folklore. ",
+                "Nightwing's restart wrapper makes Move runtime authority explicit with -DiscoverMoveState -ClaimUsbMoves instead of silently adding Move evidence on plain serve. Raven's GameCult-Muninn, GameCult-Muninn-Activate, and GameCult-Muninn-VideoProof tasks execute wscript.exe actions whose hidden VBS launchers call noninteractive hidden PowerShell entrypoints directly; health .cmd wrappers are archived instead of command-probe health paths. ",
+                "Live yggdrasil-streampixels publishes streampixels.cultnet-rudp-service-health through its configured Yggdrasil health route, live yggdrasil-heimdall publishes heimdall.cultnet-rudp-provider-health with a boundary store at /srv/heimdall/cultcache/heimdall.service.cc, and live yggdrasil-repixelizer publishes repixelizer.cultnet-rudp-service-health with a boundary store at /srv/repixelizer/cultcache/repixelizer.service.cc. ",
+                "Live Yggdrasil Gjallar publishes /var/lib/gamecult/gjallar/gjallar.service.cc plus a daemon-owned gamecult.eve.surface_state witness, consumes Odin's accepted surface:gamecult.network.status snapshot through the configured Gjallar Odin endpoint, and publishes gjallar.overview; Nightwing's Gjallar/framebuffer units are retired. Live Odin ingests remote Raven Vili while accepting Yggdrasil-local Gjallar publications directly over RUDP. ",
+                "Live Mimir Eve dashboard publishes CultMesh state at /var/lib/gamecult/eve-dashboard/cultmesh/eve-dashboard.ccmp plus a boundary store at /var/lib/gamecult/eve-dashboard/cultcache/eve-dashboard.service.cc while health-nightwing-eve-dashboard.ps1 inspects those witnesses directly, and live Nightwing Eve browser reference publishes a boundary store at /var/lib/gamecult/eve-browser-reference/cultcache/eve-browser-reference.service.cc while health-nightwing-eve-browser-reference.ps1 inspects that store directly. The remaining debt is deleting bridge-only lowerings where they are no longer useful and keeping debug probes unable to own daemon truth."
+            )
                 .to_string(),
         verification_layer:
             "CultMesh keepalive store records plus live Idunn decision cycles, not process exit codes or chat summaries."
@@ -5012,7 +5021,7 @@ fn daemon_surgery_plan(target: &DaemonTarget, updated_at: &str) -> IdunnDaemonSu
             severity = "critical";
             owner = "Odin core";
             current_mechanism =
-                "Odin now ingests remote Raven Vili, Raven Muninn, Starfire Muninn, Nightwing Muninn, and Nightwing Gjallar witness stores into the accepted provider catalog while relying on xenos-boundary hashed-store inspection for C# witness bodies."
+                "Odin ingests remote Raven Vili, Raven Muninn, Starfire Muninn, and Nightwing Muninn witness stores while accepting Yggdrasil-local Gjallar's typed aggregate publication directly over CultNet/RUDP."
                     .to_string();
             intended_authority =
                 "Odin owns accepted Verse discovery and provider catalog truth as typed CultMesh/CultNet records over cultnet.transport.rudp.v0."
@@ -7822,7 +7831,7 @@ mod tests {
         assert_eq!(plan.status, "active-transport-migration");
         assert_eq!(plan.next_target, "none");
         assert!(plan.current_phase.contains(
-            "Nightwing Gjallar now consumes Odin's accepted gamecult.eve.surface_state snapshot over CultNet/RUDP"
+            "Yggdrasil Gjallar now consumes Odin's accepted gamecult.eve.surface_state snapshot over CultNet/RUDP"
         ));
         assert!(
             plan.cut_line.contains(
@@ -7871,13 +7880,10 @@ mod tests {
             plan.cut_line
                 .contains("/srv/repixelizer/cultcache/repixelizer.service.cc")
         );
+        assert!(plan.cut_line.contains("Live Yggdrasil Gjallar publishes"));
         assert!(
             plan.cut_line
-                .contains("live Nightwing Gjallar publishes a boundary store")
-        );
-        assert!(
-            plan.cut_line
-                .contains("/var/lib/gamecult/gjallar/cultcache/gjallar.service.cc")
+                .contains("/var/lib/gamecult/gjallar/gjallar.service.cc")
         );
         assert!(
             plan.cut_line
