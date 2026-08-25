@@ -6,9 +6,17 @@ const test = require("node:test");
 const {
   createBrowserCatalog,
   findProviderCdnRoute,
+  hermodrRudpPeerOptions,
   normalizeProviderAdvertisement,
+  normalizeSurfaceState,
   surfaceRecordKeys,
 } = require("../src/hermodr-daemon.cjs");
+
+test("Hermodr outbound RUDP peers bind beyond loopback", () => {
+  const options = hermodrRudpPeerOptions();
+  assert.equal(options.bindHost, "0.0.0.0");
+  assert.equal(options.connectTimeoutMs, 2_000);
+});
 
 const provider = normalizeProviderAdvertisement({
   providerId: "fixture.game",
@@ -34,6 +42,24 @@ test("Hermodr preserves every advertised surface and its semantic kind", () => {
 test("surface reads prefer the provider-advertised record reference", () => {
   const catalog = createBrowserCatalog([provider]);
   assert.equal(surfaceRecordKeys(catalog, "fixture.game", "fixture.world")[0], "cultmesh://fixture/surfaces/world");
+});
+
+test("surface-state normalization lowers MessagePack array records", () => {
+  const state = normalizeSurfaceState([
+    "gjallar.overview",
+    "Gjallar",
+    7,
+    "2026-08-25T00:00:00Z",
+    [
+      "gjallar.overview.surface",
+      ["root", "dashboard", { title: "Gjallar" }, [], [], [], { mode: "weighted-bisect" }, {}],
+      [],
+    ],
+  ], "gjallar.overview");
+
+  assert.equal(state.surface.id, "gjallar.overview.surface");
+  assert.equal(state.surface.root.kind, "dashboard");
+  assert.equal(state.surface.root.layout.mode, "weighted-bisect");
 });
 
 test("CDN routing follows the asset URI provider instead of a product name", () => {
