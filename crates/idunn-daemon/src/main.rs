@@ -178,6 +178,8 @@ struct ReleaseTarget {
     state_migration_command: Option<String>,
     zero_downtime_capability: String,
     deployed_revision_witness: Option<PathBuf>,
+    artifact_strategy: String,
+    artifact_witness_root: Option<PathBuf>,
     requires_bifrost_authority: bool,
     source_change_pathspecs: Vec<String>,
 }
@@ -4603,6 +4605,8 @@ fn release_target(
         state_migration_command: state_migration_command.map(ToString::to_string),
         zero_downtime_capability: zero_downtime_capability.to_string(),
         deployed_revision_witness: None,
+        artifact_strategy: "source-archive-from-observed-ref".to_string(),
+        artifact_witness_root: None,
         requires_bifrost_authority: false,
         source_change_pathspecs: Vec::new(),
     }
@@ -4634,6 +4638,12 @@ fn requiring_bifrost_authority(mut release: ReleaseTarget) -> ReleaseTarget {
 
 fn with_deployed_revision_witness(mut release: ReleaseTarget, path: PathBuf) -> ReleaseTarget {
     release.deployed_revision_witness = Some(path);
+    release
+}
+
+fn with_container_artifact_witness(mut release: ReleaseTarget, root: PathBuf) -> ReleaseTarget {
+    release.artifact_strategy = "immutable-docker-image-id".to_string();
+    release.artifact_witness_root = Some(root);
     release
 }
 
@@ -4702,7 +4712,7 @@ fn release_target_record(
         upstream_branch: release.upstream_branch.clone(),
         desired_revision,
         deployed_revision,
-        artifact_strategy: "source-archive-from-observed-ref".to_string(),
+        artifact_strategy: release.artifact_strategy.clone(),
         rollout_strategy: release.rollout_strategy.clone(),
         state_migration_authority: if release.state_migration_command.is_some() {
             "daemon-owned-command"
@@ -4741,6 +4751,11 @@ fn deployment_artifact_record(
     release: &IdunnReleaseTargetRecord,
     built_at: &str,
 ) -> IdunnDeploymentArtifactRecord {
+    let witnessed_image = target
+        .release
+        .as_ref()
+        .and_then(|configured| configured.artifact_witness_root.as_ref())
+        .and_then(|root| read_container_artifact_witness(root, &release.desired_revision).ok());
     IdunnDeploymentArtifactRecord {
         artifact_id: artifact_id(target),
         daemon_id: target.daemon_id.clone(),
@@ -4748,12 +4763,37 @@ fn deployment_artifact_record(
         source_branch: release.upstream_branch.clone(),
         source_remote: release.upstream_remote.clone(),
         artifact_kind: release.artifact_strategy.clone(),
-        artifact_uri: "built-by-deploy-command".to_string(),
-        sha256: "pending-deploy-command".to_string(),
+        artifact_uri: witnessed_image
+            .as_ref()
+            .map(|image_id| format!("docker-image://{image_id}"))
+            .unwrap_or_else(|| "not-yet-constructed".to_string()),
+        sha256: witnessed_image.unwrap_or_else(|| "not-yet-constructed".to_string()),
         built_at: built_at.to_string(),
         release_authority_id: release.release_authority_id.clone(),
         release_authority_envelope_sha256: release.release_authority_envelope_sha256.clone(),
     }
+}
+
+fn read_container_artifact_witness(root: &Path, source_revision: &str) -> Result<String> {
+    let witness = fs::read_to_string(root.join(format!("{source_revision}.env")))?;
+    let fields = witness
+        .lines()
+        .filter_map(|line| line.split_once('='))
+        .collect::<BTreeMap<_, _>>();
+    let image_id = fields
+        .get("image_id")
+        .ok_or_else(|| anyhow!("container artifact witness has no image_id"))?;
+    if fields.get("schema") != Some(&"idunn.epiphany_image_artifact.v1")
+        || fields.get("source_commit") != Some(&source_revision)
+        || !image_id.starts_with("sha256:")
+        || image_id.len() != 71
+        || !image_id[7..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(anyhow!("container artifact witness is invalid"));
+    }
+    Ok((*image_id).to_string())
 }
 
 fn state_migration_plan_record(
@@ -5521,6 +5561,35 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                     DEPLOYABLE_SOURCE_PATHS,
                 )),
                 enabled: true,
+                interval_seconds: 300,
+            },
+            DaemonTarget {
+                daemon_id: "yggdrasil-epiphany-ox17".to_string(),
+                verse_id: "yggdrasil.local".to_string(),
+                name: "Yggdrasil Epiphany Ox17 candidate".to_string(),
+                health_contract: health_contract("epiphany.ox17-capstone-admission", "failed"),
+                deploy_command: Some(yggdrasil_actuator("deploy", "epiphany-ox17")),
+                restart_command: None,
+                release: Some(with_source_change_pathspecs(
+                    with_container_artifact_witness(
+                        with_deployed_revision_witness(
+                            release_target_on_branch(
+                                "Epiphany",
+                                PathBuf::from("/srv/build/Epiphany"),
+                                "codex/epiphany-shakedown-live",
+                                "fresh-container-capstone",
+                                None,
+                                "one-shot-no-restart",
+                            ),
+                            PathBuf::from("/srv/epiphany/ox17/deployment.env"),
+                        ),
+                        PathBuf::from("/srv/epiphany/artifacts"),
+                    ),
+                    DEPLOYABLE_SOURCE_PATHS,
+                )),
+                // Ox17 is an explicitly requested one-shot admission target. It
+                // never participates in daemon continuity or automatic rollout.
+                enabled: false,
                 interval_seconds: 300,
             },
             DaemonTarget {
@@ -8381,6 +8450,30 @@ mod tests {
             ]
         );
 
+        let ox17 = yggdrasil
+            .iter()
+            .find(|target| target.daemon_id == "yggdrasil-epiphany-ox17")
+            .expect("Yggdrasil Epiphany Ox17 target");
+        assert!(!ox17.enabled, "Ox17 must never auto-actuate");
+        assert!(ox17.restart_command.is_none());
+        assert_eq!(
+            ox17.deploy_command.as_deref(),
+            Some(
+                "sudo -n /usr/local/libexec/idunn-yggdrasil deploy epiphany-ox17 \"$IDUNN_SOURCE_COMMIT\" \"$IDUNN_REPOSITORY_FULL_NAME\" \"$IDUNN_UPSTREAM_REF\" \"$BIFROST_RELEASE_AUTHORITY_ID\" \"$BIFROST_RELEASE_AUTHORITY_SHA256\" \"$IDUNN_DEPLOYMENT_REQUEST_ID\" \"$IDUNN_REQUIRES_BIFROST_AUTHORITY\""
+            )
+        );
+        let ox17_release = ox17.release.as_ref().expect("Ox17 release target");
+        assert_eq!(ox17_release.rollout_strategy, "fresh-container-capstone");
+        assert_eq!(ox17_release.artifact_strategy, "immutable-docker-image-id");
+        assert_eq!(
+            ox17_release.artifact_witness_root,
+            Some(PathBuf::from("/srv/epiphany/artifacts"))
+        );
+        assert_eq!(
+            ox17_release.deployed_revision_witness,
+            Some(PathBuf::from("/srv/epiphany/ox17/deployment.env"))
+        );
+
         for legacy in yggdrasil
             .iter()
             .filter(|target| {
@@ -8397,6 +8490,25 @@ mod tests {
                 legacy.repo
             );
         }
+    }
+
+    #[test]
+    fn container_artifact_witness_binds_exact_source_and_image_id() {
+        let root = tempfile::tempdir().unwrap();
+        let source = "a".repeat(40);
+        let image_id = format!("sha256:{}", "b".repeat(64));
+        fs::write(
+            root.path().join(format!("{source}.env")),
+            format!(
+                "schema=idunn.epiphany_image_artifact.v1\nsource_commit={source}\nimage_id={image_id}\n"
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            read_container_artifact_witness(root.path(), &source).unwrap(),
+            image_id
+        );
+        assert!(read_container_artifact_witness(root.path(), &"c".repeat(40)).is_err());
     }
 
     #[test]
@@ -8429,13 +8541,13 @@ mod tests {
             !unit.contains("--deployment-brake-store /var/lib/gamecult/idunn/deployment-brake.cc")
         );
         assert!(!unit.contains("--trusted-epiphany-health-identity-store"));
-        assert!(actuator.contains("deploy:epiphany|restart:epiphany"));
+        assert!(actuator.contains("deploy:epiphany|restart:epiphany|deploy:epiphany-ox17"));
         assert!(actuator.contains("/usr/local/bin/idunn validate-release-authority"));
         assert!(
             actuator.contains("bifrost-persona-feedback) target_requires_bifrost_authority=true")
         );
         assert!(actuator.contains(
-            "epiphany|voidbot|heimdall|repixelizer|streampixels|odin|codex-connector|ghostlight|gjallar) target_requires_bifrost_authority=false"
+            "epiphany|epiphany-ox17|voidbot|heimdall|repixelizer|streampixels|odin|codex-connector|ghostlight|gjallar) target_requires_bifrost_authority=false"
         ));
         assert!(
             actuator
