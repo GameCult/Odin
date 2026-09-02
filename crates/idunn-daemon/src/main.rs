@@ -2871,8 +2871,9 @@ fn require_compiled_repository_origin(
             "compiled-policy repository has no readable canonical origin"
         ));
     }
-    let urls = String::from_utf8(output.stdout)
-        .context("compiled-policy repository origin is not UTF-8")?
+    let origin_output = String::from_utf8(output.stdout)
+        .context("compiled-policy repository origin is not UTF-8")?;
+    let urls = origin_output
         .lines()
         .map(str::trim)
         .filter(|url| !url.is_empty())
