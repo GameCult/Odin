@@ -11,6 +11,13 @@ Idunn keeps the apples: desired daemon presence, deployment freshness, boot
 recovery, crash recovery, health freshness, deploy/restart intent, operator
 escalation, and continuity witness state.
 
+The current deployment and runtime-admission contract is
+[`idunn-deployment-authority.md`](idunn-deployment-authority.md). That contract
+owns target recipes, operator bindings, capability-graph admission,
+expected/present/ready correlation, candidate promotion, route admission, and
+the separation between deployment and continuity. This page describes the
+broader keepalive body and its existing state surfaces.
+
 ## Authority Map
 
 - Owner: Idunn owns daemon lifecycle management from its root-admitted target
