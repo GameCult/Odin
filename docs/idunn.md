@@ -118,6 +118,50 @@ Managed dependency candidates are derived from validated Expected documents.
 External operator bindings remain expected configuration only; they cannot
 impersonate signed presence or readiness.
 
+### Source resolution and actuation map
+
+- **Owner:** the Idunn deployment transaction owns the transition from one
+  observation of a moving admitted ref to runner-readable immutable source.
+  The source driver resolves through a transaction-unique fetched-ref witness;
+  the control loop must compile and durably persist the complete
+  `CompiledDeploymentPlan` before any source freeze or runner actuation.
+- **Inputs:** the root-admitted raw operator-binding bytes; the exact repository
+  declaration blob read from the selected Git tree; one unique source-resolution
+  ID; the fetched admitted-ref revision; the selected commit and tree; and the
+  complete Gitlink path, origin, and revision set admitted by that binding.
+- **Outputs:** private `ResolvedSource` facts used to compile the plan; a
+  plan-only exact archive in root-owned transaction storage; and a
+  `FrozenSourceReceipt` binding the transaction ID, plan ID, and snapshot digest.
+  The receipt is embedded in the observed `FrozenSource` and must validate
+  against the plan before a runner may consume the tree.
+- **Derived state:** the source-identity checkout, unique fetched ref, temporary
+  Gitlink checkouts, extracted runner workspaces, and in-memory `FrozenSource`
+  view are disposable projections. None may replace the persisted plan,
+  receipt, or sealed release as transaction authority.
+- **Forbidden writers:** a repository identity may perform Git and network
+  reads but cannot write the root-owned frozen tree. A moving ref, mutable
+  checkout, caller-supplied parsed binding, fresh recipe read, or incomplete
+  Gitlink subset cannot revise a compiled transaction. Resume may not resolve a
+  fresh binding or ref, and runner actuation may not accept source without its
+  plan-bound receipt.
+- **Shared path:** initial execution resolves once, compiles and persists the
+  full plan, freezes only from that plan, persists the receipt, re-observes the
+  immutable snapshot, and runs the bound builders. Retry and crash recovery use
+  the same persisted plan and receipt; if freeze must be repeated, it fetches
+  only the exact planned revisions and never observes the moving ref again.
+  Transaction source storage is cleaned only after the sealed release has been
+  durably persisted.
+- **Deletion line:** source-owned worktrees and Git metadata do not cross into
+  actuation storage; source selection does not return a runner-usable mutable
+  checkout; and no resume path is permitted to reconstruct authority from the
+  current repository binding or branch head.
+- **Verification layer:** focused source-driver tests observe the unique
+  admitted-ref witness, exact Gitlink-set equality, root ownership, canonical
+  read-only modes, bounded symlinks, snapshot digest, and plan/receipt binding.
+  Transaction crash tests must additionally prove that every boundary after
+  plan persistence resumes without ref resolution and that cleanup cannot run
+  before sealed-release persistence.
+
 ## Promotion and continuity
 
 For a routed stateful singleton, Idunn starts the candidate privately, observes
@@ -158,9 +202,11 @@ graph conditions hold.
 ## Current implementation boundary
 
 `crates/idunn-daemon/src/deployment.rs` and `deployment_plan.rs` implement the
-deterministic declaration, binding, plan, release, and Expected foundation.
-They do not yet drive Git, runners, systemd, proxies, CultCache, CultMesh,
-brakes, runtime activations, write leases, or runtime health verification.
-Runtime integration must consume these contracts; it must not recreate target
-catalogs, raw deployment commands, root Git inspection, or a second admission
-opinion.
+deterministic declaration, binding, plan, release, and Expected contracts.
+`drivers.rs` implements the narrow source resolution/freeze, runner, systemd,
+write-lease, topology, and route actuator ports. The transaction engine still
+must persist and sequence the compiled plan, frozen-source receipt, sealed
+release, activation, lease, readiness, route, and admitted generation. Driver
+ports are consequences, not a second deployment controller; runtime integration
+must not recreate target catalogs, raw deployment commands, root Git inspection,
+or a second admission opinion.
