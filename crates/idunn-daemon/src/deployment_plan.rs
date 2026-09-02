@@ -25,7 +25,6 @@ pub const SEALED_RELEASE_SCHEMA: &str = "idunn.sealed_release.v1";
 pub struct GitlinkTreeFact {
     pub origin: String,
     pub revision: String,
-    pub tree_entry_revision: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,6 +43,7 @@ pub struct SourceSelectionFacts {
     pub schema: String,
     pub origin: String,
     pub admitted_ref: String,
+    pub admitted_ref_revision: String,
     pub revision: String,
     pub source_tree: String,
     pub recipe_path: PathBuf,
@@ -68,6 +68,10 @@ impl SourceSelectionFacts {
             self.admitted_ref == binding.repository.admitted_ref,
             "selected ref differs from binding"
         );
+        require_sha1(
+            &self.admitted_ref_revision,
+            "selected admitted-ref revision",
+        )?;
         require_sha1(&self.revision, "selected revision")?;
         require_sha1(&self.source_tree, "selected source tree")?;
         ensure!(
@@ -92,7 +96,10 @@ impl SourceSelectionFacts {
                     "selected source differs from the pinned revision"
                 );
             }
-            (SourceSelectionPolicy::RefHead, SourceSelection::RefHead) => {}
+            (SourceSelectionPolicy::RefHead, SourceSelection::RefHead) => ensure!(
+                self.revision == self.admitted_ref_revision,
+                "ref-head selection differs from the fetched admitted-ref revision"
+            ),
             (
                 SourceSelectionPolicy::SignedRelease,
                 SourceSelection::SignedRelease {
@@ -118,12 +125,6 @@ impl SourceSelectionFacts {
                 path.display()
             );
             require_sha1(&receipt.revision, "Gitlink revision")?;
-            require_sha1(&receipt.tree_entry_revision, "Gitlink tree entry")?;
-            ensure!(
-                receipt.revision == receipt.tree_entry_revision,
-                "Gitlink {} revision differs from the selected tree entry",
-                path.display()
-            );
         }
         Ok(())
     }
@@ -1089,6 +1090,7 @@ nodes = ["yggdrasil"]
             schema: SOURCE_SELECTION_FACTS_SCHEMA.into(),
             origin: "https://github.com/GameCult/Service.git".into(),
             admitted_ref: "refs/heads/main".into(),
+            admitted_ref_revision: "2222222222222222222222222222222222222222".into(),
             revision: "2222222222222222222222222222222222222222".into(),
             source_tree: "3333333333333333333333333333333333333333".into(),
             recipe_path: "deployment/idunn/recipe.toml".into(),
@@ -1233,7 +1235,6 @@ nodes = ["yggdrasil"]
             GitlinkTreeFact {
                 origin: "https://github.com/GameCult/Lib.git".into(),
                 revision: "4444444444444444444444444444444444444444".into(),
-                tree_entry_revision: "4444444444444444444444444444444444444444".into(),
             },
         );
         facts.validate_against(&binding).unwrap();
@@ -1241,7 +1242,7 @@ nodes = ["yggdrasil"]
             .gitlinks
             .get_mut(&PathBuf::from("vendor/lib"))
             .unwrap()
-            .tree_entry_revision = "5555555555555555555555555555555555555555".into();
+            .origin = "https://github.com/GameCult/Wrong.git".into();
         assert!(facts.validate_against(&binding).is_err());
     }
 

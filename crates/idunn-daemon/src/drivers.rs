@@ -41,18 +41,82 @@ pub struct ProcessIdentity {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FrozenSource {
+struct GitTreeEntry {
+    mode: String,
+    kind: String,
+    object: String,
+    path: PathBuf,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedSource {
     pub facts: SourceSelectionFacts,
     pub recipe_bytes: Vec<u8>,
-    pub root: PathBuf,
+}
+
+impl ResolvedSource {
+    pub fn validate_against(&self, binding: &OperatorBinding) -> Result<()> {
+        self.facts.validate_against(binding)?;
+        ensure!(!self.recipe_bytes.is_empty(), "resolved recipe is empty");
+        ensure!(
+            sha256_id(&self.recipe_bytes) == self.facts.recipe_blob_sha256,
+            "resolved recipe bytes differ from the selected Git object"
+        );
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FrozenSource {
+    receipt: FrozenSourceReceipt,
+    facts: SourceSelectionFacts,
+    recipe_bytes: Vec<u8>,
+    root: PathBuf,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FrozenSourceReceipt {
+    pub transaction_id: String,
+    pub plan_id: String,
+    pub snapshot_sha256: String,
+}
+
+impl FrozenSourceReceipt {
+    pub fn validate_against(&self, plan: &CompiledDeploymentPlan) -> Result<()> {
+        plan.validate()?;
+        require_driver_id(&self.transaction_id, "source transaction")?;
+        ensure!(self.plan_id == plan.plan_id, "frozen source plan differs");
+        require_sha256_id(&self.snapshot_sha256, "frozen source snapshot")
+    }
+
+    fn snapshot_component(&self) -> &str {
+        self.snapshot_sha256
+            .strip_prefix("sha256-")
+            .expect("validated frozen source digest")
+    }
 }
 
 pub trait SourcePort {
-    fn select(
+    fn resolve(
         &self,
         binding: &OperatorBinding,
+        resolution_id: &str,
         selected_at_unix_millis: u64,
+    ) -> Result<ResolvedSource>;
+
+    fn freeze(
+        &self,
+        transaction_id: &str,
+        plan: &CompiledDeploymentPlan,
+    ) -> Result<FrozenSourceReceipt>;
+
+    fn observe_frozen(
+        &self,
+        plan: &CompiledDeploymentPlan,
+        receipt: &FrozenSourceReceipt,
     ) -> Result<FrozenSource>;
+
+    fn cleanup(&self, transaction_id: &str, receipt: Option<&FrozenSourceReceipt>) -> Result<()>;
 }
 
 pub trait RunnerPort {
@@ -203,23 +267,32 @@ pub trait RoutePort {
 
 /// Fixed-argv Git source driver. It never interprets recipe text as a command
 /// and never derives source policy from the target repository. The configured
-/// identity performs every Git read and materialization.
+/// identity performs every Git/network read; root Idunn extracts only exact Git
+/// object archives into a separate transaction-owned immutable store.
 pub struct GitSourceDriver {
-    pub source_root: PathBuf,
+    pub source_cache_root: PathBuf,
+    pub frozen_source_root: PathBuf,
     pub identity: Option<ProcessIdentity>,
     pub git_program: PathBuf,
+    pub tar_program: PathBuf,
 }
 
 impl GitSourceDriver {
-    pub fn new(source_root: impl Into<PathBuf>, identity: Option<ProcessIdentity>) -> Self {
+    pub fn new(
+        source_cache_root: impl Into<PathBuf>,
+        frozen_source_root: impl Into<PathBuf>,
+        identity: Option<ProcessIdentity>,
+    ) -> Self {
         Self {
-            source_root: source_root.into(),
+            source_cache_root: source_cache_root.into(),
+            frozen_source_root: frozen_source_root.into(),
             identity,
             git_program: PathBuf::from("/usr/bin/git"),
+            tar_program: PathBuf::from("/usr/bin/tar"),
         }
     }
 
-    fn git<I, S>(&self, args: I) -> Result<Output>
+    fn git_command<I, S>(&self, args: I) -> Result<Command>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
@@ -233,13 +306,21 @@ impl GitSourceDriver {
             .args(args)
             .stdin(Stdio::null())
             .env_clear()
-            .env("HOME", self.source_root.join(".home"))
+            .env("HOME", self.source_cache_root.join(".home"))
             .env("PATH", "/usr/bin:/bin")
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("LANG", "C.UTF-8");
         apply_identity(&mut command, self.identity)?;
-        let output = command.output().with_context(|| {
+        Ok(command)
+    }
+
+    fn git<I, S>(&self, args: I) -> Result<Output>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let output = self.git_command(args)?.output().with_context(|| {
             format!(
                 "starting fixed-argv Git driver {}",
                 self.git_program.display()
@@ -278,9 +359,21 @@ impl GitSourceDriver {
                 checkout.as_os_str().to_owned(),
             ])?;
         }
+        let checkout_metadata = fs::symlink_metadata(checkout)
+            .with_context(|| format!("inspecting source checkout {}", checkout.display()))?;
         ensure!(
-            checkout.join(".git").exists(),
-            "source checkout is not a Git worktree"
+            checkout_metadata.is_dir() && !checkout_metadata.file_type().is_symlink(),
+            "source checkout is not a native directory"
+        );
+        let canonical_checkout = checkout.canonicalize()?;
+        ensure!(
+            canonical_checkout == *checkout,
+            "source checkout traverses a symlink or noncanonical path"
+        );
+        let git_metadata = fs::symlink_metadata(checkout.join(".git"))?;
+        ensure!(
+            git_metadata.is_dir() && !git_metadata.file_type().is_symlink(),
+            "source checkout has no native Git object directory"
         );
         let actual_origin = self.git_text([
             OsString::from("-C"),
@@ -296,14 +389,18 @@ impl GitSourceDriver {
         Ok(())
     }
 
-    fn admitted_ref_name(binding: &OperatorBinding) -> String {
-        format!("refs/idunn/admitted/{}", binding.target)
+    fn admitted_ref_name(binding: &OperatorBinding, resolution_id: &str) -> Result<String> {
+        require_driver_id(resolution_id, "source resolution")?;
+        Ok(format!(
+            "refs/idunn/resolutions/{}/{}",
+            binding.target, resolution_id
+        ))
     }
 
     fn resolve_selected_revision(
         &self,
         binding: &OperatorBinding,
-        fetched_ref: &str,
+        admitted_ref_revision: &str,
     ) -> Result<(String, SourceSelection)> {
         let checkout = &binding.repository.checkout;
         let (revision, selection) = match binding.repository.selection {
@@ -315,15 +412,9 @@ impl GitSourceDriver {
                     .context("pinned source binding lost its exact revision")?,
                 SourceSelection::PinnedObject,
             ),
-            SourceSelectionPolicy::RefHead => (
-                self.git_text([
-                    OsString::from("-C"),
-                    checkout.as_os_str().to_owned(),
-                    OsString::from("rev-parse"),
-                    OsString::from(format!("{fetched_ref}^{{commit}}")),
-                ])?,
-                SourceSelection::RefHead,
-            ),
+            SourceSelectionPolicy::RefHead => {
+                (admitted_ref_revision.to_owned(), SourceSelection::RefHead)
+            }
             SourceSelectionPolicy::SignedRelease => {
                 bail!("signed-release selection requires a release-authority source port")
             }
@@ -344,146 +435,152 @@ impl GitSourceDriver {
             OsString::from("merge-base"),
             OsString::from("--is-ancestor"),
             revision.clone().into(),
-            fetched_ref.into(),
+            admitted_ref_revision.into(),
         ])
         .context("selected source is outside the fetched admitted ref")?;
         Ok((revision, selection))
     }
 
-    fn gitlink_fact(
-        &self,
-        binding: &OperatorBinding,
-        revision: &str,
-        path: &Path,
-    ) -> Result<GitlinkTreeFact> {
-        let output = self.git_text([
-            OsString::from("-C"),
-            binding.repository.checkout.as_os_str().to_owned(),
-            OsString::from("ls-tree"),
-            revision.into(),
-            OsString::from("--"),
-            path.as_os_str().to_owned(),
-        ])?;
-        let mut fields = output.split_whitespace();
-        ensure!(
-            fields.next() == Some("160000"),
-            "bound Gitlink is not a commit tree entry"
-        );
-        ensure!(
-            fields.next() == Some("commit"),
-            "bound Gitlink has the wrong object kind"
-        );
-        let tree_revision = fields
-            .next()
-            .context("Gitlink tree entry has no revision")?;
-        require_git_sha(tree_revision, "Gitlink tree revision")?;
-        let origin = binding.repository.gitlinks[path].origin.clone();
-        Ok(GitlinkTreeFact {
-            origin,
-            revision: tree_revision.to_owned(),
-            tree_entry_revision: tree_revision.to_owned(),
-        })
-    }
-
-    fn materialize_worktree(
-        &self,
-        binding: &OperatorBinding,
-        revision: &str,
-        gitlinks: &BTreeMap<PathBuf, GitlinkTreeFact>,
-    ) -> Result<PathBuf> {
-        let target_root = self.source_root.join(&binding.target);
-        let root = target_root.join(format!("{}-{}", revision, Uuid::new_v4()));
-        self.git([
-            OsString::from("-C"),
-            binding.repository.checkout.as_os_str().to_owned(),
-            OsString::from("worktree"),
-            OsString::from("add"),
-            OsString::from("--detach"),
-            root.as_os_str().to_owned(),
-            revision.into(),
-        ])?;
-
-        for (path, fact) in gitlinks {
-            let destination = root.join(path);
+    fn git_tree_entries(&self, repository: &Path, revision: &str) -> Result<Vec<GitTreeEntry>> {
+        let output = self
+            .git([
+                OsString::from("-C"),
+                repository.as_os_str().to_owned(),
+                OsString::from("ls-tree"),
+                OsString::from("-r"),
+                OsString::from("-z"),
+                revision.into(),
+            ])?
+            .stdout;
+        let mut entries = Vec::new();
+        for record in output
+            .split(|byte| *byte == 0)
+            .filter(|record| !record.is_empty())
+        {
+            let tab = record
+                .iter()
+                .position(|byte| *byte == b'\t')
+                .context("Git tree record has no path delimiter")?;
+            let header = std::str::from_utf8(&record[..tab])
+                .context("Git tree record header is not UTF-8")?;
+            let path =
+                std::str::from_utf8(&record[tab + 1..]).context("Git tree path is not UTF-8")?;
+            let mut fields = header.split(' ');
+            let mode = fields.next().context("Git tree record has no mode")?;
+            let kind = fields.next().context("Git tree record has no kind")?;
+            let object = fields.next().context("Git tree record has no object")?;
+            ensure!(fields.next().is_none(), "Git tree record has extra fields");
+            require_git_sha(object, "Git tree object")?;
+            let path = PathBuf::from(path);
+            let normalized = normalized_relative(&path)?;
             ensure!(
-                destination.starts_with(&root),
-                "Gitlink escaped the frozen source root"
+                normalized == path.to_string_lossy(),
+                "Git tree path is not normalized"
             );
-            if destination.exists() {
-                fs::remove_dir(&destination).with_context(|| {
-                    format!(
-                        "removing empty Gitlink placeholder {}",
-                        destination.display()
-                    )
-                })?;
-            }
-            if let Some(parent) = destination.parent() {
-                ensure_source_directory_tree(&root, parent, self.identity)?;
-            }
-            self.git([
-                OsString::from("clone"),
-                OsString::from("--filter=blob:none"),
-                OsString::from("--no-checkout"),
-                OsString::from("--origin"),
-                OsString::from("origin"),
-                fact.origin.clone().into(),
-                destination.as_os_str().to_owned(),
-            ])?;
-            self.git([
-                OsString::from("-C"),
-                destination.as_os_str().to_owned(),
-                OsString::from("fetch"),
-                OsString::from("--no-tags"),
-                OsString::from("origin"),
-                fact.revision.clone().into(),
-            ])?;
-            self.git([
-                OsString::from("-C"),
-                destination.as_os_str().to_owned(),
-                OsString::from("checkout"),
-                OsString::from("--detach"),
-                fact.revision.clone().into(),
-            ])?;
-            let actual = self.git_text([
-                OsString::from("-C"),
-                destination.as_os_str().to_owned(),
-                OsString::from("rev-parse"),
-                OsString::from("HEAD"),
-            ])?;
             ensure!(
-                actual == fact.revision,
-                "materialized Gitlink revision differs"
+                path.components().all(|component| !matches!(
+                    component,
+                    std::path::Component::Normal(value) if value == ".git"
+                )),
+                "Git tree contains forbidden .git metadata"
             );
+            entries.push(GitTreeEntry {
+                mode: mode.to_owned(),
+                kind: kind.to_owned(),
+                object: object.to_owned(),
+                path,
+            });
         }
-        Ok(root)
+        entries.sort_by(|left, right| left.path.cmp(&right.path));
+        ensure!(
+            entries.windows(2).all(|pair| pair[0].path != pair[1].path),
+            "Git tree emits a path twice"
+        );
+        Ok(entries)
     }
-}
 
-impl SourcePort for GitSourceDriver {
-    fn select(
+    fn exact_recipe_and_gitlinks(
         &self,
         binding: &OperatorBinding,
-        selected_at_unix_millis: u64,
-    ) -> Result<FrozenSource> {
-        binding.validate()?;
+        revision: &str,
+    ) -> Result<(Vec<u8>, BTreeMap<PathBuf, GitlinkTreeFact>)> {
+        let entries = self.git_tree_entries(&binding.repository.checkout, revision)?;
+        let recipe = entries
+            .iter()
+            .find(|entry| entry.path == binding.repository.recipe_path)
+            .context("selected tree has no deployment recipe")?;
+        ensure!(
+            matches!(recipe.mode.as_str(), "100644" | "100755") && recipe.kind == "blob",
+            "deployment recipe is not a regular Git blob"
+        );
+        let recipe_bytes = self
+            .git([
+                OsString::from("-C"),
+                binding.repository.checkout.as_os_str().to_owned(),
+                OsString::from("cat-file"),
+                OsString::from("blob"),
+                recipe.object.clone().into(),
+            ])?
+            .stdout;
+        ensure!(
+            !recipe_bytes.is_empty(),
+            "selected deployment recipe is empty"
+        );
+
+        let observed_gitlinks = entries
+            .iter()
+            .filter(|entry| entry.mode == "160000")
+            .map(|entry| {
+                ensure!(entry.kind == "commit", "Gitlink has the wrong object kind");
+                Ok((entry.path.clone(), entry.object.clone()))
+            })
+            .collect::<Result<BTreeMap<_, _>>>()?;
+        let expected_paths = binding
+            .repository
+            .gitlinks
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        let observed_paths = observed_gitlinks
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        ensure!(
+            observed_paths == expected_paths,
+            "selected tree Gitlinks do not exactly match operator bindings"
+        );
+        let gitlinks = observed_gitlinks
+            .into_iter()
+            .map(|(path, revision)| {
+                let origin = binding.repository.gitlinks[&path].origin.clone();
+                (path, GitlinkTreeFact { origin, revision })
+            })
+            .collect();
+        Ok((recipe_bytes, gitlinks))
+    }
+
+    fn prepare_source_root(&self, binding: &OperatorBinding) -> Result<()> {
         #[cfg(unix)]
         ensure!(
             unsafe { libc::geteuid() } != 0 || self.identity.is_some(),
             "root Idunn must configure an unprivileged source identity"
         );
         ensure!(
-            selected_at_unix_millis > 0,
-            "source selection has no timestamp"
-        );
-        ensure!(
-            binding.repository.checkout.starts_with(&self.source_root)
-                && binding.repository.checkout != self.source_root,
+            binding
+                .repository
+                .checkout
+                .starts_with(&self.source_cache_root)
+                && binding.repository.checkout != self.source_cache_root,
             "repository checkout is outside Idunn's source authority root"
         );
-        ensure_source_directory(&self.source_root, self.identity)?;
-        ensure_source_directory(&self.source_root.join(".home"), self.identity)?;
+        ensure_source_directory(&self.source_cache_root, self.identity)?;
+        ensure!(
+            self.source_cache_root.canonicalize()? == self.source_cache_root,
+            "source cache root traverses a symlink or noncanonical path"
+        );
+        ensure_source_directory(&self.source_cache_root.join(".home"), self.identity)?;
         ensure_source_directory_tree(
-            &self.source_root,
+            &self.source_cache_root,
             binding
                 .repository
                 .checkout
@@ -491,9 +588,175 @@ impl SourcePort for GitSourceDriver {
                 .context("repository checkout has no parent directory")?,
             self.identity,
         )?;
-        ensure_source_directory(&self.source_root.join(&binding.target), self.identity)?;
-        self.ensure_checkout(binding)?;
-        let fetched_ref = Self::admitted_ref_name(binding);
+        self.ensure_checkout(binding)
+    }
+
+    fn verify_exact_source(
+        &self,
+        binding: &OperatorBinding,
+        resolved: &ResolvedSource,
+    ) -> Result<()> {
+        let actual_tree = self.git_text([
+            OsString::from("-C"),
+            binding.repository.checkout.as_os_str().to_owned(),
+            OsString::from("rev-parse"),
+            OsString::from(format!("{}^{{tree}}", resolved.facts.revision)),
+        ])?;
+        ensure!(
+            actual_tree == resolved.facts.source_tree,
+            "selected revision no longer resolves to the frozen source tree"
+        );
+        let (recipe_bytes, gitlinks) =
+            self.exact_recipe_and_gitlinks(binding, &resolved.facts.revision)?;
+        ensure!(
+            recipe_bytes == resolved.recipe_bytes,
+            "selected recipe object differs from the durable source resolution"
+        );
+        ensure!(
+            gitlinks == resolved.facts.gitlinks,
+            "Gitlinks differ from the durable source resolution"
+        );
+        Ok(())
+    }
+
+    fn git_archive_into(
+        &self,
+        repository: &Path,
+        revision: &str,
+        prefix: Option<&Path>,
+        destination: &Path,
+    ) -> Result<()> {
+        ensure!(
+            self.tar_program.is_absolute(),
+            "source archive extractor is not absolute"
+        );
+        let mut archive_args = vec![
+            OsString::from("-C"),
+            repository.as_os_str().to_owned(),
+            OsString::from("archive"),
+            OsString::from("--format=tar"),
+        ];
+        if let Some(prefix) = prefix {
+            archive_args.push(OsString::from(format!(
+                "--prefix={}/",
+                normalized_relative(prefix)?
+            )));
+        }
+        archive_args.push(revision.into());
+        let mut archive = self.git_command(archive_args)?;
+        archive.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut archive = archive.spawn().context("starting exact Git archive")?;
+        let archive_stdout = archive.stdout.take().context("Git archive has no stdout")?;
+        let mut extractor = Command::new(&self.tar_program);
+        extractor
+            .args([
+                OsString::from("--extract"),
+                OsString::from("--file=-"),
+                OsString::from("--directory"),
+                destination.as_os_str().to_owned(),
+                OsString::from("--no-same-owner"),
+            ])
+            .stdin(Stdio::from(archive_stdout))
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .env_clear()
+            .env("LANG", "C.UTF-8");
+        let extractor = extractor
+            .spawn()
+            .context("starting fixed-argv source archive extractor")?;
+        let archive_output = archive
+            .wait_with_output()
+            .context("waiting for exact Git archive")?;
+        let extractor_output = extractor
+            .wait_with_output()
+            .context("waiting for source archive extractor")?;
+        ensure!(
+            archive_output.status.success(),
+            "Git archive failed: {}",
+            String::from_utf8_lossy(&archive_output.stderr).trim()
+        );
+        ensure!(
+            extractor_output.status.success(),
+            "source archive extraction failed: {}",
+            String::from_utf8_lossy(&extractor_output.stderr).trim()
+        );
+        Ok(())
+    }
+
+    fn materialize_gitlink_archive(
+        &self,
+        binding: &OperatorBinding,
+        path: &Path,
+        fact: &GitlinkTreeFact,
+        destination: &Path,
+    ) -> Result<()> {
+        let gitlink_root = self
+            .source_cache_root
+            .join(".gitlinks")
+            .join(&binding.target);
+        ensure_source_directory_tree(&self.source_cache_root, &gitlink_root, self.identity)?;
+        let checkout = gitlink_root.join(format!("{}-{}", fact.revision, Uuid::new_v4()));
+        let result = (|| {
+            self.git([
+                OsString::from("clone"),
+                OsString::from("--filter=blob:none"),
+                OsString::from("--no-checkout"),
+                OsString::from("--origin"),
+                OsString::from("origin"),
+                fact.origin.clone().into(),
+                checkout.as_os_str().to_owned(),
+            ])?;
+            self.git([
+                OsString::from("-C"),
+                checkout.as_os_str().to_owned(),
+                OsString::from("fetch"),
+                OsString::from("--no-tags"),
+                OsString::from("origin"),
+                fact.revision.clone().into(),
+            ])?;
+            let actual = self.git_text([
+                OsString::from("-C"),
+                checkout.as_os_str().to_owned(),
+                OsString::from("rev-parse"),
+                OsString::from(format!("{}^{{commit}}", fact.revision)),
+            ])?;
+            ensure!(actual == fact.revision, "Gitlink exact revision is absent");
+            ensure!(
+                !self
+                    .git_tree_entries(&checkout, &fact.revision)?
+                    .iter()
+                    .any(|entry| entry.mode == "160000"),
+                "nested Gitlinks are not admitted in Idunn v1"
+            );
+            self.git_archive_into(&checkout, &fact.revision, Some(path), destination)
+        })();
+        let cleanup = if checkout.exists() {
+            remove_tree_inside(&gitlink_root, &checkout)
+        } else {
+            Ok(())
+        };
+        match (result, cleanup) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), _) => Err(error),
+            (Ok(()), Err(error)) => Err(error.context("cleaning exact Gitlink checkout")),
+        }
+    }
+}
+
+impl SourcePort for GitSourceDriver {
+    fn resolve(
+        &self,
+        binding: &OperatorBinding,
+        resolution_id: &str,
+        selected_at_unix_millis: u64,
+    ) -> Result<ResolvedSource> {
+        binding.validate()?;
+        ensure!(
+            selected_at_unix_millis > 0,
+            "source selection has no timestamp"
+        );
+        self.prepare_source_root(binding)?;
+        let fetched_ref = Self::admitted_ref_name(binding, resolution_id)?;
         self.git([
             OsString::from("-C"),
             binding.repository.checkout.as_os_str().to_owned(),
@@ -506,7 +769,15 @@ impl SourcePort for GitSourceDriver {
                 binding.repository.admitted_ref
             )),
         ])?;
-        let (revision, selection) = self.resolve_selected_revision(binding, &fetched_ref)?;
+        let admitted_ref_revision = self.git_text([
+            OsString::from("-C"),
+            binding.repository.checkout.as_os_str().to_owned(),
+            OsString::from("rev-parse"),
+            OsString::from(format!("{fetched_ref}^{{commit}}")),
+        ])?;
+        require_git_sha(&admitted_ref_revision, "fetched admitted-ref revision")?;
+        let (revision, selection) =
+            self.resolve_selected_revision(binding, &admitted_ref_revision)?;
         let source_tree = self.git_text([
             OsString::from("-C"),
             binding.repository.checkout.as_os_str().to_owned(),
@@ -514,35 +785,12 @@ impl SourcePort for GitSourceDriver {
             OsString::from(format!("{revision}^{{tree}}")),
         ])?;
         require_git_sha(&source_tree, "selected source tree")?;
-        let recipe_spec = format!("{}:{}", revision, binding.repository.recipe_path.display());
-        let recipe_bytes = self
-            .git([
-                OsString::from("-C"),
-                binding.repository.checkout.as_os_str().to_owned(),
-                OsString::from("show"),
-                recipe_spec.into(),
-            ])?
-            .stdout;
-        ensure!(
-            !recipe_bytes.is_empty(),
-            "selected deployment recipe is empty"
-        );
-
-        let mut gitlinks = BTreeMap::new();
-        for path in binding.repository.gitlinks.keys() {
-            gitlinks.insert(path.clone(), self.gitlink_fact(binding, &revision, path)?);
-        }
-        let root = self.materialize_worktree(binding, &revision, &gitlinks)?;
-        let materialized_recipe = fs::read(root.join(&binding.repository.recipe_path))
-            .context("reading materialized deployment recipe")?;
-        ensure!(
-            materialized_recipe == recipe_bytes,
-            "materialized recipe differs from the selected Git object"
-        );
+        let (recipe_bytes, gitlinks) = self.exact_recipe_and_gitlinks(binding, &revision)?;
         let facts = SourceSelectionFacts {
             schema: SOURCE_SELECTION_FACTS_SCHEMA.into(),
             origin: binding.repository.origin.clone(),
             admitted_ref: binding.repository.admitted_ref.clone(),
+            admitted_ref_revision,
             revision,
             source_tree,
             recipe_path: binding.repository.recipe_path.clone(),
@@ -552,11 +800,155 @@ impl SourcePort for GitSourceDriver {
             selected_at_unix_millis,
         };
         facts.validate_against(binding)?;
-        Ok(FrozenSource {
+        let resolved = ResolvedSource {
             facts,
             recipe_bytes,
+        };
+        resolved.validate_against(binding)?;
+        Ok(resolved)
+    }
+
+    fn freeze(
+        &self,
+        transaction_id: &str,
+        plan: &CompiledDeploymentPlan,
+    ) -> Result<FrozenSourceReceipt> {
+        plan.validate()?;
+        require_driver_id(transaction_id, "source transaction")?;
+        let (_, binding) = plan.parsed_inputs()?;
+        let resolved = ResolvedSource {
+            facts: plan.source.clone(),
+            recipe_bytes: plan.recipe_blob.clone(),
+        };
+        resolved.validate_against(&binding)?;
+        #[cfg(unix)]
+        ensure!(
+            unsafe { libc::geteuid() } == 0 && self.identity.is_some(),
+            "freezing source requires root Idunn with an unprivileged Git identity"
+        );
+        self.prepare_source_root(&binding)?;
+        self.git([
+            OsString::from("-C"),
+            binding.repository.checkout.as_os_str().to_owned(),
+            OsString::from("fetch"),
+            OsString::from("--no-tags"),
+            OsString::from("origin"),
+            resolved.facts.revision.clone().into(),
+        ])
+        .context("fetching the durable exact source revision")?;
+        self.verify_exact_source(&binding, &resolved)?;
+        let transaction_root =
+            prepare_frozen_transaction_root(&self.frozen_source_root, transaction_id)?;
+        let partial = transaction_root.join(".partial");
+        prepare_frozen_source_destination(&partial)?;
+        let materialization = (|| {
+            self.git_archive_into(
+                &binding.repository.checkout,
+                &resolved.facts.revision,
+                None,
+                &partial,
+            )?;
+            for (path, fact) in &resolved.facts.gitlinks {
+                self.materialize_gitlink_archive(&binding, path, fact, &partial)?;
+            }
+            let recipe_path = partial.join(&resolved.facts.recipe_path);
+            let recipe_metadata = fs::symlink_metadata(&recipe_path)?;
+            ensure!(
+                recipe_metadata.is_file() && !recipe_metadata.file_type().is_symlink(),
+                "frozen deployment recipe is not a regular file"
+            );
+            let materialized_recipe =
+                fs::read(&recipe_path).context("reading frozen deployment recipe")?;
+            ensure!(
+                materialized_recipe == resolved.recipe_bytes,
+                "frozen recipe differs from the durable source resolution"
+            );
+            harden_frozen_source(&partial)?;
+            validate_frozen_source(&partial)?;
+            frozen_source_sha256(&partial)
+        })();
+        let snapshot_sha256 = match materialization {
+            Ok(snapshot_sha256) => snapshot_sha256,
+            Err(error) => {
+                let _ = remove_frozen_transaction_root(&self.frozen_source_root, transaction_id);
+                return Err(error);
+            }
+        };
+        let snapshot_component = snapshot_sha256
+            .strip_prefix("sha256-")
+            .expect("generated frozen source digest");
+        let final_root = transaction_root.join(snapshot_component);
+        fs::rename(&partial, &final_root).context("publishing immutable frozen source")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&transaction_root, fs::Permissions::from_mode(0o500))?;
+        }
+        let receipt = FrozenSourceReceipt {
+            transaction_id: transaction_id.to_owned(),
+            plan_id: plan.plan_id.clone(),
+            snapshot_sha256,
+        };
+        receipt.validate_against(plan)?;
+        Ok(receipt)
+    }
+
+    fn observe_frozen(
+        &self,
+        plan: &CompiledDeploymentPlan,
+        receipt: &FrozenSourceReceipt,
+    ) -> Result<FrozenSource> {
+        receipt.validate_against(plan)?;
+        validate_frozen_source_store(&self.frozen_source_root)?;
+        let root = self
+            .frozen_source_root
+            .join(&receipt.transaction_id)
+            .join(receipt.snapshot_component());
+        let canonical_store = self.frozen_source_root.canonicalize()?;
+        let canonical_root = root.canonicalize()?;
+        ensure!(
+            canonical_store == self.frozen_source_root
+                && canonical_root == root
+                && canonical_root.starts_with(&canonical_store),
+            "frozen source receipt resolves outside its authority root"
+        );
+        validate_frozen_source(&root)?;
+        ensure!(
+            frozen_source_sha256(&root)? == receipt.snapshot_sha256,
+            "frozen source snapshot differs from its receipt"
+        );
+        let recipe_path = root.join(&plan.source.recipe_path);
+        let recipe_metadata = fs::symlink_metadata(&recipe_path)?;
+        ensure!(
+            recipe_metadata.is_file() && !recipe_metadata.file_type().is_symlink(),
+            "observed deployment recipe is not a regular file"
+        );
+        ensure!(
+            fs::read(&recipe_path)? == plan.recipe_blob,
+            "observed deployment recipe differs from the persisted plan"
+        );
+        Ok(FrozenSource {
+            receipt: receipt.clone(),
+            facts: plan.source.clone(),
+            recipe_bytes: plan.recipe_blob.clone(),
             root,
         })
+    }
+
+    fn cleanup(&self, transaction_id: &str, receipt: Option<&FrozenSourceReceipt>) -> Result<()> {
+        require_driver_id(transaction_id, "source transaction")?;
+        if let Some(receipt) = receipt {
+            ensure!(
+                receipt.transaction_id == transaction_id,
+                "frozen source cleanup receipt belongs to another transaction"
+            );
+            require_sha256_id(&receipt.snapshot_sha256, "frozen source snapshot")?;
+        }
+        let transaction_root = self.frozen_source_root.join(transaction_id);
+        if !transaction_root.exists() {
+            return Ok(());
+        }
+        remove_frozen_transaction_root(&self.frozen_source_root, transaction_id)
     }
 }
 
@@ -807,6 +1199,7 @@ impl RunnerPort for DockerRunnerDriver {
         sealed_at_unix_millis: u64,
     ) -> Result<MaterializedRelease> {
         plan.validate()?;
+        source.receipt.validate_against(plan)?;
         ensure!(
             source.facts == plan.source && source.recipe_bytes == plan.recipe_blob,
             "runner source differs from the compiled plan"
@@ -2240,6 +2633,337 @@ fn rfc3339_millis(millis: u64) -> Result<String> {
 }
 
 #[cfg(unix)]
+fn validate_frozen_source_store(store: &Path) -> Result<()> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    ensure!(store.is_absolute(), "frozen source store is not absolute");
+    let canonical_store = store
+        .canonicalize()
+        .with_context(|| format!("resolving frozen source store {}", store.display()))?;
+    ensure!(
+        canonical_store == store,
+        "frozen source store traverses a symlink or noncanonical path"
+    );
+    let metadata = fs::symlink_metadata(store)?;
+    ensure!(
+        metadata.is_dir()
+            && !metadata.file_type().is_symlink()
+            && metadata.uid() == 0
+            && metadata.permissions().mode() & 0o022 == 0,
+        "frozen source store is not root-owned and nonwritable"
+    );
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_frozen_source_store(_store: &Path) -> Result<()> {
+    bail!("frozen source materialization requires a Unix actuator")
+}
+
+#[cfg(unix)]
+fn prepare_frozen_transaction_root(store: &Path, transaction_id: &str) -> Result<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+
+    require_driver_id(transaction_id, "source transaction")?;
+    validate_frozen_source_store(store)?;
+    let transaction_root = store.join(transaction_id);
+    if transaction_root.exists() {
+        remove_frozen_transaction_root(store, transaction_id)?;
+    }
+    fs::create_dir(&transaction_root)?;
+    fs::set_permissions(&transaction_root, fs::Permissions::from_mode(0o700))?;
+    Ok(transaction_root)
+}
+
+#[cfg(not(unix))]
+fn prepare_frozen_transaction_root(_store: &Path, _transaction_id: &str) -> Result<PathBuf> {
+    bail!("frozen source materialization requires a Unix actuator")
+}
+
+#[cfg(unix)]
+fn remove_frozen_transaction_root(store: &Path, transaction_id: &str) -> Result<()> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    require_driver_id(transaction_id, "source transaction")?;
+    validate_frozen_source_store(store)?;
+    let transaction_root = store.join(transaction_id);
+    let metadata = fs::symlink_metadata(&transaction_root)?;
+    ensure!(
+        metadata.is_dir()
+            && !metadata.file_type().is_symlink()
+            && metadata.uid() == 0
+            && metadata.permissions().mode() & 0o022 == 0,
+        "frozen source transaction root is not Idunn-owned"
+    );
+    fs::set_permissions(&transaction_root, fs::Permissions::from_mode(0o700))?;
+    fs::remove_dir_all(&transaction_root).with_context(|| {
+        format!(
+            "removing exact frozen source transaction {}",
+            transaction_root.display()
+        )
+    })
+}
+
+#[cfg(not(unix))]
+fn remove_frozen_transaction_root(_store: &Path, _transaction_id: &str) -> Result<()> {
+    bail!("frozen source cleanup requires a Unix actuator")
+}
+
+#[cfg(unix)]
+fn prepare_frozen_source_destination(destination: &Path) -> Result<()> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    ensure!(
+        unsafe { libc::geteuid() } == 0,
+        "frozen source materialization requires root Idunn"
+    );
+    ensure!(
+        destination.is_absolute(),
+        "frozen source destination is not absolute"
+    );
+    let parent = destination
+        .parent()
+        .context("frozen source destination has no parent")?;
+    ensure!(destination != parent, "frozen source destination is broad");
+    let canonical_parent = parent
+        .canonicalize()
+        .with_context(|| format!("resolving frozen source parent {}", parent.display()))?;
+    ensure!(
+        canonical_parent == parent,
+        "frozen source parent traverses a symlink or noncanonical path"
+    );
+    let parent_metadata = fs::symlink_metadata(parent)?;
+    ensure!(
+        parent_metadata.is_dir()
+            && !parent_metadata.file_type().is_symlink()
+            && parent_metadata.uid() == 0
+            && parent_metadata.permissions().mode() & 0o022 == 0,
+        "frozen source parent is not root-owned and nonwritable"
+    );
+    if destination.exists() {
+        remove_frozen_source_destination(destination)?;
+    }
+    fs::create_dir(destination)
+        .with_context(|| format!("creating frozen source {}", destination.display()))?;
+    fs::set_permissions(destination, fs::Permissions::from_mode(0o700))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn prepare_frozen_source_destination(_destination: &Path) -> Result<()> {
+    bail!("frozen source materialization requires a Unix actuator")
+}
+
+#[cfg(unix)]
+fn remove_frozen_source_destination(destination: &Path) -> Result<()> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    ensure!(
+        destination.is_absolute(),
+        "frozen source destination is not absolute"
+    );
+    let parent = destination
+        .parent()
+        .context("frozen source destination has no parent")?;
+    ensure!(destination != parent, "frozen source destination is broad");
+    let parent_metadata = fs::symlink_metadata(parent)?;
+    let metadata = fs::symlink_metadata(destination)?;
+    ensure!(
+        parent_metadata.is_dir()
+            && !parent_metadata.file_type().is_symlink()
+            && parent_metadata.uid() == 0
+            && parent_metadata.permissions().mode() & 0o022 == 0,
+        "frozen source parent is not root-owned and nonwritable"
+    );
+    ensure!(
+        metadata.is_dir()
+            && !metadata.file_type().is_symlink()
+            && metadata.uid() == 0
+            && metadata.permissions().mode() & 0o022 == 0,
+        "existing frozen source is not an Idunn-owned directory"
+    );
+    fs::remove_dir_all(destination)
+        .with_context(|| format!("removing exact frozen source {}", destination.display()))
+}
+
+#[cfg(not(unix))]
+fn remove_frozen_source_destination(_destination: &Path) -> Result<()> {
+    bail!("frozen source materialization requires a Unix actuator")
+}
+
+#[cfg(unix)]
+fn harden_frozen_source(root: &Path) -> Result<()> {
+    harden_frozen_source_tree(root, root)
+}
+
+#[cfg(unix)]
+fn harden_frozen_source_tree(root: &Path, current: &Path) -> Result<()> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let metadata = fs::symlink_metadata(current)?;
+    ensure!(metadata.uid() == 0, "frozen source entry is not root-owned");
+    ensure!(
+        current == root || current.file_name() != Some(OsStr::new(".git")),
+        "frozen source contains forbidden .git metadata"
+    );
+    if metadata.is_dir() {
+        let mut entries = fs::read_dir(current)?.collect::<std::io::Result<Vec<_>>>()?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            harden_frozen_source_tree(root, &entry.path())?;
+        }
+        fs::set_permissions(current, fs::Permissions::from_mode(0o555))?;
+    } else if metadata.is_file() {
+        let mode = if metadata.permissions().mode() & 0o111 == 0 {
+            0o444
+        } else {
+            0o555
+        };
+        fs::set_permissions(current, fs::Permissions::from_mode(mode))?;
+    } else if metadata.file_type().is_symlink() {
+        validate_frozen_source_symlink(root, current)?;
+    } else {
+        bail!("frozen source contains a special filesystem entry")
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_frozen_source_symlink(root: &Path, path: &Path) -> Result<()> {
+    let target = fs::read_link(path)?;
+    ensure!(target.is_relative(), "frozen source symlink is absolute");
+    let parent = path
+        .parent()
+        .context("frozen source symlink has no parent")?;
+    let mut components = parent
+        .strip_prefix(root)?
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(value) => Some(value.to_os_string()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    for component in target.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::Normal(value) => components.push(value.to_os_string()),
+            std::path::Component::ParentDir => {
+                ensure!(
+                    components.pop().is_some(),
+                    "frozen source symlink escapes its root"
+                );
+            }
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                bail!("frozen source symlink is absolute")
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn harden_frozen_source(_root: &Path) -> Result<()> {
+    bail!("frozen source materialization requires Unix permissions")
+}
+
+#[cfg(unix)]
+fn validate_frozen_source(root: &Path) -> Result<()> {
+    validate_frozen_source_tree(root, root)
+}
+
+#[cfg(unix)]
+fn validate_frozen_source_tree(root: &Path, current: &Path) -> Result<()> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let metadata = fs::symlink_metadata(current)?;
+    ensure!(metadata.uid() == 0, "frozen source entry is not root-owned");
+    ensure!(
+        current == root || current.file_name() != Some(OsStr::new(".git")),
+        "frozen source contains forbidden .git metadata"
+    );
+    if metadata.is_dir() {
+        ensure!(
+            metadata.permissions().mode() & 0o777 == 0o555,
+            "frozen source directory is not 0555"
+        );
+        let mut entries = fs::read_dir(current)?.collect::<std::io::Result<Vec<_>>>()?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            validate_frozen_source_tree(root, &entry.path())?;
+        }
+    } else if metadata.is_file() {
+        ensure!(
+            matches!(metadata.permissions().mode() & 0o777, 0o444 | 0o555),
+            "frozen source file has a noncanonical mode"
+        );
+    } else if metadata.file_type().is_symlink() {
+        validate_frozen_source_symlink(root, current)?;
+    } else {
+        bail!("frozen source contains a special filesystem entry")
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_frozen_source(_root: &Path) -> Result<()> {
+    bail!("frozen source observation requires Unix permissions")
+}
+
+#[cfg(unix)]
+fn frozen_source_sha256(root: &Path) -> Result<String> {
+    let mut hasher = Sha256::new();
+    hash_frozen_source_tree(root, root, &mut hasher)?;
+    Ok(format!("sha256-{:x}", hasher.finalize()))
+}
+
+#[cfg(unix)]
+fn hash_frozen_source_tree(root: &Path, current: &Path, hasher: &mut Sha256) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut entries = fs::read_dir(current)?.collect::<std::io::Result<Vec<_>>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let path = entry.path();
+        let relative = normalized_relative(path.strip_prefix(root)?)?;
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.is_dir() {
+            hasher.update(b"dir\0");
+            hasher.update(relative.as_bytes());
+            hasher.update(b"\0");
+            hash_frozen_source_tree(root, &path, hasher)?;
+        } else if metadata.is_file() {
+            let bytes = fs::read(&path)?;
+            hasher.update(b"file\0");
+            hasher.update(relative.as_bytes());
+            hasher.update(b"\0");
+            hasher.update(
+                (metadata.permissions().mode() & 0o111 != 0)
+                    .to_string()
+                    .as_bytes(),
+            );
+            hasher.update(b"\0");
+            hasher.update((bytes.len() as u64).to_le_bytes());
+            hasher.update(&bytes);
+        } else if metadata.file_type().is_symlink() {
+            let target = fs::read_link(&path)?;
+            hasher.update(b"link\0");
+            hasher.update(relative.as_bytes());
+            hasher.update(b"\0");
+            hasher.update(target.as_os_str().as_encoded_bytes());
+            hasher.update(b"\0");
+        } else {
+            bail!("frozen source contains a special filesystem entry")
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn frozen_source_sha256(_root: &Path) -> Result<String> {
+    bail!("frozen source observation requires Unix permissions")
+}
+
+#[cfg(unix)]
 fn harden_installed_release(root: &Path, artifacts: &[ArtifactReceipt]) -> Result<()> {
     let executable_paths = artifacts
         .iter()
@@ -2678,6 +3402,32 @@ fn require_git_sha(value: &str, label: &str) -> Result<()> {
     Ok(())
 }
 
+fn require_sha256_id(value: &str, label: &str) -> Result<()> {
+    let digest = value
+        .strip_prefix("sha256-")
+        .with_context(|| format!("{label} has no sha256 prefix"))?;
+    ensure!(
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "{label} is not a lowercase SHA-256 id"
+    );
+    Ok(())
+}
+
+fn require_driver_id(value: &str, label: &str) -> Result<()> {
+    ensure!(
+        !value.is_empty()
+            && value.len() <= 128
+            && value
+                .bytes()
+                .all(|byte| { byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-') }),
+        "{label} id is invalid"
+    );
+    Ok(())
+}
+
 fn ensure_source_directory_tree(
     root: &Path,
     directory: &Path,
@@ -3067,6 +3817,26 @@ mod tests {
         format!("sha256-{}", byte.to_string().repeat(64))
     }
 
+    #[cfg(unix)]
+    fn git_at(repository: &Path, arguments: &[&str]) -> Result<String> {
+        let output = Command::new("/usr/bin/git")
+            .arg("-C")
+            .arg(repository)
+            .args(arguments)
+            .env_clear()
+            .env("HOME", repository)
+            .env("PATH", "/usr/bin:/bin")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("LANG", "C.UTF-8")
+            .output()?;
+        ensure!(
+            output.status.success(),
+            "test Git failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+    }
+
     fn expected() -> IdunnExpectedIncarnationRecord {
         IdunnExpectedIncarnationRecord {
             schema_version: IDUNN_EXPECTED_INCARNATION_SCHEMA.into(),
@@ -3271,6 +4041,89 @@ mod tests {
         validate_runner_secret(&secret, identity)?;
         fs::set_permissions(&secret, fs::Permissions::from_mode(0o444))?;
         assert!(validate_runner_secret(&secret, identity).is_err());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exact_git_archive_becomes_root_owned_immutable_source_without_git_metadata() -> Result<()> {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+
+        let temp = tempfile::tempdir()?;
+        let repository = temp.path().join("repository");
+        fs::create_dir(&repository)?;
+        git_at(&repository, &["init", "--initial-branch=main"])?;
+        git_at(&repository, &["config", "user.name", "Idunn Test"])?;
+        git_at(
+            &repository,
+            &["config", "user.email", "idunn-test@example.invalid"],
+        )?;
+        fs::write(repository.join("deployment.toml"), b"target = 'test'\n")?;
+        let script = repository.join("build.sh");
+        fs::write(&script, b"#!/bin/sh\nexit 0\n")?;
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755))?;
+        fs::create_dir(repository.join("links"))?;
+        symlink("../deployment.toml", repository.join("links/deployment"))?;
+        git_at(&repository, &["add", "--all"])?;
+        git_at(&repository, &["commit", "-m", "fixture"])?;
+        let revision = git_at(&repository, &["rev-parse", "HEAD"])?;
+
+        let parent = temp.path().join("transaction");
+        fs::create_dir(&parent)?;
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o700))?;
+        let destination = parent.join("source");
+        prepare_frozen_source_destination(&destination)?;
+        let driver = GitSourceDriver::new(
+            temp.path().join("source-cache"),
+            temp.path().join("frozen-source"),
+            None,
+        );
+        driver.git_archive_into(&repository, &revision, None, &destination)?;
+        driver.git_archive_into(
+            &repository,
+            &revision,
+            Some(Path::new("vendor/fixture")),
+            &destination,
+        )?;
+        harden_frozen_source(&destination)?;
+
+        assert!(!destination.join(".git").exists());
+        assert_eq!(
+            fs::symlink_metadata(destination.join("deployment.toml"))?
+                .permissions()
+                .mode()
+                & 0o777,
+            0o444
+        );
+        let script_metadata = fs::symlink_metadata(destination.join("build.sh"))?;
+        assert_eq!(script_metadata.uid(), 0);
+        assert_eq!(script_metadata.permissions().mode() & 0o777, 0o555);
+        assert!(destination.join("vendor/fixture/deployment.toml").is_file());
+        validate_frozen_source_symlink(&destination, &destination.join("links/deployment"))?;
+        validate_frozen_source(&destination)?;
+        let digest = frozen_source_sha256(&destination)?;
+        let recipe = destination.join("deployment.toml");
+        fs::set_permissions(&recipe, fs::Permissions::from_mode(0o644))?;
+        assert!(validate_frozen_source(&destination).is_err());
+        fs::set_permissions(&recipe, fs::Permissions::from_mode(0o444))?;
+        fs::write(&recipe, b"target = 'changed'\n")?;
+        assert_ne!(frozen_source_sha256(&destination)?, digest);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn frozen_source_rejects_a_symlink_that_escapes_the_transaction_tree() -> Result<()> {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let temp = tempfile::tempdir()?;
+        let parent = temp.path().join("transaction");
+        fs::create_dir(&parent)?;
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o700))?;
+        let destination = parent.join("source");
+        prepare_frozen_source_destination(&destination)?;
+        symlink("../../outside", destination.join("escape"))?;
+        assert!(harden_frozen_source(&destination).is_err());
         Ok(())
     }
 }
