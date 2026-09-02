@@ -41,6 +41,14 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<()> {
     let command = args.next().ok_or_else(|| anyhow!(usage()))?;
     let options = parse_options(args)?;
     match command.as_str() {
+        "enroll-provider-health-identity" => {
+            let public_key = enroll_provider_health_identity(&options)?;
+            println!("{public_key}");
+        }
+        "provider-health-public-key" => {
+            let public_key = provider_health_public_key(&options)?;
+            println!("{public_key}");
+        }
         "enroll-idunn-identity" => {
             require_only(&options, &["private-store"])?;
             enroll_service_identity_at::<IdunnServiceIdentity>(&path(&options, "private-store")?)?;
@@ -76,6 +84,7 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<()> {
         "deployment-brake-status" => deployment_brake_status(&options)?,
         "create-daemon-health-trust-binding" => create_health_binding(&options)?,
         "add-daemon-health-trust-binding" => add_health_binding(&options)?,
+        "require-daemon-health-release-binding" => require_health_binding_release(&options)?,
         "rotate-daemon-health-trust-signer" => rotate_health_binding_signer(&options)?,
         "validate-daemon-health-trust-binding" => {
             require_only(&options, &["input"])?;
@@ -86,6 +95,24 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<()> {
         _ => bail!("unknown command {command:?}\n{}", usage()),
     }
     Ok(())
+}
+
+fn enroll_provider_health_identity(options: &BTreeMap<String, String>) -> Result<String> {
+    require_only(options, &["private-store"])?;
+    let signer = enroll_service_identity_at::<GameCultProviderHealthIdentity>(&path(
+        options,
+        "private-store",
+    )?)?;
+    encode_public_key(&signer.entry().public_key)
+}
+
+fn provider_health_public_key(options: &BTreeMap<String, String>) -> Result<String> {
+    require_only(options, &["private-store"])?;
+    let signer = open_service_identity_at::<GameCultProviderHealthIdentity>(&path(
+        options,
+        "private-store",
+    )?)?;
+    encode_public_key(&signer.entry().public_key)
 }
 
 fn deployment_brake_engage(options: &BTreeMap<String, String>) -> Result<()> {
@@ -191,11 +218,24 @@ fn deployment_brake_status(options: &BTreeMap<String, String>) -> Result<()> {
             "now-unix-millis",
         ],
     )?;
+    let exact_actuation_fields = ["release-id", "deployment-id", "now-unix-millis"];
+    let exact_actuation_field_count = exact_actuation_fields
+        .into_iter()
+        .filter(|field| options.contains_key(*field))
+        .count();
+    if exact_actuation_field_count != 0
+        && exact_actuation_field_count != exact_actuation_fields.len()
+    {
+        bail!("exact deployment-brake actuation validation requires release, deployment, and time");
+    }
     let record = read_brake(&path(options, "store")?)?;
     if record.runtime_id != required(options, "runtime-id")? {
         bail!("deployment brake belongs to another runtime")
     }
     if record.status == "engaged" {
+        if exact_actuation_field_count != 0 {
+            bail!("engaged deployment brake denies exact actuation validation");
+        }
         println!(
             "engaged runtime={} scope={} owner={} reason={}",
             record.runtime_id, record.scope, record.updated_by, record.reason
@@ -288,11 +328,19 @@ fn read_operator_anchor(path: &Path) -> Result<ServiceIdentityTrustAnchor> {
 
 fn validate_health_binding_store(path: &Path) -> Result<()> {
     let entries = SingleFileMessagePackBackingStore::new(path).pull_all_read_only_snapshot()?;
+    validated_health_bindings(&entries)?;
+    Ok(())
+}
+
+fn validated_health_bindings(
+    entries: &[CultCacheEnvelope],
+) -> Result<Vec<IdunnDaemonHealthTrustBindingRecord>> {
     if entries.is_empty() {
         bail!("daemon health trust store is empty");
     }
     let mut keys = BTreeSet::new();
     let mut tuples = BTreeSet::new();
+    let mut bindings = Vec::with_capacity(entries.len());
     for envelope in entries {
         if envelope.r#type != IdunnDaemonHealthTrustBindingRecord::TYPE
             || envelope.schema_id.as_deref() != Some(IDUNN_DAEMON_HEALTH_TRUST_BINDING_SCHEMA)
@@ -307,15 +355,16 @@ fn validate_health_binding_store(path: &Path) -> Result<()> {
         binding.validate()?;
         if !keys.insert(binding.binding_id.clone())
             || !tuples.insert((
-                binding.daemon_id,
-                binding.health_contract,
-                binding.source_runtime_id,
+                binding.daemon_id.clone(),
+                binding.health_contract.clone(),
+                binding.source_runtime_id.clone(),
             ))
         {
             bail!("trust store contains a duplicate binding id or tuple");
         }
+        bindings.push(binding);
     }
-    Ok(())
+    Ok(bindings)
 }
 
 fn create_health_binding(options: &BTreeMap<String, String>) -> Result<()> {
@@ -427,6 +476,91 @@ fn add_health_binding(options: &BTreeMap<String, String>) -> Result<()> {
     )?;
     if !store.compare_exchange(&expected, &[envelope])? {
         bail!("trust store changed during validated append");
+    }
+    Ok(())
+}
+
+fn require_health_binding_release(options: &BTreeMap<String, String>) -> Result<()> {
+    require_only(
+        options,
+        &[
+            "store",
+            "binding-id",
+            "daemon",
+            "health-contract",
+            "source-runtime",
+            "signer-public-key-hex",
+        ],
+    )?;
+    let store_path = path(options, "store")?;
+    let store = SingleFileMessagePackBackingStore::new(&store_path);
+    let entries = store.pull_all_read_only_snapshot()?;
+    let signer_public_key = decode_public_key(required(options, "signer-public-key-hex")?)?;
+    require_health_binding_release_from_snapshot(
+        &store,
+        entries,
+        required(options, "binding-id")?,
+        required(options, "daemon")?,
+        required(options, "health-contract")?,
+        required(options, "source-runtime")?,
+        &signer_public_key,
+    )
+}
+
+fn require_health_binding_release_from_snapshot(
+    store: &SingleFileMessagePackBackingStore,
+    entries: Vec<CultCacheEnvelope>,
+    binding_id: &str,
+    daemon_id: &str,
+    health_contract: &str,
+    source_runtime_id: &str,
+    signer_public_key: &[u8],
+) -> Result<()> {
+    let bindings = validated_health_bindings(&entries)?;
+    let target_index = bindings
+        .iter()
+        .position(|binding| binding.binding_id == binding_id)
+        .ok_or_else(|| anyhow!("named daemon health trust binding does not exist"))?;
+    let current = &bindings[target_index];
+    if current.daemon_id != daemon_id
+        || current.health_contract != health_contract
+        || current.source_runtime_id != source_runtime_id
+        || current.signer_public_key != signer_public_key
+    {
+        bail!("named daemon health trust binding does not match the expected immutable fields");
+    }
+    if current.release_binding_required {
+        return Ok(());
+    }
+
+    let mut next = current.clone();
+    next.release_binding_required = true;
+    next.validate()?;
+    let mut replacement = entries[target_index].clone();
+    replacement.payload = rmp_serde::to_vec(&next)?;
+    let expected = entries
+        .into_iter()
+        .map(|envelope| CultCacheExpectedEnvelope {
+            r#type: envelope.r#type.clone(),
+            key: envelope.key.clone(),
+            current: Some(envelope),
+        })
+        .collect::<Vec<_>>();
+    if !store.compare_exchange(&expected, &[replacement])? {
+        let latest_entries = store.pull_all_read_only_snapshot()?;
+        let latest_bindings = validated_health_bindings(&latest_entries)?;
+        if let Some(latest) = latest_bindings
+            .iter()
+            .find(|binding| binding.binding_id == binding_id)
+            && latest.daemon_id == daemon_id
+            && latest.health_contract == health_contract
+            && latest.source_runtime_id == source_runtime_id
+            && latest.signer_public_key == signer_public_key
+            && latest.release_binding_required
+        {
+            return Ok(());
+        }
+        bail!("daemon health trust store changed during release-binding transition");
     }
     Ok(())
 }
@@ -723,6 +857,19 @@ fn decode_public_key(value: &str) -> Result<Vec<u8>> {
         .collect()
 }
 
+fn encode_public_key(value: &[u8]) -> Result<String> {
+    if value.len() != 32 {
+        bail!("provider health public key must be exactly 32 bytes");
+    }
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(64);
+    for byte in value {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    Ok(encoded)
+}
+
 fn refuse_existing(path: &Path, label: &str) -> Result<()> {
     if path.exists() {
         bail!(
@@ -760,7 +907,7 @@ fn normalized(path: &Path) -> Result<PathBuf> {
 }
 
 fn usage() -> &'static str {
-    "Usage: idunn-provision enroll-idunn-identity --private-store <path>\n       idunn-provision export-idunn-public-anchor --private-store <path> --public-anchor <path>\n       idunn-provision enroll-deployment-brake-operator --private-store <path>\n       idunn-provision export-deployment-brake-operator-anchor --private-store <path> --public-anchor <path>\n       idunn-provision deployment-brake-engage --store <path> --runtime-id <id> --owner <principal> --reason <text> --observed-at-unix-millis <u64>\n       idunn-provision deployment-brake-release --store <path> --private-store <path> --runtime-id <id> --owner <principal> --reason <text> --authorization-id <id> --release-id <id> --deployment-id <id> --issued-at-unix-millis <u64> --expires-at-unix-millis <u64>\n       idunn-provision deployment-brake-status --store <path> --operator-anchor <path> --runtime-id <id> [--release-id <id> --deployment-id <id> --now-unix-millis <u64>]\n       idunn-provision create-daemon-health-trust-binding --output <path> --binding-id <id> --daemon <id> --health-contract <id> --source-runtime <id> --signer-public-key-hex <hex> --bound-at-unix-millis <u64> --release-binding-required <true|false>\n       idunn-provision add-daemon-health-trust-binding --output <path> --binding-id <id> --daemon <id> --health-contract <id> --source-runtime <id> --signer-public-key-hex <hex> --bound-at-unix-millis <u64> --release-binding-required <true|false>\n       idunn-provision rotate-daemon-health-trust-signer --output <path> --binding-id <id> --signer-public-key-hex <hex> --bound-at-unix-millis <u64>\n       idunn-provision validate-daemon-health-trust-binding --input <path>\n       idunn-provision create-provider-projection-trust-anchor --output <path> --trust-anchor-id <id> --runtime-id <id> --idunn-public-anchor <path> --bound-at-unix-millis <u64> --expires-at-unix-millis <u64>\n       idunn-provision validate-provider-projection-trust-anchor --input <path> --idunn-public-anchor <path>"
+    "Usage: idunn-provision enroll-provider-health-identity --private-store <path>\n       idunn-provision provider-health-public-key --private-store <path>\n       idunn-provision enroll-idunn-identity --private-store <path>\n       idunn-provision export-idunn-public-anchor --private-store <path> --public-anchor <path>\n       idunn-provision enroll-deployment-brake-operator --private-store <path>\n       idunn-provision export-deployment-brake-operator-anchor --private-store <path> --public-anchor <path>\n       idunn-provision deployment-brake-engage --store <path> --runtime-id <id> --owner <principal> --reason <text> --observed-at-unix-millis <u64>\n       idunn-provision deployment-brake-release --store <path> --private-store <path> --runtime-id <id> --owner <principal> --reason <text> --authorization-id <id> --release-id <id> --deployment-id <id> --issued-at-unix-millis <u64> --expires-at-unix-millis <u64>\n       idunn-provision deployment-brake-status --store <path> --operator-anchor <path> --runtime-id <id> [--release-id <id> --deployment-id <id> --now-unix-millis <u64>]\n       idunn-provision create-daemon-health-trust-binding --output <path> --binding-id <id> --daemon <id> --health-contract <id> --source-runtime <id> --signer-public-key-hex <hex> --bound-at-unix-millis <u64> --release-binding-required <true|false>\n       idunn-provision add-daemon-health-trust-binding --output <path> --binding-id <id> --daemon <id> --health-contract <id> --source-runtime <id> --signer-public-key-hex <hex> --bound-at-unix-millis <u64> --release-binding-required <true|false>\n       idunn-provision require-daemon-health-release-binding --store <path> --binding-id <id> --daemon <id> --health-contract <id> --source-runtime <id> --signer-public-key-hex <hex>\n       idunn-provision rotate-daemon-health-trust-signer --output <path> --binding-id <id> --signer-public-key-hex <hex> --bound-at-unix-millis <u64>\n       idunn-provision validate-daemon-health-trust-binding --input <path>\n       idunn-provision create-provider-projection-trust-anchor --output <path> --trust-anchor-id <id> --runtime-id <id> --idunn-public-anchor <path> --bound-at-unix-millis <u64> --expires-at-unix-millis <u64>\n       idunn-provision validate-provider-projection-trust-anchor --input <path> --idunn-public-anchor <path>"
 }
 
 #[cfg(test)]
@@ -815,6 +962,50 @@ mod tests {
             "--release-binding-required",
             "false",
         ]
+    }
+
+    const TEST_SIGNER_HEX: &str =
+        "1111111111111111111111111111111111111111111111111111111111111111";
+    const WRONG_SIGNER_HEX: &str =
+        "2222222222222222222222222222222222222222222222222222222222222222";
+
+    fn write_test_binding(
+        command: &str,
+        store: &str,
+        id: &str,
+        daemon: &str,
+        runtime: &str,
+    ) -> Result<()> {
+        invoke(&binding_args(command, store, id, daemon, runtime))
+    }
+
+    fn require_test_binding(
+        store: &str,
+        id: &str,
+        daemon: &str,
+        contract: &str,
+        runtime: &str,
+        signer: &str,
+    ) -> Result<()> {
+        invoke(&[
+            "require-daemon-health-release-binding",
+            "--store",
+            store,
+            "--binding-id",
+            id,
+            "--daemon",
+            daemon,
+            "--health-contract",
+            contract,
+            "--source-runtime",
+            runtime,
+            "--signer-public-key-hex",
+            signer,
+        ])
+    }
+
+    fn store_snapshot(path: &Path) -> Result<Vec<CultCacheEnvelope>> {
+        SingleFileMessagePackBackingStore::new(path).pull_all_read_only_snapshot()
     }
 
     #[test]
@@ -892,6 +1083,253 @@ mod tests {
     }
 
     #[test]
+    fn require_release_binding_changes_only_the_named_flag_and_is_idempotent() -> Result<()> {
+        let temp = TempDir::new()?;
+        let store = temp.path().join("trust.cc");
+        let path = store.to_str().unwrap();
+        write_test_binding(
+            "create-daemon-health-trust-binding",
+            path,
+            "one",
+            "daemon-one",
+            "runtime-one",
+        )?;
+        write_test_binding(
+            "add-daemon-health-trust-binding",
+            path,
+            "two",
+            "daemon-two",
+            "runtime-two",
+        )?;
+        let before = store_snapshot(&store)?;
+
+        require_test_binding(
+            path,
+            "one",
+            "daemon-one",
+            "provider.health",
+            "runtime-one",
+            TEST_SIGNER_HEX,
+        )?;
+        let after = store_snapshot(&store)?;
+        let before_target = before.iter().find(|entry| entry.key == "one").unwrap();
+        let after_target = after.iter().find(|entry| entry.key == "one").unwrap();
+        let mut expected: IdunnDaemonHealthTrustBindingRecord =
+            rmp_serde::from_slice(&before_target.payload)?;
+        expected.release_binding_required = true;
+        assert_eq!(
+            rmp_serde::from_slice::<IdunnDaemonHealthTrustBindingRecord>(&after_target.payload)?,
+            expected
+        );
+        let mut expected_envelope = before_target.clone();
+        expected_envelope.payload = after_target.payload.clone();
+        assert_eq!(after_target, &expected_envelope);
+        assert_eq!(
+            after.iter().find(|entry| entry.key == "two"),
+            before.iter().find(|entry| entry.key == "two")
+        );
+
+        require_test_binding(
+            path,
+            "one",
+            "daemon-one",
+            "provider.health",
+            "runtime-one",
+            TEST_SIGNER_HEX,
+        )?;
+        assert_eq!(store_snapshot(&store)?, after);
+        require_health_binding_release_from_snapshot(
+            &SingleFileMessagePackBackingStore::new(&store),
+            before,
+            "one",
+            "daemon-one",
+            "provider.health",
+            "runtime-one",
+            &decode_public_key(TEST_SIGNER_HEX)?,
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn require_release_binding_refuses_wrong_identity_and_invalid_store_without_writing()
+    -> Result<()> {
+        let temp = TempDir::new()?;
+        let store = temp.path().join("trust.cc");
+        let path = store.to_str().unwrap();
+        write_test_binding(
+            "create-daemon-health-trust-binding",
+            path,
+            "one",
+            "daemon-one",
+            "runtime-one",
+        )?;
+        let before = store_snapshot(&store)?;
+        for (id, daemon, contract, runtime, signer) in [
+            (
+                "one",
+                "wrong",
+                "provider.health",
+                "runtime-one",
+                TEST_SIGNER_HEX,
+            ),
+            ("one", "daemon-one", "wrong", "runtime-one", TEST_SIGNER_HEX),
+            (
+                "one",
+                "daemon-one",
+                "provider.health",
+                "wrong",
+                TEST_SIGNER_HEX,
+            ),
+            (
+                "one",
+                "daemon-one",
+                "provider.health",
+                "runtime-one",
+                WRONG_SIGNER_HEX,
+            ),
+            (
+                "missing",
+                "daemon-one",
+                "provider.health",
+                "runtime-one",
+                TEST_SIGNER_HEX,
+            ),
+        ] {
+            assert!(require_test_binding(path, id, daemon, contract, runtime, signer).is_err());
+        }
+        assert!(
+            invoke(&[
+                "require-daemon-health-release-binding",
+                "--store",
+                path,
+                "--binding-id",
+                "one",
+                "--daemon",
+                "daemon-one",
+                "--health-contract",
+                "provider.health",
+                "--signer-public-key-hex",
+                TEST_SIGNER_HEX,
+            ])
+            .is_err()
+        );
+        assert_eq!(store_snapshot(&store)?, before);
+
+        SingleFileMessagePackBackingStore::new(&store).push(&CultCacheEnvelope {
+            key: "alien".into(),
+            r#type: "alien".into(),
+            payload: vec![],
+            stored_at: "2026-07-19T20:00:00Z".into(),
+            schema_id: Some("alien.v0".into()),
+        })?;
+        let foreign = store_snapshot(&store)?;
+        assert!(
+            require_test_binding(
+                path,
+                "one",
+                "daemon-one",
+                "provider.health",
+                "runtime-one",
+                TEST_SIGNER_HEX,
+            )
+            .is_err()
+        );
+        assert_eq!(store_snapshot(&store)?, foreign);
+
+        let ambiguous = temp.path().join("ambiguous.cc");
+        let ambiguous_path = ambiguous.to_str().unwrap();
+        write_test_binding(
+            "create-daemon-health-trust-binding",
+            ambiguous_path,
+            "one",
+            "daemon-one",
+            "runtime-one",
+        )?;
+        let mut duplicate: IdunnDaemonHealthTrustBindingRecord =
+            rmp_serde::from_slice(&store_snapshot(&ambiguous)?.remove(0).payload)?;
+        duplicate.binding_id = "duplicate".into();
+        SingleFileMessagePackBackingStore::new(&ambiguous).push(&typed_envelope(
+            &duplicate.binding_id,
+            &duplicate,
+            IDUNN_DAEMON_HEALTH_TRUST_BINDING_SCHEMA,
+            duplicate.bound_at_unix_millis,
+        )?)?;
+        let ambiguous_before = store_snapshot(&ambiguous)?;
+        assert!(
+            require_test_binding(
+                ambiguous_path,
+                "one",
+                "daemon-one",
+                "provider.health",
+                "runtime-one",
+                TEST_SIGNER_HEX,
+            )
+            .is_err()
+        );
+        assert_eq!(store_snapshot(&ambiguous)?, ambiguous_before);
+        Ok(())
+    }
+
+    #[test]
+    fn require_release_binding_cas_covers_the_whole_validated_store() -> Result<()> {
+        let temp = TempDir::new()?;
+        let store_path = temp.path().join("trust.cc");
+        let path = store_path.to_str().unwrap();
+        write_test_binding(
+            "create-daemon-health-trust-binding",
+            path,
+            "one",
+            "daemon-one",
+            "runtime-one",
+        )?;
+        write_test_binding(
+            "add-daemon-health-trust-binding",
+            path,
+            "two",
+            "daemon-two",
+            "runtime-two",
+        )?;
+        let stale = store_snapshot(&store_path)?;
+        require_test_binding(
+            path,
+            "two",
+            "daemon-two",
+            "provider.health",
+            "runtime-two",
+            TEST_SIGNER_HEX,
+        )?;
+
+        let store = SingleFileMessagePackBackingStore::new(&store_path);
+        let error = require_health_binding_release_from_snapshot(
+            &store,
+            stale,
+            "one",
+            "daemon-one",
+            "provider.health",
+            "runtime-one",
+            &decode_public_key(TEST_SIGNER_HEX)?,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("changed during release-binding"));
+        let records = validated_health_bindings(&store_snapshot(&store_path)?)?;
+        assert!(
+            !records
+                .iter()
+                .find(|binding| binding.binding_id == "one")
+                .unwrap()
+                .release_binding_required
+        );
+        assert!(
+            records
+                .iter()
+                .find(|binding| binding.binding_id == "two")
+                .unwrap()
+                .release_binding_required
+        );
+        Ok(())
+    }
+
+    #[test]
     fn concurrent_health_binding_appends_have_one_cas_winner() -> Result<()> {
         let temp = TempDir::new()?;
         let store = temp.path().join("trust.cc");
@@ -935,6 +1373,106 @@ mod tests {
                 .len(),
             1 + wins
         );
+        Ok(())
+    }
+
+    #[test]
+    fn provider_health_identity_enrollment_is_profile_exact_and_immutable() -> Result<()> {
+        let temp = TempDir::new()?;
+        let private = temp.path().join("provider-health-identity.cc");
+        let options = BTreeMap::from([(
+            "private-store".to_string(),
+            private.to_string_lossy().into_owned(),
+        )]);
+
+        let public_key_hex = enroll_provider_health_identity(&options)?;
+        let signer = open_service_identity_at::<GameCultProviderHealthIdentity>(&private)?;
+        assert_eq!(
+            public_key_hex,
+            encode_public_key(&signer.entry().public_key)?
+        );
+        assert_eq!(
+            decode_public_key(&public_key_hex)?,
+            signer.entry().public_key
+        );
+
+        let entries =
+            SingleFileMessagePackBackingStore::new(&private).pull_all_read_only_snapshot()?;
+        let [entry] = entries.as_slice() else {
+            panic!("provider health identity store must contain exactly one entry");
+        };
+        assert_eq!(entry.r#type, GameCultProviderHealthIdentity::PRIVATE_TYPE);
+        assert_eq!(entry.key, GameCultProviderHealthIdentity::PRIVATE_KEY);
+        assert_eq!(
+            entry.schema_id.as_deref(),
+            Some(GameCultProviderHealthIdentity::PRIVATE_SCHEMA)
+        );
+        assert!(open_service_identity_at::<IdunnServiceIdentity>(&private).is_err());
+
+        let before = std::fs::read(&private)?;
+        assert!(
+            invoke(&[
+                "enroll-provider-health-identity",
+                "--private-store",
+                private.to_str().unwrap(),
+            ])
+            .is_err()
+        );
+        assert_eq!(std::fs::read(&private)?, before);
+
+        let unauthorized = temp.path().join("unauthorized.cc");
+        assert!(
+            invoke(&[
+                "enroll-provider-health-identity",
+                "--private-store",
+                unauthorized.to_str().unwrap(),
+                "--release-binding-required",
+                "true",
+            ])
+            .is_err()
+        );
+        assert!(!unauthorized.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn provider_health_public_key_is_read_only_and_rejects_wrong_profile_or_options() -> Result<()>
+    {
+        let temp = TempDir::new()?;
+        let provider = temp.path().join("provider-health.cc");
+        let provider_options = BTreeMap::from([(
+            "private-store".to_string(),
+            provider.to_string_lossy().into_owned(),
+        )]);
+        let expected = enroll_provider_health_identity(&provider_options)?;
+        let provider_before = std::fs::read(&provider)?;
+        assert_eq!(provider_health_public_key(&provider_options)?, expected);
+        assert_eq!(std::fs::read(&provider)?, provider_before);
+
+        let wrong_profile = temp.path().join("idunn.cc");
+        enroll_service_identity_at::<IdunnServiceIdentity>(&wrong_profile)?;
+        let wrong_before = std::fs::read(&wrong_profile)?;
+        assert!(
+            invoke(&[
+                "provider-health-public-key",
+                "--private-store",
+                wrong_profile.to_str().unwrap(),
+            ])
+            .is_err()
+        );
+        assert_eq!(std::fs::read(&wrong_profile)?, wrong_before);
+
+        assert!(
+            invoke(&[
+                "provider-health-public-key",
+                "--private-store",
+                provider.to_str().unwrap(),
+                "--release-binding-required",
+                "true",
+            ])
+            .is_err()
+        );
+        assert_eq!(std::fs::read(&provider)?, provider_before);
         Ok(())
     }
 
@@ -1292,6 +1830,33 @@ mod tests {
             "100",
         ])?;
         assert_eq!(read_brake(&store)?.status, "engaged");
+        invoke(&[
+            "deployment-brake-status",
+            "--store",
+            store.to_str().unwrap(),
+            "--operator-anchor",
+            anchor.to_str().unwrap(),
+            "--runtime-id",
+            "yggdrasil",
+        ])?;
+        assert!(
+            invoke(&[
+                "deployment-brake-status",
+                "--store",
+                store.to_str().unwrap(),
+                "--operator-anchor",
+                anchor.to_str().unwrap(),
+                "--runtime-id",
+                "yggdrasil",
+                "--release-id",
+                "commit-4",
+                "--deployment-id",
+                "request-4",
+                "--now-unix-millis",
+                "150",
+            ])
+            .is_err()
+        );
         invoke(&[
             "deployment-brake-release",
             "--store",

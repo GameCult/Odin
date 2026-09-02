@@ -44,12 +44,16 @@ escalation, and continuity witness state.
 - Consequence gate: Yggdrasil keeps `deployment-brake.cc` and its pre-created
   sibling `deployment-brake.cc.lock` in `/var/lib/gamecult/idunn-authority`.
   The directory is `root:idunn` `0750`, both files are `root:idunn` `0640`, and
-  Idunn receives only a systemd `ReadOnlyPaths` view. It holds the lock shared
-  across the final read, validation, and spawn; the root-owned operator writer
-  takes it exclusive for engage/release. A bounded release authorizes the exact
-  rollout request and source revision, covering its migration and deploy spawns
-  until expiry. It is not consumed after the first spawn, and every spawn must
-  independently revalidate it.
+  Idunn receives only a systemd `ReadOnlyPaths` view. Idunn validates under a
+  shared lock before spawning the privileged boundary. The root actuator then
+  independently reopens and validates the signed brake while remaining the sole
+  shared-lock holder through one synchronous deploy transaction; the child does
+  not inherit the lock descriptor. The root-owned operator writer takes the
+  lock exclusive for engage/release. A bounded release admits the exact target,
+  rollout request, and source revision only when the transaction starts before
+  its signed deadline. Admission transfers completion of that transaction to
+  the actuator; expiry is not a retroactive timer veto. Every later transaction
+  must independently revalidate the brake.
 - Deletion line: any keepalive loop inside Odin, Gjallar, Eve lowerers, or
   renderer code must be cut or demoted to a probe that names Idunn as the
   restart owner.
@@ -95,10 +99,13 @@ Idunn now shares Odin's Rust body:
 - `--swarm-profile yggdrasil-local` is the Linux host-local supervisor for
   Epiphany, Heimdall, Repixelizer, StreamPixels, and VoidBot. Its only command boundary is the
   root-owned `/usr/local/libexec/idunn-yggdrasil` actuator. Restart commands
-  target the local Compose stack; deployment fails closed unless a root-owned
-  executable manifest exists for that service under
-  `/srv/odin/deploy-manifests`. It does not inherit Starfire paths, SSH keys,
-  ADB authority, or Windows process ownership.
+  target the local Compose stack. For deployment, the root boundary derives the
+  repository, ref, daemon id, and release-authority posture from its fixed
+  target allowlist, then binds the caller's request identifier and source to the
+  signed root-owned brake. A manifest must be a direct root-owned executable
+  regular file under `/srv/odin/deploy-manifests`; neither it nor any ancestor
+  may be group/world-writable, and symlink manifests are refused. It does not
+  inherit Starfire paths, SSH keys, ADB authority, or Windows process ownership.
 - Release authority is explicit per target. Odin, Ghostlight, and Epiphany are
   source-observed targets: Idunn derives the newest commit on each admitted ref
   that changes build or runtime source, freezes that exact revision into its

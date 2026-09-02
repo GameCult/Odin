@@ -32,7 +32,7 @@ pub const IDUNN_DEPLOYMENT_REQUEST_SCHEMA: &str = "idunn.deployment_request.v2";
 pub const IDUNN_CURRENT_DEPLOYMENT_REQUEST_SCHEMA: &str = "idunn.current_deployment_request.v1";
 pub const IDUNN_DEPLOYMENT_RESULT_SCHEMA: &str = "idunn.deployment_result.v1";
 pub const IDUNN_LIFECYCLE_COMMAND_SCHEMA: &str = "idunn.lifecycle_command.v1";
-pub const IDUNN_RELEASE_TARGET_SCHEMA: &str = "idunn.release_target.v2";
+pub const IDUNN_RELEASE_TARGET_SCHEMA: &str = "idunn.release_target.v3";
 pub const IDUNN_DEPLOYMENT_ARTIFACT_SCHEMA: &str = "idunn.deployment_artifact.v2";
 pub const BIFROST_REPOSITORY_RELEASE_AUTHORITY_SCHEMA: &str =
     "bifrost.repository_release_authority.v1";
@@ -50,6 +50,10 @@ pub const IDUNN_RUDP_HEALTH_INGRESS_SCHEMA: &str = "idunn.rudp_health_ingress.v1
 pub const IDUNN_DAEMON_HEALTH_TRUST_BINDING_SCHEMA: &str = "idunn.daemon_health_trust_binding.v1";
 pub const IDUNN_AUTHENTICATED_DAEMON_HEALTH_ADMISSION_SCHEMA: &str =
     "idunn.authenticated_daemon_health_admission.v1";
+pub const IDUNN_RUNTIME_TRAFFIC_ADMISSION_SCHEMA: &str = "idunn.runtime_traffic_admission.v2";
+pub const IDUNN_CODEX_CONNECTOR_RUNTIME_TRAFFIC_ADMISSION_RECORD_KEY: &str =
+    "yggdrasil-codex-connector";
+pub const IDUNN_GHOSTLIGHT_RUNTIME_TRAFFIC_ADMISSION_RECORD_KEY: &str = "yggdrasil-ghostlight";
 pub const IDUNN_UNSIGNED_DAEMON_HEALTH_DIAGNOSTIC_SCHEMA: &str =
     "idunn.unsigned_daemon_health_diagnostic.v1";
 pub const MUNINN_TELEMETRY_SURFACE_SCHEMA: &str = "muninn.telemetry_surface.v1";
@@ -432,6 +436,8 @@ pub struct IdunnAuthenticatedDaemonHealthAdmissionRecord {
     pub deployment_id: Option<String>,
     #[cultcache(key = 17)]
     pub private_state_exposed: bool,
+    #[cultcache(key = 18, default)]
+    pub activation_witness_sha256: Option<String>,
 }
 
 impl IdunnAuthenticatedDaemonHealthAdmissionRecord {
@@ -462,8 +468,80 @@ impl IdunnAuthenticatedDaemonHealthAdmissionRecord {
             &self.source_commit,
         )?;
         validate_optional_identifier(&self.deployment_id, "deployment id")?;
+        if self
+            .activation_witness_sha256
+            .as_deref()
+            .is_some_and(|value| !is_sha256(value))
+        {
+            bail!("authenticated daemon health activation witness is malformed");
+        }
         if self.private_state_exposed {
             bail!("authenticated daemon health admission exposes private state");
+        }
+        Ok(())
+    }
+}
+
+/// Idunn-issued traffic authority for a release that has proved its exact
+/// deployment, activation, and authenticated provider-health lineage.
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(
+    type = "idunn.runtime_traffic_admission",
+    schema = "idunn.runtime_traffic_admission.v2"
+)]
+pub struct IdunnRuntimeTrafficAdmissionRecord {
+    #[cultcache(key = 0)]
+    pub schema_version: String,
+    #[cultcache(key = 1)]
+    pub daemon_id: String,
+    #[cultcache(key = 2)]
+    pub release_id: String,
+    #[cultcache(key = 3)]
+    pub release_witness_sha256: String,
+    #[cultcache(key = 4)]
+    pub source_commit: String,
+    #[cultcache(key = 5)]
+    pub deployment_id: String,
+    #[cultcache(key = 6)]
+    pub activation_witness_sha256: String,
+    #[cultcache(key = 7)]
+    pub signed_health_sha256: String,
+    #[cultcache(key = 8)]
+    pub publisher_incarnation_id: String,
+    #[cultcache(key = 9)]
+    pub publisher_sequence: u64,
+    #[cultcache(key = 10)]
+    pub signer_identity_id: String,
+    #[cultcache(key = 11)]
+    pub runtime_process_id: u32,
+    #[cultcache(key = 12)]
+    pub runtime_process_starttime_ticks: u64,
+}
+
+impl IdunnRuntimeTrafficAdmissionRecord {
+    pub fn validate(&self) -> Result<()> {
+        if self.schema_version != IDUNN_RUNTIME_TRAFFIC_ADMISSION_SCHEMA {
+            bail!("runtime traffic admission schema is unsupported");
+        }
+        if self.daemon_id != IDUNN_CODEX_CONNECTOR_RUNTIME_TRAFFIC_ADMISSION_RECORD_KEY
+            && self.daemon_id != IDUNN_GHOSTLIGHT_RUNTIME_TRAFFIC_ADMISSION_RECORD_KEY
+        {
+            bail!("runtime traffic admission daemon is unsupported");
+        }
+        validate_identifier(&self.daemon_id, "daemon id")?;
+        validate_identifier(&self.release_id, "release id")?;
+        validate_identifier(&self.deployment_id, "deployment id")?;
+        validate_identifier(&self.publisher_incarnation_id, "publisher incarnation id")?;
+        validate_identifier(&self.signer_identity_id, "signer identity id")?;
+        if !is_sha256(&self.release_witness_sha256)
+            || !is_lower_hex(&self.source_commit, 40)
+            || !is_sha256(&self.activation_witness_sha256)
+            || !is_sha256(&self.signed_health_sha256)
+            || self.publisher_sequence == 0
+            || self.runtime_process_id == 0
+            || self.runtime_process_starttime_ticks == 0
+        {
+            bail!("runtime traffic admission lineage is malformed");
         }
         Ok(())
     }
@@ -721,7 +799,7 @@ pub struct IdunnLifecycleCommandRecord {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
-#[cultcache(type = "idunn.release_target", schema = "idunn.release_target.v2")]
+#[cultcache(type = "idunn.release_target", schema = "idunn.release_target.v3")]
 pub struct IdunnReleaseTargetRecord {
     #[cultcache(key = 0)]
     pub target_id: String,
@@ -765,6 +843,8 @@ pub struct IdunnReleaseTargetRecord {
     pub requires_bifrost_authority: bool,
     #[cultcache(key = 20, default)]
     pub observed_upstream_revision: String,
+    #[cultcache(key = 21)]
+    pub minimum_source_revision: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
@@ -1786,6 +1866,7 @@ cultmesh_rs::cultmesh_documents!(OdinDocuments {
     IdunnSignedDaemonHealthRecord => IDUNN_SIGNED_DAEMON_HEALTH_SCHEMA,
     IdunnDaemonHealthTrustBindingRecord => IDUNN_DAEMON_HEALTH_TRUST_BINDING_SCHEMA,
     IdunnAuthenticatedDaemonHealthAdmissionRecord => IDUNN_AUTHENTICATED_DAEMON_HEALTH_ADMISSION_SCHEMA,
+    IdunnRuntimeTrafficAdmissionRecord => IDUNN_RUNTIME_TRAFFIC_ADMISSION_SCHEMA,
     IdunnUnsignedDaemonHealthDiagnosticRecord => IDUNN_UNSIGNED_DAEMON_HEALTH_DIAGNOSTIC_SCHEMA,
     GameCultServiceTrustAnchorRecord => GAMECULT_SERVICE_TRUST_ANCHOR_SCHEMA,
     IdunnAuthenticatedProviderHealthProjectionRecord => IDUNN_AUTHENTICATED_PROVIDER_HEALTH_PROJECTION_SCHEMA,
@@ -1867,6 +1948,7 @@ mod tests {
             signature_algorithm: "ed25519".into(),
             signature: vec![9; 64],
             private_state_exposed: false,
+            activation_witness_sha256: Some(format!("sha256-{}", "f".repeat(64))),
         }
     }
 
@@ -1913,6 +1995,26 @@ mod tests {
             source_commit: health.source_commit,
             deployment_id: health.deployment_id,
             private_state_exposed: false,
+            activation_witness_sha256: health.activation_witness_sha256,
+        }
+    }
+
+    fn runtime_traffic_admission_fixture() -> IdunnRuntimeTrafficAdmissionRecord {
+        let admission = authenticated_admission_fixture();
+        IdunnRuntimeTrafficAdmissionRecord {
+            schema_version: IDUNN_RUNTIME_TRAFFIC_ADMISSION_SCHEMA.into(),
+            daemon_id: IDUNN_CODEX_CONNECTOR_RUNTIME_TRAFFIC_ADMISSION_RECORD_KEY.into(),
+            release_id: admission.release_id.unwrap(),
+            release_witness_sha256: admission.release_witness_sha256.unwrap(),
+            source_commit: admission.source_commit.unwrap(),
+            deployment_id: admission.deployment_id.unwrap(),
+            activation_witness_sha256: admission.activation_witness_sha256.unwrap(),
+            signed_health_sha256: admission.signed_health_sha256,
+            publisher_incarnation_id: admission.publisher_incarnation_id,
+            publisher_sequence: admission.publisher_sequence,
+            signer_identity_id: admission.signer_identity_id,
+            runtime_process_id: 41,
+            runtime_process_starttime_ticks: 987_654,
         }
     }
 
@@ -2115,6 +2217,95 @@ mod tests {
     }
 
     #[test]
+    fn runtime_traffic_admission_is_a_closed_positional_document() -> Result<()> {
+        let admission = runtime_traffic_admission_fixture();
+        admission.validate()?;
+        assert_eq!(
+            IdunnRuntimeTrafficAdmissionRecord::TYPE,
+            "idunn.runtime_traffic_admission"
+        );
+        assert_eq!(
+            IdunnRuntimeTrafficAdmissionRecord::SCHEMA_NAME,
+            IDUNN_RUNTIME_TRAFFIC_ADMISSION_SCHEMA
+        );
+        let payload = rmp_serde::to_vec(&admission)?;
+        assert_eq!(payload.first(), Some(&0x9d));
+        assert_eq!(
+            rmp_serde::from_slice::<IdunnRuntimeTrafficAdmissionRecord>(&payload)?,
+            admission
+        );
+        let pre_process_binding = rmp_serde::to_vec(&(
+            admission.schema_version.clone(),
+            admission.daemon_id.clone(),
+            admission.release_id.clone(),
+            admission.release_witness_sha256.clone(),
+            admission.source_commit.clone(),
+            admission.deployment_id.clone(),
+            admission.activation_witness_sha256.clone(),
+            admission.signed_health_sha256.clone(),
+            admission.publisher_incarnation_id.clone(),
+            admission.publisher_sequence,
+            admission.signer_identity_id.clone(),
+        ))?;
+        assert_eq!(pre_process_binding.first(), Some(&0x9b));
+        assert!(
+            rmp_serde::from_slice::<IdunnRuntimeTrafficAdmissionRecord>(&pre_process_binding)
+                .is_err(),
+            "runtime admission v2 must not decode a pre-process-binding body"
+        );
+        let mut ghostlight = admission.clone();
+        ghostlight.daemon_id = IDUNN_GHOSTLIGHT_RUNTIME_TRAFFIC_ADMISSION_RECORD_KEY.into();
+        ghostlight.validate()?;
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_traffic_admission_refuses_weak_or_partial_lineage() {
+        let mut admission = runtime_traffic_admission_fixture();
+        admission.publisher_sequence = 0;
+        assert!(admission.validate().is_err());
+
+        admission = runtime_traffic_admission_fixture();
+        admission.source_commit = "F".repeat(40);
+        assert!(admission.validate().is_err());
+
+        admission = runtime_traffic_admission_fixture();
+        admission.activation_witness_sha256 = "missing".into();
+        assert!(admission.validate().is_err());
+
+        admission = runtime_traffic_admission_fixture();
+        admission.schema_version = "idunn.runtime_traffic_admission.v0".into();
+        assert!(admission.validate().is_err());
+
+        admission = runtime_traffic_admission_fixture();
+        admission.daemon_id = "caller-selected-daemon".into();
+        assert!(admission.validate().is_err());
+
+        admission = runtime_traffic_admission_fixture();
+        admission.runtime_process_id = 0;
+        assert!(admission.validate().is_err());
+
+        admission = runtime_traffic_admission_fixture();
+        admission.runtime_process_starttime_ticks = 0;
+        assert!(admission.validate().is_err());
+    }
+
+    #[test]
+    fn activation_binding_is_additive_for_existing_authenticated_admissions() -> Result<()> {
+        let mut admission = authenticated_admission_fixture();
+        admission.activation_witness_sha256 = None;
+        let mut legacy = rmp_serde::to_vec(&admission)?;
+        assert_eq!(&legacy[..3], &[0xdc, 0, 19]);
+        assert_eq!(legacy.pop(), Some(0xc0));
+        legacy[2] = 18;
+        let decoded: IdunnAuthenticatedDaemonHealthAdmissionRecord =
+            rmp_serde::from_slice(&legacy)?;
+        assert_eq!(decoded.activation_witness_sha256, None);
+        decoded.validate()?;
+        Ok(())
+    }
+
+    #[test]
     fn generic_signed_health_contracts_refuse_weak_or_partial_authority() {
         let mut health = signed_health_fixture();
         health.private_state_exposed = true;
@@ -2127,6 +2318,9 @@ mod tests {
         assert!(health.validate().is_err());
         health = signed_health_fixture();
         health.publisher_sequence = 0;
+        assert!(health.validate().is_err());
+        health = signed_health_fixture();
+        health.activation_witness_sha256 = Some(format!("sha256-{}", "F".repeat(64)));
         assert!(health.validate().is_err());
 
         let mut binding = trust_binding_fixture();
@@ -2144,6 +2338,9 @@ mod tests {
         assert!(admission.validate().is_err());
         admission = authenticated_admission_fixture();
         admission.admitted_at_unix_millis = admission.observed_at_unix_millis - 1;
+        assert!(admission.validate().is_err());
+        admission = authenticated_admission_fixture();
+        admission.activation_witness_sha256 = Some("caller-selected".into());
         assert!(admission.validate().is_err());
     }
 

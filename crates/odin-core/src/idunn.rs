@@ -457,6 +457,7 @@ mod tests {
             release_authority_status: "authorized".to_string(),
             requires_bifrost_authority: true,
             observed_upstream_revision: "abc123".to_string(),
+            minimum_source_revision: None,
         };
         let artifact = IdunnDeploymentArtifactRecord {
             artifact_id: "artifact:voidbot:main".to_string(),
@@ -501,6 +502,15 @@ mod tests {
             status: "planned".to_string(),
             planned_at: "2026-06-04T00:00:02Z".to_string(),
         };
+        let release_payload = rmp_serde::to_vec(&release_target)?;
+        assert_eq!(&release_payload[..3], &[0xdc, 0, 22]);
+        let mut pre_floor_payload = release_payload.clone();
+        assert_eq!(pre_floor_payload.pop(), Some(0xc0));
+        pre_floor_payload[2] = 21;
+        assert!(
+            rmp_serde::from_slice::<IdunnReleaseTargetRecord>(&pre_floor_payload).is_err(),
+            "release-target v3 must not decode a pre-floor positional body"
+        );
         node.put(&release_target.target_id, &release_target)?;
         node.put(&artifact.artifact_id, &artifact)?;
         node.put(&migration_plan.plan_id, &migration_plan)?;

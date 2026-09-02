@@ -19,7 +19,7 @@ UMask=027
 PrivateTmp=yes
 ProtectHome=yes
 ProtectSystem=full
-ReadWritePaths=/etc/gamecult/idunn /etc/gamecult/codex-connector /etc/gamecult/ghostlight /etc/systemd/system/codex-connector.service /etc/systemd/system/epiphany-swarm.service /etc/systemd/system/ghostlight-dungeon.service /var/lib/gamecult/idunn /srv/build /srv/voidbot
+ReadWritePaths=/etc/gamecult/idunn /etc/gamecult/codex-connector /etc/gamecult/ghostlight-dungeon /etc/systemd/system/codex-connector.service /etc/systemd/system/epiphany-swarm.service /etc/systemd/system/ghostlight-dungeon.service /var/lib/gamecult/idunn /srv/build /srv/voidbot
 ReadOnlyPaths=/var/lib/gamecult/idunn-authority
 
 [Install]

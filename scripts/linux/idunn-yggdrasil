@@ -1,6 +1,11 @@
 #!/bin/sh
 set -eu
 
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+LC_ALL=C
+export LC_ALL
+
 if [ "$(id -u)" -ne 0 ]; then
   echo "idunn-yggdrasil must run through its narrow sudo boundary" >&2
   exit 1
@@ -8,105 +13,368 @@ fi
 
 action="${1:-}"
 target="${2:-}"
-source_commit="${3:-}"
-repository_full_name="${4:-}"
-upstream_ref="${5:-}"
-release_authority_id="${6:-}"
-release_authority_sha256="${7:-}"
-deployment_request_id="${8:-}"
-requires_bifrost_authority="${9:-false}"
 compose=/srv/compose/yggdrasil-apps.yaml
+brake_store=/var/lib/gamecult/idunn-authority/deployment-brake.cc
+brake_lock=/var/lib/gamecult/idunn-authority/deployment-brake.cc.lock
+brake_anchor=/etc/gamecult/idunn/deployment-brake-operator-anchor.cc
+generation_lock=/var/lib/gamecult/idunn-authority/idunn-generation.lock
+idunn_provision=/usr/local/bin/idunn-provision
 
-require_release_lineage() {
-  case "$target" in
-    bifrost-persona-feedback) target_requires_bifrost_authority=true ;;
-    epiphany|epiphany-capstone-17|voidbot|heimdall|repixelizer|streampixels|odin|codex-connector|ghostlight|gjallar) target_requires_bifrost_authority=false ;;
-    *) echo "deployment target has no release-authority policy: $target" >&2; exit 1 ;;
-  esac
-  if [ "$requires_bifrost_authority" != "$target_requires_bifrost_authority" ]; then
-    echo "caller release-authority mode does not match root policy for $target" >&2
+require_root_owned_nonwritable_component() {
+  component="$1"
+  kind="$2"
+  if [ -L "$component" ]; then
+    echo "privileged actuator path component must not be a symlink: $component" >&2
     exit 1
   fi
-  requires_bifrost_authority="$target_requires_bifrost_authority"
-  case "$source_commit" in
-    *[!0-9a-f]*|'') echo "invalid or missing IDUNN_SOURCE_COMMIT" >&2; exit 1 ;;
+  case "$kind" in
+    file) [ -f "$component" ] || { echo "privileged actuator path component is not a regular file: $component" >&2; exit 1; } ;;
+    directory) [ -d "$component" ] || { echo "privileged actuator path component is not a directory: $component" >&2; exit 1; } ;;
+    *) echo "internal privileged actuator path-kind error" >&2; exit 1 ;;
   esac
-  [ "${#source_commit}" -eq 40 ] || { echo "IDUNN_SOURCE_COMMIT must be 40 hex characters" >&2; exit 1; }
-  [ -n "$repository_full_name" ] || { echo "missing repository identity" >&2; exit 1; }
-  [ -n "$upstream_ref" ] || { echo "missing upstream ref" >&2; exit 1; }
-  [ -n "$deployment_request_id" ] || { echo "missing Idunn deployment request id" >&2; exit 1; }
+  owner="$(stat -c '%u' -- "$component")"
+  mode="$(stat -c '%a' -- "$component")"
+  [ "$owner" = 0 ] || { echo "privileged actuator path component is not root-owned: $component" >&2; exit 1; }
+  case "$mode" in
+    ''|*[!0-7]*) echo "privileged actuator path component has an unreadable mode: $component" >&2; exit 1 ;;
+  esac
+  group_mode=$(( (mode / 10) % 10 ))
+  other_mode=$(( mode % 10 ))
+  if [ $((group_mode & 2)) -ne 0 ] || [ $((other_mode & 2)) -ne 0 ]; then
+    echo "privileged actuator path component is group/world-writable: $component" >&2
+    exit 1
+  fi
+}
+
+require_root_owned_regular_path() {
+  path="$1"
+  case "$path" in
+    /*) ;;
+    *) echo "privileged actuator path must be absolute: $path" >&2; exit 1 ;;
+  esac
+  ancestor="$(dirname -- "$path")"
+  while :; do
+    require_root_owned_nonwritable_component "$ancestor" directory
+    [ "$ancestor" = / ] && break
+    ancestor="$(dirname -- "$ancestor")"
+  done
+  require_root_owned_nonwritable_component "$path" file
+}
+
+require_root_owned_resolved_executable() {
+  entrypoint="$1"
+  ancestor="$(dirname -- "$entrypoint")"
+  while :; do
+    require_root_owned_nonwritable_component "$ancestor" directory
+    [ "$ancestor" = / ] && break
+    ancestor="$(dirname -- "$ancestor")"
+  done
+  [ -e "$entrypoint" ] || { echo "privileged executable entrypoint is missing: $entrypoint" >&2; exit 1; }
+  [ "$(stat -c '%u' -- "$entrypoint")" = 0 ] || { echo "privileged executable entrypoint is not root-owned: $entrypoint" >&2; exit 1; }
+  resolved="$(readlink -f -- "$entrypoint")"
+  [ -n "$resolved" ] || { echo "privileged executable entrypoint cannot be resolved: $entrypoint" >&2; exit 1; }
+  require_root_owned_regular_path "$resolved"
+  [ -x "$resolved" ] || { echo "privileged executable is not executable: $resolved" >&2; exit 1; }
+}
+
+acquire_idunn_generation_lock() {
+  # Every target consequence observes one installed Idunn generation. The
+  # self-bootstrap owns the exclusive side of this lock while replacing and
+  # accepting that generation; target manifests hold the shared side from
+  # admission through completion. This lock does not decide brake posture,
+  # target lifecycle, or release authority.
+  require_root_owned_regular_path "$generation_lock"
+  exec 8<"$generation_lock"
+  /usr/bin/flock --shared 8
+}
+
+deployment_target_policy() {
+  manifest_takes_action=false
+  minimum_source_revision_required=false
+  case "$target" in
+    odin)
+      daemon_id=yggdrasil-odin
+      repository_full_name=GameCult/Odin
+      upstream_ref=refs/heads/codex/ygg-idunn-independent-bootstrap
+      requires_bifrost_authority=false
+      manifest_takes_action=true
+      ;;
+    codex-connector)
+      daemon_id=yggdrasil-codex-connector
+      repository_full_name=GameCult/CodexConnector
+      upstream_ref=refs/heads/codex/ghostlight-release-binding
+      requires_bifrost_authority=false
+      minimum_source_revision_required=true
+      manifest_takes_action=true
+      ;;
+    ghostlight)
+      daemon_id=yggdrasil-ghostlight
+      repository_full_name=GameCult/Ghostlight
+      upstream_ref=refs/heads/codex/ghostlight-dungeon-mvp
+      requires_bifrost_authority=false
+      minimum_source_revision_required=true
+      manifest_takes_action=true
+      ;;
+    voidbot)
+      daemon_id=yggdrasil-voidbot
+      repository_full_name=GameCult/VoidBot
+      upstream_ref=refs/heads/main
+      requires_bifrost_authority=false
+      manifest_takes_action=true
+      ;;
+    heimdall)
+      daemon_id=yggdrasil-heimdall
+      repository_full_name=GameCult/Heimdall
+      upstream_ref=refs/heads/main
+      requires_bifrost_authority=false
+      ;;
+    epiphany-capstone-17)
+      daemon_id=yggdrasil-epiphany-capstone-17
+      repository_full_name=GameCult/Epiphany
+      upstream_ref=refs/heads/codex/epiphany-shakedown-live
+      requires_bifrost_authority=false
+      manifest_takes_action=true
+      ;;
+    epiphany)
+      daemon_id=yggdrasil-epiphany
+      repository_full_name=GameCult/Epiphany
+      upstream_ref=refs/heads/codex/epiphany-shakedown-live
+      requires_bifrost_authority=false
+      manifest_takes_action=true
+      ;;
+    bifrost-persona-feedback)
+      daemon_id=yggdrasil-bifrost-persona-feedback
+      repository_full_name=GameCult/Bifrost
+      upstream_ref=refs/heads/main
+      requires_bifrost_authority=true
+      ;;
+    repixelizer)
+      daemon_id=yggdrasil-repixelizer
+      repository_full_name=GameCult/repixelizer
+      upstream_ref=refs/heads/main
+      requires_bifrost_authority=false
+      ;;
+    streampixels)
+      daemon_id=yggdrasil-streampixels
+      repository_full_name=GameCult/StreamPixels
+      upstream_ref=refs/heads/main
+      requires_bifrost_authority=false
+      ;;
+    gjallar)
+      daemon_id=yggdrasil-gjallar
+      repository_full_name=GameCult/Gjallar
+      upstream_ref=refs/heads/codex/yggdrasil-aggregate-daemon
+      requires_bifrost_authority=false
+      ;;
+    *) echo "deployment target has no root actuator policy: $target" >&2; exit 1 ;;
+  esac
+}
+
+require_signed_deployment_grant() {
+  source_commit="$3"
+  deployment_request_id="$4"
+  release_authority_id="$5"
+  release_authority_sha256="$6"
+
+  deployment_target_policy
+  case "$source_commit" in
+    *[!0-9a-f]*|'') echo "invalid or missing source commit" >&2; exit 1 ;;
+  esac
+  [ "${#source_commit}" -eq 40 ] || { echo "source commit must be 40 lowercase hex characters" >&2; exit 1; }
+  case "$deployment_request_id" in
+    *[!A-Za-z0-9._:/+-]*|'') echo "invalid or missing Idunn deployment request id" >&2; exit 1 ;;
+  esac
+  [ "${#deployment_request_id}" -le 256 ] || { echo "Idunn deployment request id is oversized" >&2; exit 1; }
+  case "$deployment_request_id" in
+    "deploy:$daemon_id:"?*|"manual:redeploy:$daemon_id:"?*) ;;
+    *) echo "signed deployment request is not for root target $target" >&2; exit 1 ;;
+  esac
+
   case "$requires_bifrost_authority" in
     true)
       [ -n "$release_authority_id" ] || { echo "missing Bifrost release authority id" >&2; exit 1; }
       case "$release_authority_sha256" in
         *[!0-9a-f]*|'') echo "invalid or missing Bifrost release authority digest" >&2; exit 1 ;;
       esac
-      [ "${#release_authority_sha256}" -eq 64 ] || { echo "Bifrost release authority digest must be 64 hex characters" >&2; exit 1; }
-      /usr/local/bin/idunn validate-release-authority \
-        --store /var/lib/gamecult/idunn/yggdrasil.keepalive.cc \
-        --release-authority-store /srv/bifrost/state/repository-release-authority.cc \
-        --repository-full-name "$repository_full_name" \
-        --upstream-ref "$upstream_ref" \
-        --source-revision "$source_commit" \
-        --release-authority-id "$release_authority_id" \
-        --release-authority-sha256 "$release_authority_sha256"
+      [ "${#release_authority_sha256}" -eq 64 ] || { echo "Bifrost release authority digest must be 64 lowercase hex characters" >&2; exit 1; }
       ;;
     false)
       [ -z "$release_authority_id" ] || { echo "source-observed release cannot claim Bifrost authority id" >&2; exit 1; }
       [ -z "$release_authority_sha256" ] || { echo "source-observed release cannot claim Bifrost authority digest" >&2; exit 1; }
       ;;
-    *) echo "invalid Bifrost authority requirement mode" >&2; exit 1 ;;
   esac
+
+  require_root_owned_resolved_executable "$idunn_provision"
+  require_root_owned_regular_path "$brake_store"
+  require_root_owned_regular_path "$brake_lock"
+  require_root_owned_regular_path "$brake_anchor"
+
+  # This validation is the deployment-admission point. The signed expiry is a
+  # start-before deadline: it denies a later transaction, but does not become a
+  # timer-shaped veto over one already admitted. The root actuator remains the
+  # sole shared-lock holder through the synchronous consequence, so an explicit
+  # engage/release transition cannot race or rewrite that transaction.
+  exec 9<"$brake_lock"
+  /usr/bin/flock --shared 9
+  now_unix_millis="$(/usr/bin/date +%s%3N)"
+  case "$now_unix_millis" in
+    ''|*[!0-9]*) echo "root actuator clock did not produce Unix milliseconds" >&2; exit 1 ;;
+  esac
+  "$idunn_provision" deployment-brake-status \
+    --store "$brake_store" \
+    --operator-anchor "$brake_anchor" \
+    --runtime-id yggdrasil \
+    --release-id "$source_commit" \
+    --deployment-id "$deployment_request_id" \
+    --now-unix-millis "$now_unix_millis"
+
+  if [ "$minimum_source_revision_required" = true ]; then
+    require_root_owned_resolved_executable /usr/local/bin/idunn
+    /usr/local/bin/idunn validate-minimum-source-revision \
+      --daemon "$daemon_id" \
+      --source-revision "$source_commit"
+  fi
+
+  if [ "$requires_bifrost_authority" = true ]; then
+    require_root_owned_resolved_executable /usr/local/bin/idunn
+    /usr/local/bin/idunn validate-release-authority \
+      --store /var/lib/gamecult/idunn/yggdrasil.keepalive.cc \
+      --release-authority-store /srv/bifrost/state/repository-release-authority.cc \
+      --repository-full-name "$repository_full_name" \
+      --upstream-ref "$upstream_ref" \
+      --source-revision "$source_commit" \
+      --release-authority-id "$release_authority_id" \
+      --release-authority-sha256 "$release_authority_sha256"
+  fi
 }
+
+manifest_group_exists() {
+  kill -s 0 "-$manifest_pid" 2>/dev/null
+}
+
+signal_manifest_group() {
+  kill -s "$1" "-$manifest_pid" 2>/dev/null || true
+}
+
+forward_manifest_signal() {
+  manifest_wait_interrupted=true
+  signal_manifest_group "$1"
+}
+
+run_manifest_while_holding_authority_locks() {
+  # Stay alive as the sole lock owner. The child must not inherit descriptors
+  # 8 or 9: flock locks attach to shared open-file descriptions, so an
+  # inherited descriptor could retain or unlock the parent's generation or
+  # deployment transaction. The owned process group also prevents ordinary
+  # descendants from outliving interruption.
+  require_root_owned_resolved_executable /usr/bin/setsid
+  /usr/bin/setsid "$@" 8<&- 9<&- &
+  manifest_pid=$!
+  manifest_wait_interrupted=false
+  trap 'forward_manifest_signal HUP' HUP
+  trap 'forward_manifest_signal INT' INT
+  trap 'forward_manifest_signal TERM' TERM
+  while :; do
+    manifest_wait_interrupted=false
+    if wait "$manifest_pid"; then
+      manifest_status=0
+    else
+      manifest_status=$?
+    fi
+    if [ "$manifest_wait_interrupted" = true ] && manifest_group_exists; then
+      continue
+    fi
+    break
+  done
+  trap - HUP INT TERM
+
+  manifest_descendants_leaked=false
+  if manifest_group_exists; then
+    manifest_descendants_leaked=true
+    signal_manifest_group TERM
+    for _ in 1 2 3 4 5; do
+      manifest_group_exists || break
+      sleep 1
+    done
+  fi
+  if manifest_group_exists; then
+    signal_manifest_group KILL
+    for _ in 1 2 3 4 5; do
+      manifest_group_exists || break
+      sleep 1
+    done
+  fi
+  if manifest_group_exists; then
+    echo "deployment manifest process group survived SIGKILL" >&2
+    return 1
+  fi
+  if [ "$manifest_descendants_leaked" = true ] && [ "$manifest_status" -eq 0 ]; then
+    echo "deployment manifest left a descendant process behind" >&2
+    return 1
+  fi
+  return "$manifest_status"
+}
+
+case "$action" in
+  deploy)
+    [ "$#" -eq 6 ] || { echo "deploy requires exact target, source, request, and release-authority arguments" >&2; exit 2; }
+    ;;
+  restart)
+    [ "$#" -eq 2 ] || { echo "restart accepts only one exact target" >&2; exit 2; }
+    ;;
+  *)
+    echo "unsupported Idunn Yggdrasil actuator action: $action" >&2
+    exit 2
+    ;;
+esac
+
+acquire_idunn_generation_lock
 
 case "$action:$target" in
   restart:heimdall)
+    require_root_owned_regular_path "$compose"
     exec docker compose -f "$compose" restart heimdall
     ;;
   restart:repixelizer)
+    require_root_owned_regular_path "$compose"
     exec docker compose -f "$compose" restart repixelizer
     ;;
   restart:streampixels)
+    require_root_owned_regular_path "$compose"
     docker compose -f "$compose" restart streampixels-service streampixels-web
     ;;
   restart:gjallar)
     exec systemctl restart gjallar-yggdrasil.service
     ;;
-  deploy:voidbot|restart:voidbot|deploy:epiphany|restart:epiphany|deploy:epiphany-capstone-17|deploy:odin|restart:odin|deploy:codex-connector|restart:codex-connector|deploy:ghostlight|restart:ghostlight)
+  restart:voidbot|restart:epiphany|restart:odin|restart:codex-connector|restart:ghostlight)
     manifest="/srv/odin/deploy-manifests/$target"
-    if [ ! -x "$manifest" ] || [ ! -O "$manifest" ]; then
-      echo "root-owned executable deploy manifest is not installed: $manifest" >&2
-      exit 1
-    fi
-    if [ "$action" = deploy ]; then
-      require_release_lineage
-    fi
-    IDUNN_ACTUATOR=1 IDUNN_COMMAND_AUTHORITY=idunn-daemon \
-      IDUNN_SOURCE_COMMIT="$source_commit" \
-      IDUNN_REPOSITORY_FULL_NAME="$repository_full_name" \
-      IDUNN_UPSTREAM_REF="$upstream_ref" \
-      BIFROST_RELEASE_AUTHORITY_ID="$release_authority_id" \
-      BIFROST_RELEASE_AUTHORITY_SHA256="$release_authority_sha256" \
-      IDUNN_DEPLOYMENT_REQUEST_ID="$deployment_request_id" \
-      IDUNN_REQUIRES_BIFROST_AUTHORITY="$requires_bifrost_authority" \
-      exec "$manifest" "$action"
+    require_root_owned_regular_path "$manifest"
+    [ -x "$manifest" ] || { echo "root actuator manifest is not executable: $manifest" >&2; exit 1; }
+    export IDUNN_ACTUATOR=1
+    export IDUNN_COMMAND_AUTHORITY=idunn-daemon
+    run_manifest_while_holding_authority_locks "$manifest" restart
+    exit $?
     ;;
-  deploy:heimdall|deploy:repixelizer|deploy:streampixels|deploy:bifrost-persona-feedback|deploy:gjallar)
+  deploy:voidbot|deploy:epiphany|deploy:epiphany-capstone-17|deploy:odin|deploy:codex-connector|deploy:ghostlight|deploy:heimdall|deploy:repixelizer|deploy:streampixels|deploy:bifrost-persona-feedback|deploy:gjallar)
     manifest="/srv/odin/deploy-manifests/$target"
-    if [ ! -x "$manifest" ] || [ ! -O "$manifest" ]; then
-      echo "root-owned executable deploy manifest is not installed: $manifest" >&2
-      exit 1
+    require_root_owned_regular_path "$manifest"
+    [ -x "$manifest" ] || { echo "root actuator manifest is not executable: $manifest" >&2; exit 1; }
+    require_signed_deployment_grant "$@"
+    export IDUNN_ACTUATOR=1
+    export IDUNN_COMMAND_AUTHORITY=idunn-daemon
+    export IDUNN_SOURCE_COMMIT="$source_commit"
+    export IDUNN_REPOSITORY_FULL_NAME="$repository_full_name"
+    export IDUNN_UPSTREAM_REF="$upstream_ref"
+    export BIFROST_RELEASE_AUTHORITY_ID="$release_authority_id"
+    export BIFROST_RELEASE_AUTHORITY_SHA256="$release_authority_sha256"
+    export IDUNN_DEPLOYMENT_REQUEST_ID="$deployment_request_id"
+    export IDUNN_REQUIRES_BIFROST_AUTHORITY="$requires_bifrost_authority"
+    if [ "$manifest_takes_action" = true ]; then
+      run_manifest_while_holding_authority_locks "$manifest" "$action"
+      exit $?
     fi
-    require_release_lineage
-    IDUNN_ACTUATOR=1 IDUNN_COMMAND_AUTHORITY=idunn-daemon \
-      IDUNN_SOURCE_COMMIT="$source_commit" \
-      IDUNN_REPOSITORY_FULL_NAME="$repository_full_name" \
-      IDUNN_UPSTREAM_REF="$upstream_ref" \
-      BIFROST_RELEASE_AUTHORITY_ID="$release_authority_id" \
-      BIFROST_RELEASE_AUTHORITY_SHA256="$release_authority_sha256" \
-      IDUNN_DEPLOYMENT_REQUEST_ID="$deployment_request_id" \
-      IDUNN_REQUIRES_BIFROST_AUTHORITY="$requires_bifrost_authority" \
-      exec "$manifest"
+    run_manifest_while_holding_authority_locks "$manifest"
+    exit $?
     ;;
   *)
     echo "unsupported Idunn Yggdrasil actuator request: $action $target" >&2

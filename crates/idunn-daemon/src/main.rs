@@ -22,6 +22,8 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use odin_core::{
     BifrostRepositoryReleaseAuthorityRecord, IDUNN_AUTHENTICATED_DAEMON_HEALTH_ADMISSION_SCHEMA,
     IDUNN_AUTHENTICATED_PROVIDER_HEALTH_PROJECTION_SCHEMA,
+    IDUNN_CODEX_CONNECTOR_RUNTIME_TRAFFIC_ADMISSION_RECORD_KEY,
+    IDUNN_GHOSTLIGHT_RUNTIME_TRAFFIC_ADMISSION_RECORD_KEY, IDUNN_RUNTIME_TRAFFIC_ADMISSION_SCHEMA,
     IDUNN_UNSIGNED_DAEMON_HEALTH_DIAGNOSTIC_SCHEMA, IdunnAuthenticatedDaemonHealthAdmissionRecord,
     IdunnAuthenticatedProviderHealthProjectionRecord, IdunnCommandBoundaryRecord,
     IdunnCurrentDeploymentRequestRecord, IdunnDaemonHealthRecord,
@@ -30,7 +32,8 @@ use odin_core::{
     IdunnDeploymentResultRecord, IdunnDesiredDaemonRecord, IdunnLifecycleCommandRecord,
     IdunnOperatorAlarmRecord, IdunnPlan, IdunnReleaseTargetRecord, IdunnRestartRequestRecord,
     IdunnRestartResultRecord, IdunnRolloutPlanRecord, IdunnRolloutResultRecord,
-    IdunnRudpHealthIngressRecord, IdunnRuntimeTransportCheckRecord, IdunnSignedDaemonHealthRecord,
+    IdunnRudpHealthIngressRecord, IdunnRuntimeTrafficAdmissionRecord,
+    IdunnRuntimeTransportCheckRecord, IdunnSignedDaemonHealthRecord,
     IdunnSignedHealthAdmissionRecord, IdunnStateMigrationPlanRecord,
     IdunnStateMigrationResultRecord, IdunnSwarmSurgeryPlanRecord,
     IdunnUnsignedDaemonHealthDiagnosticRecord, OdinDocuments,
@@ -54,6 +57,15 @@ const IDUNN_HEALTH_RUDP_CONNECTION_ID: u32 = 0x1d0d_0001;
 const IDUNN_PUBLIC_HEALTH_QUERY_CONNECTION_ID: u32 = 0x1d0d_0002;
 const IDUNN_PUBLIC_HEALTH_QUERY_RUNTIME_ID: &str = "idunn-daemon";
 const IDUNN_PUBLIC_HEALTH_QUERY_ROLE: &str = "authenticated-provider-health-projector";
+const CODEX_CONNECTOR_RUNTIME_TRAFFIC_ADMISSION_PATH: &str =
+    "/etc/gamecult/codex-connector/runtime/traffic-admission.cc";
+const CODEX_CONNECTOR_RUNTIME_TRAFFIC_ADMISSION_GROUP: &str = "codex-connector";
+const GHOSTLIGHT_RUNTIME_TRAFFIC_ADMISSION_PATH: &str =
+    "/etc/gamecult/ghostlight-dungeon/runtime/traffic-admission.cc";
+const GHOSTLIGHT_RUNTIME_TRAFFIC_ADMISSION_GROUP: &str = "ghostlight";
+const RUNTIME_TRAFFIC_ADMISSION_PENDING_DETAIL: &str = "traffic-admission-pending";
+const GHOSTLIGHT_MINIMUM_SOURCE_REVISION: &str = "6bb686981050e048c070376e7f7ac86d177e8f18";
+const CODEX_CONNECTOR_MINIMUM_SOURCE_REVISION: &str = "68fe94b9475823de92ed766a97ea962d48723708";
 const EPIPHANY_SIGNED_RUNTIME_HEALTH_TYPE: &str = "epiphany.idunn_signed_runtime_health";
 const EPIPHANY_SIGNED_RUNTIME_HEALTH_SCHEMA_VERSION: &str =
     "epiphany.idunn_signed_runtime_health.v0";
@@ -111,7 +123,7 @@ enum DecodedHealthIngress {
     },
     AuthenticatedGeneric {
         health: IdunnDaemonHealthRecord,
-        statement: IdunnSignedDaemonHealthRecord,
+        statement_payload: Vec<u8>,
         admission: IdunnAuthenticatedDaemonHealthAdmissionRecord,
     },
     Diagnostic(IdunnUnsignedDaemonHealthDiagnosticRecord),
@@ -182,7 +194,40 @@ struct ReleaseTarget {
     artifact_witness_root: Option<PathBuf>,
     requires_bifrost_authority: bool,
     source_change_pathspecs: Vec<String>,
+    minimum_source_revision: Option<String>,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CompiledMinimumSourceRevisionPolicy {
+    daemon_id: &'static str,
+    repository_full_name: &'static str,
+    canonical_repository_url: &'static str,
+    upstream_ref: &'static str,
+    canonical_fetched_ref: &'static str,
+    repository_path: &'static str,
+    minimum_source_revision: &'static str,
+}
+
+const COMPILED_MINIMUM_SOURCE_REVISION_POLICIES: &[CompiledMinimumSourceRevisionPolicy] = &[
+    CompiledMinimumSourceRevisionPolicy {
+        daemon_id: "yggdrasil-codex-connector",
+        repository_full_name: "GameCult/CodexConnector",
+        canonical_repository_url: "https://github.com/GameCult/CodexConnector.git",
+        upstream_ref: "refs/heads/codex/ghostlight-release-binding",
+        canonical_fetched_ref: "refs/remotes/origin/codex/ghostlight-release-binding",
+        repository_path: "/srv/build/CodexConnector",
+        minimum_source_revision: CODEX_CONNECTOR_MINIMUM_SOURCE_REVISION,
+    },
+    CompiledMinimumSourceRevisionPolicy {
+        daemon_id: "yggdrasil-ghostlight",
+        repository_full_name: "GameCult/Ghostlight",
+        canonical_repository_url: "https://github.com/GameCult/Ghostlight.git",
+        upstream_ref: "refs/heads/codex/ghostlight-dungeon-mvp",
+        canonical_fetched_ref: "refs/remotes/origin/codex/ghostlight-dungeon-mvp",
+        repository_path: "/srv/build/Ghostlight",
+        minimum_source_revision: GHOSTLIGHT_MINIMUM_SOURCE_REVISION,
+    },
+];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ReleaseAuthorization {
@@ -572,7 +617,9 @@ enum Mode {
     Swarm(SwarmOptions),
     LifecycleCommand(LifecycleCommandOptions),
     ReleaseAuthorityValidation(ReleaseAuthorityValidationOptions),
+    MinimumSourceRevisionValidation(MinimumSourceRevisionValidationOptions),
     HealthAdmissionValidation(HealthAdmissionValidationOptions),
+    RuntimeAdmissionValidation(RuntimeAdmissionValidationOptions),
 }
 
 #[derive(Clone, Debug)]
@@ -582,6 +629,52 @@ struct HealthAdmissionValidationOptions {
     release_id: String,
     release_witness_sha256: String,
     source_commit: String,
+    activation_witness_sha256: Option<String>,
+    write_admission_witness: Option<PathBuf>,
+    runtime_process: Option<RuntimeProcessObservation>,
+}
+
+#[derive(Clone, Debug)]
+struct RuntimeAdmissionValidationOptions {
+    input: PathBuf,
+    daemon_id: String,
+    deployment_request_id: String,
+    release_id: String,
+    release_witness_sha256: String,
+    source_commit: String,
+    activation_witness_sha256: String,
+    runtime_process: RuntimeProcessObservation,
+}
+
+#[derive(Clone, Debug)]
+enum ValidatedHealthAdmission {
+    GenericActive(IdunnAuthenticatedDaemonHealthAdmissionRecord),
+    RuntimeTraffic(RuntimeTrafficIssuanceCandidate),
+    LegacyActive(IdunnSignedHealthAdmissionRecord),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RuntimeProcessObservation {
+    process_id: u32,
+    starttime_ticks: u64,
+}
+
+impl RuntimeProcessObservation {
+    fn validate(self) -> Result<Self> {
+        if self.process_id == 0 || self.starttime_ticks == 0 {
+            return Err(anyhow!(
+                "runtime process id and starttime ticks must both be nonzero"
+            ));
+        }
+        Ok(self)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct RuntimeTrafficIssuanceCandidate {
+    grant: IdunnRuntimeTrafficAdmissionRecord,
+    desired: IdunnDesiredDaemonRecord,
+    source: AuthenticatedProviderHealthSource,
 }
 
 #[derive(Clone, Debug)]
@@ -620,10 +713,20 @@ struct ReleaseAuthorityValidationOptions {
     envelope_sha256: String,
 }
 
+#[derive(Clone, Debug)]
+struct MinimumSourceRevisionValidationOptions {
+    daemon_id: String,
+    source_revision: String,
+}
+
 fn main() -> Result<()> {
     let options = Options::parse(env::args().skip(1))?;
 
-    if let Some(parent) = options.common.store_path.parent() {
+    if !matches!(
+        &options.mode,
+        Mode::RuntimeAdmissionValidation(_) | Mode::MinimumSourceRevisionValidation(_)
+    ) && let Some(parent) = options.common.store_path.parent()
+    {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
     }
@@ -657,8 +760,30 @@ fn main() -> Result<()> {
         Mode::ReleaseAuthorityValidation(validation) => {
             validate_release_authority_at_privileged_boundary(validation)
         }
+        Mode::MinimumSourceRevisionValidation(validation) => {
+            validate_minimum_source_revision_at_privileged_boundary(validation)
+        }
         Mode::HealthAdmissionValidation(validation) => {
             validate_health_admission(validation, &options.common)
+        }
+        Mode::RuntimeAdmissionValidation(validation) => {
+            let admission = validate_runtime_admission(validation)?;
+            println!(
+                "validated Idunn runtime traffic admission daemon={} releaseId={} witnessSha256={} sourceCommit={} deploymentId={} activationWitnessSha256={} signedHealthSha256={} publisherIncarnation={} publisherSequence={} signerIdentity={} runtimeProcessId={} runtimeProcessStarttimeTicks={}",
+                admission.daemon_id,
+                admission.release_id,
+                admission.release_witness_sha256,
+                admission.source_commit,
+                admission.deployment_id,
+                admission.activation_witness_sha256,
+                admission.signed_health_sha256,
+                admission.publisher_incarnation_id,
+                admission.publisher_sequence,
+                admission.signer_identity_id,
+                admission.runtime_process_id,
+                admission.runtime_process_starttime_ticks,
+            );
+            Ok(())
         }
     }
 }
@@ -667,14 +792,95 @@ fn validate_health_admission(
     expected: &HealthAdmissionValidationOptions,
     options: &CommonOptions,
 ) -> Result<()> {
-    validate_health_admission_at(expected, options, &timestamp()?)
+    let now = timestamp()?;
+    if expected.write_admission_witness.is_some() {
+        let grant = issue_runtime_traffic_admission(expected, options, &now)?;
+        let output = expected.write_admission_witness.as_deref().ok_or_else(|| {
+            anyhow!("validated runtime traffic candidate lost its fixed output path")
+        })?;
+        println!(
+            "published Idunn runtime traffic admission daemon={} path={} signedHealthSha256={} publisherIncarnation={} publisherSequence={} runtimeProcessId={} runtimeProcessStarttimeTicks={}",
+            grant.daemon_id,
+            output.display(),
+            grant.signed_health_sha256,
+            grant.publisher_incarnation_id,
+            grant.publisher_sequence,
+            grant.runtime_process_id,
+            grant.runtime_process_starttime_ticks,
+        );
+        return Ok(());
+    }
+
+    let admission = validate_health_admission_at(expected, options, &now)?;
+    match admission {
+        ValidatedHealthAdmission::GenericActive(admission) => {
+            println!(
+                "validated authenticated Idunn health admission daemon={} state={} releaseId={} witnessSha256={} sourceCommit={} activationWitnessSha256={} signedHealthSha256={} publisherIncarnation={} publisherSequence={}",
+                admission.daemon_id,
+                admission.state,
+                admission.release_id.as_deref().unwrap_or_default(),
+                admission
+                    .release_witness_sha256
+                    .as_deref()
+                    .unwrap_or_default(),
+                admission.source_commit.as_deref().unwrap_or_default(),
+                admission
+                    .activation_witness_sha256
+                    .as_deref()
+                    .unwrap_or_default(),
+                admission.signed_health_sha256,
+                admission.publisher_incarnation_id,
+                admission.publisher_sequence,
+            );
+        }
+        ValidatedHealthAdmission::RuntimeTraffic(_) => {
+            return Err(anyhow!(
+                "runtime traffic admission must use the atomic issuance path"
+            ));
+        }
+        ValidatedHealthAdmission::LegacyActive(admission) => {
+            println!(
+                "validated signed Idunn health admission daemon={} state={} releaseId={} witnessSha256={} sourceCommit={} signedHealthSha256={} publisherIncarnation={} publisherSequence={}",
+                admission.daemon_id,
+                admission.state,
+                admission.release_id,
+                admission.release_witness_sha256,
+                admission.source_commit,
+                admission.signed_health_sha256,
+                admission.publisher_incarnation_id,
+                admission.publisher_sequence,
+            );
+        }
+    }
+    Ok(())
 }
 
 fn validate_health_admission_at(
     expected: &HealthAdmissionValidationOptions,
     options: &CommonOptions,
     now: &str,
-) -> Result<()> {
+) -> Result<ValidatedHealthAdmission> {
+    if let Some(digest) = expected.activation_witness_sha256.as_deref() {
+        validate_sha256(digest, "activation witness")?;
+    }
+    let issuing_runtime_admission = expected.write_admission_witness.is_some();
+    if let Some(output) = expected.write_admission_witness.as_deref() {
+        require_supported_runtime_admission_pair(&expected.daemon_id, output)?;
+        if expected.activation_witness_sha256.is_none() {
+            return Err(anyhow!(
+                "runtime traffic admission requires --activation-witness-sha256"
+            ));
+        }
+        expected.runtime_process.ok_or_else(|| {
+            anyhow!(
+                "runtime traffic admission requires --runtime-process-id and --runtime-process-starttime-ticks"
+            )
+        })?;
+    } else if expected.runtime_process.is_some() {
+        return Err(anyhow!(
+            "runtime process identity belongs only to runtime traffic admission issuance"
+        ));
+    }
     let lock = Arc::new(Mutex::new(()));
     let has_generic_admission = with_store_node(options, &lock, |node| {
         Ok(node
@@ -704,42 +910,57 @@ fn validate_health_admission_at(
                 expected.daemon_id
             )
         })?;
-        let admission = source.admission;
-        if admission.state != "active"
-            || admission.deployment_id.as_deref() != Some(expected.deployment_request_id.as_str())
+        let signed_health_detail = source.statement.detail.clone();
+        let admission = source.admission.clone();
+        let required_state = validate_health_admission_posture(
+            &admission.state,
+            &signed_health_detail,
+            issuing_runtime_admission,
+        )?;
+        if admission.deployment_id.as_deref() != Some(expected.deployment_request_id.as_str())
             || admission.release_id.as_deref() != Some(expected.release_id.as_str())
             || admission.release_witness_sha256.as_deref()
                 != Some(expected.release_witness_sha256.as_str())
             || admission.source_commit.as_deref() != Some(expected.source_commit.as_str())
+            || expected
+                .activation_witness_sha256
+                .as_deref()
+                .is_some_and(|digest| {
+                    admission.activation_witness_sha256.as_deref() != Some(digest)
+                })
             || admission.publisher_incarnation_id.is_empty()
             || admission.publisher_sequence == 0
             || admission.signed_health_sha256.is_empty()
             || admission.signer_identity_id.is_empty()
         {
             return Err(anyhow!(
-                "Idunn admitted health does not prove the exact active candidate"
+                "Idunn admitted health does not prove the exact {} candidate",
+                required_state
             ));
         }
-        println!(
-            "validated authenticated Idunn health admission daemon={} state={} releaseId={} witnessSha256={} sourceCommit={} signedHealthSha256={} publisherIncarnation={} publisherSequence={}",
-            admission.daemon_id,
-            admission.state,
-            admission.release_id.as_deref().unwrap_or_default(),
-            admission
-                .release_witness_sha256
-                .as_deref()
-                .unwrap_or_default(),
-            admission.source_commit.as_deref().unwrap_or_default(),
-            admission.signed_health_sha256,
-            admission.publisher_incarnation_id,
-            admission.publisher_sequence,
-        );
-        return Ok(());
+        if issuing_runtime_admission {
+            let process = expected.runtime_process.ok_or_else(|| {
+                anyhow!("runtime traffic candidate lost its root-observed process identity")
+            })?;
+            return Ok(ValidatedHealthAdmission::RuntimeTraffic(
+                RuntimeTrafficIssuanceCandidate {
+                    grant: runtime_traffic_admission_from(&admission, process)?,
+                    desired,
+                    source,
+                },
+            ));
+        }
+        return Ok(ValidatedHealthAdmission::GenericActive(admission));
     }
 
     // The old Epiphany-specific health contract remains a sealed read path for
     // already-admitted releases. New publishers use the generic authenticated
     // daemon-health contract above.
+    if issuing_runtime_admission {
+        return Err(anyhow!(
+            "runtime traffic admission requires generic authenticated daemon health; legacy Epiphany admission is ineligible"
+        ));
+    }
     let admission = with_store_node(options, &lock, |node| {
         let admission = node
             .get::<IdunnSignedHealthAdmissionRecord>(&expected.daemon_id)?
@@ -771,6 +992,7 @@ fn validate_health_admission_at(
         || admission.release_id != expected.release_id
         || admission.release_witness_sha256 != expected.release_witness_sha256
         || admission.source_commit != expected.source_commit
+        || expected.activation_witness_sha256.is_some()
         || admission.publisher_incarnation_id.is_empty()
         || admission.publisher_sequence == 0
         || admission.signed_health_sha256.is_empty()
@@ -780,18 +1002,712 @@ fn validate_health_admission_at(
             "Idunn admitted health does not prove the exact active candidate"
         ));
     }
-    println!(
-        "validated signed Idunn health admission daemon={} state={} releaseId={} witnessSha256={} sourceCommit={} signedHealthSha256={} publisherIncarnation={} publisherSequence={}",
-        admission.daemon_id,
-        admission.state,
-        admission.release_id,
-        admission.release_witness_sha256,
-        admission.source_commit,
-        admission.signed_health_sha256,
-        admission.publisher_incarnation_id,
-        admission.publisher_sequence,
-    );
+    Ok(ValidatedHealthAdmission::LegacyActive(admission))
+}
+
+fn validate_health_admission_posture(
+    state: &str,
+    detail: &str,
+    issuing_runtime_admission: bool,
+) -> Result<&'static str> {
+    let required_state = if issuing_runtime_admission {
+        "warming"
+    } else {
+        "active"
+    };
+    if state != required_state
+        || (issuing_runtime_admission && detail != RUNTIME_TRAFFIC_ADMISSION_PENDING_DETAIL)
+    {
+        return Err(anyhow!(
+            "Idunn admitted health does not prove the exact {} candidate",
+            required_state
+        ));
+    }
+    Ok(required_state)
+}
+
+fn runtime_traffic_admission_from(
+    admission: &IdunnAuthenticatedDaemonHealthAdmissionRecord,
+    process: RuntimeProcessObservation,
+) -> Result<IdunnRuntimeTrafficAdmissionRecord> {
+    if admission.state != "warming" {
+        return Err(anyhow!(
+            "runtime traffic authority requires a supported target's warming authenticated admission"
+        ));
+    }
+    let process = process.validate()?;
+    let grant = IdunnRuntimeTrafficAdmissionRecord {
+        schema_version: IDUNN_RUNTIME_TRAFFIC_ADMISSION_SCHEMA.into(),
+        daemon_id: admission.daemon_id.clone(),
+        release_id: admission
+            .release_id
+            .clone()
+            .ok_or_else(|| anyhow!("runtime traffic authority lost its release id"))?,
+        release_witness_sha256: admission
+            .release_witness_sha256
+            .clone()
+            .ok_or_else(|| anyhow!("runtime traffic authority lost its release witness"))?,
+        source_commit: admission
+            .source_commit
+            .clone()
+            .ok_or_else(|| anyhow!("runtime traffic authority lost its source commit"))?,
+        deployment_id: admission
+            .deployment_id
+            .clone()
+            .ok_or_else(|| anyhow!("runtime traffic authority lost its deployment id"))?,
+        activation_witness_sha256: admission
+            .activation_witness_sha256
+            .clone()
+            .ok_or_else(|| anyhow!("runtime traffic authority lost its activation witness"))?,
+        signed_health_sha256: admission.signed_health_sha256.clone(),
+        publisher_incarnation_id: admission.publisher_incarnation_id.clone(),
+        publisher_sequence: admission.publisher_sequence,
+        signer_identity_id: admission.signer_identity_id.clone(),
+        runtime_process_id: process.process_id,
+        runtime_process_starttime_ticks: process.starttime_ticks,
+    };
+    grant.validate()?;
+    Ok(grant)
+}
+
+fn issue_runtime_traffic_admission(
+    expected: &HealthAdmissionValidationOptions,
+    options: &CommonOptions,
+    now: &str,
+) -> Result<IdunnRuntimeTrafficAdmissionRecord> {
+    let output = expected
+        .write_admission_witness
+        .as_deref()
+        .ok_or_else(|| anyhow!("runtime traffic issuance lost its fixed output path"))?;
+    require_supported_runtime_admission_pair(&expected.daemon_id, output)?;
+    #[cfg(unix)]
+    require_runtime_admission_writer_uid(unsafe { libc::geteuid() })?;
+    let process = expected
+        .runtime_process
+        .ok_or_else(|| anyhow!("runtime traffic issuance lost its process identity"))?
+        .validate()?;
+    require_current_runtime_process(process)?;
+
+    let ValidatedHealthAdmission::RuntimeTraffic(candidate) =
+        validate_health_admission_at(expected, options, now)?
+    else {
+        return Err(anyhow!(
+            "runtime traffic issuance did not resolve an authenticated probation candidate"
+        ));
+    };
+
+    let trust_store_path = options
+        .daemon_health_trust_store_path
+        .as_deref()
+        .ok_or_else(|| anyhow!("runtime traffic issuance has no root trust store"))?;
+    // Fixed lock order: first the Idunn-owned operational store, then the
+    // root-owned trust store. These locks are synchronization, not decision
+    // owners. Every authenticated-health/head writer contends on the first;
+    // every trust writer contends on the second. Holding both shared freezes
+    // the exact source and signer authority while root takes a fresh clock,
+    // rechecks the process, and CAS-publishes the one root-owned grant. Target
+    // services can only read their separately sealed grant store and lock.
+    let state_store = SingleFileMessagePackBackingStore::new(&options.store_path);
+    let trust_store = SingleFileMessagePackBackingStore::new(trust_store_path);
+    let grant = state_store.with_read_only_shared_snapshot(|state_snapshot| {
+        trust_store.with_read_only_shared_snapshot(|trust_snapshot| {
+            validate_runtime_traffic_issuance_trust_snapshot(&trust_snapshot, &candidate)?;
+            let mint_now = timestamp()?;
+            validate_runtime_traffic_issuance_snapshot(
+                &state_snapshot,
+                &candidate,
+                expected,
+                &mint_now,
+            )?;
+            require_current_runtime_process(process)?;
+            publish_runtime_traffic_admission(output, &candidate.grant)?;
+            if let Err(process_error) = require_current_runtime_process(process) {
+                let revoke = revoke_runtime_traffic_admission(output);
+                return match revoke {
+                    Ok(()) => Err(process_error.context(
+                        "runtime process changed immediately after grant publication; grant revoked",
+                    )),
+                    Err(revoke_error) => Err(anyhow!(
+                        "runtime process changed immediately after grant publication: {process_error:#}; fail-closed revocation also failed: {revoke_error:#}"
+                    )),
+                };
+            }
+            Ok(candidate.grant.clone())
+        })
+    })?;
+    Ok(grant)
+}
+
+fn validate_runtime_traffic_issuance_trust_snapshot(
+    snapshot: &[CultCacheEnvelope],
+    candidate: &RuntimeTrafficIssuanceCandidate,
+) -> Result<()> {
+    let mut matches = Vec::new();
+    for entry in snapshot
+        .iter()
+        .filter(|entry| entry.r#type == IdunnDaemonHealthTrustBindingRecord::TYPE)
+    {
+        let binding: IdunnDaemonHealthTrustBindingRecord = rmp_serde::from_slice(&entry.payload)
+            .context("decoding frozen runtime-issuance trust binding")?;
+        binding.validate()?;
+        if binding.daemon_id == candidate.source.statement.daemon_id
+            && binding.health_contract == candidate.source.statement.health_contract
+            && binding.source_runtime_id == candidate.source.statement.source_runtime_id
+        {
+            matches.push(binding);
+        }
+    }
+    let [binding] = matches.as_slice() else {
+        return Err(anyhow!(
+            "runtime traffic issuance requires one exact frozen trust binding"
+        ));
+    };
+    let binding_sha256 = record_sha256(binding)?;
+    if binding != &candidate.source.binding
+        || binding_sha256 != candidate.source.binding_sha256
+        || binding.signer_identity_id != candidate.source.admission.signer_identity_id
+    {
+        return Err(anyhow!(
+            "runtime traffic issuance trust binding changed before grant publication"
+        ));
+    }
     Ok(())
+}
+
+fn validate_runtime_traffic_issuance_snapshot(
+    snapshot: &[CultCacheEnvelope],
+    candidate: &RuntimeTrafficIssuanceCandidate,
+    expected: &HealthAdmissionValidationOptions,
+    mint_now: &str,
+) -> Result<()> {
+    let desired: IdunnDesiredDaemonRecord =
+        required_snapshot_record(snapshot, &candidate.desired.daemon_id, "desired daemon")?;
+    let health: IdunnDaemonHealthRecord = required_snapshot_record(
+        snapshot,
+        &candidate.source.health.daemon_id,
+        "authenticated daemon health",
+    )?;
+    let admission: IdunnAuthenticatedDaemonHealthAdmissionRecord = required_snapshot_record(
+        snapshot,
+        &candidate.source.admission.daemon_id,
+        "authenticated health admission",
+    )?;
+    let statement_envelope = required_snapshot_envelope::<IdunnSignedDaemonHealthRecord>(
+        snapshot,
+        &candidate.source.admission.daemon_id,
+        "signed daemon health",
+    )?;
+    let (statement, _) = decode_generic_signed_health_payload(&statement_envelope.payload)?;
+    let statement_sha256 = format!("sha256-{:x}", Sha256::digest(&statement_envelope.payload));
+    let deployment_head = candidate
+        .source
+        .deployment_head
+        .as_ref()
+        .ok_or_else(|| anyhow!("runtime traffic candidate lost its deployment head"))?;
+    let current_head: IdunnCurrentDeploymentRequestRecord = required_snapshot_record(
+        snapshot,
+        &candidate.source.admission.daemon_id,
+        "current deployment head",
+    )?;
+    let deployment_request = candidate
+        .source
+        .deployment_request
+        .as_ref()
+        .ok_or_else(|| anyhow!("runtime traffic candidate lost its deployment request"))?;
+    let current_request: IdunnDeploymentRequestRecord = required_snapshot_record(
+        snapshot,
+        &deployment_request.request_id,
+        "deployment request",
+    )?;
+
+    let process = expected
+        .runtime_process
+        .ok_or_else(|| anyhow!("runtime traffic issuance lost its expected process identity"))?;
+    let expected_grant = runtime_traffic_admission_from(&admission, process)?;
+    validate_runtime_traffic_issuance_freshness(&desired, &admission, mint_now)?;
+    if desired != candidate.desired
+        || health != candidate.source.health
+        || admission != candidate.source.admission
+        || statement != candidate.source.statement
+        || statement_sha256 != candidate.source.statement_sha256
+        || current_head != *deployment_head
+        || current_request != *deployment_request
+        || current_head.daemon_id != admission.daemon_id
+        || current_head.request_id != expected.deployment_request_id
+        || current_head.request_id != current_request.request_id
+        || current_head.sequence == 0
+        || current_request.daemon_id != admission.daemon_id
+        || current_request.source_revision != expected.source_commit
+        || expected_grant != candidate.grant
+    {
+        return Err(anyhow!(
+            "authenticated health or current deployment request changed before runtime traffic issuance"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_runtime_traffic_issuance_freshness(
+    desired: &IdunnDesiredDaemonRecord,
+    admission: &IdunnAuthenticatedDaemonHealthAdmissionRecord,
+    mint_now: &str,
+) -> Result<()> {
+    let mint_now_millis = parse_timestamp_millis(mint_now)
+        .ok_or_else(|| anyhow!("runtime traffic issuance clock is invalid"))?;
+    if mint_now_millis < admission.admitted_at_unix_millis
+        || mint_now_millis.saturating_sub(admission.observed_at_unix_millis)
+            > u64::from(desired.max_silence_seconds).saturating_mul(1000)
+    {
+        return Err(anyhow!(
+            "authenticated health became stale before runtime traffic issuance"
+        ));
+    }
+    Ok(())
+}
+
+fn required_snapshot_record<T>(snapshot: &[CultCacheEnvelope], key: &str, label: &str) -> Result<T>
+where
+    T: DatabaseEntry + serde::de::DeserializeOwned,
+{
+    let envelope = required_snapshot_envelope::<T>(snapshot, key, label)?;
+    rmp_serde::from_slice(&envelope.payload)
+        .with_context(|| format!("decoding exact {label} snapshot"))
+}
+
+fn required_snapshot_envelope<'a, T: DatabaseEntry>(
+    snapshot: &'a [CultCacheEnvelope],
+    key: &str,
+    label: &str,
+) -> Result<&'a CultCacheEnvelope> {
+    let mut matches = snapshot
+        .iter()
+        .filter(|entry| entry.r#type == T::TYPE && entry.key == key);
+    let envelope = matches
+        .next()
+        .ok_or_else(|| anyhow!("exact {label} snapshot is absent"))?;
+    if matches.next().is_some() {
+        return Err(anyhow!("exact {label} snapshot is ambiguous"));
+    }
+    Ok(envelope)
+}
+
+fn require_current_runtime_process(expected: RuntimeProcessObservation) -> Result<()> {
+    let observed = observe_runtime_process(expected.process_id)?;
+    if observed != expected {
+        return Err(anyhow!(
+            "root-observed runtime process identity changed before traffic admission"
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn observe_runtime_process(process_id: u32) -> Result<RuntimeProcessObservation> {
+    let stat_path = PathBuf::from(format!("/proc/{process_id}/stat"));
+    let stat = fs::read_to_string(&stat_path).with_context(|| {
+        format!(
+            "reading root-observed runtime process {}",
+            stat_path.display()
+        )
+    })?;
+    Ok(RuntimeProcessObservation {
+        process_id,
+        starttime_ticks: parse_linux_proc_stat_starttime_ticks(&stat, process_id)?,
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn observe_runtime_process(_process_id: u32) -> Result<RuntimeProcessObservation> {
+    Err(anyhow!(
+        "runtime traffic admission process observation requires Linux /proc"
+    ))
+}
+
+fn parse_linux_proc_stat_starttime_ticks(stat: &str, expected_process_id: u32) -> Result<u64> {
+    let command_open = stat
+        .find('(')
+        .ok_or_else(|| anyhow!("Linux process stat has no command opening delimiter"))?;
+    let command_close = stat
+        .rfind(')')
+        .filter(|close| *close > command_open)
+        .ok_or_else(|| anyhow!("Linux process stat has no command closing delimiter"))?;
+    let process_id: u32 = stat[..command_open]
+        .trim()
+        .parse()
+        .context("Linux process stat has an invalid process id")?;
+    if process_id != expected_process_id || process_id == 0 {
+        return Err(anyhow!(
+            "Linux process stat does not describe the expected process"
+        ));
+    }
+    // Fields after the command begin at field 3 (state), so zero-based index
+    // 19 is field 22: the kernel starttime in clock ticks since boot.
+    let starttime_ticks: u64 = stat[command_close + 1..]
+        .split_whitespace()
+        .nth(19)
+        .ok_or_else(|| anyhow!("Linux process stat has no field-22 starttime"))?
+        .parse()
+        .context("Linux process stat field-22 starttime is invalid")?;
+    if starttime_ticks == 0 {
+        return Err(anyhow!(
+            "Linux process stat field-22 starttime must be nonzero"
+        ));
+    }
+    Ok(starttime_ticks)
+}
+
+fn runtime_admission_policy_for_path(path: &Path) -> Result<(&'static str, &'static str)> {
+    let spelling = path.as_os_str();
+    if spelling == std::ffi::OsStr::new(CODEX_CONNECTOR_RUNTIME_TRAFFIC_ADMISSION_PATH) {
+        return Ok((
+            IDUNN_CODEX_CONNECTOR_RUNTIME_TRAFFIC_ADMISSION_RECORD_KEY,
+            CODEX_CONNECTOR_RUNTIME_TRAFFIC_ADMISSION_GROUP,
+        ));
+    }
+    if spelling == std::ffi::OsStr::new(GHOSTLIGHT_RUNTIME_TRAFFIC_ADMISSION_PATH) {
+        return Ok((
+            IDUNN_GHOSTLIGHT_RUNTIME_TRAFFIC_ADMISSION_RECORD_KEY,
+            GHOSTLIGHT_RUNTIME_TRAFFIC_ADMISSION_GROUP,
+        ));
+    }
+    Err(anyhow!(
+        "runtime traffic admission path is not one of the two exact supported absolute paths"
+    ))
+}
+
+fn require_supported_runtime_admission_pair(daemon_id: &str, path: &Path) -> Result<()> {
+    let (expected_daemon_id, _) = runtime_admission_policy_for_path(path)?;
+    if daemon_id != expected_daemon_id {
+        return Err(anyhow!(
+            "runtime traffic admission daemon/path pair is unsupported"
+        ));
+    }
+    Ok(())
+}
+
+fn decode_runtime_traffic_admission_snapshot(
+    entries: &[CultCacheEnvelope],
+) -> Result<IdunnRuntimeTrafficAdmissionRecord> {
+    let [entry] = entries else {
+        return Err(anyhow!(
+            "runtime traffic admission store must contain exactly one record"
+        ));
+    };
+    if entry.r#type != IdunnRuntimeTrafficAdmissionRecord::TYPE
+        || entry.schema_id.as_deref() != Some(IDUNN_RUNTIME_TRAFFIC_ADMISSION_SCHEMA)
+        || chrono::DateTime::parse_from_rfc3339(&entry.stored_at).is_err()
+    {
+        return Err(anyhow!(
+            "runtime traffic admission envelope has the wrong type, schema, or timestamp"
+        ));
+    }
+    let record: IdunnRuntimeTrafficAdmissionRecord =
+        rmp_serde::from_slice(&entry.payload).context("decoding runtime traffic admission")?;
+    if rmp_serde::to_vec(&record)? != entry.payload {
+        return Err(anyhow!(
+            "runtime traffic admission is not canonical positional MessagePack"
+        ));
+    }
+    record.validate()?;
+    if record.daemon_id != entry.key {
+        return Err(anyhow!(
+            "runtime traffic admission envelope key does not match its supported daemon"
+        ));
+    }
+    Ok(record)
+}
+
+fn validate_runtime_admission(
+    expected: &RuntimeAdmissionValidationOptions,
+) -> Result<IdunnRuntimeTrafficAdmissionRecord> {
+    expected.runtime_process.validate()?;
+    require_current_runtime_process(expected.runtime_process)?;
+    require_supported_runtime_admission_pair(&expected.daemon_id, &expected.input)?;
+    validate_sha256(&expected.release_witness_sha256, "release witness")?;
+    validate_commit_sha(&expected.source_commit)?;
+    validate_sha256(&expected.activation_witness_sha256, "activation witness")?;
+    validate_runtime_admission_filesystem(&expected.input, true)?;
+    let record = SingleFileMessagePackBackingStore::new(&expected.input)
+        .with_read_only_shared_snapshot(|entries| -> Result<_> {
+            let record = decode_runtime_traffic_admission_snapshot(&entries)?;
+            validate_runtime_admission_lineage(&record, expected)?;
+            Ok(record)
+        })?;
+    validate_runtime_admission_filesystem(&expected.input, true)?;
+    require_current_runtime_process(expected.runtime_process)?;
+    Ok(record)
+}
+
+fn validate_runtime_admission_lineage(
+    record: &IdunnRuntimeTrafficAdmissionRecord,
+    expected: &RuntimeAdmissionValidationOptions,
+) -> Result<()> {
+    if record.daemon_id != expected.daemon_id
+        || record.deployment_id != expected.deployment_request_id
+        || record.release_id != expected.release_id
+        || record.release_witness_sha256 != expected.release_witness_sha256
+        || record.source_commit != expected.source_commit
+        || record.activation_witness_sha256 != expected.activation_witness_sha256
+        || record.runtime_process_id != expected.runtime_process.process_id
+        || record.runtime_process_starttime_ticks != expected.runtime_process.starttime_ticks
+    {
+        return Err(anyhow!(
+            "runtime traffic admission does not prove the exact expected release tuple"
+        ));
+    }
+    Ok(())
+}
+
+fn require_runtime_admission_writer_uid(uid: u32) -> Result<()> {
+    if uid != 0 {
+        return Err(anyhow!(
+            "runtime traffic admission publication requires root"
+        ));
+    }
+    Ok(())
+}
+
+fn publish_runtime_traffic_admission(
+    path: &Path,
+    record: &IdunnRuntimeTrafficAdmissionRecord,
+) -> Result<()> {
+    require_supported_runtime_admission_pair(&record.daemon_id, path)?;
+    #[cfg(unix)]
+    require_runtime_admission_writer_uid(unsafe { libc::geteuid() })?;
+    record.validate()?;
+    validate_runtime_admission_filesystem(path, false)?;
+    let store = SingleFileMessagePackBackingStore::new(path);
+    let expected = store.pull_all_read_only_snapshot()?;
+    if !expected.is_empty() {
+        let existing = decode_runtime_traffic_admission_snapshot(&expected)?;
+        require_supported_runtime_admission_pair(&existing.daemon_id, path)?;
+        revoke_runtime_traffic_admission(path)?;
+        return Err(anyhow!(
+            "runtime traffic admission must be revoked before fresh publication"
+        ));
+    }
+    let envelope = CultCacheEnvelope {
+        key: record.daemon_id.clone(),
+        r#type: IdunnRuntimeTrafficAdmissionRecord::TYPE.into(),
+        payload: rmp_serde::to_vec(record)?,
+        stored_at: timestamp()?,
+        schema_id: Some(IDUNN_RUNTIME_TRAFFIC_ADMISSION_SCHEMA.into()),
+    };
+    if !store.compare_exchange_snapshot(&expected, &[envelope])? {
+        revoke_runtime_traffic_admission(path)?;
+        return Err(anyhow!(
+            "runtime traffic admission changed during atomic publication"
+        ));
+    }
+    let verified = (|| -> Result<()> {
+        seal_runtime_admission_file(path)?;
+        validate_runtime_admission_filesystem(path, true)?;
+        let sealed = store.with_read_only_shared_snapshot(|entries| {
+            decode_runtime_traffic_admission_snapshot(&entries)
+        })?;
+        if &sealed != record {
+            return Err(anyhow!(
+                "sealed runtime traffic admission differs from the validated candidate"
+            ));
+        }
+        validate_runtime_admission_filesystem(path, true)?;
+        Ok(())
+    })();
+    if let Err(error) = verified {
+        let revoke = revoke_runtime_traffic_admission(path);
+        return match revoke {
+            Ok(()) => Err(error.context(
+                "runtime traffic admission publication failed and the candidate was revoked",
+            )),
+            Err(revoke_error) => Err(anyhow!(
+                "runtime traffic admission publication failed: {error:#}; fail-closed revocation also failed: {revoke_error:#}"
+            )),
+        };
+    }
+    Ok(())
+}
+
+fn revoke_runtime_traffic_admission(path: &Path) -> Result<()> {
+    let _ = runtime_admission_policy_for_path(path)?;
+    #[cfg(unix)]
+    require_runtime_admission_writer_uid(unsafe { libc::geteuid() })?;
+    let store = SingleFileMessagePackBackingStore::new(path);
+    for _ in 0..8 {
+        let expected = store.pull_all_read_only_snapshot()?;
+        if expected.is_empty() {
+            seal_runtime_admission_file(path)?;
+            return Ok(());
+        }
+        if store.compare_exchange_snapshot(&expected, &[])? {
+            seal_runtime_admission_file(path)?;
+            return Ok(());
+        }
+    }
+    Err(anyhow!(
+        "runtime traffic admission could not be revoked after repeated contention"
+    ))
+}
+
+fn runtime_admission_lock_path(path: &Path) -> PathBuf {
+    let mut name = path
+        .file_name()
+        .map(|value| value.to_os_string())
+        .unwrap_or_else(|| "traffic-admission.cc".into());
+    name.push(".lock");
+    path.with_file_name(name)
+}
+
+fn runtime_admission_custody_paths(path: &Path) -> [PathBuf; 2] {
+    [path.to_path_buf(), runtime_admission_lock_path(path)]
+}
+
+#[cfg(unix)]
+fn runtime_admission_group_id(group_name: &str) -> Result<u32> {
+    use std::ffi::CString;
+
+    let group = CString::new(group_name).context("runtime traffic admission group contains NUL")?;
+    let entry = unsafe { libc::getgrnam(group.as_ptr()) };
+    if entry.is_null() {
+        return Err(anyhow!(
+            "required runtime traffic admission group {} does not exist",
+            group_name
+        ));
+    }
+    Ok(unsafe { (*entry).gr_gid })
+}
+
+#[cfg(unix)]
+fn validate_runtime_admission_filesystem(path: &Path, require_sealed_leaf: bool) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    let (_, group_name) = runtime_admission_policy_for_path(path)?;
+    let group_id = runtime_admission_group_id(group_name)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("runtime traffic admission path has no parent"))?;
+    let mut component = Some(parent);
+    while let Some(directory) = component {
+        let metadata = fs::symlink_metadata(directory)
+            .with_context(|| format!("inspecting {}", directory.display()))?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(anyhow!(
+                "runtime traffic admission parent {} is not a direct directory",
+                directory.display()
+            ));
+        }
+        let mode = metadata.mode() & 0o7777;
+        if metadata.uid() != 0 || mode & 0o022 != 0 {
+            return Err(anyhow!(
+                "runtime traffic admission parent {} must be root-owned and not group/world writable",
+                directory.display()
+            ));
+        }
+        if directory == parent && (metadata.gid() != group_id || mode != 0o750) {
+            return Err(anyhow!(
+                "runtime traffic admission directory must be root:{} mode 0750",
+                group_name
+            ));
+        }
+        component = directory.parent();
+    }
+
+    for custody_path in runtime_admission_custody_paths(path) {
+        validate_runtime_admission_leaf(&custody_path, group_id, group_name, require_sealed_leaf)?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_runtime_admission_leaf(
+    path: &Path,
+    group_id: u32,
+    group_name: &str,
+    require_sealed_leaf: bool,
+) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(anyhow!(
+                    "runtime traffic admission custody leaf {} must be a direct regular file",
+                    path.display()
+                ));
+            }
+            let mode = metadata.mode() & 0o7777;
+            if metadata.uid() != 0 || mode & 0o022 != 0 {
+                return Err(anyhow!(
+                    "runtime traffic admission custody leaf {} must be root-owned and not group/world writable",
+                    path.display()
+                ));
+            }
+            if require_sealed_leaf && (metadata.gid() != group_id || mode != 0o640) {
+                return Err(anyhow!(
+                    "runtime traffic admission custody leaf {} must be root:{} mode 0640",
+                    path.display(),
+                    group_name,
+                ));
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !require_sealed_leaf => {}
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("inspecting runtime traffic admission {}", path.display())
+            });
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_runtime_admission_filesystem(_path: &Path, _require_sealed_leaf: bool) -> Result<()> {
+    Err(anyhow!(
+        "runtime traffic admission publication and validation require Unix ownership semantics"
+    ))
+}
+
+#[cfg(unix)]
+fn seal_runtime_admission_file(path: &Path) -> Result<()> {
+    let (_, group_name) = runtime_admission_policy_for_path(path)?;
+    let group_id = runtime_admission_group_id(group_name)?;
+    for custody_path in runtime_admission_custody_paths(path) {
+        seal_runtime_admission_leaf(&custody_path, group_id)?;
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("runtime traffic admission path has no parent"))?;
+    File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .with_context(|| format!("syncing admission parent {}", parent.display()))?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn seal_runtime_admission_leaf(path: &Path, group_id: u32) -> Result<()> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::PermissionsExt;
+
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .with_context(|| format!("opening admission {} for sealing", path.display()))?;
+    if unsafe { libc::fchown(file.as_raw_fd(), 0, group_id) } != 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("setting owner on {}", path.display()));
+    }
+    file.set_permissions(fs::Permissions::from_mode(0o640))
+        .with_context(|| format!("sealing mode on {}", path.display()))?;
+    file.sync_all()
+        .with_context(|| format!("syncing sealed admission {}", path.display()))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn seal_runtime_admission_file(_path: &Path) -> Result<()> {
+    Err(anyhow!(
+        "runtime traffic admission publication requires Unix ownership semantics"
+    ))
 }
 
 fn validate_release_authority_at_privileged_boundary(
@@ -814,6 +1730,23 @@ fn validate_release_authority_at_privileged_boundary(
         ));
     }
     println!("Bifrost release authority validated for privileged deployment boundary.");
+    Ok(())
+}
+
+fn validate_minimum_source_revision_at_privileged_boundary(
+    options: &MinimumSourceRevisionValidationOptions,
+) -> Result<()> {
+    let policy = compiled_minimum_source_revision_policy_for_daemon(&options.daemon_id)
+        .ok_or_else(|| anyhow!("daemon has no compiled minimum-source policy"))?;
+    require_minimum_source_revision(
+        Path::new(policy.repository_path),
+        &options.source_revision,
+        policy,
+    )?;
+    println!(
+        "compiled minimum source revision validated daemon={} sourceRevision={} floor={}",
+        options.daemon_id, options.source_revision, policy.minimum_source_revision
+    );
     Ok(())
 }
 
@@ -964,6 +1897,23 @@ fn validate_targets(targets: &[DaemonTarget]) -> Result<()> {
                 "{} treats probe failure as stale deployment but has no deploy command",
                 target.daemon_id
             ));
+        }
+        if let Some(release) = target.release.as_ref() {
+            let compiled = compiled_minimum_source_revision_policy_for_daemon(&target.daemon_id);
+            let upstream_ref = format!("refs/heads/{}", release.upstream_branch);
+            if release.minimum_source_revision.as_deref()
+                != compiled.map(|policy| policy.minimum_source_revision)
+                || compiled.is_some_and(|policy| {
+                    release.repository_full_name != policy.repository_full_name
+                        || upstream_ref != policy.upstream_ref
+                        || release.repo_path != PathBuf::from(policy.repository_path)
+                })
+            {
+                issues.push(format!(
+                    "{} differs from its compiled minimum-source policy",
+                    target.daemon_id
+                ));
+            }
         }
     }
 
@@ -1801,6 +2751,217 @@ fn validate_commit_sha(value: &str) -> Result<()> {
     Ok(())
 }
 
+fn compiled_minimum_source_revision_policy(
+    repository_full_name: &str,
+    upstream_ref: &str,
+) -> Option<&'static CompiledMinimumSourceRevisionPolicy> {
+    COMPILED_MINIMUM_SOURCE_REVISION_POLICIES
+        .iter()
+        .find(|policy| {
+            policy.repository_full_name == repository_full_name
+                && policy.upstream_ref == upstream_ref
+        })
+}
+
+fn compiled_minimum_source_revision_policy_for_daemon(
+    daemon_id: &str,
+) -> Option<&'static CompiledMinimumSourceRevisionPolicy> {
+    COMPILED_MINIMUM_SOURCE_REVISION_POLICIES
+        .iter()
+        .find(|policy| policy.daemon_id == daemon_id)
+}
+
+fn require_release_minimum_source_revision(
+    target: &DaemonTarget,
+    release: &ReleaseTarget,
+    candidate_revision: &str,
+) -> Result<()> {
+    let upstream_ref = format!("refs/heads/{}", release.upstream_branch);
+    let compiled = compiled_minimum_source_revision_policy_for_daemon(&target.daemon_id);
+    let declared = release.minimum_source_revision.as_deref();
+    if declared != compiled.map(|policy| policy.minimum_source_revision) {
+        return Err(anyhow!(
+            "release target minimum source policy differs from Idunn's compiled authority"
+        ));
+    }
+    let Some(policy) = compiled else {
+        return Ok(());
+    };
+    if release.repository_full_name != policy.repository_full_name
+        || upstream_ref != policy.upstream_ref
+        || release.repo_path != PathBuf::from(policy.repository_path)
+    {
+        return Err(anyhow!(
+            "release target identity differs from Idunn's compiled minimum-source policy"
+        ));
+    }
+    require_deployment_source_revision(&release.repo_path, candidate_revision, policy)
+}
+
+fn require_compiled_minimum_source_revision(
+    daemon_id: &str,
+    repository_full_name: &str,
+    upstream_ref: &str,
+    candidate_revision: &str,
+) -> Result<Option<&'static CompiledMinimumSourceRevisionPolicy>> {
+    let Some(policy) = compiled_minimum_source_revision_policy_for_daemon(daemon_id) else {
+        return Ok(None);
+    };
+    if repository_full_name != policy.repository_full_name || upstream_ref != policy.upstream_ref {
+        return Err(anyhow!(
+            "deployment identity differs from Idunn's compiled minimum-source policy"
+        ));
+    }
+    require_deployment_source_revision(
+        Path::new(policy.repository_path),
+        candidate_revision,
+        policy,
+    )?;
+    Ok(Some(policy))
+}
+
+fn require_minimum_source_revision(
+    repository_path: &Path,
+    candidate_revision: &str,
+    policy: &CompiledMinimumSourceRevisionPolicy,
+) -> Result<()> {
+    require_compiled_repository_origin(repository_path, policy)?;
+    require_revision_floor_ancestry(
+        repository_path,
+        candidate_revision,
+        policy.minimum_source_revision,
+    )
+}
+
+fn require_deployment_source_revision(
+    repository_path: &Path,
+    candidate_revision: &str,
+    policy: &CompiledMinimumSourceRevisionPolicy,
+) -> Result<()> {
+    require_minimum_source_revision(repository_path, candidate_revision, policy)?;
+    require_canonical_fetched_dag_membership(
+        repository_path,
+        candidate_revision,
+        policy.canonical_fetched_ref,
+    )
+}
+
+fn require_compiled_repository_origin(
+    repository_path: &Path,
+    policy: &CompiledMinimumSourceRevisionPolicy,
+) -> Result<()> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repository_path)
+        .arg("remote")
+        .arg("get-url")
+        .arg("--all")
+        .arg("origin")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .with_context(|| {
+            format!(
+                "reading compiled-policy repository origin in {}",
+                repository_path.display()
+            )
+        })?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "compiled-policy repository has no readable canonical origin"
+        ));
+    }
+    let urls = String::from_utf8(output.stdout)
+        .context("compiled-policy repository origin is not UTF-8")?
+        .lines()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .collect::<Vec<_>>();
+    if urls.len() != 1 || urls[0] != policy.canonical_repository_url {
+        return Err(anyhow!(
+            "compiled-policy repository origin differs from Idunn's fixed canonical repository"
+        ));
+    }
+    Ok(())
+}
+
+fn require_revision_floor_ancestry(
+    repository_path: &Path,
+    candidate_revision: &str,
+    minimum_revision: &str,
+) -> Result<()> {
+    validate_commit_sha(candidate_revision)?;
+    validate_commit_sha(minimum_revision)?;
+    if git_revision(repository_path, candidate_revision).as_deref() != Some(candidate_revision) {
+        return Err(anyhow!(
+            "candidate source revision is absent from the compiled-policy repository"
+        ));
+    }
+    if git_revision(repository_path, minimum_revision).as_deref() != Some(minimum_revision) {
+        return Err(anyhow!(
+            "compiled minimum source revision is absent from its fixed repository"
+        ));
+    }
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(repository_path)
+        .arg("merge-base")
+        .arg("--is-ancestor")
+        .arg(minimum_revision)
+        .arg(candidate_revision)
+        .status()
+        .with_context(|| {
+            format!(
+                "checking compiled minimum source revision in {}",
+                repository_path.display()
+            )
+        })?;
+    if !status.success() {
+        return Err(anyhow!(
+            "candidate source revision is below or unrelated to Idunn's compiled minimum"
+        ));
+    }
+    Ok(())
+}
+
+fn require_canonical_fetched_dag_membership(
+    repository_path: &Path,
+    candidate_revision: &str,
+    canonical_fetched_ref: &str,
+) -> Result<()> {
+    validate_commit_sha(candidate_revision)?;
+    if git_revision(repository_path, candidate_revision).as_deref() != Some(candidate_revision) {
+        return Err(anyhow!(
+            "candidate source revision is absent from the compiled-policy repository"
+        ));
+    }
+    if git_revision(repository_path, canonical_fetched_ref).is_none() {
+        return Err(anyhow!(
+            "compiled canonical fetched ref is absent from its fixed repository"
+        ));
+    }
+    let canonical_status = Command::new("git")
+        .arg("-C")
+        .arg(repository_path)
+        .arg("merge-base")
+        .arg("--is-ancestor")
+        .arg(candidate_revision)
+        .arg(canonical_fetched_ref)
+        .status()
+        .with_context(|| {
+            format!(
+                "checking candidate membership in canonical fetched DAG at {}",
+                repository_path.display()
+            )
+        })?;
+    if !canonical_status.success() {
+        return Err(anyhow!(
+            "candidate source revision is not in Idunn's canonical fetched DAG"
+        ));
+    }
+    Ok(())
+}
+
 fn validate_release_authority_receipt(
     receipt: &BifrostRepositoryReleaseAuthorityRecord,
     expected_id: &str,
@@ -1880,11 +3041,25 @@ fn authorize_release(
         .as_ref()
         .ok_or_else(|| anyhow!("deployment target has no release declaration"))?;
     let state = SystemReleaseStatePort;
+    if let Some(policy) = compiled_minimum_source_revision_policy_for_daemon(&target.daemon_id) {
+        let upstream_ref = format!("refs/heads/{}", release.upstream_branch);
+        if release.repository_full_name != policy.repository_full_name
+            || upstream_ref != policy.upstream_ref
+            || release.repo_path != PathBuf::from(policy.repository_path)
+            || release.minimum_source_revision.as_deref() != Some(policy.minimum_source_revision)
+        {
+            return Err(anyhow!(
+                "release target identity differs from Idunn's compiled minimum-source policy"
+            ));
+        }
+        require_compiled_repository_origin(&release.repo_path, policy)?;
+    }
     state.fetch(release)?;
     let observed_upstream_revision = state.desired_revision(release)?;
     let upstream_ref = format!("refs/heads/{}", release.upstream_branch);
     if !release.requires_bifrost_authority {
         validate_commit_sha(&observed_upstream_revision)?;
+        require_release_minimum_source_revision(target, release, &observed_upstream_revision)?;
         return Ok(ReleaseAuthorization {
             repository_full_name: release.repository_full_name.clone(),
             upstream_ref,
@@ -1914,6 +3089,7 @@ fn authorize_release(
             selected.source_revision
         ));
     }
+    require_release_minimum_source_revision(target, release, &selected.source_revision)?;
     Ok(selected)
 }
 
@@ -1935,6 +3111,12 @@ fn revalidate_deployment_request(
     store_lock: &Arc<Mutex<()>>,
 ) -> Result<()> {
     validate_commit_sha(&request.source_revision)?;
+    require_compiled_minimum_source_revision(
+        &request.daemon_id,
+        &request.repository_full_name,
+        &request.upstream_ref,
+        &request.source_revision,
+    )?;
     if !request.requires_bifrost_authority {
         if !request.release_authority_id.is_empty()
             || !request.release_authority_envelope_sha256.is_empty()
@@ -1992,29 +3174,42 @@ fn read_fresh_daemon_published_health(
                     return Ok(None);
                 };
                 admission.validate()?;
-                let Some(statement) =
-                    node.get::<IdunnSignedDaemonHealthRecord>(&admission.daemon_id)?
+                let Some(statement_envelope) = node
+                    .cache()
+                    .get_envelope::<IdunnSignedDaemonHealthRecord>(&admission.daemon_id)?
                 else {
                     return Ok(None);
                 };
+                let (statement, _) =
+                    decode_generic_signed_health_payload(&statement_envelope.payload)?;
+                statement.validate()?;
                 let (binding, current_binding_sha256) =
                     load_daemon_health_trust_binding(options, &statement)?;
                 validate_generic_release_binding(node, &admission)?;
                 let now_millis = parse_timestamp_millis(now)
                     .ok_or_else(|| anyhow!("managed health clock is invalid"))?;
-                let statement_digest = format!(
-                    "sha256-{:x}",
-                    Sha256::digest(rmp_serde::to_vec(&statement)?)
-                );
+                let statement_digest =
+                    format!("sha256-{:x}", Sha256::digest(&statement_envelope.payload));
                 if admission.daemon_id != health.daemon_id
+                    || admission.daemon_id != statement.daemon_id
                     || admission.health_contract != health.health_contract
+                    || admission.health_contract != statement.health_contract
+                    || admission.source_runtime_id != statement.source_runtime_id
                     || admission.state != health.state
+                    || admission.state != statement.state
+                    || statement.detail != health.detail
+                    || admission.trust_binding_id != binding.binding_id
                     || admission.trust_binding_sha256 != current_binding_sha256
                     || admission.signed_health_sha256 != statement_digest
                     || admission.signer_identity_id != statement.signer_identity_id
                     || admission.publisher_incarnation_id != statement.publisher_incarnation_id
                     || admission.publisher_sequence != statement.publisher_sequence
                     || admission.observed_at_unix_millis != statement.observed_at_unix_millis
+                    || admission.release_id != statement.release_id
+                    || admission.release_witness_sha256 != statement.release_witness_sha256
+                    || admission.source_commit != statement.source_commit
+                    || admission.deployment_id != statement.deployment_id
+                    || admission.activation_witness_sha256 != statement.activation_witness_sha256
                     || now_millis < admission.admitted_at_unix_millis
                     || now_millis.saturating_sub(admission.observed_at_unix_millis)
                         > u64::from(desired.max_silence_seconds).saturating_mul(1000)
@@ -3418,7 +4613,7 @@ fn admit_health_from_rudp_message(
         }
         DecodedHealthIngress::AuthenticatedGeneric {
             health,
-            statement,
+            statement_payload,
             admission,
         } => {
             return admit_generic_signed_health(
@@ -3426,7 +4621,7 @@ fn admit_health_from_rudp_message(
                 store_lock,
                 admitted_at,
                 health,
-                statement,
+                statement_payload,
                 admission,
             );
         }
@@ -3551,14 +4746,14 @@ fn compact_authenticated_health_statement_history(
                         "authenticated health admission for {daemon_id} lost its signed statement"
                     )
                 })?;
-            let statement: IdunnSignedDaemonHealthRecord = rmp_serde::from_slice(&entry.payload)
+            let (statement, _) = decode_generic_signed_health_payload(&entry.payload)
                 .context("decoding current signed daemon health")?;
             statement.validate()?;
-            let digest = format!(
-                "sha256-{:x}",
-                Sha256::digest(rmp_serde::to_vec(&statement)?)
-            );
-            if statement.daemon_id != *daemon_id || digest != admission.signed_health_sha256 {
+            let digest = format!("sha256-{:x}", Sha256::digest(&entry.payload));
+            if statement.daemon_id != *daemon_id
+                || digest != admission.signed_health_sha256
+                || statement.activation_witness_sha256 != admission.activation_witness_sha256
+            {
                 return Err(anyhow!(
                     "authenticated health admission for {daemon_id} does not bind its signed statement"
                 ));
@@ -3830,16 +5025,10 @@ fn authenticate_generic_signed_health(
     admitted_at: &str,
 ) -> Result<(
     IdunnDaemonHealthRecord,
-    IdunnSignedDaemonHealthRecord,
+    Vec<u8>,
     IdunnAuthenticatedDaemonHealthAdmissionRecord,
 )> {
-    let statement: IdunnSignedDaemonHealthRecord = rmp_serde::from_slice(&document.payload)
-        .context("decoding generic signed daemon health")?;
-    if rmp_serde::to_vec(&statement)? != document.payload {
-        return Err(anyhow!(
-            "signed daemon health payload is not canonical positional MessagePack"
-        ));
-    }
+    let (statement, unsigned_payload) = decode_generic_signed_health_payload(&document.payload)?;
     statement.validate()?;
     if document.record_key != statement.daemon_id
         || document.source_runtime_id.as_deref() != Some(statement.source_runtime_id.as_str())
@@ -3881,9 +5070,6 @@ fn authenticate_generic_signed_health(
         .as_slice()
         .try_into()
         .map_err(|_| anyhow!("signed daemon health signature length is invalid"))?;
-    let mut unsigned = statement.clone();
-    unsigned.signature.clear();
-    let unsigned_payload = rmp_serde::to_vec(&unsigned)?;
     verify_service_identity_signature_with_public_key::<
         GameCultProviderHealthIdentity,
         IdunnSignedDaemonHealthPurpose,
@@ -3941,9 +5127,16 @@ fn authenticate_generic_signed_health(
         source_commit: statement.source_commit.clone(),
         deployment_id: statement.deployment_id.clone(),
         private_state_exposed: false,
+        activation_witness_sha256: statement.activation_witness_sha256.clone(),
     };
     admission.validate()?;
-    Ok((health, statement, admission))
+    Ok((health, document.payload.clone(), admission))
+}
+
+fn decode_generic_signed_health_payload(
+    payload: &[u8],
+) -> Result<(IdunnSignedDaemonHealthRecord, Vec<u8>)> {
+    IdunnSignedDaemonHealthRecord::decode_canonical_signed_payload(payload)
 }
 
 fn load_daemon_health_trust_binding(
@@ -3985,7 +5178,7 @@ fn admit_generic_signed_health(
     store_lock: &Arc<Mutex<()>>,
     admitted_at: &str,
     health: IdunnDaemonHealthRecord,
-    statement: IdunnSignedDaemonHealthRecord,
+    statement_payload: Vec<u8>,
     admission: IdunnAuthenticatedDaemonHealthAdmissionRecord,
 ) -> Result<HealthIngressOutcome> {
     for _ in 0..8 {
@@ -4026,10 +5219,17 @@ fn admit_generic_signed_health(
                 current: expected_statement,
             },
         ];
+        let statement_envelope = CultCacheEnvelope {
+            key: admission.daemon_id.clone(),
+            r#type: IdunnSignedDaemonHealthRecord::TYPE.into(),
+            payload: statement_payload.clone(),
+            stored_at: admitted_at.to_string(),
+            schema_id: Some(IdunnSignedDaemonHealthRecord::TYPE.into()),
+        };
         let replacements = [
             typed_envelope(&health.daemon_id, &health, admitted_at)?,
             typed_envelope(&admission.daemon_id, &admission, admitted_at)?,
-            typed_envelope(&admission.daemon_id, &statement, admitted_at)?,
+            statement_envelope,
         ];
         if SingleFileMessagePackBackingStore::new(&options.store_path)
             .compare_exchange(&expected, &replacements)?
@@ -4140,11 +5340,11 @@ fn decode_health_from_rudp_message(
         return Err(anyhow!("expected MessagePack raw payload encoding"));
     }
     if document.schema_id == SIGNED_DAEMON_HEALTH_SCHEMA_ID {
-        let (health, statement, admission) =
+        let (health, statement_payload, admission) =
             authenticate_generic_signed_health(document, options, admitted_at)?;
         return Ok(DecodedHealthIngress::AuthenticatedGeneric {
             health,
-            statement,
+            statement_payload,
             admission,
         });
     }
@@ -4595,7 +5795,7 @@ fn release_target(
     state_migration_command: Option<&str>,
     zero_downtime_capability: &str,
 ) -> ReleaseTarget {
-    ReleaseTarget {
+    let mut target = ReleaseTarget {
         repo: repo.to_string(),
         repository_full_name: format!("GameCult/{repo}"),
         repo_path,
@@ -4609,7 +5809,10 @@ fn release_target(
         artifact_witness_root: None,
         requires_bifrost_authority: false,
         source_change_pathspecs: Vec::new(),
-    }
+        minimum_source_revision: None,
+    };
+    refresh_compiled_minimum_source_revision(&mut target);
+    target
 }
 
 fn release_target_on_branch(
@@ -4628,7 +5831,15 @@ fn release_target_on_branch(
         zero_downtime_capability,
     );
     target.upstream_branch = upstream_branch.to_string();
+    refresh_compiled_minimum_source_revision(&mut target);
     target
+}
+
+fn refresh_compiled_minimum_source_revision(release: &mut ReleaseTarget) {
+    let upstream_ref = format!("refs/heads/{}", release.upstream_branch);
+    release.minimum_source_revision =
+        compiled_minimum_source_revision_policy(&release.repository_full_name, &upstream_ref)
+            .map(|policy| policy.minimum_source_revision.to_string());
 }
 
 fn requiring_bifrost_authority(mut release: ReleaseTarget) -> ReleaseTarget {
@@ -4689,16 +5900,21 @@ fn release_target_record(
         .as_ref()
         .map(|value| value.source_revision.clone())
         .unwrap_or_else(|| observed_upstream_revision.clone());
+    let minimum_source_revision_satisfied = desired_revision != "unknown"
+        && require_release_minimum_source_revision(target, release, &desired_revision).is_ok();
     let status = if fetch_result.is_ok()
         && observed_upstream_revision != "unknown"
         && (release.deployed_revision_witness.is_none() || deployed_revision != "unknown")
         && (!release.requires_bifrost_authority || authorization.is_some())
+        && minimum_source_revision_satisfied
     {
         if release.requires_bifrost_authority {
             "tracked-authorized"
         } else {
             "tracked-source-authority"
         }
+    } else if !minimum_source_revision_satisfied {
+        "below-compiled-minimum-source-revision"
     } else {
         "release-authority-unavailable"
     };
@@ -4743,6 +5959,7 @@ fn release_target_record(
         .to_string(),
         requires_bifrost_authority: release.requires_bifrost_authority,
         observed_upstream_revision,
+        minimum_source_revision: release.minimum_source_revision.clone(),
     }
 }
 
@@ -4874,7 +6091,7 @@ fn rollout_plan_record(
     }
 }
 
-fn git_revision(repo_path: &PathBuf, rev: &str) -> Option<String> {
+fn git_revision(repo_path: &Path, rev: &str) -> Option<String> {
     let output = Command::new("git")
         .arg("-C")
         .arg(repo_path)
@@ -5427,7 +6644,7 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
     let yggdrasil_actuator = |action: &str, target: &str| {
         if action == "deploy" {
             format!(
-                "sudo -n /usr/local/libexec/idunn-yggdrasil deploy {target} \"$IDUNN_SOURCE_COMMIT\" \"$IDUNN_REPOSITORY_FULL_NAME\" \"$IDUNN_UPSTREAM_REF\" \"$BIFROST_RELEASE_AUTHORITY_ID\" \"$BIFROST_RELEASE_AUTHORITY_SHA256\" \"$IDUNN_DEPLOYMENT_REQUEST_ID\" \"$IDUNN_REQUIRES_BIFROST_AUTHORITY\""
+                "sudo -n /usr/local/libexec/idunn-yggdrasil deploy {target} \"$IDUNN_SOURCE_COMMIT\" \"$IDUNN_DEPLOYMENT_REQUEST_ID\" \"$BIFROST_RELEASE_AUTHORITY_ID\" \"$BIFROST_RELEASE_AUTHORITY_SHA256\""
             )
         } else {
             format!("sudo -n /usr/local/libexec/idunn-yggdrasil {action} {target}")
@@ -5479,7 +6696,7 @@ fn swarm_targets(options: &SwarmOptions) -> Result<Vec<DaemonTarget>> {
                         release_target_on_branch(
                             "CodexConnector",
                             PathBuf::from("/srv/build/CodexConnector"),
-                            "main",
+                            "codex/ghostlight-release-binding",
                             "restart-after-verified-build",
                             None,
                             "restart-required",
@@ -5971,9 +7188,18 @@ impl Options {
         let release_authority_validation = args
             .first()
             .is_some_and(|arg| arg == "validate-release-authority");
+        let minimum_source_revision_validation = args
+            .first()
+            .is_some_and(|arg| arg == "validate-minimum-source-revision");
+        if minimum_source_revision_validation {
+            validate_minimum_source_revision_cli_shape(&args)?;
+        }
         let health_admission_validation = args
             .first()
             .is_some_and(|arg| arg == "validate-health-admission");
+        let runtime_admission_validation = args
+            .first()
+            .is_some_and(|arg| arg == "validate-runtime-admission");
         let lifecycle_action = args.first().and_then(|arg| match arg.as_str() {
             "restart" | "request-restart" => Some(LifecycleAction::Restart),
             "redeploy" | "request-redeploy" | "deploy" | "request-deploy" => {
@@ -6015,10 +7241,19 @@ impl Options {
         let mut validation_envelope_sha256 = None;
         let mut validation_release_id = None;
         let mut validation_release_witness_sha256 = None;
+        let mut validation_activation_witness_sha256 = None;
         let mut validation_deployment_request_id = None;
+        let mut validation_input = None;
+        let mut write_admission_witness = None;
+        let mut validation_runtime_process_id = None;
+        let mut validation_runtime_process_starttime_ticks = None;
 
         let mut args = args.into_iter().peekable();
-        if lifecycle_action.is_some() || release_authority_validation || health_admission_validation
+        if lifecycle_action.is_some()
+            || release_authority_validation
+            || minimum_source_revision_validation
+            || health_admission_validation
+            || runtime_admission_validation
         {
             let _ = args.next();
         }
@@ -6071,9 +7306,36 @@ impl Options {
                     validation_release_witness_sha256 =
                         Some(take_value(&mut args, "--release-witness-sha256")?)
                 }
+                "--activation-witness-sha256" => {
+                    validation_activation_witness_sha256 =
+                        Some(take_value(&mut args, "--activation-witness-sha256")?)
+                }
                 "--deployment-request-id" => {
                     validation_deployment_request_id =
                         Some(take_value(&mut args, "--deployment-request-id")?)
+                }
+                "--input" => {
+                    validation_input = Some(PathBuf::from(take_value(&mut args, "--input")?))
+                }
+                "--write-admission-witness" => {
+                    write_admission_witness = Some(PathBuf::from(take_value(
+                        &mut args,
+                        "--write-admission-witness",
+                    )?))
+                }
+                "--runtime-process-id" => {
+                    validation_runtime_process_id = Some(
+                        take_value(&mut args, "--runtime-process-id")?
+                            .parse::<u32>()
+                            .context("--runtime-process-id must be a nonzero u32")?,
+                    )
+                }
+                "--runtime-process-starttime-ticks" => {
+                    validation_runtime_process_starttime_ticks = Some(
+                        take_value(&mut args, "--runtime-process-starttime-ticks")?
+                            .parse::<u64>()
+                            .context("--runtime-process-starttime-ticks must be a nonzero u64")?,
+                    )
                 }
                 "--daemon" => daemon_id = Some(take_value(&mut args, "--daemon")?),
                 "--verse" => verse_id = take_value(&mut args, "--verse")?,
@@ -6196,6 +7458,40 @@ impl Options {
             command_timeout_seconds,
         };
 
+        if validation_input.is_some() && !runtime_admission_validation {
+            return Err(anyhow!("--input belongs to validate-runtime-admission"));
+        }
+        if write_admission_witness.is_some() && !health_admission_validation {
+            return Err(anyhow!(
+                "--write-admission-witness belongs to validate-health-admission"
+            ));
+        }
+        let runtime_process = match (
+            validation_runtime_process_id,
+            validation_runtime_process_starttime_ticks,
+        ) {
+            (Some(process_id), Some(starttime_ticks)) => Some(
+                RuntimeProcessObservation {
+                    process_id,
+                    starttime_ticks,
+                }
+                .validate()?,
+            ),
+            (None, None) => None,
+            _ => {
+                return Err(anyhow!(
+                    "--runtime-process-id and --runtime-process-starttime-ticks must be supplied together"
+                ));
+            }
+        };
+        let runtime_process_lane = runtime_admission_validation
+            || (health_admission_validation && write_admission_witness.is_some());
+        if runtime_process.is_some() && !runtime_process_lane {
+            return Err(anyhow!(
+                "runtime process identity belongs only to runtime traffic issuance or validation"
+            ));
+        }
+
         if release_authority_validation {
             let store_path = common.release_authority_store_path.clone().ok_or_else(|| {
                 anyhow!("release authority validation requires --release-authority-store")
@@ -6223,7 +7519,39 @@ impl Options {
             });
         }
 
+        if minimum_source_revision_validation {
+            return Ok(Self {
+                common,
+                mode: Mode::MinimumSourceRevisionValidation(
+                    MinimumSourceRevisionValidationOptions {
+                        daemon_id: daemon_id.ok_or_else(|| {
+                            anyhow!("minimum source validation requires --daemon")
+                        })?,
+                        source_revision: validation_source_revision.ok_or_else(|| {
+                            anyhow!("minimum source validation requires --source-revision")
+                        })?,
+                    },
+                ),
+            });
+        }
+
         if health_admission_validation {
+            if let Some(output) = write_admission_witness.as_deref() {
+                let output_daemon = daemon_id
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("health admission validation requires --daemon"))?;
+                require_supported_runtime_admission_pair(output_daemon, output)?;
+                if validation_activation_witness_sha256.is_none() {
+                    return Err(anyhow!(
+                        "--write-admission-witness requires --activation-witness-sha256"
+                    ));
+                }
+                if runtime_process.is_none() {
+                    return Err(anyhow!(
+                        "--write-admission-witness requires --runtime-process-id and --runtime-process-starttime-ticks"
+                    ));
+                }
+            }
             return Ok(Self {
                 common,
                 mode: Mode::HealthAdmissionValidation(HealthAdmissionValidationOptions {
@@ -6241,6 +7569,51 @@ impl Options {
                     source_commit: validation_source_revision.ok_or_else(|| {
                         anyhow!("health admission validation requires --source-revision")
                     })?,
+                    activation_witness_sha256: validation_activation_witness_sha256,
+                    write_admission_witness,
+                    runtime_process,
+                }),
+            });
+        }
+
+        if runtime_admission_validation {
+            let input = validation_input
+                .ok_or_else(|| anyhow!("runtime admission validation requires --input"))?;
+            let input_daemon = daemon_id
+                .as_deref()
+                .ok_or_else(|| anyhow!("runtime admission validation requires --daemon"))?;
+            require_supported_runtime_admission_pair(input_daemon, &input)?;
+            let runtime_process = runtime_process.ok_or_else(|| {
+                anyhow!(
+                    "runtime admission validation requires --runtime-process-id and --runtime-process-starttime-ticks"
+                )
+            })?;
+            return Ok(Self {
+                common,
+                mode: Mode::RuntimeAdmissionValidation(RuntimeAdmissionValidationOptions {
+                    input,
+                    daemon_id: daemon_id
+                        .ok_or_else(|| anyhow!("runtime admission validation requires --daemon"))?,
+                    deployment_request_id: validation_deployment_request_id.ok_or_else(|| {
+                        anyhow!("runtime admission validation requires --deployment-request-id")
+                    })?,
+                    release_id: validation_release_id.ok_or_else(|| {
+                        anyhow!("runtime admission validation requires --release-id")
+                    })?,
+                    release_witness_sha256: validation_release_witness_sha256.ok_or_else(|| {
+                        anyhow!("runtime admission validation requires --release-witness-sha256")
+                    })?,
+                    source_commit: validation_source_revision.ok_or_else(|| {
+                        anyhow!("runtime admission validation requires --source-revision")
+                    })?,
+                    activation_witness_sha256: validation_activation_witness_sha256.ok_or_else(
+                        || {
+                            anyhow!(
+                                "runtime admission validation requires --activation-witness-sha256"
+                            )
+                        },
+                    )?,
+                    runtime_process,
                 }),
             });
         }
@@ -6337,6 +7710,31 @@ impl Options {
 
         Ok(Self { common, mode })
     }
+}
+
+fn validate_minimum_source_revision_cli_shape(args: &[String]) -> Result<()> {
+    if args.len() != 5 {
+        return Err(anyhow!(
+            "validate-minimum-source-revision accepts only --daemon and --source-revision"
+        ));
+    }
+    let mut seen = BTreeSet::new();
+    for pair in args[1..].chunks_exact(2) {
+        if pair[1].trim().is_empty()
+            || !matches!(pair[0].as_str(), "--daemon" | "--source-revision")
+            || !seen.insert(pair[0].as_str())
+        {
+            return Err(anyhow!(
+                "validate-minimum-source-revision accepts one --daemon and one --source-revision"
+            ));
+        }
+    }
+    if !seen.contains("--daemon") || !seen.contains("--source-revision") {
+        return Err(anyhow!(
+            "validate-minimum-source-revision requires --daemon and --source-revision"
+        ));
+    }
+    Ok(())
 }
 
 fn take_value(args: &mut impl Iterator<Item = String>, name: &str) -> Result<String> {
@@ -7013,8 +8411,10 @@ fn help_text() -> &'static str {
         "Usage: idunn --daemon <id> [--name <name>] [--verse <verse>] [--store <path>] [--release-authority-store <path>] [--daemon-health-trust-store <path>] [--deploy-command <command>] [--restart-command <command>] [--operator-alarm-command <command>] [--rudp-health-bind <addr|none>] [--trusted-epiphany-health-identity-store <path>] [--execute] [--interval-seconds <seconds>] [--command-timeout-seconds <seconds>] [--repo-root <path>] [--swarm-profile <profile>] [--service-identity-store <path>] [--public-health-store <path>] [--public-health-query-bind <addr>]\n",
         "       idunn restart --daemon <id> [--store <path>] [--requested-by <who>] [--detail <text>]\n",
         "       idunn redeploy --daemon <id> [--store <path>] [--requested-by <who>] [--detail <text>]\n",
-        "       idunn validate-health-admission --store <path> --daemon <id> --deployment-request-id <id> --release-id <id> --release-witness-sha256 <sha256> --source-revision <commit>\n\n",
-        "Idunn supervises owner-authenticated CultNet/RUDP health with --daemon, or a built-in swarm supervisor with --swarm-profile starfire-local or yggdrasil-local. Generic signed health requires a root-owned CultCache trust store via --daemon-health-trust-store. Unsigned idunn.daemon_health packets are diagnostic-only and cannot satisfy lifecycle health. Yggdrasil release targets that require Bifrost authorization need an explicit CultCache path via --release-authority-store; source-observed targets do not borrow that authority. The Epiphany v0 migration path additionally requires its pinned host identity. RUDP health ingress is disabled unless --rudp-health-bind is supplied. The read-only outward projection listener is disabled unless --public-health-query-bind is supplied with the dedicated public store and Idunn service identity; it serves only target-catalog authenticated-provider projection keys and never opens private Idunn state. The restart/redeploy verbs publish typed idunn.lifecycle_command.v1 records; the running supervisor claims them and executes only through its configured command boundary."
+        "       idunn validate-minimum-source-revision --daemon <fixed-id> --source-revision <commit>\n",
+        "       idunn validate-health-admission --store <path> --daemon <supported-id> --deployment-request-id <id> --release-id <id> --release-witness-sha256 <sha256> --source-revision <commit> [--activation-witness-sha256 <sha256>] [--write-admission-witness <fixed-target-path> --runtime-process-id <pid> --runtime-process-starttime-ticks <ticks>]\n",
+        "       idunn validate-runtime-admission --input <fixed-target-path> --daemon <supported-id> --deployment-request-id <id> --release-id <id> --release-witness-sha256 <sha256> --source-revision <commit> --activation-witness-sha256 <sha256> --runtime-process-id <pid> --runtime-process-starttime-ticks <ticks>\n\n",
+        "Idunn supervises owner-authenticated CultNet/RUDP health with --daemon, or a built-in swarm supervisor with --swarm-profile starfire-local or yggdrasil-local. Generic signed health requires a root-owned CultCache trust store via --daemon-health-trust-store. Unsigned idunn.daemon_health packets are diagnostic-only and cannot satisfy lifecycle health. Yggdrasil release targets that require Bifrost authorization need an explicit CultCache path via --release-authority-store; source-observed targets do not borrow that authority. The Epiphany v0 migration path additionally requires its pinned host identity. RUDP health ingress is disabled unless --rudp-health-bind is supplied. The read-only outward projection listener is disabled unless --public-health-query-bind is supplied with the dedicated public store and Idunn service identity; it serves only target-catalog authenticated-provider projection keys and never opens private Idunn state. Runtime traffic admission publication supports exactly yggdrasil-codex-connector at /etc/gamecult/codex-connector/runtime/traffic-admission.cc and yggdrasil-ghostlight at /etc/gamecult/ghostlight-dungeon/runtime/traffic-admission.cc. Each v2 grant requires exact generic warming/traffic-admission-pending health, complete release and activation lineage, and root-observed Linux PID/starttime identity. Idunn holds the Idunn-owned source store and root-owned trust-store shared locks in that fixed order from exact snapshot revalidation through root-owned grant CAS publication; the locks coordinate their respective owners and do not own the decision. It takes a fresh clock and re-observes /proc before and immediately after publication; failure revokes the grant. The grant and its sibling lock are sealed for read-only target snapshots. Ordinary health validation remains active-only, while read-side grant validation requires and re-observes the exact expected process identity. The restart/redeploy verbs publish typed idunn.lifecycle_command.v1 records; the running supervisor claims them and executes only through its configured command boundary."
     )
 }
 
@@ -7148,6 +8548,73 @@ mod tests {
             SystemReleaseStatePort.desired_revision(&release).unwrap(),
             changed_runtime_commit
         );
+    }
+
+    #[test]
+    fn minimum_source_proofs_keep_offline_continuity_independent_of_canonical_drift() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().to_path_buf();
+        let git = |args: &[&str]| {
+            let status = Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git command failed: {args:?}");
+        };
+
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.email", "idunn-test@gamecult.org"]);
+        git(&["config", "user.name", "Idunn Test"]);
+        fs::write(repo.join("body.txt"), "pre-floor\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "pre-floor"]);
+        let pre_floor = git_revision(&repo, "HEAD").unwrap();
+
+        fs::write(repo.join("body.txt"), "floor\n").unwrap();
+        git(&["commit", "-am", "floor"]);
+        let floor = git_revision(&repo, "HEAD").unwrap();
+        fs::write(repo.join("body.txt"), "candidate\n").unwrap();
+        git(&["commit", "-am", "candidate"]);
+        let candidate = git_revision(&repo, "HEAD").unwrap();
+        git(&["update-ref", "refs/remotes/origin/canonical", &candidate]);
+        const OFFLINE_ORIGIN: &str = "https://127.0.0.1:9/idunn-offline-proof.git";
+        git(&["remote", "add", "origin", OFFLINE_ORIGIN]);
+        let floor_for_policy: &'static str = Box::leak(floor.clone().into_boxed_str());
+        let policy = CompiledMinimumSourceRevisionPolicy {
+            daemon_id: "offline-test-daemon",
+            repository_full_name: "GameCult/OfflineTest",
+            canonical_repository_url: OFFLINE_ORIGIN,
+            upstream_ref: "refs/heads/canonical",
+            canonical_fetched_ref: "refs/remotes/origin/canonical",
+            repository_path: "/not-used-by-local-proof",
+            minimum_source_revision: floor_for_policy,
+        };
+
+        require_minimum_source_revision(&repo, &candidate, &policy).unwrap();
+        require_deployment_source_revision(&repo, &candidate, &policy).unwrap();
+        assert!(require_minimum_source_revision(&repo, &pre_floor, &policy).is_err());
+
+        fs::write(repo.join("body.txt"), "ahead of fetched canonical\n").unwrap();
+        git(&["commit", "-am", "ahead of fetched canonical"]);
+        let not_fetched = git_revision(&repo, "HEAD").unwrap();
+        require_minimum_source_revision(&repo, &not_fetched, &policy).unwrap();
+        assert!(require_deployment_source_revision(&repo, &not_fetched, &policy).is_err());
+
+        git(&["checkout", "-b", "unrelated", &pre_floor]);
+        fs::write(repo.join("body.txt"), "unrelated\n").unwrap();
+        git(&["commit", "-am", "unrelated"]);
+        let unrelated = git_revision(&repo, "HEAD").unwrap();
+        assert!(require_minimum_source_revision(&repo, &unrelated, &policy).is_err());
+
+        git(&[
+            "remote",
+            "set-url",
+            "origin",
+            "https://github.com/attacker/substitute.git",
+        ]);
+        assert!(require_minimum_source_revision(&repo, &candidate, &policy).is_err());
     }
 
     #[test]
@@ -7592,6 +9059,356 @@ mod tests {
         assert_eq!(validation.repository_full_name, "GameCult/Epiphany");
         assert_eq!(validation.source_revision, EPIPHANY_SHA);
         assert_eq!(validation.authority_id, authority_id);
+    }
+
+    #[test]
+    fn minimum_source_validator_cli_derives_every_authority_input_from_daemon() {
+        for (daemon_id, expected_floor) in [
+            (
+                "yggdrasil-codex-connector",
+                CODEX_CONNECTOR_MINIMUM_SOURCE_REVISION,
+            ),
+            ("yggdrasil-ghostlight", GHOSTLIGHT_MINIMUM_SOURCE_REVISION),
+        ] {
+            let options = Options::parse(
+                [
+                    "validate-minimum-source-revision",
+                    "--daemon",
+                    daemon_id,
+                    "--source-revision",
+                    expected_floor,
+                ]
+                .into_iter()
+                .map(ToString::to_string),
+            )
+            .unwrap();
+            let Mode::MinimumSourceRevisionValidation(validation) = options.mode else {
+                panic!("expected minimum-source validation posture");
+            };
+            assert_eq!(validation.daemon_id, daemon_id);
+            assert_eq!(validation.source_revision, expected_floor);
+        }
+
+        for extra in ["--store", "--repository-full-name", "--upstream-ref"] {
+            let error = Options::parse(
+                [
+                    "validate-minimum-source-revision",
+                    "--daemon",
+                    "yggdrasil-ghostlight",
+                    "--source-revision",
+                    GHOSTLIGHT_MINIMUM_SOURCE_REVISION,
+                    extra,
+                    "caller-selected",
+                ]
+                .into_iter()
+                .map(ToString::to_string),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains("accepts only --daemon and --source-revision"));
+        }
+    }
+
+    #[test]
+    fn compiled_minimum_source_policy_is_exactly_two_fixed_authorities() {
+        assert_eq!(COMPILED_MINIMUM_SOURCE_REVISION_POLICIES.len(), 2);
+        let connector =
+            compiled_minimum_source_revision_policy_for_daemon("yggdrasil-codex-connector")
+                .unwrap();
+        assert_eq!(connector.repository_full_name, "GameCult/CodexConnector");
+        assert_eq!(
+            connector.canonical_repository_url,
+            "https://github.com/GameCult/CodexConnector.git"
+        );
+        assert_eq!(
+            connector.upstream_ref,
+            "refs/heads/codex/ghostlight-release-binding"
+        );
+        assert_eq!(
+            connector.canonical_fetched_ref,
+            "refs/remotes/origin/codex/ghostlight-release-binding"
+        );
+        assert_eq!(connector.repository_path, "/srv/build/CodexConnector");
+        assert_eq!(
+            connector.minimum_source_revision,
+            "68fe94b9475823de92ed766a97ea962d48723708"
+        );
+
+        let ghostlight =
+            compiled_minimum_source_revision_policy_for_daemon("yggdrasil-ghostlight").unwrap();
+        assert_eq!(ghostlight.repository_full_name, "GameCult/Ghostlight");
+        assert_eq!(
+            ghostlight.canonical_repository_url,
+            "https://github.com/GameCult/Ghostlight.git"
+        );
+        assert_eq!(
+            ghostlight.upstream_ref,
+            "refs/heads/codex/ghostlight-dungeon-mvp"
+        );
+        assert_eq!(
+            ghostlight.canonical_fetched_ref,
+            "refs/remotes/origin/codex/ghostlight-dungeon-mvp"
+        );
+        assert_eq!(ghostlight.repository_path, "/srv/build/Ghostlight");
+        assert_eq!(
+            ghostlight.minimum_source_revision,
+            "6bb686981050e048c070376e7f7ac86d177e8f18"
+        );
+        assert!(compiled_minimum_source_revision_policy_for_daemon("yggdrasil-odin").is_none());
+    }
+
+    fn runtime_admission_cli_args(command: &str) -> Vec<String> {
+        vec![
+            command.into(),
+            "--daemon".into(),
+            IDUNN_CODEX_CONNECTOR_RUNTIME_TRAFFIC_ADMISSION_RECORD_KEY.into(),
+            "--deployment-request-id".into(),
+            "deploy-connector-1".into(),
+            "--release-id".into(),
+            "release-connector-1".into(),
+            "--release-witness-sha256".into(),
+            format!("sha256-{}", "a".repeat(64)),
+            "--source-revision".into(),
+            "b".repeat(40),
+            "--activation-witness-sha256".into(),
+            format!("sha256-{}", "c".repeat(64)),
+            "--runtime-process-id".into(),
+            "4101".into(),
+            "--runtime-process-starttime-ticks".into(),
+            "98765".into(),
+        ]
+    }
+
+    #[test]
+    fn parser_keeps_runtime_admission_issuance_on_the_fixed_probation_lane() {
+        let mut args = runtime_admission_cli_args("validate-health-admission");
+        args.extend([
+            "--store".into(),
+            "/var/lib/gamecult/idunn/idunn.keepalive.cc".into(),
+            "--write-admission-witness".into(),
+            CODEX_CONNECTOR_RUNTIME_TRAFFIC_ADMISSION_PATH.into(),
+        ]);
+        let options = Options::parse(args.into_iter()).unwrap();
+        let Mode::HealthAdmissionValidation(validation) = options.mode else {
+            panic!("expected health admission validation posture");
+        };
+        assert_eq!(
+            validation.write_admission_witness.as_deref(),
+            Some(Path::new(CODEX_CONNECTOR_RUNTIME_TRAFFIC_ADMISSION_PATH))
+        );
+        assert!(validation.activation_witness_sha256.is_some());
+        assert_eq!(
+            validation.runtime_process,
+            Some(RuntimeProcessObservation {
+                process_id: 4_101,
+                starttime_ticks: 98_765,
+            })
+        );
+
+        let mut ghostlight = runtime_admission_cli_args("validate-health-admission");
+        ghostlight[2] = IDUNN_GHOSTLIGHT_RUNTIME_TRAFFIC_ADMISSION_RECORD_KEY.into();
+        ghostlight.extend([
+            "--write-admission-witness".into(),
+            GHOSTLIGHT_RUNTIME_TRAFFIC_ADMISSION_PATH.into(),
+        ]);
+        let ghostlight = Options::parse(ghostlight.into_iter()).unwrap();
+        let Mode::HealthAdmissionValidation(ghostlight) = ghostlight.mode else {
+            panic!("expected Ghostlight health admission validation posture");
+        };
+        assert_eq!(
+            ghostlight.write_admission_witness.as_deref(),
+            Some(Path::new(GHOSTLIGHT_RUNTIME_TRAFFIC_ADMISSION_PATH))
+        );
+
+        let mut missing_activation = runtime_admission_cli_args("validate-health-admission");
+        missing_activation.drain(11..13);
+        missing_activation.extend([
+            "--write-admission-witness".into(),
+            CODEX_CONNECTOR_RUNTIME_TRAFFIC_ADMISSION_PATH.into(),
+        ]);
+        let error = Options::parse(missing_activation.into_iter())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("requires --activation-witness-sha256"));
+
+        let mut missing_process = runtime_admission_cli_args("validate-health-admission");
+        missing_process.drain(13..17);
+        missing_process.extend([
+            "--write-admission-witness".into(),
+            CODEX_CONNECTOR_RUNTIME_TRAFFIC_ADMISSION_PATH.into(),
+        ]);
+        let error = Options::parse(missing_process.into_iter())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("requires --runtime-process-id"));
+
+        let mut caller_selected = runtime_admission_cli_args("validate-health-admission");
+        caller_selected.extend([
+            "--write-admission-witness".into(),
+            "/tmp/traffic-admission.cc".into(),
+        ]);
+        let error = Options::parse(caller_selected.into_iter())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("two exact supported absolute paths"));
+
+        let mut other_daemon = runtime_admission_cli_args("validate-health-admission");
+        other_daemon[2] = "yggdrasil-other-daemon".into();
+        other_daemon.extend([
+            "--write-admission-witness".into(),
+            CODEX_CONNECTOR_RUNTIME_TRAFFIC_ADMISSION_PATH.into(),
+        ]);
+        let error = Options::parse(other_daemon.into_iter())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("daemon/path pair is unsupported"));
+
+        let error =
+            Options::parse(runtime_admission_cli_args("validate-health-admission").into_iter())
+                .unwrap_err()
+                .to_string();
+        assert!(error.contains("belongs only to runtime traffic issuance or validation"));
+    }
+
+    #[test]
+    fn runtime_admission_policy_is_exactly_two_non_substitutable_pairs() {
+        assert_eq!(
+            runtime_admission_policy_for_path(Path::new(
+                CODEX_CONNECTOR_RUNTIME_TRAFFIC_ADMISSION_PATH
+            ))
+            .unwrap(),
+            (
+                IDUNN_CODEX_CONNECTOR_RUNTIME_TRAFFIC_ADMISSION_RECORD_KEY,
+                CODEX_CONNECTOR_RUNTIME_TRAFFIC_ADMISSION_GROUP
+            )
+        );
+        assert_eq!(
+            runtime_admission_policy_for_path(Path::new(GHOSTLIGHT_RUNTIME_TRAFFIC_ADMISSION_PATH))
+                .unwrap(),
+            (
+                IDUNN_GHOSTLIGHT_RUNTIME_TRAFFIC_ADMISSION_RECORD_KEY,
+                GHOSTLIGHT_RUNTIME_TRAFFIC_ADMISSION_GROUP
+            )
+        );
+        assert!(
+            require_supported_runtime_admission_pair(
+                IDUNN_CODEX_CONNECTOR_RUNTIME_TRAFFIC_ADMISSION_RECORD_KEY,
+                Path::new(GHOSTLIGHT_RUNTIME_TRAFFIC_ADMISSION_PATH)
+            )
+            .is_err()
+        );
+        assert!(
+            require_supported_runtime_admission_pair(
+                IDUNN_GHOSTLIGHT_RUNTIME_TRAFFIC_ADMISSION_RECORD_KEY,
+                Path::new(CODEX_CONNECTOR_RUNTIME_TRAFFIC_ADMISSION_PATH)
+            )
+            .is_err()
+        );
+        assert!(
+            runtime_admission_policy_for_path(Path::new(
+                "/etc/gamecult/ghostlight-dungeon/runtime/./traffic-admission.cc"
+            ))
+            .is_err()
+        );
+        assert_eq!(
+            runtime_admission_lock_path(Path::new(GHOSTLIGHT_RUNTIME_TRAFFIC_ADMISSION_PATH)),
+            PathBuf::from(format!(
+                "{}.lock",
+                GHOSTLIGHT_RUNTIME_TRAFFIC_ADMISSION_PATH
+            ))
+        );
+        assert_eq!(
+            runtime_admission_custody_paths(Path::new(
+                CODEX_CONNECTOR_RUNTIME_TRAFFIC_ADMISSION_PATH
+            )),
+            [
+                PathBuf::from(CODEX_CONNECTOR_RUNTIME_TRAFFIC_ADMISSION_PATH),
+                PathBuf::from(format!(
+                    "{}.lock",
+                    CODEX_CONNECTOR_RUNTIME_TRAFFIC_ADMISSION_PATH
+                )),
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sealed_runtime_admission_custody_refuses_a_missing_sibling_lock() {
+        let root = tempfile::tempdir().unwrap();
+        let data_path = root.path().join("traffic-admission.cc");
+        let lock_path = runtime_admission_lock_path(&data_path);
+        let error = validate_runtime_admission_leaf(&lock_path, 0, "test", true)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("inspecting runtime traffic admission"));
+        assert!(error.contains("traffic-admission.cc.lock"));
+    }
+
+    #[test]
+    fn parser_exposes_read_only_runtime_admission_validation() {
+        let mut args = runtime_admission_cli_args("validate-runtime-admission");
+        args.extend([
+            "--input".into(),
+            CODEX_CONNECTOR_RUNTIME_TRAFFIC_ADMISSION_PATH.into(),
+        ]);
+        let options = Options::parse(args.into_iter()).unwrap();
+        let Mode::RuntimeAdmissionValidation(validation) = options.mode else {
+            panic!("expected runtime admission validation posture");
+        };
+        assert_eq!(
+            validation.input,
+            PathBuf::from(CODEX_CONNECTOR_RUNTIME_TRAFFIC_ADMISSION_PATH)
+        );
+        assert_eq!(
+            validation.daemon_id,
+            IDUNN_CODEX_CONNECTOR_RUNTIME_TRAFFIC_ADMISSION_RECORD_KEY
+        );
+        assert_eq!(validation.runtime_process.process_id, 4_101);
+        assert_eq!(validation.runtime_process.starttime_ticks, 98_765);
+
+        let mut ghostlight = runtime_admission_cli_args("validate-runtime-admission");
+        ghostlight[2] = IDUNN_GHOSTLIGHT_RUNTIME_TRAFFIC_ADMISSION_RECORD_KEY.into();
+        ghostlight.extend([
+            "--input".into(),
+            GHOSTLIGHT_RUNTIME_TRAFFIC_ADMISSION_PATH.into(),
+        ]);
+        let ghostlight = Options::parse(ghostlight.into_iter()).unwrap();
+        let Mode::RuntimeAdmissionValidation(ghostlight) = ghostlight.mode else {
+            panic!("expected Ghostlight runtime admission validation posture");
+        };
+        assert_eq!(
+            ghostlight.daemon_id,
+            IDUNN_GHOSTLIGHT_RUNTIME_TRAFFIC_ADMISSION_RECORD_KEY
+        );
+        assert_eq!(
+            ghostlight.input,
+            PathBuf::from(GHOSTLIGHT_RUNTIME_TRAFFIC_ADMISSION_PATH)
+        );
+
+        let mut substituted = runtime_admission_cli_args("validate-runtime-admission");
+        substituted.extend([
+            "--input".into(),
+            GHOSTLIGHT_RUNTIME_TRAFFIC_ADMISSION_PATH.into(),
+        ]);
+        let error = Options::parse(substituted.into_iter())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("daemon/path pair is unsupported"));
+
+        let mut missing_process = runtime_admission_cli_args("validate-runtime-admission");
+        missing_process.drain(13..17);
+        missing_process.extend([
+            "--input".into(),
+            CODEX_CONNECTOR_RUNTIME_TRAFFIC_ADMISSION_PATH.into(),
+        ]);
+        let error = Options::parse(missing_process.into_iter())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("requires --runtime-process-id"));
+        assert!(help_text().contains("validate-runtime-admission"));
+        assert!(help_text().contains(GHOSTLIGHT_RUNTIME_TRAFFIC_ADMISSION_PATH));
+        assert!(help_text().contains(IDUNN_GHOSTLIGHT_RUNTIME_TRAFFIC_ADMISSION_RECORD_KEY));
     }
 
     fn target(default_failure_state: &str, deploy_command: Option<&str>) -> DaemonTarget {
@@ -8418,7 +10235,10 @@ mod tests {
             .expect("Epiphany deploy command");
         assert!(deploy.starts_with("sudo -n /usr/local/libexec/idunn-yggdrasil deploy epiphany"));
         assert!(deploy.contains("$IDUNN_SOURCE_COMMIT"));
-        assert!(deploy.contains("$IDUNN_REQUIRES_BIFROST_AUTHORITY"));
+        assert!(deploy.contains("$IDUNN_DEPLOYMENT_REQUEST_ID"));
+        assert!(!deploy.contains("$IDUNN_REPOSITORY_FULL_NAME"));
+        assert!(!deploy.contains("$IDUNN_UPSTREAM_REF"));
+        assert!(!deploy.contains("$IDUNN_REQUIRES_BIFROST_AUTHORITY"));
 
         let release = epiphany.release.as_ref().expect("Epiphany release target");
         assert_eq!(release.repo, "Epiphany");
@@ -8456,12 +10276,21 @@ mod tests {
         assert_eq!(
             capstone_17.deploy_command.as_deref(),
             Some(
-                "sudo -n /usr/local/libexec/idunn-yggdrasil deploy epiphany-capstone-17 \"$IDUNN_SOURCE_COMMIT\" \"$IDUNN_REPOSITORY_FULL_NAME\" \"$IDUNN_UPSTREAM_REF\" \"$BIFROST_RELEASE_AUTHORITY_ID\" \"$BIFROST_RELEASE_AUTHORITY_SHA256\" \"$IDUNN_DEPLOYMENT_REQUEST_ID\" \"$IDUNN_REQUIRES_BIFROST_AUTHORITY\""
+                "sudo -n /usr/local/libexec/idunn-yggdrasil deploy epiphany-capstone-17 \"$IDUNN_SOURCE_COMMIT\" \"$IDUNN_DEPLOYMENT_REQUEST_ID\" \"$BIFROST_RELEASE_AUTHORITY_ID\" \"$BIFROST_RELEASE_AUTHORITY_SHA256\""
             )
         );
-        let capstone_17_release = capstone_17.release.as_ref().expect("Capstone 17 release target");
-        assert_eq!(capstone_17_release.rollout_strategy, "fresh-container-capstone");
-        assert_eq!(capstone_17_release.artifact_strategy, "immutable-docker-image-id");
+        let capstone_17_release = capstone_17
+            .release
+            .as_ref()
+            .expect("Capstone 17 release target");
+        assert_eq!(
+            capstone_17_release.rollout_strategy,
+            "fresh-container-capstone"
+        );
+        assert_eq!(
+            capstone_17_release.artifact_strategy,
+            "immutable-docker-image-id"
+        );
         assert!(capstone_17_release.source_change_pathspecs.is_empty());
         assert_eq!(
             capstone_17_release.artifact_witness_root,
@@ -8510,9 +10339,10 @@ mod tests {
     }
 
     #[test]
-    fn yggdrasil_service_and_root_actuator_advertise_epiphany_release_boundary() {
+    fn yggdrasil_service_and_root_actuator_hold_the_privileged_release_boundary() {
         let unit = include_str!("../../../scripts/linux/idunn-yggdrasil.service");
         let actuator = include_str!("../../../scripts/linux/idunn-yggdrasil");
+        let sudoers = include_str!("../../../scripts/linux/idunn-yggdrasil.sudoers");
 
         assert!(unit.contains(
             "--release-authority-store /srv/bifrost/state/repository-release-authority.cc"
@@ -8530,7 +10360,15 @@ mod tests {
                 .any(|line| line == "ReadWritePaths=/var/lib/gamecult/idunn-authority")
         );
         assert!(unit.contains("/etc/gamecult/codex-connector"));
-        assert!(unit.contains("/etc/gamecult/ghostlight"));
+        assert!(
+            unit.split_ascii_whitespace()
+                .any(|entry| entry == "/etc/gamecult/ghostlight-dungeon")
+        );
+        assert!(
+            !unit
+                .split_ascii_whitespace()
+                .any(|entry| entry == "/etc/gamecult/ghostlight")
+        );
         assert!(unit.contains("/etc/systemd/system/codex-connector.service"));
         assert!(unit.contains("/etc/systemd/system/epiphany-swarm.service"));
         assert!(unit.contains("/etc/systemd/system/ghostlight-dungeon.service"));
@@ -8539,27 +10377,90 @@ mod tests {
             !unit.contains("--deployment-brake-store /var/lib/gamecult/idunn/deployment-brake.cc")
         );
         assert!(!unit.contains("--trusted-epiphany-health-identity-store"));
-        assert!(actuator.contains("deploy:epiphany|restart:epiphany|deploy:epiphany-capstone-17"));
+        assert!(actuator.contains("deploy:voidbot|deploy:epiphany|deploy:epiphany-capstone-17"));
         assert!(actuator.contains("/usr/local/bin/idunn validate-release-authority"));
-        assert!(
-            actuator.contains("bifrost-persona-feedback) target_requires_bifrost_authority=true")
-        );
-        assert!(actuator.contains(
-            "epiphany|epiphany-capstone-17|voidbot|heimdall|repixelizer|streampixels|odin|codex-connector|ghostlight|gjallar) target_requires_bifrost_authority=false"
-        ));
-        assert!(
+        assert!(actuator.contains("bifrost-persona-feedback)"));
+        assert!(actuator.contains("requires_bifrost_authority=true"));
+        assert!(actuator.contains("repository_full_name=GameCult/Bifrost"));
+        assert!(actuator.contains("daemon_id=yggdrasil-bifrost-persona-feedback"));
+        assert!(actuator.contains("deployment-brake-status"));
+        assert!(actuator.contains("/usr/local/bin/idunn validate-minimum-source-revision"));
+        assert_eq!(
             actuator
-                .contains("caller release-authority mode does not match root policy for $target")
+                .matches("minimum_source_revision_required=true")
+                .count(),
+            2
         );
+        assert!(!actuator.contains(CODEX_CONNECTOR_MINIMUM_SOURCE_REVISION));
+        assert!(!actuator.contains(GHOSTLIGHT_MINIMUM_SOURCE_REVISION));
+        assert!(actuator.contains("--release-id \"$source_commit\""));
+        assert!(actuator.contains("--deployment-id \"$deployment_request_id\""));
+        assert!(actuator.contains("\"deploy:$daemon_id:\"?*|\"manual:redeploy:$daemon_id:\"?*"));
+        assert!(actuator.contains("require_root_owned_regular_path \"$manifest\""));
+        assert!(actuator.contains("[ -L \"$component\" ]"));
+        assert!(actuator.contains("[ -f \"$component\" ]"));
+        assert!(actuator.contains("[ \"$owner\" = 0 ]"));
+        assert!(actuator.contains("group/world-writable"));
+        assert!(actuator.contains("exec 9<\"$brake_lock\""));
+        assert!(actuator.contains("/usr/bin/flock --shared 9"));
+        assert!(
+            actuator.contains(
+                "generation_lock=/var/lib/gamecult/idunn-authority/idunn-generation.lock"
+            )
+        );
+        assert!(actuator.contains("require_root_owned_regular_path \"$generation_lock\""));
+        assert!(actuator.contains("exec 8<\"$generation_lock\""));
+        assert!(actuator.contains("/usr/bin/flock --shared 8"));
+        assert!(actuator.contains("run_manifest_while_holding_authority_locks"));
+        assert!(actuator.contains("/usr/bin/setsid \"$@\" 8<&- 9<&- &"));
+        assert!(!actuator.contains("/usr/bin/setsid \"$@\" 9<&- &"));
+        assert!(!actuator.contains("/usr/bin/setsid \"$@\" &"));
+        assert!(actuator.contains("kill -s \"$1\" \"-$manifest_pid\""));
+        assert!(actuator.contains("wait \"$manifest_pid\""));
+        assert!(actuator.contains("manifest_descendants_leaked"));
+        assert!(!actuator.contains("exec \"$manifest\""));
+        assert_eq!(
+            actuator
+                .matches("require_root_owned_regular_path \"$compose\"")
+                .count(),
+            3
+        );
+        assert!(actuator.contains("[ \"$#\" -eq 6 ]"));
+        assert!(actuator.contains("[ \"$#\" -eq 2 ]"));
+        assert!(!actuator.contains("target_requires_bifrost_authority"));
         let policy_derivation = actuator
-            .find("target_requires_bifrost_authority=true")
+            .find("requires_bifrost_authority=true")
             .expect("root target policy");
-        let caller_mode_branch = actuator
+        let derived_mode_branch = actuator
             .find("case \"$requires_bifrost_authority\" in")
             .expect("authority mode branch");
+        let minimum_source_validation = actuator
+            .find("validate-minimum-source-revision")
+            .expect("minimum-source boundary");
+        let deployment_brake_validation = actuator
+            .find("deployment-brake-status")
+            .expect("deployment-brake boundary");
+        let manifest_execution = actuator
+            .find("run_manifest_while_holding_authority_locks")
+            .expect("manifest execution boundary");
+        let generation_lock_acquisition = actuator
+            .rfind("acquire_idunn_generation_lock")
+            .expect("generation-lock acquisition");
+        let target_dispatch = actuator
+            .find("case \"$action:$target\" in")
+            .expect("target dispatch");
         assert!(
-            policy_derivation < caller_mode_branch,
-            "root target policy must be derived before the authority mode is trusted"
+            policy_derivation < derived_mode_branch,
+            "root target policy must be derived before its mode is consumed"
+        );
+        assert!(
+            deployment_brake_validation < minimum_source_validation
+                && minimum_source_validation < manifest_execution,
+            "compiled minimum-source proof must run after brake admission and before actuation"
+        );
+        assert!(
+            generation_lock_acquisition < target_dispatch,
+            "generation lock must be acquired before any target dispatch"
         );
         assert!(actuator.contains("IDUNN_SOURCE_COMMIT=\"$source_commit\""));
         assert!(
@@ -8568,6 +10469,64 @@ mod tests {
         assert!(
             actuator.contains("IDUNN_REQUIRES_BIFROST_AUTHORITY=\"$requires_bifrost_authority\"")
         );
+        assert!(sudoers.contains("Cmnd_Alias IDUNN_YGGDRASIL_DEPLOY"));
+        assert!(sudoers.contains("/usr/local/libexec/idunn-yggdrasil deploy ghostlight *"));
+        assert!(sudoers.contains("/usr/local/libexec/idunn-yggdrasil restart ghostlight"));
+        assert!(!sudoers.contains("/usr/local/libexec/idunn-yggdrasil *"));
+    }
+
+    #[test]
+    fn yggdrasil_root_actuator_policy_matches_every_typed_release_target() {
+        let targets = swarm_targets(&SwarmOptions {
+            profile: "yggdrasil-local".to_string(),
+            repo_root: PathBuf::from("/srv/odin/source"),
+        })
+        .expect("yggdrasil-local targets");
+        let actuator = include_str!("../../../scripts/linux/idunn-yggdrasil");
+        let sudoers = include_str!("../../../scripts/linux/idunn-yggdrasil.sudoers");
+
+        for target in targets.iter().filter(|target| target.release.is_some()) {
+            let actuator_name = target
+                .daemon_id
+                .strip_prefix("yggdrasil-")
+                .expect("Yggdrasil daemon id");
+            let release = target.release.as_ref().unwrap();
+            let policy_marker = format!("    {actuator_name})");
+            let policy = actuator
+                .split_once(policy_marker.as_str())
+                .unwrap_or_else(|| panic!("missing root policy for {actuator_name}"))
+                .1
+                .split_once(";;")
+                .expect("bounded root target policy")
+                .0;
+            let expected_daemon = format!("daemon_id={}", target.daemon_id);
+            let expected_repository =
+                format!("repository_full_name={}", release.repository_full_name);
+            let expected_ref = format!("upstream_ref=refs/heads/{}", release.upstream_branch);
+            let expected_authority = format!(
+                "requires_bifrost_authority={}",
+                release.requires_bifrost_authority
+            );
+            let expected_deploy_case = format!("deploy:{actuator_name}");
+            let expected_sudo_deploy =
+                format!("/usr/local/libexec/idunn-yggdrasil deploy {actuator_name} *");
+            assert!(policy.contains(expected_daemon.as_str()));
+            assert!(policy.contains(expected_repository.as_str()));
+            assert!(policy.contains(expected_ref.as_str()));
+            assert!(policy.contains(expected_authority.as_str()));
+            if release.minimum_source_revision.is_some() {
+                assert!(policy.contains("minimum_source_revision_required=true"));
+            } else {
+                assert!(!policy.contains("minimum_source_revision_required=true"));
+            }
+            assert!(actuator.contains(expected_deploy_case.as_str()));
+            assert!(sudoers.contains(expected_sudo_deploy.as_str()));
+            if target.restart_command.is_some() {
+                let expected_sudo_restart =
+                    format!("/usr/local/libexec/idunn-yggdrasil restart {actuator_name}");
+                assert!(sudoers.contains(expected_sudo_restart.as_str()));
+            }
+        }
     }
 
     #[test]
@@ -8577,6 +10536,7 @@ mod tests {
             repo_root: PathBuf::from("/srv/odin/source"),
         })
         .expect("yggdrasil-local targets");
+        let actuator = include_str!("../../../scripts/linux/idunn-yggdrasil");
 
         for (daemon_id, repo, branch, witness, actuator_name, restart_on_missing) in [
             (
@@ -8590,7 +10550,7 @@ mod tests {
             (
                 "yggdrasil-codex-connector",
                 "CodexConnector",
-                "main",
+                "codex/ghostlight-release-binding",
                 "/srv/codex-connector/deploy/deployment.env",
                 "codex-connector",
                 true,
@@ -8647,10 +10607,14 @@ mod tests {
             assert!(target.enabled);
         }
 
-        let actuator = include_str!("../../../scripts/linux/idunn-yggdrasil");
-        assert!(actuator.contains("deploy:odin|restart:odin"));
-        assert!(actuator.contains("deploy:codex-connector|restart:codex-connector"));
-        assert!(actuator.contains("deploy:ghostlight|restart:ghostlight"));
+        assert!(actuator.contains(
+            "deploy:epiphany-capstone-17|deploy:odin|deploy:codex-connector|deploy:ghostlight"
+        ));
+        assert!(
+            actuator.contains(
+                "restart:epiphany|restart:odin|restart:codex-connector|restart:ghostlight"
+            )
+        );
         assert!(actuator.contains("restart:heimdall"));
         assert!(actuator.contains("deploy:heimdall"));
         assert!(actuator.contains("restart:gjallar"));
@@ -8931,7 +10895,7 @@ mod tests {
         assert_eq!(
             target.deploy_command.as_deref(),
             Some(
-                "sudo -n /usr/local/libexec/idunn-yggdrasil deploy bifrost-persona-feedback \"$IDUNN_SOURCE_COMMIT\" \"$IDUNN_REPOSITORY_FULL_NAME\" \"$IDUNN_UPSTREAM_REF\" \"$BIFROST_RELEASE_AUTHORITY_ID\" \"$BIFROST_RELEASE_AUTHORITY_SHA256\" \"$IDUNN_DEPLOYMENT_REQUEST_ID\" \"$IDUNN_REQUIRES_BIFROST_AUTHORITY\""
+                "sudo -n /usr/local/libexec/idunn-yggdrasil deploy bifrost-persona-feedback \"$IDUNN_SOURCE_COMMIT\" \"$IDUNN_DEPLOYMENT_REQUEST_ID\" \"$BIFROST_RELEASE_AUTHORITY_ID\" \"$BIFROST_RELEASE_AUTHORITY_SHA256\""
             )
         );
         assert!(target.restart_command.is_none());
@@ -9765,6 +11729,7 @@ mod tests {
             signature_algorithm: "ed25519".into(),
             signature: Vec::new(),
             private_state_exposed: false,
+            activation_witness_sha256: release_bound.then(|| format!("sha256-{}", "f".repeat(64))),
         };
         let unsigned = rmp_serde::to_vec(&statement).unwrap();
         statement.signature = signer
@@ -9863,6 +11828,33 @@ mod tests {
         }
     }
 
+    fn legacy_generic_signed_health_fixture() -> (CultNetMessage, CommonOptions, tempfile::TempDir)
+    {
+        let (mut message, options, root) = generic_signed_health_fixture(1);
+        let CultNetMessage::DocumentPutRaw { document, .. } = &mut message else {
+            unreachable!()
+        };
+        let mut legacy: IdunnSignedDaemonHealthRecord =
+            rmp_serde::from_slice(&document.payload).unwrap();
+        legacy.activation_witness_sha256 = None;
+        legacy.signature.clear();
+        let mut unsigned = rmp_serde::to_vec(&legacy).unwrap();
+        assert_eq!(&unsigned[..3], &[0xdc, 0, 18]);
+        assert_eq!(unsigned.pop(), Some(0xc0));
+        unsigned[2] = 17;
+        let signer = open_service_identity_at::<GameCultProviderHealthIdentity>(
+            &root.path().join("provider-health-identity.cc"),
+        )
+        .unwrap();
+        legacy.signature = signer
+            .sign::<IdunnSignedDaemonHealthPurpose>(&unsigned)
+            .signature;
+        document.payload = rmp_serde::to_vec(&legacy).unwrap();
+        assert_eq!(document.payload.pop(), Some(0xc0));
+        document.payload[2] = 17;
+        (message, options, root)
+    }
+
     #[test]
     fn generic_signed_health_requires_root_binding_and_monotonic_admission() {
         let (first, options, _root) = generic_signed_health_fixture(1);
@@ -9885,6 +11877,7 @@ mod tests {
                 .expect("generic admission");
             assert_eq!(admission.publisher_sequence, 1);
             assert_eq!(admission.trust_binding_id, "root/test-daemon/health");
+            assert_eq!(admission.activation_witness_sha256, None);
             let statement = node
                 .get::<IdunnSignedDaemonHealthRecord>(&admission.daemon_id)?
                 .expect("signed statement");
@@ -9948,6 +11941,29 @@ mod tests {
             document.payload[0] ^= 1;
         }
         assert!(health_from_rudp_message(&forged, &options).is_err());
+    }
+
+    #[test]
+    fn legacy_generic_health_remains_admissible_without_activation_authority() {
+        let (message, options, _root) = legacy_generic_signed_health_fixture();
+        let raw_payload = match &message {
+            CultNetMessage::DocumentPutRaw { document, .. } => document.payload.clone(),
+            _ => unreachable!(),
+        };
+        let lock = Arc::new(Mutex::new(()));
+        admit_health_from_rudp_message(&message, &options, &lock, "2026-07-19T12:00:01Z").unwrap();
+        with_store_node(&options, &lock, |node| {
+            let admission = node
+                .get::<IdunnAuthenticatedDaemonHealthAdmissionRecord>("test-daemon")?
+                .expect("legacy generic admission");
+            assert_eq!(admission.activation_witness_sha256, None);
+            assert_eq!(
+                admission.signed_health_sha256,
+                format!("sha256-{:x}", Sha256::digest(&raw_payload))
+            );
+            Ok(())
+        })
+        .unwrap();
     }
 
     #[test]
@@ -10181,15 +12197,240 @@ mod tests {
             release_id: "release-test-1".into(),
             release_witness_sha256: format!("sha256-{}", "a".repeat(64)),
             source_commit: "b".repeat(40),
+            activation_witness_sha256: Some(format!("sha256-{}", "f".repeat(64))),
+            write_admission_witness: None,
+            runtime_process: None,
         };
         validate_health_admission_at(&exact, &options, "2026-07-19T12:00:02Z").unwrap();
 
-        let mut substituted = exact;
+        let mut substituted = exact.clone();
         substituted.release_witness_sha256 = format!("sha256-{}", "f".repeat(64));
         let error = validate_health_admission_at(&substituted, &options, "2026-07-19T12:00:02Z")
             .unwrap_err()
             .to_string();
         assert!(error.contains("does not prove the exact active candidate"));
+        substituted.release_witness_sha256 = format!("sha256-{}", "a".repeat(64));
+        substituted.activation_witness_sha256 = Some(format!("sha256-{}", "e".repeat(64)));
+        let error = validate_health_admission_at(&substituted, &options, "2026-07-19T12:00:02Z")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("does not prove the exact active candidate"));
+
+        with_store_node(&options, &lock, |node| {
+            let mut admission = node
+                .get::<IdunnAuthenticatedDaemonHealthAdmissionRecord>("test-daemon")?
+                .expect("authenticated admission");
+            admission.release_id = Some("caller-substituted-release".into());
+            node.put(&admission.daemon_id, &admission)?;
+            Ok(())
+        })
+        .unwrap();
+        let mut forged_expected = exact;
+        forged_expected.release_id = "caller-substituted-release".into();
+        let error =
+            validate_health_admission_at(&forged_expected, &options, "2026-07-19T12:00:02Z")
+                .unwrap_err()
+                .to_string();
+        assert!(error.contains("no fresh authenticated health admission"));
+    }
+
+    fn runtime_traffic_admission_record_fixture() -> IdunnRuntimeTrafficAdmissionRecord {
+        IdunnRuntimeTrafficAdmissionRecord {
+            schema_version: IDUNN_RUNTIME_TRAFFIC_ADMISSION_SCHEMA.into(),
+            daemon_id: IDUNN_CODEX_CONNECTOR_RUNTIME_TRAFFIC_ADMISSION_RECORD_KEY.into(),
+            release_id: "release-connector-1".into(),
+            release_witness_sha256: format!("sha256-{}", "a".repeat(64)),
+            source_commit: "b".repeat(40),
+            deployment_id: "deploy-connector-1".into(),
+            activation_witness_sha256: format!("sha256-{}", "c".repeat(64)),
+            signed_health_sha256: format!("sha256-{}", "d".repeat(64)),
+            publisher_incarnation_id: "connector/boot-7/process-11".into(),
+            publisher_sequence: 42,
+            signer_identity_id: "connector-health-signer".into(),
+            runtime_process_id: 4_101,
+            runtime_process_starttime_ticks: 98_765,
+        }
+    }
+
+    fn runtime_admission_validation_fixture() -> RuntimeAdmissionValidationOptions {
+        let record = runtime_traffic_admission_record_fixture();
+        RuntimeAdmissionValidationOptions {
+            input: PathBuf::from(CODEX_CONNECTOR_RUNTIME_TRAFFIC_ADMISSION_PATH),
+            daemon_id: record.daemon_id,
+            deployment_request_id: record.deployment_id,
+            release_id: record.release_id,
+            release_witness_sha256: record.release_witness_sha256,
+            source_commit: record.source_commit,
+            activation_witness_sha256: record.activation_witness_sha256,
+            runtime_process: RuntimeProcessObservation {
+                process_id: record.runtime_process_id,
+                starttime_ticks: record.runtime_process_starttime_ticks,
+            },
+        }
+    }
+
+    #[test]
+    fn runtime_admission_lineage_refuses_stale_grant_replay() {
+        let record = runtime_traffic_admission_record_fixture();
+        let exact = runtime_admission_validation_fixture();
+        validate_runtime_admission_lineage(&record, &exact).unwrap();
+
+        let mut next_deployment = exact;
+        next_deployment.deployment_request_id = "deploy-connector-2".into();
+        next_deployment.activation_witness_sha256 = format!("sha256-{}", "e".repeat(64));
+        let error = validate_runtime_admission_lineage(&record, &next_deployment)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("exact expected release tuple"));
+
+        let mut next_process = runtime_admission_validation_fixture();
+        next_process.runtime_process.starttime_ticks += 1;
+        let error = validate_runtime_admission_lineage(&record, &next_process)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("exact expected release tuple"));
+    }
+
+    #[test]
+    fn linux_proc_stat_parser_reads_exact_pid_and_field_22() {
+        let stat =
+            "4101 (connector worker ) odd) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 98765 20";
+        assert_eq!(
+            parse_linux_proc_stat_starttime_ticks(stat, 4_101).unwrap(),
+            98_765
+        );
+        assert!(parse_linux_proc_stat_starttime_ticks(stat, 4_102).is_err());
+        assert!(parse_linux_proc_stat_starttime_ticks("4101 worker S 1", 4_101).is_err());
+        assert!(
+            parse_linux_proc_stat_starttime_ticks(
+                "4101 (worker) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 0",
+                4_101
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn runtime_admission_mutation_authority_is_root_only() {
+        require_runtime_admission_writer_uid(0).unwrap();
+        let error = require_runtime_admission_writer_uid(1)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("requires root"));
+    }
+
+    fn warming_authenticated_runtime_admission_fixture()
+    -> IdunnAuthenticatedDaemonHealthAdmissionRecord {
+        let grant = runtime_traffic_admission_record_fixture();
+        IdunnAuthenticatedDaemonHealthAdmissionRecord {
+            schema_version: IDUNN_AUTHENTICATED_DAEMON_HEALTH_ADMISSION_SCHEMA.into(),
+            daemon_id: grant.daemon_id,
+            health_contract: "codex-connector.authenticated-health".into(),
+            source_runtime_id: "codex-connector".into(),
+            state: "warming".into(),
+            observed_at_unix_millis: 1_788_200_000_000,
+            admitted_at_unix_millis: 1_788_200_000_001,
+            trust_binding_id: "root/yggdrasil-codex-connector/health".into(),
+            trust_binding_sha256: format!("sha256-{}", "e".repeat(64)),
+            signer_identity_id: grant.signer_identity_id,
+            publisher_incarnation_id: grant.publisher_incarnation_id,
+            publisher_sequence: grant.publisher_sequence,
+            signed_health_sha256: grant.signed_health_sha256,
+            release_id: Some(grant.release_id),
+            release_witness_sha256: Some(grant.release_witness_sha256),
+            source_commit: Some(grant.source_commit),
+            deployment_id: Some(grant.deployment_id),
+            private_state_exposed: false,
+            activation_witness_sha256: Some(grant.activation_witness_sha256),
+        }
+    }
+
+    #[test]
+    fn runtime_admission_probation_is_warming_pending_only() {
+        assert!(validate_health_admission_posture("active", "ready", false).is_ok());
+        assert!(validate_health_admission_posture("warming", "ready", false).is_err());
+        assert!(
+            validate_health_admission_posture(
+                "warming",
+                RUNTIME_TRAFFIC_ADMISSION_PENDING_DETAIL,
+                true
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_health_admission_posture(
+                "active",
+                RUNTIME_TRAFFIC_ADMISSION_PENDING_DETAIL,
+                true
+            )
+            .is_err()
+        );
+        assert!(validate_health_admission_posture("warming", "ready", true).is_err());
+    }
+
+    #[test]
+    fn runtime_admission_is_derived_only_from_complete_authenticated_lineage() {
+        let admission = warming_authenticated_runtime_admission_fixture();
+        let process = RuntimeProcessObservation {
+            process_id: 4_101,
+            starttime_ticks: 98_765,
+        };
+        admission.validate().unwrap();
+        assert_eq!(
+            runtime_traffic_admission_from(&admission, process).unwrap(),
+            runtime_traffic_admission_record_fixture()
+        );
+
+        let mut missing_activation = admission.clone();
+        missing_activation.activation_witness_sha256 = None;
+        assert!(runtime_traffic_admission_from(&missing_activation, process).is_err());
+
+        let mut active = admission;
+        active.state = "active".into();
+        assert!(runtime_traffic_admission_from(&active, process).is_err());
+
+        let mut ghostlight = warming_authenticated_runtime_admission_fixture();
+        ghostlight.daemon_id = IDUNN_GHOSTLIGHT_RUNTIME_TRAFFIC_ADMISSION_RECORD_KEY.into();
+        let activation = ghostlight.activation_witness_sha256.clone().unwrap();
+        let ghostlight = runtime_traffic_admission_from(&ghostlight, process).unwrap();
+        assert_eq!(
+            ghostlight.daemon_id,
+            IDUNN_GHOSTLIGHT_RUNTIME_TRAFFIC_ADMISSION_RECORD_KEY
+        );
+        assert_eq!(ghostlight.activation_witness_sha256, activation);
+    }
+
+    #[test]
+    fn runtime_admission_snapshot_is_exact_and_canonical() {
+        let record = runtime_traffic_admission_record_fixture();
+        let envelope = CultCacheEnvelope {
+            key: record.daemon_id.clone(),
+            r#type: IdunnRuntimeTrafficAdmissionRecord::TYPE.into(),
+            payload: rmp_serde::to_vec(&record).unwrap(),
+            stored_at: "2026-09-02T12:00:00Z".into(),
+            schema_id: Some(IDUNN_RUNTIME_TRAFFIC_ADMISSION_SCHEMA.into()),
+        };
+        assert_eq!(
+            decode_runtime_traffic_admission_snapshot(std::slice::from_ref(&envelope)).unwrap(),
+            record
+        );
+
+        let mut wrong_schema = envelope.clone();
+        wrong_schema.schema_id = Some("idunn.runtime_traffic_admission.v0".into());
+        assert!(decode_runtime_traffic_admission_snapshot(&[wrong_schema]).is_err());
+
+        let mut invalid_timestamp = envelope.clone();
+        invalid_timestamp.stored_at = "caller-selected-time".into();
+        assert!(decode_runtime_traffic_admission_snapshot(&[invalid_timestamp]).is_err());
+
+        let mut named = envelope.clone();
+        named.payload = rmp_serde::to_vec_named(&record).unwrap();
+        let error = decode_runtime_traffic_admission_snapshot(&[named])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("canonical positional MessagePack"));
+
+        assert!(decode_runtime_traffic_admission_snapshot(&[envelope.clone(), envelope]).is_err());
     }
 
     #[test]
@@ -10264,6 +12505,7 @@ mod tests {
             source_commit: None,
             deployment_id: None,
             private_state_exposed: false,
+            activation_witness_sha256: None,
         };
 
         let mut same_incarnation = existing.clone();
@@ -10337,6 +12579,70 @@ mod tests {
                 .projection_source
                 .unwrap();
         (options, lock, desired, source, publisher, root)
+    }
+
+    #[test]
+    fn runtime_issuance_frozen_trust_snapshot_refuses_same_tuple_signer_rotation() {
+        let (options, _lock, desired, source, _publisher, _root) = projection_fixture(false);
+        let candidate = RuntimeTrafficIssuanceCandidate {
+            grant: runtime_traffic_admission_record_fixture(),
+            desired,
+            source,
+        };
+        let trust_path = options.daemon_health_trust_store_path.as_ref().unwrap();
+        let snapshot = SingleFileMessagePackBackingStore::new(trust_path)
+            .pull_all_read_only_snapshot()
+            .unwrap();
+        validate_runtime_traffic_issuance_trust_snapshot(&snapshot, &candidate).unwrap();
+
+        let mut rotated = candidate.source.binding.clone();
+        rotated.signer_public_key = vec![29; 32];
+        rotated.signer_identity_id = derive_service_identity_id::<GameCultProviderHealthIdentity>(
+            &rotated.signer_public_key,
+        )
+        .unwrap();
+        rotated.bound_at_unix_millis += 1;
+        rotated.validate().unwrap();
+        let mut rotated_snapshot = snapshot;
+        let binding_envelope = rotated_snapshot
+            .iter_mut()
+            .find(|entry| entry.r#type == IdunnDaemonHealthTrustBindingRecord::TYPE)
+            .unwrap();
+        binding_envelope.payload = rmp_serde::to_vec(&rotated).unwrap();
+        assert!(
+            validate_runtime_traffic_issuance_trust_snapshot(&rotated_snapshot, &candidate)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn runtime_issuance_freshness_uses_the_locked_mint_clock() {
+        let (_options, _lock, desired, source, _publisher, _root) = projection_fixture(false);
+        let admission = source.admission;
+        let freshness_limit =
+            admission.observed_at_unix_millis + u64::from(desired.max_silence_seconds) * 1_000;
+        validate_runtime_traffic_issuance_freshness(
+            &desired,
+            &admission,
+            &timestamp_from_unix_millis(freshness_limit).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            validate_runtime_traffic_issuance_freshness(
+                &desired,
+                &admission,
+                &timestamp_from_unix_millis(freshness_limit + 1).unwrap(),
+            )
+            .is_err()
+        );
+        assert!(
+            validate_runtime_traffic_issuance_freshness(
+                &desired,
+                &admission,
+                &timestamp_from_unix_millis(admission.admitted_at_unix_millis - 1).unwrap(),
+            )
+            .is_err()
+        );
     }
 
     fn public_projection(
@@ -11006,6 +13312,9 @@ mod tests {
                 release_id: "release-test".into(),
                 release_witness_sha256: format!("sha256-{}", "a".repeat(64)),
                 source_commit: "b".repeat(40),
+                activation_witness_sha256: None,
+                write_admission_witness: None,
+                runtime_process: None,
             },
             &options,
             "2026-07-16T00:01:02Z",
@@ -11039,6 +13348,9 @@ mod tests {
                 release_id: "release-test".into(),
                 release_witness_sha256: format!("sha256-{}", "a".repeat(64)),
                 source_commit: "b".repeat(40),
+                activation_witness_sha256: None,
+                write_admission_witness: None,
+                runtime_process: None,
             },
             &options,
             "2026-07-16T00:01:03Z",
@@ -11083,6 +13395,9 @@ mod tests {
                 release_id: "release-test".into(),
                 release_witness_sha256: format!("sha256-{}", "a".repeat(64)),
                 source_commit: "b".repeat(40),
+                activation_witness_sha256: None,
+                write_admission_witness: None,
+                runtime_process: None,
             },
             &options,
             "2026-07-16T00:02:00Z",
@@ -11241,6 +13556,9 @@ mod tests {
                 release_id: "release-test".into(),
                 release_witness_sha256: format!("sha256-{}", "a".repeat(64)),
                 source_commit: "b".repeat(40),
+                activation_witness_sha256: None,
+                write_admission_witness: None,
+                runtime_process: None,
             },
             &options,
             "2026-07-16T00:01:03Z",
@@ -11293,6 +13611,9 @@ mod tests {
                 release_id: "release-test".into(),
                 release_witness_sha256: format!("sha256-{}", "a".repeat(64)),
                 source_commit: "b".repeat(40),
+                activation_witness_sha256: None,
+                write_admission_witness: None,
+                runtime_process: None,
             },
             &options,
         )
