@@ -12424,9 +12424,10 @@ mod tests {
         invalid_timestamp.stored_at = "caller-selected-time".into();
         assert!(decode_runtime_traffic_admission_snapshot(&[invalid_timestamp]).is_err());
 
-        let mut named = envelope.clone();
-        named.payload = rmp_serde::to_vec_named(&record).unwrap();
-        let error = decode_runtime_traffic_admission_snapshot(&[named])
+        let mut noncanonical = envelope.clone();
+        assert_eq!(noncanonical.payload.first(), Some(&0x9d));
+        noncanonical.payload.splice(0..1, [0xdc, 0, 13]);
+        let error = decode_runtime_traffic_admission_snapshot(&[noncanonical])
             .unwrap_err()
             .to_string();
         assert!(error.contains("canonical positional MessagePack"));
