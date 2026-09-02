@@ -1026,11 +1026,14 @@ recipe_path = "deployment/idunn/recipe.toml"
 [runners.rust]
 driver = "docker"
 image = "rust@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+user = "1000:1000"
 affordances = ["source-read", "artifact-write"]
 allowed_programs = ["cargo"]
 network_profile = "build-dependency-egress"
 memory_mebibytes = 2048
 cpu_quota_percent = 200
+pids_limit = 512
+tmpfs_mebibytes = 512
 
 [workload]
 driver = "systemd-transient"
@@ -1066,9 +1069,6 @@ reload_unit = "nginx.service"
 [brakes]
 deployment_store = "/var/lib/gamecult/idunn/service-deployment-brake.cc"
 lifecycle_store = "/var/lib/gamecult/idunn/service-lifecycle-brake.cc"
-
-[state_transition]
-policy = "preserve"
 
 [rollout]
 strategy = "candidate-then-promote"

@@ -205,7 +205,13 @@ fn parse_serve(mut args: impl Iterator<Item = String>) -> Result<Command> {
     }
     ensure!(options.poll_millis > 0, "--poll-millis must be positive");
     options.source_identity = match (source_uid, source_gid) {
-        (Some(uid), Some(gid)) => Some(ProcessIdentity { uid, gid }),
+        (Some(uid), Some(gid)) => {
+            ensure!(
+                uid > 0 && gid > 0,
+                "source UID and GID must be unprivileged"
+            );
+            Some(ProcessIdentity { uid, gid })
+        }
         (None, None) => None,
         _ => bail!("--source-uid and --source-gid must be supplied together"),
     };

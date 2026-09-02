@@ -262,8 +262,6 @@ pub struct OperatorBinding {
     #[serde(default)]
     pub process_write_lease: Option<ProcessWriteLeaseBinding>,
     pub brakes: BrakeBinding,
-    #[serde(default)]
-    pub state_transition: Option<StateTransitionBinding>,
     pub rollout: RolloutBinding,
     pub placement: PlacementBinding,
     #[serde(default)]
@@ -306,6 +304,7 @@ pub struct GitlinkBinding {
 pub struct RunnerBinding {
     pub driver: RunnerDriver,
     pub image: String,
+    pub user: String,
     #[serde(default)]
     pub affordances: BTreeSet<RunnerAffordance>,
     pub cache_root: Option<PathBuf>,
@@ -319,6 +318,8 @@ pub struct RunnerBinding {
     pub network_profile: Option<String>,
     pub memory_mebibytes: u32,
     pub cpu_quota_percent: u32,
+    pub pids_limit: u32,
+    pub tmpfs_mebibytes: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -404,22 +405,6 @@ impl ProcessWriteLeaseBinding {
 pub struct BrakeBinding {
     pub deployment_store: PathBuf,
     pub lifecycle_store: PathBuf,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct StateTransitionBinding {
-    pub policy: StateTransitionPolicy,
-    pub archive_root: Option<PathBuf>,
-    pub backup_root: Option<PathBuf>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum StateTransitionPolicy {
-    Preserve,
-    FencedMigration,
-    FreshRoot,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -810,6 +795,7 @@ impl OperatorBinding {
         for (id, runner) in &self.runners {
             require_id(id, "runner binding")?;
             require_pinned_image(&runner.image)?;
+            require_container_identity(&runner.user)?;
             ensure!(
                 runner.memory_mebibytes > 0,
                 "runner memory must be positive"
@@ -817,6 +803,10 @@ impl OperatorBinding {
             ensure!(
                 (1..=100_000).contains(&runner.cpu_quota_percent),
                 "runner CPU quota is outside 1..=100000"
+            );
+            ensure!(
+                runner.pids_limit > 0 && runner.tmpfs_mebibytes > 0,
+                "runner process or temporary-filesystem limit is zero"
             );
             if let Some(cache_root) = runner.cache_root.as_ref() {
                 require_absolute_path(cache_root, "runner cache root")?;
@@ -859,6 +849,11 @@ impl OperatorBinding {
         }
         require_identity(&self.workload.user, "workload user")?;
         require_identity(&self.workload.group, "workload group")?;
+        ensure!(
+            !matches!(self.workload.user.as_str(), "root" | "0")
+                && !matches!(self.workload.group.as_str(), "root" | "0"),
+            "ordinary Idunn workloads cannot run as root"
+        );
         require_id(&self.workload.unit_prefix, "workload unit prefix")?;
         require_id(&self.runtime_identity.runtime_id, "runtime id")?;
         require_id(
@@ -914,6 +909,49 @@ impl OperatorBinding {
                 );
             }
         }
+        let mut authority_paths = vec![
+            self.brakes.deployment_store.clone(),
+            self.brakes.lifecycle_store.clone(),
+        ];
+        if let Some(write_lease) = &self.process_write_lease {
+            authority_paths.push(write_lease.record_path.clone());
+            authority_paths.push(write_lease.lock_path());
+        }
+        ensure!(
+            authority_paths.iter().enumerate().all(|(index, path)| {
+                authority_paths[index + 1..]
+                    .iter()
+                    .all(|other| !paths_overlap(path, other))
+            }),
+            "Idunn authority paths overlap"
+        );
+        let mut protected_paths = authority_paths;
+        protected_paths.extend([
+            self.workload.release_root.clone(),
+            self.workload.runtime_root.clone(),
+            self.runtime_identity.trust_anchor_store.clone(),
+        ]);
+        if let Some(route) = &self.route {
+            protected_paths.push(route.config_path.clone());
+        }
+        if let Some(release_authority) = &self.repository.release_authority_store {
+            protected_paths.push(release_authority.clone());
+        }
+        for authority_path in protected_paths {
+            for writable_path in self
+                .workload
+                .read_write_paths
+                .iter()
+                .chain(self.workload.state_root.iter())
+            {
+                ensure!(
+                    !paths_overlap(&authority_path, writable_path),
+                    "workload writable path {} overlaps Idunn authority {}",
+                    writable_path.display(),
+                    authority_path.display()
+                );
+            }
+        }
         for capability in &self.workload.capabilities {
             require_value(capability, "workload capability")?;
         }
@@ -946,30 +984,11 @@ impl OperatorBinding {
                 "private port range starts at zero"
             );
             ensure!(
-                route.private_port_start <= route.private_port_end,
-                "private port range is inverted"
+                route.private_port_start < route.private_port_end,
+                "candidate rollout requires at least two private ports"
             );
             require_absolute_path(&route.config_path, "route config")?;
             require_unit(&route.reload_unit, "route reload unit")?;
-        }
-        if let Some(transition) = &self.state_transition {
-            match transition.policy {
-                StateTransitionPolicy::Preserve => {}
-                StateTransitionPolicy::FencedMigration => ensure!(
-                    transition.backup_root.is_some(),
-                    "fenced migration has no backup root"
-                ),
-                StateTransitionPolicy::FreshRoot => ensure!(
-                    transition.archive_root.is_some(),
-                    "fresh-root transition has no whole-root archive"
-                ),
-            }
-            if let Some(path) = transition.archive_root.as_ref() {
-                require_absolute_path(path, "state archive root")?;
-            }
-            if let Some(path) = transition.backup_root.as_ref() {
-                require_absolute_path(path, "state backup root")?;
-            }
         }
         ensure!(
             self.rollout.retain_releases >= 2,
@@ -1055,12 +1074,17 @@ impl OperatorBinding {
             self.workload.state_root.is_some() == declaration.state.is_some(),
             "state root binding must exist exactly when the recipe declares state"
         );
-        ensure!(
-            self.state_transition.is_some() == declaration.state.is_some(),
-            "state-transition binding must exist exactly when the recipe declares state"
-        );
         for step in &declaration.steps {
             let binding = &self.runners[&step.runner];
+            ensure!(
+                !binding
+                    .environment
+                    .contains_key(&declaration.source_stamp_environment)
+                    && !binding
+                        .secret_files
+                        .contains_key(&declaration.source_stamp_environment),
+                "runner cannot replace the Idunn source stamp"
+            );
             ensure!(
                 binding.affordances.contains(&RunnerAffordance::SourceRead),
                 "runner {} cannot read the frozen source",
@@ -1197,20 +1221,6 @@ impl OperatorBinding {
             }
             (false, _, None) => {}
             _ => bail!("route binding does not match the launch contract"),
-        }
-        if let Some(transition) = &self.state_transition {
-            match transition.policy {
-                StateTransitionPolicy::Preserve => {}
-                StateTransitionPolicy::FencedMigration => ensure!(
-                    declaration
-                        .state
-                        .as_ref()
-                        .and_then(|state| state.migration.as_ref())
-                        .is_some(),
-                    "binding requests migration but target declares no migrator"
-                ),
-                StateTransitionPolicy::FreshRoot => {}
-            }
         }
         for dependency in declaration
             .dependencies
@@ -1411,6 +1421,16 @@ fn require_pinned_image(value: &str) -> Result<()> {
     require_sha256(digest, "runner image digest")
 }
 
+fn require_container_identity(value: &str) -> Result<()> {
+    let (uid, gid) = value
+        .split_once(':')
+        .context("runner user must be an explicit numeric UID:GID")?;
+    let uid: u32 = uid.parse().context("runner UID is not a u32")?;
+    let gid: u32 = gid.parse().context("runner GID is not a u32")?;
+    ensure!(uid > 0 && gid > 0, "runner identity must be unprivileged");
+    Ok(())
+}
+
 fn require_identity(value: &str, label: &str) -> Result<()> {
     require_id(value, label)
 }
@@ -1529,12 +1549,15 @@ recipe_path = "deployment/idunn/recipe.toml"
 [runners.rust]
 driver = "docker"
 image = "rust@sha256:4c2fd73ef19c5ef9d54bee03b06b2839a392604fbfcd578ed948b71b37c1d7fb"
+user = "1000:1000"
 affordances = ["source-read", "artifact-write", "build-cache"]
 cache_root = "/srv/ghostlight/build-cache"
 allowed_programs = ["cargo"]
 network_profile = "build-dependency-egress"
 memory_mebibytes = 8192
 cpu_quota_percent = 400
+pids_limit = 512
+tmpfs_mebibytes = 1024
 
 [workload]
 driver = "systemd-transient"
@@ -1576,10 +1599,6 @@ record_path = "/etc/gamecult/test-service/runtime/process-write-lease.cc"
 [brakes]
 deployment_store = "/var/lib/gamecult/idunn-authority/test-service-deployment-brake.cc"
 lifecycle_store = "/var/lib/gamecult/idunn-authority/test-service-lifecycle-brake.cc"
-
-[state_transition]
-policy = "fresh-root"
-archive_root = "/var/lib/gamecult/test-service-cold-archive"
 
 [rollout]
 strategy = "candidate-then-promote"
@@ -1636,6 +1655,17 @@ nodes = ["yggdrasil"]
     }
 
     #[test]
+    fn runner_cannot_replace_the_source_stamp() {
+        let recipe = TargetDeclaration::parse(RECIPE).unwrap();
+        let forged = BINDING.replace(
+            "[workload]",
+            "[runners.rust.environment]\nTEST_SERVICE_BUILD_COMMIT = \"forged\"\n\n[workload]",
+        );
+        let binding = OperatorBinding::parse(&forged).unwrap();
+        assert!(binding.admit(&recipe).is_err());
+    }
+
+    #[test]
     fn route_transport_mismatch_is_rejected() {
         let recipe = TargetDeclaration::parse(RECIPE).unwrap();
         let binding =
@@ -1668,21 +1698,6 @@ nodes = ["yggdrasil"]
         );
         let binding = OperatorBinding::parse(&input).unwrap();
         assert!(binding.admit(&recipe).is_err());
-    }
-
-    #[test]
-    fn fresh_root_keeps_slot_preservation_semantics_inside_the_new_state_root() {
-        let recipe = TargetDeclaration::parse(RECIPE).unwrap();
-        let binding = OperatorBinding::parse(BINDING).unwrap();
-        binding.admit(&recipe).unwrap();
-        assert_eq!(
-            recipe.state.as_ref().unwrap().slots[0].recovery,
-            StateRecovery::Preserve
-        );
-        assert_eq!(
-            binding.state_transition.as_ref().unwrap().policy,
-            StateTransitionPolicy::FreshRoot
-        );
     }
 
     #[test]
@@ -1792,15 +1807,10 @@ nodes = ["yggdrasil"]
             .replace(
                 "[process_write_lease]\nrecord_path = \"/etc/gamecult/test-service/runtime/process-write-lease.cc\"\n\n",
                 "",
-            )
-            .replace(
-                "[state_transition]\npolicy = \"fresh-root\"\narchive_root = \"/var/lib/gamecult/test-service-cold-archive\"\n\n",
-                "",
             );
         let binding = OperatorBinding::parse(&binding_text).unwrap();
         binding.admit(&recipe).unwrap();
         assert!(binding.workload.state_root.is_none());
-        assert!(binding.state_transition.is_none());
     }
 
     #[test]
