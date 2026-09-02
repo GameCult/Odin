@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 
 pub const TARGET_DECLARATION_SCHEMA: &str = "gamecult.idunn.target_declaration.v1";
 pub const OPERATOR_BINDING_SCHEMA: &str = "gamecult.idunn.operator_binding.v1";
-pub const PINNED_TAR_MEMBER_SCHEMA: &str = "gamecult.idunn.pinned_tar_member.v1";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -19,10 +18,11 @@ pub struct TargetDeclaration {
     #[serde(default)]
     pub steps: Vec<RecipeStep>,
     #[serde(default)]
-    pub external_artifacts: Vec<ExternalArtifact>,
+    pub external_inputs: Vec<ExternalInput>,
     pub artifacts: Vec<ArtifactOutput>,
     pub service: ServiceDeclaration,
-    pub state: StateDeclaration,
+    #[serde(default)]
+    pub state: Option<StateDeclaration>,
     #[serde(default)]
     pub provides: Vec<ProvidedCapability>,
     #[serde(default)]
@@ -36,9 +36,7 @@ pub struct TargetDeclaration {
 pub enum RunnerAffordance {
     SourceRead,
     ArtifactWrite,
-    DependencyNetwork,
     BuildCache,
-    PrivateCapabilityAccess,
     SecretRead,
 }
 
@@ -70,39 +68,12 @@ pub enum RecipePhase {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExternalArtifact {
+pub struct ExternalInput {
     pub id: String,
-    pub runner: String,
-    pub manifest: PathBuf,
-    pub destination: PathBuf,
-    #[serde(default)]
-    pub executable: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PinnedTarMemberManifest {
-    pub schema: String,
     pub url: String,
-    pub archive_sha256: String,
-    pub member: PathBuf,
-    pub member_sha256: String,
-}
-
-impl PinnedTarMemberManifest {
-    pub fn parse(input: &str) -> Result<Self> {
-        let manifest: Self =
-            toml::from_str(input).context("decoding strict pinned tar-member manifest")?;
-        ensure!(
-            manifest.schema == PINNED_TAR_MEMBER_SCHEMA,
-            "unsupported pinned artifact schema"
-        );
-        https_host(&manifest.url)?;
-        require_sha256(&manifest.archive_sha256, "archive sha256")?;
-        require_relative_path(&manifest.member, "archive member", false)?;
-        require_sha256(&manifest.member_sha256, "member sha256")?;
-        Ok(manifest)
-    }
+    pub sha256: String,
+    pub runner: String,
+    pub destination: PathBuf,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,6 +84,8 @@ pub struct ArtifactOutput {
     pub runner: Option<String>,
     pub source: PathBuf,
     pub destination: PathBuf,
+    #[serde(default)]
+    pub expected_sha256: Option<String>,
     #[serde(default)]
     pub executable: bool,
 }
@@ -146,15 +119,6 @@ pub struct ServiceDeclaration {
 #[serde(deny_unknown_fields)]
 pub struct HealthDeclaration {
     pub contract: String,
-    pub staged: HealthState,
-    pub ready: HealthState,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct HealthState {
-    pub state: String,
-    pub detail: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -176,7 +140,7 @@ pub enum LaunchArgument {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StateDeclaration {
-    pub generation: String,
+    pub schema_generation: String,
     pub slots: Vec<StateSlot>,
     pub migration: Option<MigrationDeclaration>,
 }
@@ -227,7 +191,8 @@ pub enum StateRecovery {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum StateStartup {
-    CreateOrOpenAfterAdmission,
+    CreateOrOpenAfterWriteLease,
+    OpenAtStart,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -291,10 +256,13 @@ pub struct OperatorBinding {
     pub repository: RepositoryBinding,
     pub runners: BTreeMap<String, RunnerBinding>,
     pub workload: WorkloadBinding,
+    pub runtime_identity: RuntimeIdentityBinding,
     pub route: Option<RouteBinding>,
-    pub admission: AdmissionBinding,
+    #[serde(default)]
+    pub process_write_lease: Option<ProcessWriteLeaseBinding>,
     pub brakes: BrakeBinding,
-    pub state_transition: StateTransitionBinding,
+    #[serde(default)]
+    pub state_transition: Option<StateTransitionBinding>,
     pub rollout: RolloutBinding,
     pub placement: PlacementBinding,
     #[serde(default)]
@@ -341,14 +309,13 @@ pub struct RunnerBinding {
     pub affordances: BTreeSet<RunnerAffordance>,
     pub cache_root: Option<PathBuf>,
     #[serde(default)]
-    pub allowed_https_hosts: BTreeSet<String>,
-    #[serde(default)]
     pub allowed_programs: BTreeSet<String>,
     #[serde(default)]
     pub environment: BTreeMap<String, String>,
     #[serde(default)]
     pub secret_files: BTreeMap<String, PathBuf>,
-    pub network: RunnerNetwork,
+    #[serde(default)]
+    pub network_profile: Option<String>,
     pub memory_mebibytes: u32,
     pub cpu_quota_percent: u32,
 }
@@ -359,14 +326,6 @@ pub enum RunnerDriver {
     Docker,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum RunnerNetwork {
-    None,
-    DependencyEgress,
-    HostPrivate,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkloadBinding {
@@ -375,7 +334,8 @@ pub struct WorkloadBinding {
     pub group: String,
     pub unit_prefix: String,
     pub release_root: PathBuf,
-    pub state_root: PathBuf,
+    #[serde(default)]
+    pub state_root: Option<PathBuf>,
     pub runtime_root: PathBuf,
     pub network: WorkloadNetwork,
     pub hardening: WorkloadHardening,
@@ -418,16 +378,24 @@ pub enum WorkloadHardening {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct AdmissionBinding {
-    pub driver: AdmissionDriver,
-    pub record_path: PathBuf,
-    pub lock_path: PathBuf,
+pub struct RuntimeIdentityBinding {
+    pub runtime_id: String,
+    pub expected_signer_identity_id: String,
+    pub trust_anchor_store: PathBuf,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum AdmissionDriver {
-    AtomicFile,
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessWriteLeaseBinding {
+    pub record_path: PathBuf,
+}
+
+impl ProcessWriteLeaseBinding {
+    pub fn lock_path(&self) -> PathBuf {
+        let mut lock_path = self.record_path.as_os_str().to_os_string();
+        lock_path.push(".lock");
+        PathBuf::from(lock_path)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -497,9 +465,12 @@ pub struct PlacementBinding {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExternalCapabilityBinding {
+    pub provider_id: String,
     pub capability: String,
     pub schema: String,
     pub compatibility: String,
+    #[serde(default = "one")]
+    pub capacity: u32,
     pub endpoint: String,
 }
 
@@ -554,6 +525,9 @@ impl TargetDeclaration {
             );
             require_relative_path(&artifact.source, "artifact source", false)?;
             require_leaf_path(&artifact.destination, "artifact destination")?;
+            if let Some(expected_sha256) = &artifact.expected_sha256 {
+                require_sha256(expected_sha256, "expected artifact sha256")?;
+            }
             ensure!(
                 destinations.insert(artifact.destination.as_path()),
                 "artifact destination {} is declared twice",
@@ -574,21 +548,32 @@ impl TargetDeclaration {
                 ),
             }
         }
-        for artifact in &self.external_artifacts {
-            require_id(&artifact.id, "external artifact")?;
+        let mut external_input_ids = BTreeSet::new();
+        let mut external_input_destinations = BTreeSet::new();
+        for input in &self.external_inputs {
+            require_id(&input.id, "external input")?;
             ensure!(
-                artifact_ids.insert(artifact.id.as_str()),
-                "artifact id {} is declared twice",
-                artifact.id
+                external_input_ids.insert(input.id.as_str()),
+                "external input id {} is declared twice",
+                input.id
             );
-            require_id(&artifact.runner, "external artifact runner class")?;
-            runner_ids.insert(artifact.runner.as_str());
-            require_relative_path(&artifact.manifest, "external artifact manifest", false)?;
-            require_leaf_path(&artifact.destination, "external artifact destination")?;
             ensure!(
-                destinations.insert(artifact.destination.as_path()),
-                "artifact destination {} is declared twice",
-                artifact.destination.display()
+                !artifact_ids.contains(input.id.as_str()),
+                "external input id {} collides with an artifact id",
+                input.id
+            );
+            require_value(&input.url, "external input URL")?;
+            https_host(&input.url)?;
+            require_sha256(&input.sha256, "external input sha256")?;
+            require_id(&input.runner, "external input runner class")?;
+            runner_ids.insert(input.runner.as_str());
+            require_relative_path(&input.destination, "external input destination", false)?;
+            ensure!(
+                external_input_destinations
+                    .insert((input.runner.as_str(), input.destination.as_path())),
+                "external input destination {} is declared twice for runner {}",
+                input.destination.display(),
+                input.runner
             );
         }
         ensure!(
@@ -610,17 +595,6 @@ impl TargetDeclaration {
             validate_launch_argument(argument)?;
         }
         require_capability(&self.service.health.contract, "health contract")?;
-        for (label, health) in [
-            ("staged health", &self.service.health.staged),
-            ("ready health", &self.service.health.ready),
-        ] {
-            require_value(&health.state, label)?;
-            require_value(&health.detail, label)?;
-        }
-        ensure!(
-            self.service.health.staged != self.service.health.ready,
-            "staged and ready health states are identical"
-        );
         for name in &self.service.required_environment {
             require_environment_name(name)?;
         }
@@ -632,59 +606,71 @@ impl TargetDeclaration {
             );
         }
 
-        require_capability(&self.state.generation, "state generation")?;
-        let slot_ids = unique_ids(
-            self.state.slots.iter().map(|slot| slot.id.as_str()),
-            "state slot",
-        )?;
-        let mut slot_paths = BTreeSet::new();
-        for slot in &self.state.slots {
-            require_relative_path(&slot.relative_path, "state slot path", false)?;
-            ensure!(
-                slot_paths.insert(slot.relative_path.as_path()),
-                "state slot path {} is declared twice",
-                slot.relative_path.display()
-            );
-            require_capability(&slot.schema, "state slot schema")?;
-            if slot.writer == StateWriter::ProcessBoundSingleWriter {
+        if let Some(state) = &self.state {
+            require_capability(&state.schema_generation, "state schema generation")?;
+            ensure!(!state.slots.is_empty(), "state contract has no slots");
+            let slot_ids = unique_ids(
+                state.slots.iter().map(|slot| slot.id.as_str()),
+                "state slot",
+            )?;
+            let mut slot_paths = BTreeSet::<PathBuf>::new();
+            for slot in &state.slots {
+                require_relative_path(&slot.relative_path, "state slot path", false)?;
                 ensure!(
-                    slot.startup == StateStartup::CreateOrOpenAfterAdmission,
-                    "writable state slot {} must open after write admission",
-                    slot.id
+                    slot_paths
+                        .iter()
+                        .all(|other| !paths_overlap(other, &slot.relative_path)),
+                    "state slot path {} overlaps another declared slot",
+                    slot.relative_path.display()
                 );
-            }
-            if slot.recovery == StateRecovery::ExternalAuthority {
                 ensure!(
-                    slot.writer == StateWriter::None,
-                    "externally authoritative state slot {} cannot name the service as writer",
-                    slot.id
+                    slot_paths.insert(slot.relative_path.clone()),
+                    "state slot path {} is declared twice",
+                    slot.relative_path.display()
                 );
+                require_capability(&slot.schema, "state slot schema")?;
+                match slot.writer {
+                    StateWriter::ProcessBoundSingleWriter => ensure!(
+                        slot.startup == StateStartup::CreateOrOpenAfterWriteLease,
+                        "writable state slot {} must open after its write lease",
+                        slot.id
+                    ),
+                    StateWriter::None => ensure!(
+                        slot.startup == StateStartup::OpenAtStart,
+                        "non-writable state slot {} cannot wait for a write lease",
+                        slot.id
+                    ),
+                }
+                if slot.recovery == StateRecovery::ExternalAuthority {
+                    ensure!(
+                        slot.writer == StateWriter::None,
+                        "externally authoritative state slot {} cannot name the service as writer",
+                        slot.id
+                    );
+                }
             }
+            if let Some(migration) = state.migration.as_ref() {
+                ensure!(
+                    artifact_ids.contains(migration.executable_artifact.as_str()),
+                    "migration executable artifact is not declared"
+                );
+                ensure!(
+                    !migration.from_generations.is_empty(),
+                    "migration has no source generations"
+                );
+                for generation in &migration.from_generations {
+                    require_capability(generation, "migration source generation")?;
+                }
+                ensure!(
+                    migration.to_generation == state.schema_generation,
+                    "migration destination differs from state generation"
+                );
+                for argument in &migration.arguments {
+                    validate_launch_argument(argument)?;
+                }
+            }
+            ensure!(slot_ids.len() == state.slots.len(), "duplicate state slot");
         }
-        if let Some(migration) = self.state.migration.as_ref() {
-            ensure!(
-                artifact_ids.contains(migration.executable_artifact.as_str()),
-                "migration executable artifact is not declared"
-            );
-            ensure!(
-                !migration.from_generations.is_empty(),
-                "migration has no source generations"
-            );
-            for generation in &migration.from_generations {
-                require_capability(generation, "migration source generation")?;
-            }
-            ensure!(
-                migration.to_generation == self.state.generation,
-                "migration destination differs from state generation"
-            );
-            for argument in &migration.arguments {
-                validate_launch_argument(argument)?;
-            }
-        }
-        ensure!(
-            slot_ids.len() == self.state.slots.len(),
-            "duplicate state slot"
-        );
 
         let mut provided = BTreeSet::new();
         for capability in &self.provides {
@@ -714,6 +700,13 @@ impl TargetDeclaration {
                 dependency.minimum_capacity > 0,
                 "dependency capacity must be positive"
             );
+            if dependency.kind == DependencyKind::Bootstrap {
+                ensure!(
+                    dependency.startup == StartupOrder::BeforeStart,
+                    "bootstrap dependency {} must be available before start",
+                    dependency.capability
+                );
+            }
             ensure!(
                 required.insert((dependency.kind, dependency.capability.as_str())),
                 "dependency {} is declared twice for the same kind",
@@ -725,6 +718,15 @@ impl TargetDeclaration {
             require_value(&conflict.reason, "conflict reason")?;
         }
         Ok(())
+    }
+
+    pub fn write_lease_required(&self) -> bool {
+        self.state.as_ref().is_some_and(|state| {
+            state
+                .slots
+                .iter()
+                .any(|slot| slot.writer == StateWriter::ProcessBoundSingleWriter)
+        })
     }
 }
 
@@ -819,32 +821,8 @@ impl OperatorBinding {
                 !runner.allowed_programs.is_empty(),
                 "runner {id} has no allowed programs"
             );
-            for host in &runner.allowed_https_hosts {
-                require_host(host)?;
-            }
-            match runner.network {
-                RunnerNetwork::None => ensure!(
-                    runner.allowed_https_hosts.is_empty(),
-                    "network-none runner {id} has HTTPS hosts"
-                ),
-                RunnerNetwork::DependencyEgress => {
-                    ensure!(
-                        runner
-                            .affordances
-                            .contains(&RunnerAffordance::DependencyNetwork),
-                        "dependency-egress runner {id} does not grant dependency-network"
-                    );
-                    ensure!(
-                        !runner.allowed_https_hosts.is_empty(),
-                        "dependency-egress runner {id} has no allowed hosts"
-                    );
-                }
-                RunnerNetwork::HostPrivate => ensure!(
-                    runner
-                        .affordances
-                        .contains(&RunnerAffordance::PrivateCapabilityAccess),
-                    "host-private runner {id} does not grant private-capability-access"
-                ),
+            if let Some(profile) = &runner.network_profile {
+                require_capability(profile, "runner network profile")?;
             }
             for name in runner.environment.keys().chain(runner.secret_files.keys()) {
                 require_environment_name(name)?;
@@ -858,25 +836,44 @@ impl OperatorBinding {
                     "build-cache runner {id} has no cache root"
                 );
             }
+            ensure!(
+                runner.affordances.contains(&RunnerAffordance::BuildCache)
+                    == runner.cache_root.is_some(),
+                "runner {id} cache root and build-cache affordance disagree"
+            );
+            ensure!(
+                runner.affordances.contains(&RunnerAffordance::SecretRead)
+                    == !runner.secret_files.is_empty(),
+                "runner {id} secret files and secret-read affordance disagree"
+            );
         }
         require_identity(&self.workload.user, "workload user")?;
         require_identity(&self.workload.group, "workload group")?;
         require_id(&self.workload.unit_prefix, "workload unit prefix")?;
+        require_id(&self.runtime_identity.runtime_id, "runtime id")?;
+        require_id(
+            &self.runtime_identity.expected_signer_identity_id,
+            "expected signer identity id",
+        )?;
+        require_absolute_path(
+            &self.runtime_identity.trust_anchor_store,
+            "trust anchor store",
+        )?;
         for (label, path) in [
             ("release root", &self.workload.release_root),
-            ("state root", &self.workload.state_root),
             ("runtime root", &self.workload.runtime_root),
-            ("admission record", &self.admission.record_path),
-            ("admission lock", &self.admission.lock_path),
             ("deployment brake", &self.brakes.deployment_store),
             ("lifecycle brake", &self.brakes.lifecycle_store),
         ] {
             require_absolute_path(path, label)?;
         }
-        ensure!(
-            self.admission.record_path != self.admission.lock_path,
-            "admission record and lock paths are identical"
-        );
+        if let Some(state_root) = &self.workload.state_root {
+            require_absolute_path(state_root, "state root")?;
+        }
+        if let Some(write_lease) = &self.process_write_lease {
+            require_absolute_path(&write_lease.record_path, "process write-lease record")?;
+            require_absolute_path(&write_lease.lock_path(), "process write-lease lock")?;
+        }
         ensure!(
             self.brakes.deployment_store != self.brakes.lifecycle_store,
             "deployment and lifecycle brakes are identical"
@@ -897,6 +894,15 @@ impl OperatorBinding {
             .chain(self.workload.devices.iter())
         {
             require_absolute_path(path, "workload path")?;
+        }
+        for path in &self.workload.read_write_paths {
+            if let Some(state_root) = &self.workload.state_root {
+                ensure!(
+                    !paths_overlap(path, state_root),
+                    "workload read-write path {} overlaps the write-lease-controlled state root",
+                    path.display()
+                );
+            }
         }
         for capability in &self.workload.capabilities {
             require_value(capability, "workload capability")?;
@@ -933,42 +939,62 @@ impl OperatorBinding {
             require_absolute_path(&route.config_path, "route config")?;
             require_unit(&route.reload_unit, "route reload unit")?;
         }
-        match self.state_transition.policy {
-            StateTransitionPolicy::Preserve => {}
-            StateTransitionPolicy::FencedMigration => ensure!(
-                self.state_transition.backup_root.is_some(),
-                "fenced migration has no backup root"
-            ),
-            StateTransitionPolicy::FreshRoot => ensure!(
-                self.state_transition.archive_root.is_some(),
-                "fresh-root transition has no whole-root archive"
-            ),
-        }
-        if let Some(path) = self.state_transition.archive_root.as_ref() {
-            require_absolute_path(path, "state archive root")?;
-        }
-        if let Some(path) = self.state_transition.backup_root.as_ref() {
-            require_absolute_path(path, "state backup root")?;
+        if let Some(transition) = &self.state_transition {
+            match transition.policy {
+                StateTransitionPolicy::Preserve => {}
+                StateTransitionPolicy::FencedMigration => ensure!(
+                    transition.backup_root.is_some(),
+                    "fenced migration has no backup root"
+                ),
+                StateTransitionPolicy::FreshRoot => ensure!(
+                    transition.archive_root.is_some(),
+                    "fresh-root transition has no whole-root archive"
+                ),
+            }
+            if let Some(path) = transition.archive_root.as_ref() {
+                require_absolute_path(path, "state archive root")?;
+            }
+            if let Some(path) = transition.backup_root.as_ref() {
+                require_absolute_path(path, "state backup root")?;
+            }
         }
         ensure!(
             self.rollout.retain_releases >= 2,
             "candidate rollout must retain at least current and prior releases"
         );
         ensure!(
-            self.placement.desired_replicas > 0,
-            "desired replicas must be positive"
+            self.placement.desired_replicas == 1,
+            "operator binding v1 admits exactly one replica"
         );
-        ensure!(!self.placement.nodes.is_empty(), "placement has no nodes");
+        ensure!(
+            self.placement.nodes.len() == 1,
+            "operator binding v1 admits exactly one node"
+        );
         for node in &self.placement.nodes {
             require_id(node, "placement node")?;
         }
+        let mut external_contracts = BTreeSet::new();
         for capability in &self.external_capabilities {
+            require_id(&capability.provider_id, "external provider id")?;
             require_capability_contract(
                 &capability.capability,
                 &capability.schema,
                 &capability.compatibility,
             )?;
+            ensure!(
+                capability.capacity > 0,
+                "external capability capacity must be positive"
+            );
             require_value(&capability.endpoint, "external capability endpoint")?;
+            ensure!(
+                external_contracts.insert((
+                    capability.provider_id.as_str(),
+                    capability.capability.as_str(),
+                    capability.schema.as_str(),
+                    capability.compatibility.as_str(),
+                )),
+                "external provider capability is declared twice"
+            );
         }
         for profile in &self.profiles {
             require_capability(profile, "profile")?;
@@ -992,9 +1018,9 @@ impl OperatorBinding {
             .map(|step| step.runner.as_str())
             .chain(
                 declaration
-                    .external_artifacts
+                    .external_inputs
                     .iter()
-                    .map(|artifact| artifact.runner.as_str()),
+                    .map(|input| input.runner.as_str()),
             )
             .chain(
                 declaration
@@ -1007,6 +1033,18 @@ impl OperatorBinding {
         ensure!(
             declared_runners == bound_runners,
             "operator runner classes do not exactly match the target recipe"
+        );
+        ensure!(
+            self.process_write_lease.is_some() == declaration.write_lease_required(),
+            "process write-lease binding must exist exactly when writable state requires it"
+        );
+        ensure!(
+            self.workload.state_root.is_some() == declaration.state.is_some(),
+            "state root binding must exist exactly when the recipe declares state"
+        );
+        ensure!(
+            self.state_transition.is_some() == declaration.state.is_some(),
+            "state-transition binding must exist exactly when the recipe declares state"
         );
         for step in &declaration.steps {
             let binding = &self.runners[&step.runner];
@@ -1051,32 +1089,24 @@ impl OperatorBinding {
                 artifact.id
             );
         }
-        for artifact in &declaration.external_artifacts {
-            let binding = &self.runners[&artifact.runner];
+        for input in &declaration.external_inputs {
+            let binding = &self.runners[&input.runner];
             ensure!(
                 binding.affordances.contains(&RunnerAffordance::SourceRead),
-                "external artifact {} runner cannot read the frozen source",
-                artifact.id
+                "external input {} runner cannot read the frozen source",
+                input.id
             );
             ensure!(
                 binding
                     .affordances
                     .contains(&RunnerAffordance::ArtifactWrite),
-                "external artifact {} runner cannot publish artifacts",
-                artifact.id
+                "external input {} runner cannot materialize inputs",
+                input.id
             );
             ensure!(
-                binding
-                    .affordances
-                    .contains(&RunnerAffordance::DependencyNetwork),
-                "external artifact {} runner has no dependency-network affordance",
-                artifact.id
-            );
-            ensure!(
-                binding.network == RunnerNetwork::DependencyEgress
-                    && !binding.allowed_https_hosts.is_empty(),
-                "external artifact {} runner has no admitted egress hosts",
-                artifact.id
+                binding.network_profile.is_some(),
+                "external input {} runner has no operator-bound network profile",
+                input.id
             );
         }
         let available_environment: BTreeSet<_> = self
@@ -1121,20 +1151,41 @@ impl OperatorBinding {
         match (
             declaration.service.route_required,
             declaration.service.transport,
-            self.route.as_ref().map(|route| route.driver),
+            self.route.as_ref(),
         ) {
-            (true, ServiceTransport::Http, Some(RouteDriver::NginxHttp))
-            | (true, ServiceTransport::Tcp, Some(RouteDriver::NginxStreamTcp))
-            | (false, _, None) => {}
+            (true, ServiceTransport::Http, Some(route))
+                if route.driver == RouteDriver::NginxHttp =>
+            {
+                ensure!(
+                    route.stable_endpoint.starts_with("http://")
+                        || route.stable_endpoint.starts_with("https://"),
+                    "HTTP stable endpoint is not an HTTP URI"
+                );
+            }
+            (true, ServiceTransport::Tcp, Some(route))
+                if route.driver == RouteDriver::NginxStreamTcp =>
+            {
+                ensure!(
+                    route.stable_endpoint.starts_with("tcp://"),
+                    "TCP stable endpoint is not a TCP URI"
+                );
+            }
+            (false, _, None) => {}
             _ => bail!("route binding does not match the launch contract"),
         }
-        match self.state_transition.policy {
-            StateTransitionPolicy::Preserve => {}
-            StateTransitionPolicy::FencedMigration => ensure!(
-                declaration.state.migration.is_some(),
-                "binding requests migration but target declares no migrator"
-            ),
-            StateTransitionPolicy::FreshRoot => {}
+        if let Some(transition) = &self.state_transition {
+            match transition.policy {
+                StateTransitionPolicy::Preserve => {}
+                StateTransitionPolicy::FencedMigration => ensure!(
+                    declaration
+                        .state
+                        .as_ref()
+                        .and_then(|state| state.migration.as_ref())
+                        .is_some(),
+                    "binding requests migration but target declares no migrator"
+                ),
+                StateTransitionPolicy::FreshRoot => {}
+            }
         }
         for dependency in declaration
             .dependencies
@@ -1150,40 +1201,13 @@ impl OperatorBinding {
                         &binding.capability,
                         &binding.schema,
                         &binding.compatibility,
-                    )
+                    ) && binding.capacity >= dependency.minimum_capacity
                 }),
                 "external capability {} has no compatible operator binding",
                 dependency.capability
             );
         }
         Ok(())
-    }
-
-    pub fn admit_external_artifact_manifest(
-        &self,
-        declaration: &TargetDeclaration,
-        artifact_id: &str,
-        manifest_input: &str,
-    ) -> Result<PinnedTarMemberManifest> {
-        let artifact = declaration
-            .external_artifacts
-            .iter()
-            .find(|artifact| artifact.id == artifact_id)
-            .with_context(|| format!("target declares no external artifact {artifact_id}"))?;
-        let runner = self.runners.get(&artifact.runner).with_context(|| {
-            format!("external artifact runner {} is not bound", artifact.runner)
-        })?;
-        ensure!(
-            runner.network == RunnerNetwork::DependencyEgress,
-            "external artifact runner has no dependency egress"
-        );
-        let manifest = PinnedTarMemberManifest::parse(manifest_input)?;
-        let host = https_host(&manifest.url)?;
-        ensure!(
-            runner.allowed_https_hosts.contains(host),
-            "external artifact host {host} is not admitted"
-        );
-        Ok(manifest)
     }
 }
 
@@ -1328,6 +1352,10 @@ fn require_absolute_path(path: &Path, label: &str) -> Result<()> {
     Ok(())
 }
 
+fn paths_overlap(left: &Path, right: &Path) -> bool {
+    left.starts_with(right) || right.starts_with(left)
+}
+
 fn require_sha1(value: &str, label: &str) -> Result<()> {
     require_lower_hex(value, 40, label)
 }
@@ -1402,12 +1430,12 @@ phase = "build"
 runner = "rust"
 argv = ["cargo", "build", "--locked", "--release", "-p", "test-service"]
 
-[[external_artifacts]]
+[[external_inputs]]
 id = "tool"
+url = "https://registry.npmjs.org/tool.tgz"
+sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 runner = "rust"
-manifest = "deployment/tool.toml"
-destination = "tool"
-executable = true
+destination = "inputs/tool.tgz"
 
 [[artifacts]]
 id = "daemon"
@@ -1415,6 +1443,7 @@ source_kind = "runner-output"
 runner = "rust"
 source = "target/release/test-service"
 destination = "test-service"
+expected_sha256 = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 executable = true
 
 [service]
@@ -1431,16 +1460,8 @@ required_environment = ["TEST_SERVICE_BIND"]
 [service.health]
 contract = "test-service.cultnet-service-health"
 
-[service.health.staged]
-state = "warming"
-detail = "traffic-admission-pending"
-
-[service.health.ready]
-state = "active"
-detail = "serving"
-
 [state]
-generation = "v1"
+schema_generation = "v1"
 
 [[state.slots]]
 id = "world"
@@ -1449,7 +1470,7 @@ kind = "cultcache-file"
 schema = "test-service.state.v1"
 writer = "process-bound-single-writer"
 recovery = "preserve"
-startup = "create-or-open-after-admission"
+startup = "create-or-open-after-write-lease"
 
 [[provides]]
 capability = "test-service.runtime"
@@ -1480,11 +1501,10 @@ recipe_path = "deployment/idunn/recipe.toml"
 [runners.rust]
 driver = "docker"
 image = "rust@sha256:4c2fd73ef19c5ef9d54bee03b06b2839a392604fbfcd578ed948b71b37c1d7fb"
-affordances = ["source-read", "artifact-write", "dependency-network", "build-cache"]
+affordances = ["source-read", "artifact-write", "build-cache"]
 cache_root = "/srv/ghostlight/build-cache"
-allowed_https_hosts = ["crates.io", "github.com"]
 allowed_programs = ["cargo"]
-network = "dependency-egress"
+network_profile = "build-dependency-egress"
 memory_mebibytes = 8192
 cpu_quota_percent = 400
 
@@ -1507,6 +1527,11 @@ TEST_SERVICE_BIND = "idunn.private_endpoint"
 [workload.argument_bindings]
 state_root = "/var/lib/gamecult/test-service"
 
+[runtime_identity]
+runtime_id = "test-service-yggdrasil"
+expected_signer_identity_id = "test-service-runtime-signer"
+trust_anchor_store = "/etc/gamecult/trust/test-service.cc"
+
 [route]
 driver = "nginx-http"
 route_id = "test-service-public"
@@ -1517,10 +1542,8 @@ private_port_end = 18839
 config_path = "/etc/nginx/idunn-routes/test-service.conf"
 reload_unit = "nginx.service"
 
-[admission]
-driver = "atomic-file"
-record_path = "/etc/gamecult/test-service/runtime/process-admission.cc"
-lock_path = "/etc/gamecult/test-service/runtime/process-admission.cc.lock"
+[process_write_lease]
+record_path = "/etc/gamecult/test-service/runtime/process-write-lease.cc"
 
 [brakes]
 deployment_store = "/var/lib/gamecult/idunn-authority/test-service-deployment-brake.cc"
@@ -1562,11 +1585,26 @@ nodes = ["yggdrasil"]
     fn operator_cannot_omit_an_affordance_derived_from_the_recipe() {
         let recipe = TargetDeclaration::parse(RECIPE).unwrap();
         let input = BINDING.replace(
-            "affordances = [\"source-read\", \"artifact-write\", \"dependency-network\", \"build-cache\"]",
-            "affordances = [\"source-read\", \"dependency-network\", \"build-cache\"]",
+            "affordances = [\"source-read\", \"artifact-write\", \"build-cache\"]",
+            "affordances = [\"source-read\", \"build-cache\"]",
         );
         let binding = OperatorBinding::parse(&input).unwrap();
         assert!(binding.admit(&recipe).is_err());
+    }
+
+    #[test]
+    fn runner_mounts_require_their_exact_operator_affordance() {
+        let cache_without_affordance = BINDING.replace(
+            "affordances = [\"source-read\", \"artifact-write\", \"build-cache\"]",
+            "affordances = [\"source-read\", \"artifact-write\"]",
+        );
+        assert!(OperatorBinding::parse(&cache_without_affordance).is_err());
+
+        let affordance_without_secret = BINDING.replace(
+            "affordances = [\"source-read\", \"artifact-write\", \"build-cache\"]",
+            "affordances = [\"source-read\", \"artifact-write\", \"build-cache\", \"secret-read\"]",
+        );
+        assert!(OperatorBinding::parse(&affordance_without_secret).is_err());
     }
 
     #[test]
@@ -1574,6 +1612,13 @@ nodes = ["yggdrasil"]
         let recipe = TargetDeclaration::parse(RECIPE).unwrap();
         let binding =
             OperatorBinding::parse(&BINDING.replace("nginx-http", "nginx-stream-tcp")).unwrap();
+        assert!(binding.admit(&recipe).is_err());
+
+        let binding = OperatorBinding::parse(&BINDING.replace(
+            "https://yggdrasil.gamecult.org/test-service/",
+            "tcp://yggdrasil.gamecult.org:443",
+        ))
+        .unwrap();
         assert!(binding.admit(&recipe).is_err());
     }
 
@@ -1598,13 +1643,16 @@ nodes = ["yggdrasil"]
     }
 
     #[test]
-    fn fresh_root_keeps_target_preservation_semantics_inside_the_new_generation() {
+    fn fresh_root_keeps_slot_preservation_semantics_inside_the_new_state_root() {
         let recipe = TargetDeclaration::parse(RECIPE).unwrap();
         let binding = OperatorBinding::parse(BINDING).unwrap();
         binding.admit(&recipe).unwrap();
-        assert_eq!(recipe.state.slots[0].recovery, StateRecovery::Preserve);
         assert_eq!(
-            binding.state_transition.policy,
+            recipe.state.as_ref().unwrap().slots[0].recovery,
+            StateRecovery::Preserve
+        );
+        assert_eq!(
+            binding.state_transition.as_ref().unwrap().policy,
             StateTransitionPolicy::FreshRoot
         );
     }
@@ -1619,29 +1667,123 @@ nodes = ["yggdrasil"]
     }
 
     #[test]
-    fn pinned_artifact_host_must_be_operator_admitted() {
+    fn state_slots_cannot_claim_overlapping_paths() {
+        let input = RECIPE.replace(
+            "startup = \"create-or-open-after-write-lease\"",
+            "startup = \"create-or-open-after-write-lease\"\n\n[[state.slots]]\nid = \"nested\"\nrelative_path = \"world.cc/index.cc\"\nkind = \"cultcache-file\"\nschema = \"test-service.index.v1\"\nwriter = \"process-bound-single-writer\"\nrecovery = \"preserve\"\nstartup = \"create-or-open-after-write-lease\"",
+        );
+        assert!(TargetDeclaration::parse(&input).is_err());
+    }
+
+    #[test]
+    fn workload_mount_cannot_bypass_write_lease_controlled_state() {
+        let input = BINDING.replace(
+            "cpu_quota_percent = 200\n\n[workload.environment]",
+            "cpu_quota_percent = 200\nread_write_paths = [\"/var/lib/gamecult/test-service/world\"]\n\n[workload.environment]",
+        );
+        assert!(OperatorBinding::parse(&input).is_err());
+    }
+
+    #[test]
+    fn v1_binding_is_explicitly_singleton() {
+        assert!(
+            OperatorBinding::parse(
+                &BINDING.replace("desired_replicas = 1", "desired_replicas = 2")
+            )
+            .is_err()
+        );
+        assert!(
+            OperatorBinding::parse(&BINDING.replace(
+                "nodes = [\"yggdrasil\"]",
+                "nodes = [\"yggdrasil\", \"raven\"]"
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn external_input_uses_an_operator_bound_network_profile() {
         let recipe = TargetDeclaration::parse(RECIPE).unwrap();
         let binding = OperatorBinding::parse(BINDING).unwrap();
-        let manifest = r#"
-schema = "gamecult.idunn.pinned_tar_member.v1"
-url = "https://registry.npmjs.org/tool.tgz"
-archive_sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-member = "package/bin/tool"
-member_sha256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-"#;
-        assert!(
-            binding
-                .admit_external_artifact_manifest(&recipe, "tool", manifest)
-                .is_err()
+        binding.admit(&recipe).unwrap();
+        let isolated = BINDING.replace("network_profile = \"build-dependency-egress\"\n", "");
+        let binding = OperatorBinding::parse(&isolated).unwrap();
+        assert!(binding.admit(&recipe).is_err());
+    }
+
+    #[test]
+    fn process_write_lease_exists_exactly_for_process_writable_state() {
+        let recipe = TargetDeclaration::parse(RECIPE).unwrap();
+        let without_lease = BINDING.replace(
+            "[process_write_lease]\nrecord_path = \"/etc/gamecult/test-service/runtime/process-write-lease.cc\"\n\n",
+            "",
         );
-        let admitted = BINDING.replace(
-            "allowed_https_hosts = [\"crates.io\", \"github.com\"]",
-            "allowed_https_hosts = [\"crates.io\", \"github.com\", \"registry.npmjs.org\"]",
+        let binding = OperatorBinding::parse(&without_lease).unwrap();
+        assert!(binding.admit(&recipe).is_err());
+
+        let read_only_recipe = TargetDeclaration::parse(
+            &RECIPE
+                .replace(
+                    "writer = \"process-bound-single-writer\"",
+                    "writer = \"none\"",
+                )
+                .replace(
+                    "startup = \"create-or-open-after-write-lease\"",
+                    "startup = \"open-at-start\"",
+                ),
+        )
+        .unwrap();
+        binding.admit(&read_only_recipe).unwrap();
+
+        let binding = OperatorBinding::parse(BINDING).unwrap();
+        assert_eq!(
+            binding.process_write_lease.as_ref().unwrap().lock_path(),
+            PathBuf::from("/etc/gamecult/test-service/runtime/process-write-lease.cc.lock")
         );
-        let binding = OperatorBinding::parse(&admitted).unwrap();
-        binding
-            .admit_external_artifact_manifest(&recipe, "tool", manifest)
-            .unwrap();
+        assert!(binding.admit(&read_only_recipe).is_err());
+    }
+
+    #[test]
+    fn stateless_target_has_no_state_binding_or_generation() {
+        let mut recipe_text = RECIPE.replace(
+            "arguments = [\n  { kind = \"literal\", value = \"--state-root\" },\n  { kind = \"binding\", name = \"state_root\" },\n]",
+            "arguments = []",
+        );
+        let state_start = recipe_text.find("\n[state]\n").unwrap();
+        let state_end = recipe_text.find("\n[[provides]]\n").unwrap();
+        recipe_text.replace_range(state_start..state_end, "");
+        let recipe = TargetDeclaration::parse(&recipe_text).unwrap();
+        assert!(recipe.state.is_none());
+
+        let binding_text = BINDING
+            .replace("state_root = \"/var/lib/gamecult/test-service\"\n", "")
+            .replace(
+                "[workload.argument_bindings]\nstate_root = \"/var/lib/gamecult/test-service\"\n\n",
+                "",
+            )
+            .replace(
+                "[process_write_lease]\nrecord_path = \"/etc/gamecult/test-service/runtime/process-write-lease.cc\"\n\n",
+                "",
+            )
+            .replace(
+                "[state_transition]\npolicy = \"fresh-root\"\narchive_root = \"/var/lib/gamecult/test-service-cold-archive\"\n\n",
+                "",
+            );
+        let binding = OperatorBinding::parse(&binding_text).unwrap();
+        binding.admit(&recipe).unwrap();
+        assert!(binding.workload.state_root.is_none());
+        assert!(binding.state_transition.is_none());
+    }
+
+    #[test]
+    fn bootstrap_dependency_must_be_available_before_start() {
+        let invalid = RECIPE.replace("kind = \"shared-infrastructure\"", "kind = \"bootstrap\"");
+        assert!(TargetDeclaration::parse(&invalid).is_err());
+        let valid = invalid.replace(
+            "startup = \"before-promotion\"",
+            "startup = \"before-start\"",
+        );
+        TargetDeclaration::parse(&valid).unwrap();
     }
 
     #[test]

@@ -7,146 +7,178 @@ use sha2::{Digest, Sha256};
 
 use crate::deployment::{
     CapabilityDependency, DependencyKind, ExternalCapabilityBinding, OperatorBinding,
-    ProvidedCapability, TargetDeclaration, capability_compatible,
+    ProvidedCapability, ServiceTransport, SourceSelectionPolicy, StateDeclaration,
+    TargetDeclaration, capability_compatible,
 };
 
+pub const SOURCE_SELECTION_FACTS_SCHEMA: &str = "idunn.source_selection_facts.v1";
 pub const COMPILED_DEPLOYMENT_PLAN_SCHEMA: &str = "idunn.compiled_deployment_plan.v1";
-pub const SEALED_DEPLOYMENT_SCHEMA: &str = "idunn.sealed_deployment.v1";
-pub const EXPECTED_GENERATION_SCHEMA: &str = "idunn.expected_generation.v1";
-pub const GENERATION_CORRELATION_SCHEMA: &str = "idunn.generation_correlation.v1";
-pub const PROMOTION_TRANSACTION_SCHEMA: &str = "idunn.promotion_transaction.v1";
-pub const ADMITTED_GENERATION_SCHEMA: &str = "idunn.admitted_generation.v1";
+pub const EXPECTED_INCARNATION_SCHEMA: &str = "idunn.expected_incarnation.v1";
+pub const SEALED_RELEASE_SCHEMA: &str = "idunn.sealed_release.v1";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ResolvedGitlink {
+pub struct GitlinkTreeFact {
     pub origin: String,
     pub revision: String,
+    pub tree_entry_revision: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "policy", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum SourceSelection {
+    PinnedObject,
+    RefHead,
+    SignedRelease { release_authority_id: String },
+}
+
+/// Private facts emitted by the future narrow source driver. Structural
+/// validation here does not prove Git ancestry, signatures, or object custody.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExactSource {
+pub struct SourceSelectionFacts {
+    pub schema: String,
     pub origin: String,
     pub admitted_ref: String,
     pub revision: String,
-    pub minimum_revision: String,
-    pub selection_receipt_sha256: String,
-    pub gitlinks: BTreeMap<PathBuf, ResolvedGitlink>,
+    pub source_tree: String,
+    pub recipe_path: PathBuf,
+    pub recipe_blob_sha256: String,
+    pub gitlinks: BTreeMap<PathBuf, GitlinkTreeFact>,
+    pub selection: SourceSelection,
+    pub selected_at_unix_millis: u64,
 }
 
-impl ExactSource {
+impl SourceSelectionFacts {
     pub fn validate_against(&self, binding: &OperatorBinding) -> Result<()> {
+        binding.validate()?;
+        ensure!(
+            self.schema == SOURCE_SELECTION_FACTS_SCHEMA,
+            "unsupported source-selection facts schema"
+        );
         ensure!(
             self.origin == binding.repository.origin,
-            "exact source origin differs from binding"
+            "selected origin differs from binding"
         );
         ensure!(
             self.admitted_ref == binding.repository.admitted_ref,
-            "exact source ref differs from binding"
+            "selected ref differs from binding"
         );
-        require_sha1(&self.revision, "exact source revision")?;
+        require_sha1(&self.revision, "selected revision")?;
+        require_sha1(&self.source_tree, "selected source tree")?;
         ensure!(
-            self.minimum_revision == binding.repository.minimum_revision,
-            "exact source floor differs from binding"
+            self.recipe_path == binding.repository.recipe_path,
+            "selected recipe path differs from binding"
         );
-        require_sha1(&self.minimum_revision, "exact source floor")?;
-        require_sha256(&self.selection_receipt_sha256, "source-selection receipt")?;
+        require_sha256(&self.recipe_blob_sha256, "selected recipe blob")?;
+        ensure!(
+            self.selected_at_unix_millis > 0,
+            "source-selection facts have no time"
+        );
+
+        match (&binding.repository.selection, &self.selection) {
+            (SourceSelectionPolicy::PinnedObject, SourceSelection::PinnedObject) => {
+                let pinned_revision = binding
+                    .repository
+                    .pinned_revision
+                    .as_deref()
+                    .context("validated pinned binding has no revision")?;
+                ensure!(
+                    self.revision == pinned_revision,
+                    "selected source differs from the pinned revision"
+                );
+            }
+            (SourceSelectionPolicy::RefHead, SourceSelection::RefHead) => {}
+            (
+                SourceSelectionPolicy::SignedRelease,
+                SourceSelection::SignedRelease {
+                    release_authority_id,
+                },
+            ) => {
+                require_token(release_authority_id, "release authority id")?;
+            }
+            _ => bail!("source-selection facts do not match operator policy"),
+        }
+
         let expected_paths: BTreeSet<_> = binding.repository.gitlinks.keys().cloned().collect();
         let observed_paths: BTreeSet<_> = self.gitlinks.keys().cloned().collect();
         ensure!(
             expected_paths == observed_paths,
-            "resolved Gitlinks differ from binding"
+            "Gitlink tree facts differ from binding"
         );
-        for (path, observed) in &self.gitlinks {
+        for (path, receipt) in &self.gitlinks {
             let expected = &binding.repository.gitlinks[path];
             ensure!(
-                observed.origin == expected.origin,
+                receipt.origin == expected.origin,
                 "Gitlink {} origin differs from binding",
                 path.display()
             );
-            require_sha1(&observed.revision, "Gitlink revision")?;
+            require_sha1(&receipt.revision, "Gitlink revision")?;
+            require_sha1(&receipt.tree_entry_revision, "Gitlink tree entry")?;
+            ensure!(
+                receipt.revision == receipt.tree_entry_revision,
+                "Gitlink {} revision differs from the selected tree entry",
+                path.display()
+            );
         }
         Ok(())
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum ProviderOrigin {
-    ManagedRuntime,
-    ExternalOperatorBinding,
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum ExpectedProviderAuthority {
+    ManagedIncarnation {
+        target: String,
+        incarnation_id: String,
+        plan_id: String,
+        sealed_release_id: String,
+        expected_projection_sha256: String,
+    },
+    ExternalOperatorBinding {
+        binding_target: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ProviderObservation {
+pub struct ExpectedProviderRef {
     pub provider_id: String,
-    pub provider_target: Option<String>,
-    pub origin: ProviderOrigin,
-    pub generation: String,
-    pub deployment_id: Option<String>,
+    pub authority: ExpectedProviderAuthority,
     pub capability: String,
     pub schema: String,
     pub compatibility: String,
     pub capacity: u32,
-    pub endpoint: String,
-    pub expected: bool,
-    pub present: bool,
-    pub ready: bool,
-    pub observation_sha256: Option<String>,
+    pub endpoint: Option<String>,
 }
 
-impl ProviderObservation {
+impl ExpectedProviderRef {
     pub fn validate(&self) -> Result<()> {
-        require_token(&self.provider_id, "provider id")?;
-        if let Some(target) = &self.provider_target {
-            require_token(target, "provider target")?;
-        }
-        require_token(&self.generation, "provider generation")?;
-        if let Some(deployment_id) = &self.deployment_id {
-            require_token(deployment_id, "provider deployment id")?;
-        }
+        require_token(&self.provider_id, "expected provider id")?;
         require_contract(&self.capability, &self.schema, &self.compatibility)?;
-        ensure!(self.capacity > 0, "provider capacity is zero");
-        require_value(&self.endpoint, "provider endpoint")?;
-        ensure!(
-            !self.present || self.expected,
-            "provider is present without expected admission"
-        );
-        ensure!(
-            !self.ready || self.present,
-            "provider is ready without signed presence"
-        );
-        match self.origin {
-            ProviderOrigin::ManagedRuntime => {
-                ensure!(
-                    self.provider_target.is_some(),
-                    "managed provider has no target"
-                );
-                if self.present {
-                    ensure!(
-                        self.deployment_id.is_some(),
-                        "present managed provider has no deployment identity"
-                    );
-                    require_sha256(
-                        self.observation_sha256.as_deref().unwrap_or_default(),
-                        "managed provider observation",
-                    )?;
-                }
+        ensure!(self.capacity > 0, "expected provider capacity is zero");
+        if let Some(endpoint) = &self.endpoint {
+            require_value(endpoint, "expected provider endpoint")?;
+        }
+        match &self.authority {
+            ExpectedProviderAuthority::ManagedIncarnation {
+                target,
+                incarnation_id,
+                plan_id,
+                sealed_release_id,
+                expected_projection_sha256,
+            } => {
+                require_token(target, "managed provider target")?;
+                require_token(incarnation_id, "managed provider incarnation")?;
+                require_sha256(plan_id, "managed provider plan")?;
+                require_sha256(sealed_release_id, "managed provider sealed release")?;
+                require_sha256(expected_projection_sha256, "managed expected projection")?;
             }
-            ProviderOrigin::ExternalOperatorBinding => {
+            ExpectedProviderAuthority::ExternalOperatorBinding { binding_target } => {
+                require_token(binding_target, "external binding target")?;
                 ensure!(
-                    self.provider_target.is_none(),
-                    "external binding impersonates a managed target"
-                );
-                ensure!(
-                    !self.present && !self.ready,
-                    "external configuration impersonates runtime observation"
-                );
-                ensure!(
-                    self.observation_sha256.is_none(),
-                    "external configuration carries a runtime observation digest"
+                    self.endpoint.is_some(),
+                    "external binding has no configured endpoint"
                 );
             }
         }
@@ -163,69 +195,140 @@ impl ProviderObservation {
             &self.compatibility,
         ) && self.capacity >= dependency.minimum_capacity
     }
+
+    fn is_external_binding(&self) -> bool {
+        matches!(
+            &self.authority,
+            ExpectedProviderAuthority::ExternalOperatorBinding { .. }
+        )
+    }
+}
+
+pub fn external_binding_provider_refs(
+    binding: &OperatorBinding,
+) -> Result<Vec<ExpectedProviderRef>> {
+    binding.validate()?;
+    let providers = binding
+        .external_capabilities
+        .iter()
+        .map(|capability| expected_external_provider(&binding.target, capability))
+        .collect::<Vec<_>>();
+    for provider in &providers {
+        provider.validate()?;
+    }
+    Ok(providers)
+}
+
+fn expected_external_provider(
+    binding_target: &str,
+    capability: &ExternalCapabilityBinding,
+) -> ExpectedProviderRef {
+    ExpectedProviderRef {
+        provider_id: capability.provider_id.clone(),
+        authority: ExpectedProviderAuthority::ExternalOperatorBinding {
+            binding_target: binding_target.to_owned(),
+        },
+        capability: capability.capability.clone(),
+        schema: capability.schema.clone(),
+        compatibility: capability.compatibility.clone(),
+        capacity: capability.capacity,
+        endpoint: Some(capability.endpoint.clone()),
+    }
+}
+
+fn managed_expected_provider_refs(
+    expected_incarnations: &[ExpectedIncarnation],
+) -> Result<Vec<ExpectedProviderRef>> {
+    let mut providers = Vec::new();
+    for expected in expected_incarnations {
+        expected.validate()?;
+        let expected_projection_sha256 = expected.canonical_sha256()?;
+        let endpoint = expected
+            .route
+            .as_ref()
+            .map(|route| route.candidate_endpoint.clone());
+        for capability in &expected.capabilities {
+            providers.push(ExpectedProviderRef {
+                provider_id: expected.runtime_id.clone(),
+                authority: ExpectedProviderAuthority::ManagedIncarnation {
+                    target: expected.target.clone(),
+                    incarnation_id: expected.incarnation_id.clone(),
+                    plan_id: expected.plan_id.clone(),
+                    sealed_release_id: expected.sealed_release_id.clone(),
+                    expected_projection_sha256: expected_projection_sha256.clone(),
+                },
+                capability: capability.capability.clone(),
+                schema: capability.schema.clone(),
+                compatibility: capability.compatibility.clone(),
+                capacity: capability.capacity,
+                endpoint: endpoint.clone(),
+            });
+        }
+    }
+    Ok(providers)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct DependencyResolution {
+pub struct DependencySelection {
     pub requirement: CapabilityDependency,
-    pub provider: Option<ProviderObservation>,
+    pub provider: Option<ExpectedProviderRef>,
 }
 
-impl DependencyResolution {
-    pub fn blocks_start(&self) -> bool {
-        self.requirement.startup == crate::deployment::StartupOrder::BeforeStart
-            && self.requirement.kind != DependencyKind::Optional
-            && !self
-                .provider
-                .as_ref()
-                .is_some_and(|provider| provider.ready)
+impl DependencySelection {
+    fn validate(&self) -> Result<()> {
+        require_contract(
+            &self.requirement.capability,
+            &self.requirement.schema,
+            &self.requirement.compatibility,
+        )?;
+        ensure!(
+            self.requirement.minimum_capacity > 0,
+            "dependency capacity is zero"
+        );
+        if let Some(provider) = &self.provider {
+            provider.validate()?;
+            ensure!(
+                provider.compatible_with(&self.requirement),
+                "selected provider is incompatible"
+            );
+            ensure!(
+                (self.requirement.kind == DependencyKind::ExternalOperatorBinding)
+                    == provider.is_external_binding(),
+                "selected provider authority does not match dependency kind"
+            );
+        } else {
+            ensure!(
+                self.requirement.kind == DependencyKind::Optional,
+                "required dependency is unresolved"
+            );
+        }
+        Ok(())
     }
-
-    pub fn blocks_promotion(&self) -> bool {
-        self.requirement.kind != DependencyKind::Optional
-            && !self
-                .provider
-                .as_ref()
-                .is_some_and(|provider| provider.ready)
-    }
 }
 
-pub fn external_binding_observations(
-    bindings: &[ExternalCapabilityBinding],
-) -> Vec<ProviderObservation> {
-    bindings
-        .iter()
-        .map(|binding| ProviderObservation {
-            provider_id: format!("operator:{}", binding.capability),
-            provider_target: None,
-            origin: ProviderOrigin::ExternalOperatorBinding,
-            generation: "operator-bound".into(),
-            deployment_id: None,
-            capability: binding.capability.clone(),
-            schema: binding.schema.clone(),
-            compatibility: binding.compatibility.clone(),
-            capacity: 1,
-            endpoint: binding.endpoint.clone(),
-            expected: true,
-            present: false,
-            ready: false,
-            observation_sha256: None,
-        })
-        .collect()
-}
-
-pub fn resolve_dependencies(
+pub fn select_dependencies(
     declaration: &TargetDeclaration,
-    observations: &[ProviderObservation],
-) -> Result<Vec<DependencyResolution>> {
-    for observation in observations {
-        observation.validate()?;
+    providers: &[ExpectedProviderRef],
+) -> Result<Vec<DependencySelection>> {
+    declaration.validate()?;
+    let mut unique_contracts = BTreeSet::new();
+    for provider in providers {
+        provider.validate()?;
+        ensure!(
+            unique_contracts.insert((
+                provider.provider_id.as_str(),
+                provider.capability.as_str(),
+                provider.schema.as_str(),
+                provider.compatibility.as_str(),
+            )),
+            "expected provider contract is duplicated"
+        );
     }
     for conflict in &declaration.conflicts {
-        if observations
+        if providers
             .iter()
-            .any(|provider| provider.expected && provider.capability == conflict.capability)
+            .any(|provider| provider.capability == conflict.capability)
         {
             bail!(
                 "capability conflict {}: {}",
@@ -238,23 +341,19 @@ pub fn resolve_dependencies(
         .dependencies
         .iter()
         .map(|dependency| {
-            let mut candidates = observations
+            let mut candidates = providers
                 .iter()
-                .filter(|provider| provider.expected && provider.compatible_with(dependency))
+                .filter(|provider| provider.compatible_with(dependency))
+                .filter(|provider| {
+                    (dependency.kind == DependencyKind::ExternalOperatorBinding)
+                        == provider.is_external_binding()
+                })
                 .cloned()
                 .collect::<Vec<_>>();
-            if dependency.kind == DependencyKind::ExternalOperatorBinding {
-                candidates
-                    .retain(|provider| provider.origin == ProviderOrigin::ExternalOperatorBinding);
-            } else {
-                candidates.retain(|provider| provider.origin == ProviderOrigin::ManagedRuntime);
-            }
             candidates.sort_by(|left, right| {
-                right
-                    .ready
-                    .cmp(&left.ready)
-                    .then_with(|| right.present.cmp(&left.present))
-                    .then_with(|| left.provider_id.cmp(&right.provider_id))
+                left.provider_id
+                    .cmp(&right.provider_id)
+                    .then_with(|| left.endpoint.cmp(&right.endpoint))
             });
             let provider = candidates.into_iter().next();
             if provider.is_none() && dependency.kind != DependencyKind::Optional {
@@ -265,38 +364,108 @@ pub fn resolve_dependencies(
                     dependency.compatibility
                 );
             }
-            Ok(DependencyResolution {
+            let selection = DependencySelection {
                 requirement: dependency.clone(),
                 provider,
-            })
+            };
+            selection.validate()?;
+            Ok(selection)
         })
         .collect()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExpectedGeneration {
-    pub schema: String,
-    pub target: String,
-    pub generation: String,
-    pub deployment_id: String,
-    pub source_revision: String,
-    pub candidate_endpoint: Option<String>,
-    pub capabilities: Vec<ProvidedCapability>,
+pub struct ExpectedRoute {
+    pub route_id: String,
+    pub transport: ServiceTransport,
+    pub stable_endpoint: String,
+    pub candidate_endpoint: String,
 }
 
-impl ExpectedGeneration {
+impl ExpectedRoute {
+    fn validate(&self) -> Result<()> {
+        require_token(&self.route_id, "expected route id")?;
+        require_value(&self.stable_endpoint, "expected stable endpoint")?;
+        require_value(&self.candidate_endpoint, "expected candidate endpoint")?;
+        match self.transport {
+            ServiceTransport::Http => ensure!(
+                self.stable_endpoint.starts_with("http://")
+                    || self.stable_endpoint.starts_with("https://"),
+                "expected HTTP stable endpoint is not an HTTP URI"
+            ),
+            ServiceTransport::Tcp => ensure!(
+                self.stable_endpoint.starts_with("tcp://"),
+                "expected TCP stable endpoint is not a TCP URI"
+            ),
+            _ => bail!("routed expected incarnation has a non-routable transport"),
+        }
+        ensure!(
+            self.candidate_endpoint
+                .starts_with(&format!("{}://", endpoint_scheme(self.transport)?)),
+            "expected candidate endpoint transport disagrees"
+        );
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExpectedIncarnation {
+    pub schema: String,
+    pub plan_id: String,
+    pub sealed_release_id: String,
+    pub target: String,
+    pub incarnation_id: String,
+    pub runtime_id: String,
+    pub expected_signer_identity_id: String,
+    pub health_contract: String,
+    pub executable_artifact_sha256: String,
+    pub state_schema_generation: Option<String>,
+    pub state_contract_sha256: Option<String>,
+    pub write_lease_required: bool,
+    pub source_revision: String,
+    pub node: String,
+    pub route: Option<ExpectedRoute>,
+    pub capabilities: Vec<ProvidedCapability>,
+    pub dependencies: Vec<DependencySelection>,
+}
+
+impl ExpectedIncarnation {
     pub fn validate(&self) -> Result<()> {
         ensure!(
-            self.schema == EXPECTED_GENERATION_SCHEMA,
-            "unsupported expected-generation schema"
+            self.schema == EXPECTED_INCARNATION_SCHEMA,
+            "unsupported expected-incarnation schema"
         );
+        require_sha256(&self.plan_id, "expected plan")?;
+        require_sha256(&self.sealed_release_id, "expected sealed release")?;
         require_token(&self.target, "expected target")?;
-        require_token(&self.generation, "expected generation")?;
-        require_token(&self.deployment_id, "expected deployment")?;
+        require_token(&self.incarnation_id, "expected incarnation")?;
+        require_token(&self.runtime_id, "expected runtime id")?;
+        require_token(
+            &self.expected_signer_identity_id,
+            "expected signer identity id",
+        )?;
+        require_token(&self.health_contract, "expected health contract")?;
+        require_sha256(
+            &self.executable_artifact_sha256,
+            "expected executable artifact",
+        )?;
+        match (&self.state_schema_generation, &self.state_contract_sha256) {
+            (Some(generation), Some(contract)) => {
+                require_token(generation, "expected state schema generation")?;
+                require_sha256(contract, "expected state contract")?;
+            }
+            (None, None) => ensure!(
+                !self.write_lease_required,
+                "stateless expected incarnation requires a write lease"
+            ),
+            _ => bail!("expected state generation and contract digest disagree"),
+        }
         require_sha1(&self.source_revision, "expected source revision")?;
-        if let Some(endpoint) = &self.candidate_endpoint {
-            require_value(endpoint, "candidate endpoint")?;
+        require_token(&self.node, "expected node")?;
+        if let Some(route) = &self.route {
+            route.validate()?;
         }
         let mut capabilities = BTreeSet::new();
         for capability in &self.capabilities {
@@ -311,31 +480,43 @@ impl ExpectedGeneration {
             );
             ensure!(
                 capabilities.insert((
-                    &capability.capability,
-                    &capability.schema,
-                    &capability.compatibility
+                    capability.capability.as_str(),
+                    capability.schema.as_str(),
+                    capability.compatibility.as_str(),
                 )),
                 "expected capability is duplicated"
             );
         }
+        for dependency in &self.dependencies {
+            dependency.validate()?;
+        }
         Ok(())
+    }
+
+    pub fn canonical_sha256(&self) -> Result<String> {
+        self.validate()?;
+        Ok(sha256_id(
+            &rmp_serde::to_vec(self).context("encoding managed expected projection")?,
+        ))
     }
 }
 
+/// Private Idunn control-plane state. This contains host binding details and is
+/// never an Odin/CultMesh projection. `ExpectedIncarnation` is the sanitized
+/// topology projection derived only after a release validates against this
+/// plan.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CompiledDeploymentPlan {
     pub schema: String,
     pub plan_id: String,
-    pub deployment_id: String,
+    pub incarnation_id: String,
     pub created_at_unix_millis: u64,
-    pub source: ExactSource,
-    pub recipe_sha256: String,
-    pub binding_sha256: String,
-    pub declaration: TargetDeclaration,
-    pub binding: OperatorBinding,
-    pub dependencies: Vec<DependencyResolution>,
-    pub expected: ExpectedGeneration,
+    pub source: SourceSelectionFacts,
+    pub recipe_blob: Vec<u8>,
+    pub binding_blob: Vec<u8>,
+    pub dependencies: Vec<DependencySelection>,
+    pub candidate_port: Option<u16>,
 }
 
 impl CompiledDeploymentPlan {
@@ -345,67 +526,57 @@ impl CompiledDeploymentPlan {
             "unsupported deployment-plan schema"
         );
         require_sha256(&self.plan_id, "plan id")?;
-        require_token(&self.deployment_id, "deployment id")?;
+        require_token(&self.incarnation_id, "plan incarnation")?;
         ensure!(
-            self.created_at_unix_millis > 0,
-            "deployment plan has no creation time"
+            self.created_at_unix_millis >= self.source.selected_at_unix_millis,
+            "deployment plan predates source selection"
         );
-        self.declaration.validate()?;
-        self.binding.validate()?;
-        self.binding.admit(&self.declaration)?;
-        self.source.validate_against(&self.binding)?;
-        require_sha256(&self.recipe_sha256, "recipe digest")?;
-        require_sha256(&self.binding_sha256, "binding digest")?;
-        self.expected.validate()?;
+        let (declaration, binding) = self.parsed_inputs()?;
+        self.source.validate_against(&binding)?;
         ensure!(
-            self.expected.target == self.declaration.target,
-            "expected target differs from recipe"
+            sha256_id(&self.recipe_blob) == self.source.recipe_blob_sha256,
+            "selected recipe blob differs from the exact plan recipe bytes"
         );
-        ensure!(
-            self.expected.generation == self.declaration.state.generation,
-            "expected generation differs from recipe"
-        );
-        ensure!(
-            self.expected.deployment_id == self.deployment_id,
-            "expected deployment differs from plan"
-        );
-        ensure!(
-            self.expected.source_revision == self.source.revision,
-            "expected source differs from plan"
-        );
-        ensure!(
-            self.expected.capabilities == self.declaration.provides,
-            "expected capabilities differ from recipe"
-        );
-        let resolved_requirements: Vec<_> = self
+        let declared_requirements: Vec<_> = declaration.dependencies.iter().collect();
+        let selected_requirements: Vec<_> = self
             .dependencies
             .iter()
-            .map(|resolution| &resolution.requirement)
+            .map(|selection| &selection.requirement)
             .collect();
-        let declared_requirements: Vec<_> = self.declaration.dependencies.iter().collect();
         ensure!(
-            resolved_requirements == declared_requirements,
-            "resolved graph differs from recipe dependencies"
+            declared_requirements == selected_requirements,
+            "selected graph differs from recipe dependencies"
         );
-        for resolution in &self.dependencies {
-            if let Some(provider) = &resolution.provider {
-                provider.validate()?;
+        for selection in &self.dependencies {
+            selection.validate()?;
+        }
+        match (&binding.route, self.candidate_port) {
+            (Some(bound), Some(port)) => {
                 ensure!(
-                    provider.compatible_with(&resolution.requirement),
-                    "resolved provider is incompatible"
-                );
-            } else {
-                ensure!(
-                    resolution.requirement.kind == DependencyKind::Optional,
-                    "required dependency is unresolved"
+                    (bound.private_port_start..=bound.private_port_end).contains(&port),
+                    "candidate port is outside the operator range"
                 );
             }
+            (None, None) => {}
+            (Some(_), None) => bail!("routed deployment has no candidate port"),
+            (None, Some(_)) => bail!("private deployment selected a routed candidate port"),
         }
         ensure!(
             self.plan_id == self.recomputed_plan_id()?,
             "deployment plan digest is not canonical"
         );
         Ok(())
+    }
+
+    fn parsed_inputs(&self) -> Result<(TargetDeclaration, OperatorBinding)> {
+        let recipe_text = std::str::from_utf8(&self.recipe_blob)
+            .context("stored deployment recipe is not UTF-8")?;
+        let binding_text = std::str::from_utf8(&self.binding_blob)
+            .context("stored operator binding is not UTF-8")?;
+        let declaration = TargetDeclaration::parse(recipe_text)?;
+        let binding = OperatorBinding::parse(binding_text)?;
+        binding.admit(&declaration)?;
+        Ok((declaration, binding))
     }
 
     fn recomputed_plan_id(&self) -> Result<String> {
@@ -419,64 +590,43 @@ impl CompiledDeploymentPlan {
 
 #[allow(clippy::too_many_arguments)]
 pub fn compile_deployment_plan(
-    declaration: TargetDeclaration,
-    binding: OperatorBinding,
-    source: ExactSource,
     recipe_bytes: &[u8],
     binding_bytes: &[u8],
-    deployment_id: impl Into<String>,
+    source: SourceSelectionFacts,
+    incarnation_id: impl Into<String>,
     candidate_port: Option<u16>,
     created_at_unix_millis: u64,
-    observed_providers: &[ProviderObservation],
+    managed_expected_incarnations: &[ExpectedIncarnation],
 ) -> Result<CompiledDeploymentPlan> {
-    declaration.validate()?;
-    binding.validate()?;
+    let recipe_text = std::str::from_utf8(recipe_bytes).context("recipe is not UTF-8")?;
+    let binding_text = std::str::from_utf8(binding_bytes).context("binding is not UTF-8")?;
+    let declaration = TargetDeclaration::parse(recipe_text)?;
+    let binding = OperatorBinding::parse(binding_text)?;
     binding.admit(&declaration)?;
     source.validate_against(&binding)?;
-    let deployment_id = deployment_id.into();
-    require_token(&deployment_id, "deployment id")?;
     ensure!(
-        created_at_unix_millis > 0,
-        "deployment plan has no creation time"
+        sha256_id(recipe_bytes) == source.recipe_blob_sha256,
+        "selected recipe blob differs from compiled recipe bytes"
     );
-    let candidate_endpoint = match (&binding.route, candidate_port) {
-        (Some(route), Some(port)) => {
-            ensure!(
-                (route.private_port_start..=route.private_port_end).contains(&port),
-                "candidate port is outside the operator range"
-            );
-            Some(format!("{}:{port}", route.private_host))
-        }
-        (None, None) => None,
-        (Some(_), None) => bail!("routed deployment has no candidate port"),
-        (None, Some(_)) => bail!("private deployment cannot select a routed candidate port"),
-    };
-    let mut providers = observed_providers.to_vec();
-    providers.extend(external_binding_observations(
-        &binding.external_capabilities,
-    ));
-    let dependencies = resolve_dependencies(&declaration, &providers)?;
-    let expected = ExpectedGeneration {
-        schema: EXPECTED_GENERATION_SCHEMA.into(),
-        target: declaration.target.clone(),
-        generation: declaration.state.generation.clone(),
-        deployment_id: deployment_id.clone(),
-        source_revision: source.revision.clone(),
-        candidate_endpoint,
-        capabilities: declaration.provides.clone(),
-    };
+    let incarnation_id = incarnation_id.into();
+    require_token(&incarnation_id, "deployment incarnation")?;
+    ensure!(
+        created_at_unix_millis >= source.selected_at_unix_millis,
+        "deployment plan predates source selection"
+    );
+    let mut providers = managed_expected_provider_refs(managed_expected_incarnations)?;
+    providers.extend(external_binding_provider_refs(&binding)?);
+    let dependencies = select_dependencies(&declaration, &providers)?;
     let mut plan = CompiledDeploymentPlan {
         schema: COMPILED_DEPLOYMENT_PLAN_SCHEMA.into(),
         plan_id: String::new(),
-        deployment_id,
+        incarnation_id,
         created_at_unix_millis,
         source,
-        recipe_sha256: sha256_id(recipe_bytes),
-        binding_sha256: sha256_id(binding_bytes),
-        declaration,
-        binding,
+        recipe_blob: recipe_bytes.to_vec(),
+        binding_blob: binding_bytes.to_vec(),
         dependencies,
-        expected,
+        candidate_port,
     };
     plan.plan_id = plan.recomputed_plan_id()?;
     plan.validate()?;
@@ -485,7 +635,7 @@ pub fn compile_deployment_plan(
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ArtifactSeal {
+pub struct ArtifactReceipt {
     pub artifact_id: String,
     pub destination: PathBuf,
     pub sha256: String,
@@ -493,457 +643,275 @@ pub struct ArtifactSeal {
     pub executable: bool,
 }
 
+impl ArtifactReceipt {
+    fn validate(&self, declaration: &TargetDeclaration) -> Result<()> {
+        require_token(&self.artifact_id, "artifact receipt id")?;
+        require_sha256(&self.sha256, "artifact digest")?;
+        ensure!(self.size_bytes > 0, "sealed artifact is empty");
+        let declared = declaration
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.id == self.artifact_id)
+            .with_context(|| format!("plan declares no artifact {}", self.artifact_id))?;
+        ensure!(
+            self.destination == declared.destination && self.executable == declared.executable,
+            "artifact receipt differs from declared output"
+        );
+        if let Some(expected_sha256) = &declared.expected_sha256 {
+            ensure!(
+                self.sha256 == prefixed_sha256(expected_sha256),
+                "artifact receipt differs from the recipe-pinned digest"
+            );
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SealedDeployment {
+pub struct ExternalInputMaterializationReceipt {
+    pub input_id: String,
+    pub url: String,
+    pub sha256: String,
+    pub runner: String,
+    pub destination: PathBuf,
+    pub size_bytes: u64,
+}
+
+impl ExternalInputMaterializationReceipt {
+    fn validate(&self, declaration: &TargetDeclaration) -> Result<()> {
+        require_token(&self.input_id, "external input receipt id")?;
+        require_sha256(&self.sha256, "external input materialized digest")?;
+        ensure!(self.size_bytes > 0, "materialized external input is empty");
+        let declared = declaration
+            .external_inputs
+            .iter()
+            .find(|input| input.id == self.input_id)
+            .with_context(|| format!("plan declares no external input {}", self.input_id))?;
+        ensure!(
+            self.url == declared.url
+                && self.sha256 == prefixed_sha256(&declared.sha256)
+                && self.runner == declared.runner
+                && self.destination == declared.destination,
+            "external input receipt differs from its pinned declaration"
+        );
+        Ok(())
+    }
+}
+
+/// Private Idunn release state. The content address covers the exact plan ID,
+/// sorted full artifact receipts, and sorted full external-input
+/// materialization receipts. The plan remains a separate private record and is
+/// supplied explicitly for validation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SealedRelease {
     pub schema: String,
-    pub release_id: String,
-    pub plan: CompiledDeploymentPlan,
-    pub plan_sha256: String,
-    pub artifacts: Vec<ArtifactSeal>,
+    pub sealed_release_id: String,
+    pub plan_id: String,
+    pub artifacts: Vec<ArtifactReceipt>,
+    pub external_inputs: Vec<ExternalInputMaterializationReceipt>,
     pub sealed_at_unix_millis: u64,
 }
 
-impl SealedDeployment {
+impl SealedRelease {
     pub fn new(
-        plan: CompiledDeploymentPlan,
-        release_id: impl Into<String>,
-        artifacts: Vec<ArtifactSeal>,
+        plan: &CompiledDeploymentPlan,
+        mut artifacts: Vec<ArtifactReceipt>,
+        mut external_inputs: Vec<ExternalInputMaterializationReceipt>,
         sealed_at_unix_millis: u64,
     ) -> Result<Self> {
         plan.validate()?;
-        let mut sealed = Self {
-            schema: SEALED_DEPLOYMENT_SCHEMA.into(),
-            release_id: release_id.into(),
-            plan_sha256: sha256_id(&rmp_serde::to_vec(&plan)?),
-            plan,
+        artifacts.sort_by(|left, right| left.artifact_id.cmp(&right.artifact_id));
+        external_inputs.sort_by(|left, right| left.input_id.cmp(&right.input_id));
+        let mut release = Self {
+            schema: SEALED_RELEASE_SCHEMA.into(),
+            sealed_release_id: String::new(),
+            plan_id: plan.plan_id.clone(),
             artifacts,
+            external_inputs,
             sealed_at_unix_millis,
         };
-        sealed.validate()?;
-        sealed
-            .artifacts
-            .sort_by(|left, right| left.artifact_id.cmp(&right.artifact_id));
-        sealed.validate()?;
-        Ok(sealed)
+        release.validate_contents(plan)?;
+        release.sealed_release_id = release.recomputed_release_id()?;
+        release.validate_against(plan)?;
+        Ok(release)
     }
 
-    pub fn validate(&self) -> Result<()> {
+    pub fn validate_against(&self, plan: &CompiledDeploymentPlan) -> Result<()> {
+        require_sha256(&self.sealed_release_id, "sealed release id")?;
+        self.validate_contents(plan)?;
         ensure!(
-            self.schema == SEALED_DEPLOYMENT_SCHEMA,
-            "unsupported sealed-deployment schema"
+            self.sealed_release_id == self.recomputed_release_id()?,
+            "sealed release content address is wrong"
         );
-        require_token(&self.release_id, "release id")?;
-        ensure!(
-            self.sealed_at_unix_millis >= self.plan.created_at_unix_millis,
-            "deployment was sealed before it was planned"
-        );
-        self.plan.validate()?;
-        ensure!(
-            self.plan_sha256 == sha256_id(&rmp_serde::to_vec(&self.plan)?),
-            "sealed plan digest is wrong"
-        );
-        let declared = self
-            .plan
-            .declaration
+        Ok(())
+    }
+
+    pub fn expected_projection(
+        &self,
+        plan: &CompiledDeploymentPlan,
+    ) -> Result<ExpectedIncarnation> {
+        self.validate_against(plan)?;
+        let (declaration, binding) = plan.parsed_inputs()?;
+        let node = binding
+            .placement
+            .nodes
+            .iter()
+            .next()
+            .context("validated singleton binding has no node")?
+            .clone();
+        let route = match (&binding.route, plan.candidate_port) {
+            (Some(bound), Some(port)) => Some(ExpectedRoute {
+                route_id: bound.route_id.clone(),
+                transport: declaration.service.transport,
+                stable_endpoint: bound.stable_endpoint.clone(),
+                candidate_endpoint: format!(
+                    "{}://{}:{port}",
+                    endpoint_scheme(declaration.service.transport)?,
+                    bound.private_host
+                ),
+            }),
+            (None, None) => None,
+            _ => bail!("plan route and candidate port disagree"),
+        };
+        let executable_artifact_sha256 = self
             .artifacts
             .iter()
-            .map(|artifact| {
-                (
-                    artifact.id.as_str(),
-                    artifact.destination.as_path(),
-                    artifact.executable,
-                )
-            })
-            .chain(
-                self.plan
-                    .declaration
-                    .external_artifacts
-                    .iter()
-                    .map(|artifact| {
-                        (
-                            artifact.id.as_str(),
-                            artifact.destination.as_path(),
-                            artifact.executable,
-                        )
-                    }),
-            )
-            .collect::<BTreeSet<_>>();
-        let mut observed = BTreeSet::new();
-        for artifact in &self.artifacts {
-            require_token(&artifact.artifact_id, "artifact seal id")?;
-            require_sha256(&artifact.sha256, "artifact seal digest")?;
-            ensure!(artifact.size_bytes > 0, "sealed artifact is empty");
-            ensure!(
-                observed.insert((
-                    artifact.artifact_id.as_str(),
-                    artifact.destination.as_path(),
-                    artifact.executable
-                )),
-                "artifact seal is duplicated"
-            );
-        }
-        ensure!(
-            declared == observed,
-            "sealed artifacts differ from declared outputs"
-        );
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RuntimePresence {
-    pub target: String,
-    pub generation: String,
-    pub deployment_id: String,
-    pub source_revision: String,
-    pub endpoint: Option<String>,
-    pub capabilities: Vec<ProvidedCapability>,
-    pub runtime_id: String,
-    pub signer_identity_id: String,
-    pub signed_statement_sha256: String,
-}
-
-impl RuntimePresence {
-    pub fn validate(&self) -> Result<()> {
-        require_token(&self.target, "presence target")?;
-        require_token(&self.generation, "presence generation")?;
-        require_token(&self.deployment_id, "presence deployment")?;
-        require_sha1(&self.source_revision, "presence source revision")?;
-        if let Some(endpoint) = &self.endpoint {
-            require_value(endpoint, "presence endpoint")?;
-        }
-        require_token(&self.runtime_id, "presence runtime")?;
-        require_token(&self.signer_identity_id, "presence signer")?;
-        require_sha256(&self.signed_statement_sha256, "presence statement")?;
-        let mut capabilities = BTreeSet::new();
-        for capability in &self.capabilities {
-            require_contract(
-                &capability.capability,
-                &capability.schema,
-                &capability.compatibility,
-            )?;
-            ensure!(
-                capability.capacity > 0,
-                "presence capability capacity is zero"
-            );
-            ensure!(
-                capabilities.insert((
-                    &capability.capability,
-                    &capability.schema,
-                    &capability.compatibility,
-                )),
-                "presence capability is duplicated"
-            );
-        }
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct HealthObservation {
-    pub contract: String,
-    pub state: String,
-    pub detail: String,
-    pub signed_statement_sha256: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct GenerationCorrelation {
-    pub schema: String,
-    pub target: String,
-    pub generation: String,
-    pub expected: bool,
-    pub present: bool,
-    pub ready: bool,
-    pub disagreements: Vec<String>,
-}
-
-pub fn correlate_generation(
-    plan: &CompiledDeploymentPlan,
-    presence: Option<&RuntimePresence>,
-    health: Option<&HealthObservation>,
-) -> Result<GenerationCorrelation> {
-    plan.validate()?;
-    let mut disagreements = Vec::new();
-    let mut present = false;
-    if let Some(presence) = presence {
-        presence.validate()?;
-        for (matches, code) in [
-            (presence.target == plan.expected.target, "target-mismatch"),
-            (
-                presence.generation == plan.expected.generation,
-                "generation-mismatch",
-            ),
-            (
-                presence.deployment_id == plan.expected.deployment_id,
-                "deployment-mismatch",
-            ),
-            (
-                presence.source_revision == plan.expected.source_revision,
-                "source-mismatch",
-            ),
-            (
-                presence.endpoint == plan.expected.candidate_endpoint,
-                "endpoint-mismatch",
-            ),
-            (
-                capability_set(&presence.capabilities)
-                    == capability_set(&plan.expected.capabilities),
-                "capability-mismatch",
-            ),
-        ] {
-            if !matches {
-                disagreements.push(code.into());
-            }
-        }
-        present = disagreements.is_empty();
-    } else {
-        disagreements.push("runtime-presence-missing".into());
-    }
-    let mut health_ready = false;
-    if let (Some(presence), Some(health)) = (presence, health) {
-        require_token(&health.contract, "health contract")?;
-        require_value(&health.state, "health state")?;
-        require_value(&health.detail, "health detail")?;
-        require_sha256(&health.signed_statement_sha256, "health statement")?;
-        if health.signed_statement_sha256 != presence.signed_statement_sha256 {
-            disagreements.push("health-presence-statement-mismatch".into());
-        } else if health.contract != plan.declaration.service.health.contract {
-            disagreements.push("health-contract-mismatch".into());
-        } else if health.state != plan.declaration.service.health.ready.state {
-            disagreements.push("health-state-not-ready".into());
-        } else if health.detail != plan.declaration.service.health.ready.detail {
-            disagreements.push("health-detail-not-ready".into());
-        } else {
-            health_ready = true;
-        }
-    } else if health.is_none() {
-        disagreements.push("health-missing".into());
-    }
-    if plan
-        .dependencies
-        .iter()
-        .any(DependencyResolution::blocks_promotion)
-    {
-        disagreements.push("dependency-graph-not-ready".into());
-    }
-    disagreements.sort();
-    disagreements.dedup();
-    Ok(GenerationCorrelation {
-        schema: GENERATION_CORRELATION_SCHEMA.into(),
-        target: plan.expected.target.clone(),
-        generation: plan.expected.generation.clone(),
-        expected: true,
-        present,
-        ready: present && health_ready && disagreements.is_empty(),
-        disagreements,
-    })
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum PromotionPhase {
-    Planned,
-    Materialized,
-    Sealed,
-    CandidateStarted,
-    Staged,
-    Fenced,
-    RouteObserved,
-    WriteAdmitted,
-    Active,
-    Draining,
-    Complete,
-}
-
-impl PromotionPhase {
-    pub fn next(self) -> Option<Self> {
-        Some(match self {
-            Self::Planned => Self::Materialized,
-            Self::Materialized => Self::Sealed,
-            Self::Sealed => Self::CandidateStarted,
-            Self::CandidateStarted => Self::Staged,
-            Self::Staged => Self::Fenced,
-            Self::Fenced => Self::RouteObserved,
-            Self::RouteObserved => Self::WriteAdmitted,
-            Self::WriteAdmitted => Self::Active,
-            Self::Active => Self::Draining,
-            Self::Draining => Self::Complete,
-            Self::Complete => return None,
-        })
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PromotionTransaction {
-    pub schema: String,
-    pub transaction_id: String,
-    pub plan_id: String,
-    pub target: String,
-    pub phase: PromotionPhase,
-    pub revision: u64,
-    pub updated_at_unix_millis: u64,
-}
-
-impl PromotionTransaction {
-    pub fn new(
-        transaction_id: impl Into<String>,
-        plan: &CompiledDeploymentPlan,
-        created_at_unix_millis: u64,
-    ) -> Result<Self> {
-        plan.validate()?;
-        let transaction = Self {
-            schema: PROMOTION_TRANSACTION_SCHEMA.into(),
-            transaction_id: transaction_id.into(),
+            .find(|artifact| artifact.artifact_id == declaration.service.executable_artifact)
+            .context("sealed release has no executable service artifact")?
+            .sha256
+            .clone();
+        let expected = ExpectedIncarnation {
+            schema: EXPECTED_INCARNATION_SCHEMA.into(),
             plan_id: plan.plan_id.clone(),
-            target: plan.declaration.target.clone(),
-            phase: PromotionPhase::Planned,
-            revision: 0,
-            updated_at_unix_millis: created_at_unix_millis,
+            sealed_release_id: self.sealed_release_id.clone(),
+            target: declaration.target.clone(),
+            incarnation_id: plan.incarnation_id.clone(),
+            runtime_id: binding.runtime_identity.runtime_id.clone(),
+            expected_signer_identity_id: binding
+                .runtime_identity
+                .expected_signer_identity_id
+                .clone(),
+            health_contract: declaration.service.health.contract.clone(),
+            executable_artifact_sha256,
+            state_schema_generation: declaration
+                .state
+                .as_ref()
+                .map(|state| state.schema_generation.clone()),
+            state_contract_sha256: declaration
+                .state
+                .as_ref()
+                .map(canonical_state_contract_sha256)
+                .transpose()?,
+            write_lease_required: declaration.write_lease_required(),
+            source_revision: plan.source.revision.clone(),
+            node,
+            route,
+            capabilities: declaration.provides.clone(),
+            dependencies: plan.dependencies.clone(),
         };
-        transaction.validate()?;
-        Ok(transaction)
+        expected.validate()?;
+        Ok(expected)
     }
 
-    pub fn validate(&self) -> Result<()> {
+    fn validate_contents(&self, plan: &CompiledDeploymentPlan) -> Result<()> {
         ensure!(
-            self.schema == PROMOTION_TRANSACTION_SCHEMA,
-            "unsupported promotion transaction schema"
+            self.schema == SEALED_RELEASE_SCHEMA,
+            "unsupported sealed-release schema"
         );
-        require_token(&self.transaction_id, "promotion transaction")?;
-        require_sha256(&self.plan_id, "promotion plan")?;
-        require_token(&self.target, "promotion target")?;
+        plan.validate()?;
+        let (declaration, _) = plan.parsed_inputs()?;
+        require_sha256(&self.plan_id, "sealed plan id")?;
         ensure!(
-            self.updated_at_unix_millis > 0,
-            "promotion transaction has no update time"
+            self.plan_id == plan.plan_id,
+            "sealed release refers to a different plan"
         );
+        ensure!(
+            self.sealed_at_unix_millis >= plan.created_at_unix_millis,
+            "release was sealed before it was planned"
+        );
+        ensure!(
+            self.artifacts
+                .windows(2)
+                .all(|pair| pair[0].artifact_id < pair[1].artifact_id),
+            "artifact receipts are not in canonical order"
+        );
+        ensure!(
+            self.external_inputs
+                .windows(2)
+                .all(|pair| pair[0].input_id < pair[1].input_id),
+            "external input receipts are not in canonical order"
+        );
+        let declared_ids = declaration
+            .artifacts
+            .iter()
+            .map(|artifact| artifact.id.as_str())
+            .collect::<BTreeSet<_>>();
+        let observed_ids = self
+            .artifacts
+            .iter()
+            .map(|artifact| artifact.artifact_id.as_str())
+            .collect::<BTreeSet<_>>();
+        ensure!(
+            declared_ids == observed_ids && observed_ids.len() == self.artifacts.len(),
+            "artifact receipts differ from declared outputs"
+        );
+        for artifact in &self.artifacts {
+            artifact.validate(&declaration)?;
+        }
+        let declared_input_ids = declaration
+            .external_inputs
+            .iter()
+            .map(|input| input.id.as_str())
+            .collect::<BTreeSet<_>>();
+        let observed_input_ids = self
+            .external_inputs
+            .iter()
+            .map(|input| input.input_id.as_str())
+            .collect::<BTreeSet<_>>();
+        ensure!(
+            declared_input_ids == observed_input_ids
+                && observed_input_ids.len() == self.external_inputs.len(),
+            "external input receipts differ from pinned declarations"
+        );
+        for input in &self.external_inputs {
+            input.validate(&declaration)?;
+        }
         Ok(())
     }
 
-    pub fn advance(&self, phase: PromotionPhase, updated_at_unix_millis: u64) -> Result<Self> {
-        self.validate()?;
-        ensure!(
-            self.phase.next() == Some(phase),
-            "promotion phase transition is not adjacent"
-        );
-        ensure!(
-            updated_at_unix_millis >= self.updated_at_unix_millis,
-            "promotion time moved backwards"
-        );
-        let next = Self {
-            schema: self.schema.clone(),
-            transaction_id: self.transaction_id.clone(),
-            plan_id: self.plan_id.clone(),
-            target: self.target.clone(),
-            phase,
-            revision: self
-                .revision
-                .checked_add(1)
-                .context("promotion revision overflow")?,
-            updated_at_unix_millis,
-        };
-        next.validate()?;
-        Ok(next)
+    fn recomputed_release_id(&self) -> Result<String> {
+        Ok(sha256_id(
+            &rmp_serde::to_vec(&(
+                self.schema.as_str(),
+                self.plan_id.as_str(),
+                &self.artifacts,
+                &self.external_inputs,
+            ))
+            .context("encoding sealed release identity")?,
+        ))
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AdmittedGeneration {
-    pub schema: String,
-    pub target: String,
-    pub generation: String,
-    pub deployment_id: String,
-    pub plan_id: String,
-    pub release_id: String,
-    pub source_revision: String,
-    pub workload_unit: String,
-    pub process_id: u32,
-    pub process_starttime_ticks: u64,
-    pub private_endpoint: Option<String>,
-    pub route_id: Option<String>,
-    pub route_observation_sha256: Option<String>,
-    pub write_admission_sha256: String,
-    pub admitted_at_unix_millis: u64,
+fn canonical_state_contract_sha256(state: &StateDeclaration) -> Result<String> {
+    Ok(sha256_id(
+        &rmp_serde::to_vec(state).context("encoding canonical state contract")?,
+    ))
 }
 
-impl AdmittedGeneration {
-    pub fn validate_against(&self, sealed: &SealedDeployment) -> Result<()> {
-        ensure!(
-            self.schema == ADMITTED_GENERATION_SCHEMA,
-            "unsupported admitted-generation schema"
-        );
-        sealed.validate()?;
-        require_token(&self.target, "admitted target")?;
-        require_token(&self.generation, "admitted generation")?;
-        require_token(&self.deployment_id, "admitted deployment")?;
-        require_sha256(&self.plan_id, "admitted plan")?;
-        require_token(&self.release_id, "admitted release")?;
-        require_sha1(&self.source_revision, "admitted source")?;
-        require_token(&self.workload_unit, "admitted workload unit")?;
-        ensure!(self.process_id > 0, "admitted process id is zero");
-        ensure!(
-            self.process_starttime_ticks > 0,
-            "admitted process start time is zero"
-        );
-        if let Some(endpoint) = &self.private_endpoint {
-            require_value(endpoint, "admitted private endpoint")?;
+fn endpoint_scheme(transport: ServiceTransport) -> Result<&'static str> {
+    match transport {
+        ServiceTransport::Http => Ok("http"),
+        ServiceTransport::Tcp => Ok("tcp"),
+        ServiceTransport::Rudp | ServiceTransport::Private => {
+            bail!("service transport has no stable route scheme")
         }
-        match (&self.route_id, &self.route_observation_sha256) {
-            (Some(route_id), Some(digest)) => {
-                require_token(route_id, "admitted route")?;
-                require_sha256(digest, "route observation")?;
-            }
-            (None, None) => {}
-            _ => bail!("admitted route identity and observation are incomplete"),
-        }
-        require_sha256(&self.write_admission_sha256, "write admission")?;
-        ensure!(self.admitted_at_unix_millis > 0, "admission has no time");
-        ensure!(
-            self.target == sealed.plan.declaration.target,
-            "admitted target differs from sealed plan"
-        );
-        ensure!(
-            self.generation == sealed.plan.declaration.state.generation,
-            "admitted generation differs from sealed plan"
-        );
-        ensure!(
-            self.deployment_id == sealed.plan.deployment_id,
-            "admitted deployment differs from sealed plan"
-        );
-        ensure!(
-            self.plan_id == sealed.plan.plan_id,
-            "admitted plan differs from sealed plan"
-        );
-        ensure!(
-            self.release_id == sealed.release_id,
-            "admitted release differs from sealed plan"
-        );
-        ensure!(
-            self.source_revision == sealed.plan.source.revision,
-            "admitted source differs from sealed plan"
-        );
-        ensure!(
-            self.private_endpoint == sealed.plan.expected.candidate_endpoint,
-            "admitted endpoint differs from expected plan"
-        );
-        match &sealed.plan.binding.route {
-            Some(route) => ensure!(
-                self.route_id.as_deref() == Some(route.route_id.as_str()),
-                "admitted route differs from binding"
-            ),
-            None => ensure!(
-                self.route_id.is_none(),
-                "private deployment carries a route"
-            ),
-        }
-        Ok(())
     }
+}
+
+fn prefixed_sha256(raw_sha256: &str) -> String {
+    format!("sha256-{raw_sha256}")
 }
 
 fn require_token(value: &str, label: &str) -> Result<()> {
@@ -965,20 +933,6 @@ fn require_contract(capability: &str, schema: &str, compatibility: &str) -> Resu
     require_token(capability, "capability")?;
     require_token(schema, "capability schema")?;
     require_token(compatibility, "capability compatibility")
-}
-
-fn capability_set(capabilities: &[ProvidedCapability]) -> BTreeSet<(&str, &str, &str, u32)> {
-    capabilities
-        .iter()
-        .map(|capability| {
-            (
-                capability.capability.as_str(),
-                capability.schema.as_str(),
-                capability.compatibility.as_str(),
-                capability.capacity,
-            )
-        })
-        .collect()
 }
 
 fn require_value(value: &str, label: &str) -> Result<()> {
@@ -1029,7 +983,6 @@ fn sha256_id(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::deployment::{OperatorBinding, TargetDeclaration};
 
     const RECIPE: &str = r#"
 schema = "gamecult.idunn.target_declaration.v1"
@@ -1042,12 +995,20 @@ phase = "build"
 runner = "rust"
 argv = ["cargo", "build", "--locked"]
 
+[[external_inputs]]
+id = "toolchain-index"
+url = "https://example.invalid/toolchain-index"
+sha256 = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+runner = "rust"
+destination = "inputs/toolchain-index"
+
 [[artifacts]]
 id = "daemon"
 source_kind = "runner-output"
 runner = "rust"
 source = "target/release/service"
 destination = "service"
+expected_sha256 = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 executable = true
 
 [service]
@@ -1059,16 +1020,17 @@ required_environment = ["SERVICE_BIND"]
 [service.health]
 contract = "service.health"
 
-[service.health.staged]
-state = "warming"
-detail = "traffic-admission-pending"
-
-[service.health.ready]
-state = "active"
-detail = "serving"
-
 [state]
-generation = "v1"
+schema_generation = "v1"
+
+[[state.slots]]
+id = "runtime-cache"
+relative_path = "runtime-cache.cc"
+kind = "cultcache-file"
+schema = "service.runtime-cache.v1"
+writer = "none"
+recovery = "rebuildable"
+startup = "open-at-start"
 
 [[provides]]
 capability = "service.runtime"
@@ -1099,7 +1061,7 @@ driver = "docker"
 image = "rust@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 affordances = ["source-read", "artifact-write"]
 allowed_programs = ["cargo"]
-network = "none"
+network_profile = "build-dependency-egress"
 memory_mebibytes = 2048
 cpu_quota_percent = 200
 
@@ -1119,6 +1081,11 @@ cpu_quota_percent = 100
 [workload.environment]
 SERVICE_BIND = "idunn.private_endpoint"
 
+[runtime_identity]
+runtime_id = "service-yggdrasil"
+expected_signer_identity_id = "service-runtime-signer"
+trust_anchor_store = "/etc/gamecult/trust/service.cc"
+
 [route]
 driver = "nginx-http"
 route_id = "service"
@@ -1128,11 +1095,6 @@ private_port_start = 18000
 private_port_end = 18009
 config_path = "/etc/nginx/idunn-routes/service.conf"
 reload_unit = "nginx.service"
-
-[admission]
-driver = "atomic-file"
-record_path = "/run/gamecult/idunn/service/admission.cc"
-lock_path = "/run/gamecult/idunn/service/admission.cc.lock"
 
 [brakes]
 deployment_store = "/var/lib/gamecult/idunn/service-deployment-brake.cc"
@@ -1151,172 +1113,275 @@ desired_replicas = 1
 nodes = ["yggdrasil"]
 "#;
 
-    fn provider(ready: bool) -> ProviderObservation {
-        ProviderObservation {
-            provider_id: "odin-yggdrasil".into(),
-            provider_target: Some("odin".into()),
-            origin: ProviderOrigin::ManagedRuntime,
-            generation: "odin-v1".into(),
-            deployment_id: Some("odin-deployment-1".into()),
-            capability: "odin.verse-rendezvous".into(),
-            schema: "odin.verse-topology.v1".into(),
-            compatibility: "v1".into(),
-            capacity: 1,
-            endpoint: "10.77.0.1:17871".into(),
-            expected: true,
-            present: ready,
-            ready,
-            observation_sha256: ready.then(|| format!("sha256-{}", "a".repeat(64))),
+    fn digest(byte: u8) -> String {
+        format!("sha256-{}", char::from(byte).to_string().repeat(64))
+    }
+
+    fn source(recipe: &str) -> SourceSelectionFacts {
+        SourceSelectionFacts {
+            schema: SOURCE_SELECTION_FACTS_SCHEMA.into(),
+            origin: "https://github.com/GameCult/Service.git".into(),
+            admitted_ref: "refs/heads/main".into(),
+            revision: "2222222222222222222222222222222222222222".into(),
+            source_tree: "3333333333333333333333333333333333333333".into(),
+            recipe_path: "deployment/idunn/recipe.toml".into(),
+            recipe_blob_sha256: sha256_id(recipe.as_bytes()),
+            gitlinks: BTreeMap::new(),
+            selection: SourceSelection::RefHead,
+            selected_at_unix_millis: 100,
         }
     }
 
-    fn plan(provider: ProviderObservation) -> CompiledDeploymentPlan {
+    fn odin() -> ExpectedIncarnation {
+        ExpectedIncarnation {
+            schema: EXPECTED_INCARNATION_SCHEMA.into(),
+            plan_id: digest(b'a'),
+            sealed_release_id: digest(b'e'),
+            target: "odin".into(),
+            incarnation_id: "odin-incarnation-1".into(),
+            runtime_id: "odin-yggdrasil".into(),
+            expected_signer_identity_id: "odin-runtime-signer".into(),
+            health_contract: "odin.cultnet-service-health".into(),
+            executable_artifact_sha256: digest(b'f'),
+            state_schema_generation: None,
+            state_contract_sha256: None,
+            write_lease_required: false,
+            source_revision: "2222222222222222222222222222222222222222".into(),
+            node: "yggdrasil".into(),
+            route: Some(ExpectedRoute {
+                route_id: "odin-private".into(),
+                transport: ServiceTransport::Tcp,
+                stable_endpoint: "tcp://10.77.0.1:17871".into(),
+                candidate_endpoint: "tcp://127.0.0.1:17871".into(),
+            }),
+            capabilities: vec![ProvidedCapability {
+                capability: "odin.verse-rendezvous".into(),
+                schema: "odin.verse-topology.v1".into(),
+                compatibility: "v1".into(),
+                capacity: 1,
+            }],
+            dependencies: Vec::new(),
+        }
+    }
+
+    fn plan() -> CompiledDeploymentPlan {
         compile_deployment_plan(
-            TargetDeclaration::parse(RECIPE).unwrap(),
-            OperatorBinding::parse(BINDING).unwrap(),
-            ExactSource {
-                origin: "https://github.com/GameCult/Service.git".into(),
-                admitted_ref: "refs/heads/main".into(),
-                revision: "2222222222222222222222222222222222222222".into(),
-                minimum_revision: "1111111111111111111111111111111111111111".into(),
-                selection_receipt_sha256: format!("sha256-{}", "d".repeat(64)),
-                gitlinks: BTreeMap::new(),
-            },
             RECIPE.as_bytes(),
             BINDING.as_bytes(),
-            "deployment-1",
+            source(RECIPE),
+            "service-incarnation-1",
             Some(18001),
-            100,
-            &[provider],
+            110,
+            &[odin()],
         )
         .unwrap()
     }
 
-    #[test]
-    fn compilation_is_deterministic_and_configuration_does_not_supply_readiness() {
-        let first = plan(provider(true));
-        let second = plan(provider(true));
-        assert_eq!(first, second);
-        assert!(!first.dependencies[0].blocks_promotion());
+    fn artifact_receipt() -> ArtifactReceipt {
+        ArtifactReceipt {
+            artifact_id: "daemon".into(),
+            destination: "service".into(),
+            sha256: digest(b'c'),
+            size_bytes: 42,
+            executable: true,
+        }
+    }
 
-        let external = ExternalCapabilityBinding {
-            capability: "odin.verse-rendezvous".into(),
-            schema: "odin.verse-topology.v1".into(),
-            compatibility: "v1".into(),
-            endpoint: "10.77.0.1:17871".into(),
-        };
-        let observations = external_binding_observations(&[external]);
-        assert!(!observations[0].present);
-        assert!(!observations[0].ready);
+    fn external_input_receipt() -> ExternalInputMaterializationReceipt {
+        ExternalInputMaterializationReceipt {
+            input_id: "toolchain-index".into(),
+            url: "https://example.invalid/toolchain-index".into(),
+            sha256: digest(b'd'),
+            runner: "rust".into(),
+            destination: "inputs/toolchain-index".into(),
+            size_bytes: 17,
+        }
     }
 
     #[test]
-    fn shared_infrastructure_reuses_the_ready_provider() {
-        let mut weaker = provider(false);
-        weaker.provider_id = "odin-candidate".into();
-        let resolved = resolve_dependencies(
-            &TargetDeclaration::parse(RECIPE).unwrap(),
-            &[weaker, provider(true)],
-        )
-        .unwrap();
+    fn compiler_parses_the_exact_bytes_it_receipts() {
+        let first = plan();
+        let second = plan();
+        assert_eq!(first, second);
+        assert_eq!(first.recipe_blob.as_slice(), RECIPE.as_bytes());
+        assert_eq!(first.binding_blob.as_slice(), BINDING.as_bytes());
         assert_eq!(
-            resolved[0].provider.as_ref().unwrap().provider_id,
+            sha256_id(&first.recipe_blob),
+            first.source.recipe_blob_sha256
+        );
+        let changed = RECIPE.replace(
+            "contract = \"service.health\"",
+            "contract = \"service.health.v2\"",
+        );
+        assert!(
+            compile_deployment_plan(
+                changed.as_bytes(),
+                BINDING.as_bytes(),
+                source(RECIPE),
+                "service-incarnation-2",
+                Some(18002),
+                111,
+                &[odin()],
+            )
+            .is_err()
+        );
+        let mut corrupted = first;
+        corrupted
+            .binding_blob
+            .extend_from_slice(b"\nunknown = true\n");
+        assert!(corrupted.validate().is_err());
+    }
+
+    #[test]
+    fn pinned_policy_requires_the_exact_operator_pin() {
+        let pinned_binding = BINDING.replace(
+            "selection = \"ref-head\"",
+            "selection = \"pinned-object\"\npinned_revision = \"2222222222222222222222222222222222222222\"",
+        );
+        let binding = OperatorBinding::parse(&pinned_binding).unwrap();
+        assert!(source(RECIPE).validate_against(&binding).is_err());
+        let mut facts = source(RECIPE);
+        facts.selection = SourceSelection::PinnedObject;
+        facts.validate_against(&binding).unwrap();
+    }
+
+    #[test]
+    fn gitlink_fact_must_match_the_selected_superproject_tree() {
+        let recipe = RECIPE.replace(
+            "source_stamp_environment = \"SERVICE_BUILD_COMMIT\"",
+            "source_stamp_environment = \"SERVICE_BUILD_COMMIT\"\nrequired_gitlinks = [\"vendor/lib\"]",
+        );
+        let binding_text = BINDING.replace(
+            "recipe_path = \"deployment/idunn/recipe.toml\"",
+            "recipe_path = \"deployment/idunn/recipe.toml\"\ngitlinks = { \"vendor/lib\" = { origin = \"https://github.com/GameCult/Lib.git\" } }",
+        );
+        let binding = OperatorBinding::parse(&binding_text).unwrap();
+        binding
+            .admit(&TargetDeclaration::parse(&recipe).unwrap())
+            .unwrap();
+        let mut facts = source(&recipe);
+        facts.gitlinks.insert(
+            "vendor/lib".into(),
+            GitlinkTreeFact {
+                origin: "https://github.com/GameCult/Lib.git".into(),
+                revision: "4444444444444444444444444444444444444444".into(),
+                tree_entry_revision: "4444444444444444444444444444444444444444".into(),
+            },
+        );
+        facts.validate_against(&binding).unwrap();
+        facts
+            .gitlinks
+            .get_mut(&PathBuf::from("vendor/lib"))
+            .unwrap()
+            .tree_entry_revision = "5555555555555555555555555555555555555555".into();
+        assert!(facts.validate_against(&binding).is_err());
+    }
+
+    #[test]
+    fn dependency_selection_uses_expected_identity_without_readiness() {
+        let declaration = TargetDeclaration::parse(RECIPE).unwrap();
+        let mut later = odin();
+        later.runtime_id = "odin-z".into();
+        let providers = managed_expected_provider_refs(&[later, odin()]).unwrap();
+        let selected = select_dependencies(&declaration, &providers).unwrap();
+        assert_eq!(
+            selected[0].provider.as_ref().unwrap().provider_id,
             "odin-yggdrasil"
         );
     }
 
     #[test]
-    fn present_and_ready_are_distinct_from_expected() {
-        let plan = plan(provider(true));
-        let presence = RuntimePresence {
-            target: "service".into(),
-            generation: "v1".into(),
-            deployment_id: "deployment-1".into(),
-            source_revision: "2222222222222222222222222222222222222222".into(),
-            endpoint: Some("127.0.0.1:18001".into()),
-            capabilities: plan.expected.capabilities.clone(),
-            runtime_id: "service-runtime".into(),
-            signer_identity_id: "signer-1".into(),
-            signed_statement_sha256: format!("sha256-{}", "b".repeat(64)),
-        };
-        let health = HealthObservation {
-            contract: "service.health".into(),
-            state: "active".into(),
-            detail: "serving".into(),
-            signed_statement_sha256: presence.signed_statement_sha256.clone(),
-        };
-        let absent = correlate_generation(&plan, None, None).unwrap();
-        assert!(absent.expected);
-        assert!(!absent.present);
-        assert!(!absent.ready);
-        let ready = correlate_generation(&plan, Some(&presence), Some(&health)).unwrap();
-        assert!(ready.present);
-        assert!(ready.ready);
-    }
-
-    #[test]
-    fn disagreement_remains_visible_and_blocks_readiness() {
-        let plan = plan(provider(true));
-        let presence = RuntimePresence {
-            target: "service".into(),
-            generation: "wrong-generation".into(),
-            deployment_id: "deployment-1".into(),
-            source_revision: "2222222222222222222222222222222222222222".into(),
-            endpoint: Some("127.0.0.1:18001".into()),
-            capabilities: plan.expected.capabilities.clone(),
-            runtime_id: "service-runtime".into(),
-            signer_identity_id: "signer-1".into(),
-            signed_statement_sha256: format!("sha256-{}", "b".repeat(64)),
-        };
-        let health = HealthObservation {
-            contract: "service.health".into(),
-            state: "active".into(),
-            detail: "serving".into(),
-            signed_statement_sha256: presence.signed_statement_sha256.clone(),
-        };
-        let correlation = correlate_generation(&plan, Some(&presence), Some(&health)).unwrap();
-        assert!(!correlation.present);
-        assert!(!correlation.ready);
-        assert!(
-            correlation
-                .disagreements
-                .contains(&"generation-mismatch".into())
+    fn external_binding_produces_expected_configuration_only() {
+        let input = BINDING.replace(
+            "[placement]",
+            "[[external_capabilities]]\nprovider_id = \"operator-archive\"\ncapability = \"archive.store\"\nschema = \"archive.store.v1\"\ncompatibility = \"v1\"\ncapacity = 2\nendpoint = \"s3://operator-bound\"\n\n[placement]",
+        );
+        let binding = OperatorBinding::parse(&input).unwrap();
+        let providers = external_binding_provider_refs(&binding).unwrap();
+        let declaration = TargetDeclaration::parse(&RECIPE.replace(
+            "kind = \"shared-infrastructure\"\ncapability = \"odin.verse-rendezvous\"\nschema = \"odin.verse-topology.v1\"",
+            "kind = \"external-operator-binding\"\ncapability = \"archive.store\"\nschema = \"archive.store.v1\"",
+        ))
+        .unwrap();
+        binding.admit(&declaration).unwrap();
+        let selected = select_dependencies(&declaration, &providers).unwrap();
+        assert!(matches!(
+            &providers[0].authority,
+            ExpectedProviderAuthority::ExternalOperatorBinding { .. }
+        ));
+        assert_eq!(providers[0].capacity, 2);
+        assert_eq!(
+            selected[0].provider.as_ref().unwrap().provider_id,
+            "operator-archive"
         );
     }
 
     #[test]
-    fn sealed_artifacts_and_promotion_phases_are_exact() {
-        let plan = plan(provider(true));
-        let sealed = SealedDeployment::new(
-            plan.clone(),
-            "release-1",
-            vec![ArtifactSeal {
-                artifact_id: "daemon".into(),
-                destination: "service".into(),
-                sha256: format!("sha256-{}", "c".repeat(64)),
-                size_bytes: 42,
-                executable: true,
-            }],
-            110,
+    fn expected_projection_is_sanitized_and_names_the_selected_graph() {
+        let plan = plan();
+        let release = SealedRelease::new(
+            &plan,
+            vec![artifact_receipt()],
+            vec![external_input_receipt()],
+            120,
         )
         .unwrap();
-        sealed.validate().unwrap();
-        let transaction = PromotionTransaction {
-            schema: PROMOTION_TRANSACTION_SCHEMA.into(),
-            transaction_id: "transaction-1".into(),
-            plan_id: plan.plan_id,
-            target: "service".into(),
-            phase: PromotionPhase::Planned,
-            revision: 0,
-            updated_at_unix_millis: 100,
-        };
-        assert!(transaction.advance(PromotionPhase::Sealed, 101).is_err());
+        let expected = release.expected_projection(&plan).unwrap();
+        assert_eq!(expected.plan_id, plan.plan_id);
+        assert_eq!(expected.sealed_release_id, release.sealed_release_id);
+        assert_eq!(expected.incarnation_id, "service-incarnation-1");
+        assert_eq!(expected.runtime_id, "service-yggdrasil");
         assert_eq!(
-            transaction
-                .advance(PromotionPhase::Materialized, 101)
-                .unwrap()
-                .phase,
-            PromotionPhase::Materialized
+            expected.expected_signer_identity_id,
+            "service-runtime-signer"
         );
+        assert_eq!(expected.health_contract, "service.health");
+        assert_eq!(expected.executable_artifact_sha256, digest(b'c'));
+        assert_eq!(expected.state_schema_generation.as_deref(), Some("v1"));
+        assert!(expected.state_contract_sha256.is_some());
+        assert!(!expected.write_lease_required);
+        assert_eq!(expected.node, "yggdrasil");
+        assert_eq!(
+            expected.dependencies[0]
+                .provider
+                .as_ref()
+                .unwrap()
+                .provider_id,
+            "odin-yggdrasil"
+        );
+        assert_eq!(
+            expected.route.as_ref().unwrap().candidate_endpoint,
+            "http://127.0.0.1:18001"
+        );
+        assert!(expected.canonical_sha256().unwrap().starts_with("sha256-"));
+        let mut invalid_release = release;
+        invalid_release.artifacts[0].size_bytes += 1;
+        assert!(invalid_release.expected_projection(&plan).is_err());
+    }
+
+    #[test]
+    fn sealed_release_address_covers_artifacts_and_external_inputs() {
+        let receipt = artifact_receipt();
+        let input = external_input_receipt();
+        let plan = plan();
+        let mut wrong_artifact = receipt.clone();
+        wrong_artifact.sha256 = digest(b'f');
+        assert!(SealedRelease::new(&plan, vec![wrong_artifact], vec![input.clone()], 120).is_err());
+        assert!(SealedRelease::new(&plan, vec![receipt.clone()], vec![], 120).is_err());
+        let release =
+            SealedRelease::new(&plan, vec![receipt.clone()], vec![input.clone()], 120).unwrap();
+        let later_receipt_time =
+            SealedRelease::new(&plan, vec![receipt], vec![input], 130).unwrap();
+        release.validate_against(&plan).unwrap();
+        assert_eq!(
+            release.sealed_release_id,
+            later_receipt_time.sealed_release_id
+        );
+        let mut changed = release.clone();
+        changed.artifacts[0].size_bytes = 43;
+        assert!(changed.validate_against(&plan).is_err());
+        let mut changed = release;
+        changed.external_inputs[0].size_bytes = 18;
+        assert!(changed.validate_against(&plan).is_err());
     }
 }
