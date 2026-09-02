@@ -2,18 +2,22 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail, ensure};
+pub use cultnet_rs::IdunnExpectedIncarnationRecord as ExpectedIncarnation;
+use cultnet_rs::{
+    GameCultRuntimeCapability, IDUNN_EXPECTED_INCARNATION_SCHEMA, IdunnExpectedDependency,
+    IdunnExpectedRoute,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::deployment::{
     CapabilityDependency, DependencyKind, ExternalCapabilityBinding, OperatorBinding,
-    ProvidedCapability, ServiceTransport, SourceSelectionPolicy, StateDeclaration,
-    TargetDeclaration, capability_compatible,
+    ServiceTransport, SourceSelectionPolicy, StartupOrder, StateDeclaration, TargetDeclaration,
+    capability_compatible,
 };
 
 pub const SOURCE_SELECTION_FACTS_SCHEMA: &str = "idunn.source_selection_facts.v1";
 pub const COMPILED_DEPLOYMENT_PLAN_SCHEMA: &str = "idunn.compiled_deployment_plan.v1";
-pub const EXPECTED_INCARNATION_SCHEMA: &str = "idunn.expected_incarnation.v1";
 pub const SEALED_RELEASE_SCHEMA: &str = "idunn.sealed_release.v1";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -305,6 +309,47 @@ impl DependencySelection {
         }
         Ok(())
     }
+
+    fn expected_projection(&self) -> Result<IdunnExpectedDependency> {
+        self.validate()?;
+        let (
+            provider_id,
+            provider_authority,
+            provider_expected_projection_sha256,
+            provider_endpoint,
+        ) = match &self.provider {
+            None => (None, None, None, None),
+            Some(provider) => match &provider.authority {
+                ExpectedProviderAuthority::ManagedIncarnation {
+                    expected_projection_sha256,
+                    ..
+                } => (
+                    Some(provider.provider_id.clone()),
+                    Some("managed-incarnation".into()),
+                    Some(expected_projection_sha256.clone()),
+                    provider.endpoint.clone(),
+                ),
+                ExpectedProviderAuthority::ExternalOperatorBinding { .. } => (
+                    Some(provider.provider_id.clone()),
+                    Some("external-operator-binding".into()),
+                    None,
+                    provider.endpoint.clone(),
+                ),
+            },
+        };
+        Ok(IdunnExpectedDependency {
+            kind: dependency_kind_name(self.requirement.kind).into(),
+            capability: self.requirement.capability.clone(),
+            schema: self.requirement.schema.clone(),
+            compatibility: self.requirement.compatibility.clone(),
+            minimum_capacity: self.requirement.minimum_capacity,
+            startup: startup_order_name(self.requirement.startup).into(),
+            provider_id,
+            provider_authority,
+            provider_expected_projection_sha256,
+            provider_endpoint,
+        })
+    }
 }
 
 pub fn select_dependencies(
@@ -374,137 +419,10 @@ pub fn select_dependencies(
         .collect()
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ExpectedRoute {
-    pub route_id: String,
-    pub transport: ServiceTransport,
-    pub stable_endpoint: String,
-    pub candidate_endpoint: String,
-}
-
-impl ExpectedRoute {
-    fn validate(&self) -> Result<()> {
-        require_token(&self.route_id, "expected route id")?;
-        require_value(&self.stable_endpoint, "expected stable endpoint")?;
-        require_value(&self.candidate_endpoint, "expected candidate endpoint")?;
-        match self.transport {
-            ServiceTransport::Http => ensure!(
-                self.stable_endpoint.starts_with("http://")
-                    || self.stable_endpoint.starts_with("https://"),
-                "expected HTTP stable endpoint is not an HTTP URI"
-            ),
-            ServiceTransport::Tcp => ensure!(
-                self.stable_endpoint.starts_with("tcp://"),
-                "expected TCP stable endpoint is not a TCP URI"
-            ),
-            _ => bail!("routed expected incarnation has a non-routable transport"),
-        }
-        ensure!(
-            self.candidate_endpoint
-                .starts_with(&format!("{}://", endpoint_scheme(self.transport)?)),
-            "expected candidate endpoint transport disagrees"
-        );
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ExpectedIncarnation {
-    pub schema: String,
-    pub plan_id: String,
-    pub sealed_release_id: String,
-    pub target: String,
-    pub incarnation_id: String,
-    pub runtime_id: String,
-    pub expected_signer_identity_id: String,
-    pub health_contract: String,
-    pub executable_artifact_sha256: String,
-    pub state_schema_generation: Option<String>,
-    pub state_contract_sha256: Option<String>,
-    pub write_lease_required: bool,
-    pub source_revision: String,
-    pub node: String,
-    pub route: Option<ExpectedRoute>,
-    pub capabilities: Vec<ProvidedCapability>,
-    pub dependencies: Vec<DependencySelection>,
-}
-
-impl ExpectedIncarnation {
-    pub fn validate(&self) -> Result<()> {
-        ensure!(
-            self.schema == EXPECTED_INCARNATION_SCHEMA,
-            "unsupported expected-incarnation schema"
-        );
-        require_sha256(&self.plan_id, "expected plan")?;
-        require_sha256(&self.sealed_release_id, "expected sealed release")?;
-        require_token(&self.target, "expected target")?;
-        require_token(&self.incarnation_id, "expected incarnation")?;
-        require_token(&self.runtime_id, "expected runtime id")?;
-        require_token(
-            &self.expected_signer_identity_id,
-            "expected signer identity id",
-        )?;
-        require_token(&self.health_contract, "expected health contract")?;
-        require_sha256(
-            &self.executable_artifact_sha256,
-            "expected executable artifact",
-        )?;
-        match (&self.state_schema_generation, &self.state_contract_sha256) {
-            (Some(generation), Some(contract)) => {
-                require_token(generation, "expected state schema generation")?;
-                require_sha256(contract, "expected state contract")?;
-            }
-            (None, None) => ensure!(
-                !self.write_lease_required,
-                "stateless expected incarnation requires a write lease"
-            ),
-            _ => bail!("expected state generation and contract digest disagree"),
-        }
-        require_sha1(&self.source_revision, "expected source revision")?;
-        require_token(&self.node, "expected node")?;
-        if let Some(route) = &self.route {
-            route.validate()?;
-        }
-        let mut capabilities = BTreeSet::new();
-        for capability in &self.capabilities {
-            require_contract(
-                &capability.capability,
-                &capability.schema,
-                &capability.compatibility,
-            )?;
-            ensure!(
-                capability.capacity > 0,
-                "expected capability capacity is zero"
-            );
-            ensure!(
-                capabilities.insert((
-                    capability.capability.as_str(),
-                    capability.schema.as_str(),
-                    capability.compatibility.as_str(),
-                )),
-                "expected capability is duplicated"
-            );
-        }
-        for dependency in &self.dependencies {
-            dependency.validate()?;
-        }
-        Ok(())
-    }
-
-    pub fn canonical_sha256(&self) -> Result<String> {
-        self.validate()?;
-        Ok(sha256_id(
-            &rmp_serde::to_vec(self).context("encoding managed expected projection")?,
-        ))
-    }
-}
-
 /// Private Idunn control-plane state. This contains host binding details and is
-/// never an Odin/CultMesh projection. `ExpectedIncarnation` is the sanitized
-/// topology projection derived only after a release validates against this
-/// plan.
+/// never an Odin/CultMesh projection. The shared CultNet Expected incarnation
+/// is the sanitized topology projection derived only after a release validates
+/// against this plan.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CompiledDeploymentPlan {
@@ -568,7 +486,7 @@ impl CompiledDeploymentPlan {
         Ok(())
     }
 
-    fn parsed_inputs(&self) -> Result<(TargetDeclaration, OperatorBinding)> {
+    pub(crate) fn parsed_inputs(&self) -> Result<(TargetDeclaration, OperatorBinding)> {
         let recipe_text = std::str::from_utf8(&self.recipe_blob)
             .context("stored deployment recipe is not UTF-8")?;
         let binding_text = std::str::from_utf8(&self.binding_blob)
@@ -754,17 +672,10 @@ impl SealedRelease {
     ) -> Result<ExpectedIncarnation> {
         self.validate_against(plan)?;
         let (declaration, binding) = plan.parsed_inputs()?;
-        let node = binding
-            .placement
-            .nodes
-            .iter()
-            .next()
-            .context("validated singleton binding has no node")?
-            .clone();
         let route = match (&binding.route, plan.candidate_port) {
-            (Some(bound), Some(port)) => Some(ExpectedRoute {
+            (Some(bound), Some(port)) => Some(IdunnExpectedRoute {
                 route_id: bound.route_id.clone(),
-                transport: declaration.service.transport,
+                transport: endpoint_scheme(declaration.service.transport)?.into(),
                 stable_endpoint: bound.stable_endpoint.clone(),
                 candidate_endpoint: format!(
                     "{}://{}:{port}",
@@ -775,26 +686,58 @@ impl SealedRelease {
             (None, None) => None,
             _ => bail!("plan route and candidate port disagree"),
         };
-        let executable_artifact_sha256 = self
+        let artifact_sha256 = self
             .artifacts
             .iter()
             .find(|artifact| artifact.artifact_id == declaration.service.executable_artifact)
             .context("sealed release has no executable service artifact")?
             .sha256
             .clone();
+        let mut capabilities = declaration
+            .provides
+            .iter()
+            .map(|capability| GameCultRuntimeCapability {
+                capability: capability.capability.clone(),
+                schema: capability.schema.clone(),
+                compatibility: capability.compatibility.clone(),
+                capacity: capability.capacity,
+            })
+            .collect::<Vec<_>>();
+        capabilities.sort_by(|left, right| {
+            (&left.capability, &left.schema, &left.compatibility).cmp(&(
+                &right.capability,
+                &right.schema,
+                &right.compatibility,
+            ))
+        });
+        let mut dependencies = plan
+            .dependencies
+            .iter()
+            .map(DependencySelection::expected_projection)
+            .collect::<Result<Vec<_>>>()?;
+        dependencies.sort_by(|left, right| {
+            (&left.capability, &left.schema, &left.compatibility).cmp(&(
+                &right.capability,
+                &right.schema,
+                &right.compatibility,
+            ))
+        });
         let expected = ExpectedIncarnation {
-            schema: EXPECTED_INCARNATION_SCHEMA.into(),
-            plan_id: plan.plan_id.clone(),
-            sealed_release_id: self.sealed_release_id.clone(),
+            schema_version: IDUNN_EXPECTED_INCARNATION_SCHEMA.into(),
             target: declaration.target.clone(),
+            plan_id: plan.plan_id.clone(),
             incarnation_id: plan.incarnation_id.clone(),
+            sealed_release_id: self.sealed_release_id.clone(),
+            source_repository: canonical_repository_identity(&plan.source.origin)?,
+            source_revision: plan.source.revision.clone(),
+            recipe_sha256: plan.source.recipe_blob_sha256.clone(),
             runtime_id: binding.runtime_identity.runtime_id.clone(),
             expected_signer_identity_id: binding
                 .runtime_identity
                 .expected_signer_identity_id
                 .clone(),
             health_contract: declaration.service.health.contract.clone(),
-            executable_artifact_sha256,
+            artifact_sha256,
             state_schema_generation: declaration
                 .state
                 .as_ref()
@@ -805,11 +748,9 @@ impl SealedRelease {
                 .map(canonical_state_contract_sha256)
                 .transpose()?,
             write_lease_required: declaration.write_lease_required(),
-            source_revision: plan.source.revision.clone(),
-            node,
             route,
-            capabilities: declaration.provides.clone(),
-            dependencies: plan.dependencies.clone(),
+            capabilities,
+            dependencies,
         };
         expected.validate()?;
         Ok(expected)
@@ -908,6 +849,32 @@ fn endpoint_scheme(transport: ServiceTransport) -> Result<&'static str> {
             bail!("service transport has no stable route scheme")
         }
     }
+}
+
+fn dependency_kind_name(kind: DependencyKind) -> &'static str {
+    match kind {
+        DependencyKind::Bootstrap => "bootstrap",
+        DependencyKind::Required => "required",
+        DependencyKind::Optional => "optional",
+        DependencyKind::SharedInfrastructure => "shared-infrastructure",
+        DependencyKind::Private => "private",
+        DependencyKind::ExternalOperatorBinding => "external-operator-binding",
+    }
+}
+
+fn startup_order_name(startup: StartupOrder) -> &'static str {
+    match startup {
+        StartupOrder::BeforePromotion => "before-promotion",
+        StartupOrder::BeforeStart => "before-start",
+    }
+}
+
+fn canonical_repository_identity(origin: &str) -> Result<String> {
+    let identity = origin
+        .strip_prefix("https://")
+        .and_then(|origin| origin.strip_suffix(".git"))
+        .context("validated Git origin is not a canonical HTTPS repository")?;
+    Ok(identity.to_owned())
 }
 
 fn prefixed_sha256(raw_sha256: &str) -> String {
@@ -1015,7 +982,7 @@ executable = true
 executable_artifact = "daemon"
 transport = "http"
 route_required = true
-required_environment = ["SERVICE_BIND"]
+required_environment = ["GAMECULT_IDUNN_RUNTIME_BUNDLE", "SERVICE_BIND"]
 
 [service.health]
 contract = "service.health"
@@ -1134,27 +1101,28 @@ nodes = ["yggdrasil"]
 
     fn odin() -> ExpectedIncarnation {
         ExpectedIncarnation {
-            schema: EXPECTED_INCARNATION_SCHEMA.into(),
-            plan_id: digest(b'a'),
-            sealed_release_id: digest(b'e'),
+            schema_version: IDUNN_EXPECTED_INCARNATION_SCHEMA.into(),
             target: "odin".into(),
+            plan_id: digest(b'a'),
             incarnation_id: "odin-incarnation-1".into(),
+            sealed_release_id: digest(b'e'),
+            source_repository: "github.com/GameCult/Odin".into(),
+            source_revision: "2222222222222222222222222222222222222222".into(),
+            recipe_sha256: digest(b'b'),
             runtime_id: "odin-yggdrasil".into(),
             expected_signer_identity_id: "odin-runtime-signer".into(),
             health_contract: "odin.cultnet-service-health".into(),
-            executable_artifact_sha256: digest(b'f'),
+            artifact_sha256: digest(b'f'),
             state_schema_generation: None,
             state_contract_sha256: None,
             write_lease_required: false,
-            source_revision: "2222222222222222222222222222222222222222".into(),
-            node: "yggdrasil".into(),
-            route: Some(ExpectedRoute {
+            route: Some(IdunnExpectedRoute {
                 route_id: "odin-private".into(),
-                transport: ServiceTransport::Tcp,
+                transport: "tcp".into(),
                 stable_endpoint: "tcp://10.77.0.1:17871".into(),
                 candidate_endpoint: "tcp://127.0.0.1:17871".into(),
             }),
-            capabilities: vec![ProvidedCapability {
+            capabilities: vec![GameCultRuntimeCapability {
                 capability: "odin.verse-rendezvous".into(),
                 schema: "odin.verse-topology.v1".into(),
                 compatibility: "v1".into(),
@@ -1336,27 +1304,78 @@ nodes = ["yggdrasil"]
             "service-runtime-signer"
         );
         assert_eq!(expected.health_contract, "service.health");
-        assert_eq!(expected.executable_artifact_sha256, digest(b'c'));
+        assert_eq!(expected.artifact_sha256, digest(b'c'));
+        assert_eq!(expected.source_repository, "github.com/GameCult/Service");
+        assert_eq!(expected.source_revision, plan.source.revision);
+        assert_eq!(expected.recipe_sha256, plan.source.recipe_blob_sha256);
         assert_eq!(expected.state_schema_generation.as_deref(), Some("v1"));
         assert!(expected.state_contract_sha256.is_some());
         assert!(!expected.write_lease_required);
-        assert_eq!(expected.node, "yggdrasil");
         assert_eq!(
-            expected.dependencies[0]
-                .provider
-                .as_ref()
-                .unwrap()
-                .provider_id,
-            "odin-yggdrasil"
+            expected.dependencies[0].provider_id.as_deref(),
+            Some("odin-yggdrasil")
+        );
+        assert_eq!(
+            expected.dependencies[0].provider_authority.as_deref(),
+            Some("managed-incarnation")
         );
         assert_eq!(
             expected.route.as_ref().unwrap().candidate_endpoint,
             "http://127.0.0.1:18001"
         );
+        assert_eq!(expected.route.as_ref().unwrap().transport, "http");
         assert!(expected.canonical_sha256().unwrap().starts_with("sha256-"));
         let mut invalid_release = release;
         invalid_release.artifacts[0].size_bytes += 1;
         assert!(invalid_release.expected_projection(&plan).is_err());
+    }
+
+    #[test]
+    fn expected_projection_sorts_shared_capability_and_dependency_claims() {
+        let recipe = RECIPE
+            .replace(
+                "[[provides]]\ncapability = \"service.runtime\"",
+                "[[provides]]\ncapability = \"zeta.runtime\"\nschema = \"zeta.runtime.v1\"\ncompatibility = \"v1\"\n\n[[provides]]\ncapability = \"service.runtime\"",
+            )
+            .replace(
+                "[[dependencies]]\nkind = \"shared-infrastructure\"",
+                "[[dependencies]]\nkind = \"optional\"\ncapability = \"zeta.optional\"\nschema = \"zeta.optional.v1\"\ncompatibility = \"v1\"\n\n[[dependencies]]\nkind = \"shared-infrastructure\"",
+            );
+        let plan = compile_deployment_plan(
+            recipe.as_bytes(),
+            BINDING.as_bytes(),
+            source(&recipe),
+            "service-incarnation-sorted",
+            Some(18002),
+            111,
+            &[odin()],
+        )
+        .unwrap();
+        let release = SealedRelease::new(
+            &plan,
+            vec![artifact_receipt()],
+            vec![external_input_receipt()],
+            120,
+        )
+        .unwrap();
+        let expected = release.expected_projection(&plan).unwrap();
+        assert_eq!(
+            expected
+                .capabilities
+                .iter()
+                .map(|capability| capability.capability.as_str())
+                .collect::<Vec<_>>(),
+            ["service.runtime", "zeta.runtime"]
+        );
+        assert_eq!(
+            expected
+                .dependencies
+                .iter()
+                .map(|dependency| dependency.capability.as_str())
+                .collect::<Vec<_>>(),
+            ["odin.verse-rendezvous", "zeta.optional"]
+        );
+        expected.validate().unwrap();
     }
 
     #[test]

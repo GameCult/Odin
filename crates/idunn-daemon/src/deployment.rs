@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 pub const TARGET_DECLARATION_SCHEMA: &str = "gamecult.idunn.target_declaration.v1";
 pub const OPERATOR_BINDING_SCHEMA: &str = "gamecult.idunn.operator_binding.v1";
+pub const IDUNN_RUNTIME_BUNDLE_ENVIRONMENT: &str = "GAMECULT_IDUNN_RUNTIME_BUNDLE";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -598,6 +599,12 @@ impl TargetDeclaration {
         for name in &self.service.required_environment {
             require_environment_name(name)?;
         }
+        ensure!(
+            self.service
+                .required_environment
+                .contains(IDUNN_RUNTIME_BUNDLE_ENVIRONMENT),
+            "service does not require the standard Idunn runtime bundle"
+        );
         for name in &self.service.optional_environment {
             require_environment_name(name)?;
             ensure!(
@@ -827,6 +834,9 @@ impl OperatorBinding {
             for name in runner.environment.keys().chain(runner.secret_files.keys()) {
                 require_environment_name(name)?;
             }
+            for value in runner.environment.values() {
+                require_value(value, "runner environment value")?;
+            }
             for path in runner.secret_files.values() {
                 require_absolute_path(path, "runner secret file")?;
             }
@@ -914,6 +924,9 @@ impl OperatorBinding {
             .chain(self.workload.secret_files.keys())
         {
             require_environment_name(name)?;
+        }
+        for value in self.workload.environment.values() {
+            require_value(value, "workload environment value")?;
         }
         for name in self.workload.argument_bindings.keys() {
             require_id(name, "argument binding")?;
@@ -1109,13 +1122,25 @@ impl OperatorBinding {
                 input.id
             );
         }
-        let available_environment: BTreeSet<_> = self
+        ensure!(
+            !self
+                .workload
+                .environment
+                .contains_key(IDUNN_RUNTIME_BUNDLE_ENVIRONMENT)
+                && !self
+                    .workload
+                    .secret_files
+                    .contains_key(IDUNN_RUNTIME_BUNDLE_ENVIRONMENT),
+            "operator binding cannot replace the standard Idunn runtime bundle"
+        );
+        let mut available_environment: BTreeSet<_> = self
             .workload
             .environment
             .keys()
             .chain(self.workload.secret_files.keys())
             .cloned()
             .collect();
+        available_environment.insert(IDUNN_RUNTIME_BUNDLE_ENVIRONMENT.into());
         ensure!(
             declaration
                 .service
@@ -1257,7 +1282,10 @@ fn require_capability_contract(capability: &str, schema: &str, compatibility: &s
 
 fn require_value(value: &str, label: &str) -> Result<()> {
     ensure!(!value.trim().is_empty(), "{label} is empty");
-    ensure!(!value.contains('\0'), "{label} contains NUL");
+    ensure!(
+        !value.chars().any(char::is_control),
+        "{label} contains a control character"
+    );
     ensure!(value.len() <= 4_096, "{label} is too long");
     Ok(())
 }
@@ -1455,7 +1483,7 @@ arguments = [
 ]
 transport = "http"
 route_required = true
-required_environment = ["TEST_SERVICE_BIND"]
+required_environment = ["GAMECULT_IDUNN_RUNTIME_BUNDLE", "TEST_SERVICE_BIND"]
 
 [service.health]
 contract = "test-service.cultnet-service-health"
