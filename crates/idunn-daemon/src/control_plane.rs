@@ -39,8 +39,8 @@ use crate::drivers::{
 };
 
 const DEPLOYMENT_COMMAND_SCHEMA: &str = "idunn.deployment_command.v2";
-const DEPLOYMENT_TRANSACTION_SCHEMA: &str = "idunn.deployment_transaction.v1";
-const ADMITTED_GENERATION_SCHEMA: &str = "idunn.admitted_generation.v1";
+const DEPLOYMENT_TRANSACTION_SCHEMA: &str = "idunn.deployment_transaction.v2";
+const ADMITTED_GENERATION_SCHEMA: &str = "idunn.admitted_generation.v2";
 const DEFAULT_TOPOLOGY_MAXIMUM_AGE_MILLIS: u64 = 30_000;
 const DEFAULT_TOPOLOGY_MAXIMUM_FUTURE_SKEW_MILLIS: u64 = 2_000;
 
@@ -4330,6 +4330,44 @@ mod tests {
             )?
         );
         assert!(ControlSnapshot::read(&path).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn loadcredential_era_control_schemas_are_rejected_before_rehydration() -> Result<()> {
+        for (record_type, key, schema) in [
+            (
+                DeploymentTransaction::TYPE,
+                "tx-legacy-workload-observation",
+                "idunn.deployment_transaction.v1",
+            ),
+            (
+                AdmittedGeneration::TYPE,
+                "legacy-admitted-target",
+                "idunn.admitted_generation.v1",
+            ),
+        ] {
+            let temporary = tempfile::tempdir()?;
+            let path = temporary.path().join("control.cc");
+            let legacy = CultCacheEnvelope {
+                key: key.into(),
+                r#type: record_type.into(),
+                payload: Vec::new(),
+                stored_at: rfc3339_millis(100)?,
+                schema_id: Some(schema.into()),
+            };
+            assert!(
+                SingleFileMessagePackBackingStore::new(&path).compare_exchange(
+                    &[CultCacheExpectedEnvelope {
+                        r#type: record_type.into(),
+                        key: key.into(),
+                        current: None,
+                    }],
+                    &[legacy],
+                )?
+            );
+            assert!(ControlSnapshot::read(&path).is_err());
+        }
         Ok(())
     }
 
