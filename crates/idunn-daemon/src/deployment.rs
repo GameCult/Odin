@@ -1,12 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{bail, ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 
 pub const TARGET_DECLARATION_SCHEMA: &str = "gamecult.idunn.target_declaration.v1";
-pub const OPERATOR_BINDING_SCHEMA: &str = "gamecult.idunn.operator_binding.v1";
+pub const OPERATOR_BINDING_SCHEMA: &str = "gamecult.idunn.operator_binding.v2";
 pub const IDUNN_RUNTIME_BUNDLE_ENVIRONMENT: &str = "GAMECULT_IDUNN_RUNTIME_BUNDLE";
+pub const IDUNN_RUNTIME_CANDIDATE_BIND_ENVIRONMENT: &str = "GAMECULT_IDUNN_CANDIDATE_BIND";
+pub const IDUNN_PROCESS_WRITE_LEASE_ENVIRONMENT: &str = "GAMECULT_IDUNN_PROCESS_WRITE_LEASE";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -172,6 +174,9 @@ pub struct MigrationDeclaration {
 #[serde(rename_all = "kebab-case")]
 pub enum StateKind {
     CultcacheFile,
+    /// Process-owned state imposed by an external runtime contract. Idunn
+    /// preserves and fences the file but never interprets its payload.
+    ExternalFile,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -332,8 +337,8 @@ pub enum RunnerDriver {
 #[serde(deny_unknown_fields)]
 pub struct WorkloadBinding {
     pub driver: WorkloadDriver,
-    pub user: String,
-    pub group: String,
+    #[serde(default)]
+    pub state_group: Option<String>,
     pub unit_prefix: String,
     pub release_root: PathBuf,
     #[serde(default)]
@@ -345,8 +350,6 @@ pub struct WorkloadBinding {
     pub read_only_paths: BTreeSet<PathBuf>,
     #[serde(default)]
     pub read_write_paths: BTreeSet<PathBuf>,
-    #[serde(default)]
-    pub capabilities: BTreeSet<String>,
     #[serde(default)]
     pub devices: BTreeSet<PathBuf>,
     pub memory_mebibytes: u32,
@@ -589,6 +592,20 @@ impl TargetDeclaration {
                 .required_environment
                 .contains(IDUNN_RUNTIME_BUNDLE_ENVIRONMENT),
             "service does not require the standard Idunn runtime bundle"
+        );
+        ensure!(
+            self.service
+                .required_environment
+                .contains(IDUNN_RUNTIME_CANDIDATE_BIND_ENVIRONMENT)
+                == self.service.route_required,
+            "routed services must require exactly one Idunn-owned candidate bind"
+        );
+        ensure!(
+            self.service
+                .required_environment
+                .contains(IDUNN_PROCESS_WRITE_LEASE_ENVIRONMENT)
+                == self.write_lease_required(),
+            "state-writing services must require exactly one Idunn-owned process write lease"
         );
         for name in &self.service.optional_environment {
             require_environment_name(name)?;
@@ -847,13 +864,19 @@ impl OperatorBinding {
                 "runner {id} secret files and secret-read affordance disagree"
             );
         }
-        require_identity(&self.workload.user, "workload user")?;
-        require_identity(&self.workload.group, "workload group")?;
+        let needs_state_group =
+            self.workload.state_root.is_some() || !self.workload.read_write_paths.is_empty();
         ensure!(
-            !matches!(self.workload.user.as_str(), "root" | "0")
-                && !matches!(self.workload.group.as_str(), "root" | "0"),
-            "ordinary Idunn workloads cannot run as root"
+            self.workload.state_group.is_some() == needs_state_group,
+            "a fixed state group must exist exactly when the dynamic workload has writable paths"
         );
+        if let Some(group) = &self.workload.state_group {
+            require_identity(group, "workload state group")?;
+            ensure!(
+                !matches!(group.as_str(), "root" | "0"),
+                "ordinary Idunn workload state cannot use the root group"
+            );
+        }
         require_id(&self.workload.unit_prefix, "workload unit prefix")?;
         require_id(&self.runtime_identity.runtime_id, "runtime id")?;
         require_id(
@@ -952,9 +975,6 @@ impl OperatorBinding {
                 );
             }
         }
-        for capability in &self.workload.capabilities {
-            require_value(capability, "workload capability")?;
-        }
         for name in self
             .workload
             .environment
@@ -962,6 +982,11 @@ impl OperatorBinding {
             .chain(self.workload.secret_files.keys())
         {
             require_environment_name(name)?;
+            ensure!(
+                name != IDUNN_RUNTIME_BUNDLE_ENVIRONMENT
+                    && name != IDUNN_RUNTIME_CANDIDATE_BIND_ENVIRONMENT,
+                "operator binding attempts to replace Idunn-owned workload environment"
+            );
         }
         for value in self.workload.environment.values() {
             require_value(value, "workload environment value")?;
@@ -996,11 +1021,11 @@ impl OperatorBinding {
         );
         ensure!(
             self.placement.desired_replicas == 1,
-            "operator binding v1 admits exactly one replica"
+            "operator binding v2 admits exactly one replica"
         );
         ensure!(
             self.placement.nodes.len() == 1,
-            "operator binding v1 admits exactly one node"
+            "operator binding v2 admits exactly one node"
         );
         for node in &self.placement.nodes {
             require_id(node, "placement node")?;
@@ -1154,8 +1179,27 @@ impl OperatorBinding {
                 && !self
                     .workload
                     .secret_files
-                    .contains_key(IDUNN_RUNTIME_BUNDLE_ENVIRONMENT),
-            "operator binding cannot replace the standard Idunn runtime bundle"
+                    .contains_key(IDUNN_RUNTIME_BUNDLE_ENVIRONMENT)
+                && !self
+                    .workload
+                    .environment
+                    .contains_key(IDUNN_RUNTIME_CANDIDATE_BIND_ENVIRONMENT)
+                && !self
+                    .workload
+                    .secret_files
+                    .contains_key(IDUNN_RUNTIME_CANDIDATE_BIND_ENVIRONMENT),
+            "operator binding cannot replace Idunn-owned launch environment"
+        );
+        ensure!(
+            !self
+                .workload
+                .environment
+                .contains_key(IDUNN_PROCESS_WRITE_LEASE_ENVIRONMENT)
+                && !self
+                    .workload
+                    .secret_files
+                    .contains_key(IDUNN_PROCESS_WRITE_LEASE_ENVIRONMENT),
+            "operator binding cannot replace the Idunn-owned process write lease"
         );
         let mut available_environment: BTreeSet<_> = self
             .workload
@@ -1165,6 +1209,12 @@ impl OperatorBinding {
             .cloned()
             .collect();
         available_environment.insert(IDUNN_RUNTIME_BUNDLE_ENVIRONMENT.into());
+        if declaration.service.route_required {
+            available_environment.insert(IDUNN_RUNTIME_CANDIDATE_BIND_ENVIRONMENT.into());
+        }
+        if declaration.write_lease_required() {
+            available_environment.insert(IDUNN_PROCESS_WRITE_LEASE_ENVIRONMENT.into());
+        }
         ensure!(
             declaration
                 .service
@@ -1193,6 +1243,22 @@ impl OperatorBinding {
             .collect();
         let bound_arguments: BTreeSet<_> =
             self.workload.argument_bindings.keys().cloned().collect();
+        match (
+            self.workload.state_root.as_ref(),
+            self.workload.argument_bindings.get("state_root"),
+        ) {
+            (Some(state_root), Some(argument)) => ensure!(
+                Path::new(argument) == state_root.as_path(),
+                "state_root argument binding differs from the admitted workload state root"
+            ),
+            (Some(_), None) => bail!("stateful workload has no state_root argument binding"),
+            (None, Some(_)) => bail!("stateless workload carries a state_root argument binding"),
+            (None, None) => {}
+        }
+        ensure!(
+            required_arguments.contains("state_root") == self.workload.state_root.is_some(),
+            "recipe state_root argument must exist exactly when the workload has a state root"
+        );
         ensure!(
             required_arguments == bound_arguments,
             "operator argument bindings do not exactly match the launch contract"
@@ -1503,7 +1569,7 @@ arguments = [
 ]
 transport = "http"
 route_required = true
-required_environment = ["GAMECULT_IDUNN_RUNTIME_BUNDLE", "TEST_SERVICE_BIND"]
+required_environment = ["GAMECULT_IDUNN_CANDIDATE_BIND", "GAMECULT_IDUNN_PROCESS_WRITE_LEASE", "GAMECULT_IDUNN_RUNTIME_BUNDLE"]
 
 [service.health]
 contract = "test-service.cultnet-service-health"
@@ -1534,7 +1600,7 @@ startup = "before-promotion"
 "#;
 
     const BINDING: &str = r#"
-schema = "gamecult.idunn.operator_binding.v1"
+schema = "gamecult.idunn.operator_binding.v2"
 target = "test-service"
 profiles = ["aetheria", "full-gamecult"]
 
@@ -1561,8 +1627,7 @@ tmpfs_mebibytes = 1024
 
 [workload]
 driver = "systemd-transient"
-user = "test-service"
-group = "test-service"
+state_group = "test-service"
 unit_prefix = "idunn-test-service"
 release_root = "/srv/test-service/releases"
 state_root = "/var/lib/gamecult/test-service"
@@ -1571,9 +1636,6 @@ network = "host-private"
 hardening = "strict"
 memory_mebibytes = 2048
 cpu_quota_percent = 200
-
-[workload.environment]
-TEST_SERVICE_BIND = "idunn.private_endpoint"
 
 [workload.argument_bindings]
 state_root = "/var/lib/gamecult/test-service"
@@ -1693,11 +1755,31 @@ nodes = ["yggdrasil"]
     fn extra_operator_environment_is_rejected() {
         let recipe = TargetDeclaration::parse(RECIPE).unwrap();
         let input = BINDING.replace(
-            "TEST_SERVICE_BIND = \"idunn.private_endpoint\"",
-            "TEST_SERVICE_BIND = \"idunn.private_endpoint\"\nUNDECLARED = \"no\"",
+            "[workload.argument_bindings]",
+            "[workload.environment]\nUNDECLARED = \"no\"\n\n[workload.argument_bindings]",
         );
         let binding = OperatorBinding::parse(&input).unwrap();
         assert!(binding.admit(&recipe).is_err());
+    }
+
+    #[test]
+    fn operator_cannot_replace_idunn_owned_launch_inputs() {
+        let recipe = TargetDeclaration::parse(RECIPE).unwrap();
+        for name in [
+            IDUNN_RUNTIME_BUNDLE_ENVIRONMENT,
+            IDUNN_RUNTIME_CANDIDATE_BIND_ENVIRONMENT,
+            IDUNN_PROCESS_WRITE_LEASE_ENVIRONMENT,
+        ] {
+            let input = BINDING.replace(
+                "[workload.argument_bindings]",
+                &format!(
+                    "[workload.environment]\n{name} = \"forged\"\n\n[workload.argument_bindings]"
+                ),
+            );
+            let rejected = OperatorBinding::parse(&input)
+                .and_then(|binding| binding.admit(&recipe).map(|_| ()));
+            assert!(rejected.is_err());
+        }
     }
 
     #[test]
@@ -1707,6 +1789,28 @@ nodes = ["yggdrasil"]
             "relative_path = \"../world.cc\"",
         );
         assert!(TargetDeclaration::parse(&input).is_err());
+    }
+
+    #[test]
+    fn mismatched_state_root_argument_binding_is_rejected() {
+        let recipe = TargetDeclaration::parse(RECIPE).unwrap();
+        let mismatched = BINDING.replace(
+            "[workload.argument_bindings]\nstate_root = \"/var/lib/gamecult/test-service\"",
+            "[workload.argument_bindings]\nstate_root = \"/var/lib/gamecult/another-service\"",
+        );
+        let binding = OperatorBinding::parse(&mismatched).unwrap();
+        assert!(binding.admit(&recipe).is_err());
+    }
+
+    #[test]
+    fn external_file_state_keeps_process_bound_writer_and_lease_semantics() {
+        let input = RECIPE.replace("kind = \"cultcache-file\"", "kind = \"external-file\"");
+        let declaration = TargetDeclaration::parse(&input).unwrap();
+        let slot = &declaration.state.as_ref().unwrap().slots[0];
+        assert_eq!(slot.kind, StateKind::ExternalFile);
+        assert_eq!(slot.writer, StateWriter::ProcessBoundSingleWriter);
+        assert_eq!(slot.startup, StateStartup::CreateOrOpenAfterWriteLease);
+        assert!(declaration.write_lease_required());
     }
 
     #[test]
@@ -1721,27 +1825,49 @@ nodes = ["yggdrasil"]
     #[test]
     fn workload_mount_cannot_bypass_write_lease_controlled_state() {
         let input = BINDING.replace(
-            "cpu_quota_percent = 200\n\n[workload.environment]",
-            "cpu_quota_percent = 200\nread_write_paths = [\"/var/lib/gamecult/test-service/world\"]\n\n[workload.environment]",
+            "cpu_quota_percent = 200\n\n[workload.argument_bindings]",
+            "cpu_quota_percent = 200\nread_write_paths = [\"/var/lib/gamecult/test-service/world\"]\n\n[workload.argument_bindings]",
         );
         assert!(OperatorBinding::parse(&input).is_err());
     }
 
     #[test]
-    fn v1_binding_is_explicitly_singleton() {
-        assert!(
-            OperatorBinding::parse(
-                &BINDING.replace("desired_replicas = 1", "desired_replicas = 2")
-            )
-            .is_err()
+    fn v2_binding_is_explicitly_singleton() {
+        assert!(OperatorBinding::parse(
+            &BINDING.replace("desired_replicas = 1", "desired_replicas = 2")
+        )
+        .is_err());
+        assert!(OperatorBinding::parse(&BINDING.replace(
+            "nodes = [\"yggdrasil\"]",
+            "nodes = [\"yggdrasil\", \"raven\"]"
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn legacy_static_workload_identity_has_no_authority_in_v2() {
+        assert!(OperatorBinding::parse(&BINDING.replace(
+            "schema = \"gamecult.idunn.operator_binding.v2\"",
+            "schema = \"gamecult.idunn.operator_binding.v1\"",
+        ),)
+        .is_err());
+        let with_static_identity = BINDING.replace(
+            "driver = \"systemd-transient\"",
+            "driver = \"systemd-transient\"\nuser = \"test-service\"\ngroup = \"test-service\"",
         );
+        assert!(OperatorBinding::parse(&with_static_identity).is_err());
+    }
+
+    #[test]
+    fn writable_state_requires_one_non_root_state_group() {
         assert!(
-            OperatorBinding::parse(&BINDING.replace(
-                "nodes = [\"yggdrasil\"]",
-                "nodes = [\"yggdrasil\", \"raven\"]"
-            ))
-            .is_err()
+            OperatorBinding::parse(&BINDING.replace("state_group = \"test-service\"\n", ""),)
+                .is_err()
         );
+        assert!(OperatorBinding::parse(
+            &BINDING.replace("state_group = \"test-service\"", "state_group = \"root\""),
+        )
+        .is_err());
     }
 
     #[test]
@@ -1773,7 +1899,8 @@ nodes = ["yggdrasil"]
                 .replace(
                     "startup = \"create-or-open-after-write-lease\"",
                     "startup = \"open-at-start\"",
-                ),
+                )
+                .replace("\"GAMECULT_IDUNN_PROCESS_WRITE_LEASE\", ", ""),
         )
         .unwrap();
         binding.admit(&read_only_recipe).unwrap();
@@ -1792,6 +1919,7 @@ nodes = ["yggdrasil"]
             "arguments = [\n  { kind = \"literal\", value = \"--state-root\" },\n  { kind = \"binding\", name = \"state_root\" },\n]",
             "arguments = []",
         );
+        recipe_text = recipe_text.replace("\"GAMECULT_IDUNN_PROCESS_WRITE_LEASE\", ", "");
         let state_start = recipe_text.find("\n[state]\n").unwrap();
         let state_end = recipe_text.find("\n[[provides]]\n").unwrap();
         recipe_text.replace_range(state_start..state_end, "");
@@ -1799,6 +1927,7 @@ nodes = ["yggdrasil"]
         assert!(recipe.state.is_none());
 
         let binding_text = BINDING
+            .replace("state_group = \"test-service\"\n", "")
             .replace("state_root = \"/var/lib/gamecult/test-service\"\n", "")
             .replace(
                 "[workload.argument_bindings]\nstate_root = \"/var/lib/gamecult/test-service\"\n\n",

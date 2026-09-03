@@ -1,23 +1,24 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{bail, ensure, Context, Result};
 pub use cultnet_rs::IdunnExpectedIncarnationRecord as ExpectedIncarnation;
 use cultnet_rs::{
-    GameCultRuntimeCapability, IDUNN_EXPECTED_INCARNATION_SCHEMA, IdunnExpectedDependency,
-    IdunnExpectedRoute,
+    IdunnExpectedCapability, IdunnExpectedDependency, IdunnExpectedRoute,
+    IDUNN_EXPECTED_INCARNATION_SCHEMA,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::control_plane::SequenceAdmittedReady;
 use crate::deployment::{
-    CapabilityDependency, DependencyKind, ExternalCapabilityBinding, OperatorBinding,
-    ServiceTransport, SourceSelectionPolicy, StartupOrder, StateDeclaration, TargetDeclaration,
-    capability_compatible,
+    capability_compatible, CapabilityDependency, DependencyKind, ExternalCapabilityBinding,
+    OperatorBinding, ServiceTransport, SourceSelectionPolicy, StartupOrder, StateDeclaration,
+    TargetDeclaration,
 };
 
 pub const SOURCE_SELECTION_FACTS_SCHEMA: &str = "idunn.source_selection_facts.v1";
-pub const COMPILED_DEPLOYMENT_PLAN_SCHEMA: &str = "idunn.compiled_deployment_plan.v1";
+pub const COMPILED_DEPLOYMENT_PLAN_SCHEMA: &str = "idunn.compiled_deployment_plan.v2";
 pub const SEALED_RELEASE_SCHEMA: &str = "idunn.sealed_release.v1";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -132,13 +133,15 @@ impl SourceSelectionFacts {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
-pub enum ExpectedProviderAuthority {
-    ManagedIncarnation {
+pub enum DependencyProviderAuthority {
+    ManagedReady {
         target: String,
         incarnation_id: String,
         plan_id: String,
         sealed_release_id: String,
         expected_projection_sha256: String,
+        odin_topology_correlation_sha256: String,
+        odin_topology_publisher_sequence: u64,
     },
     ExternalOperatorBinding {
         binding_target: String,
@@ -147,9 +150,9 @@ pub enum ExpectedProviderAuthority {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExpectedProviderRef {
+pub struct DependencyProviderRef {
     pub provider_id: String,
-    pub authority: ExpectedProviderAuthority,
+    pub authority: DependencyProviderAuthority,
     pub capability: String,
     pub schema: String,
     pub compatibility: String,
@@ -157,29 +160,39 @@ pub struct ExpectedProviderRef {
     pub endpoint: Option<String>,
 }
 
-impl ExpectedProviderRef {
+impl DependencyProviderRef {
     pub fn validate(&self) -> Result<()> {
-        require_token(&self.provider_id, "expected provider id")?;
+        require_token(&self.provider_id, "dependency provider id")?;
         require_contract(&self.capability, &self.schema, &self.compatibility)?;
-        ensure!(self.capacity > 0, "expected provider capacity is zero");
+        ensure!(self.capacity > 0, "dependency provider capacity is zero");
         if let Some(endpoint) = &self.endpoint {
-            require_value(endpoint, "expected provider endpoint")?;
+            require_value(endpoint, "dependency provider endpoint")?;
         }
         match &self.authority {
-            ExpectedProviderAuthority::ManagedIncarnation {
+            DependencyProviderAuthority::ManagedReady {
                 target,
                 incarnation_id,
                 plan_id,
                 sealed_release_id,
                 expected_projection_sha256,
+                odin_topology_correlation_sha256,
+                odin_topology_publisher_sequence,
             } => {
                 require_token(target, "managed provider target")?;
                 require_token(incarnation_id, "managed provider incarnation")?;
                 require_sha256(plan_id, "managed provider plan")?;
                 require_sha256(sealed_release_id, "managed provider sealed release")?;
                 require_sha256(expected_projection_sha256, "managed expected projection")?;
+                require_sha256(
+                    odin_topology_correlation_sha256,
+                    "managed Odin topology correlation",
+                )?;
+                ensure!(
+                    *odin_topology_publisher_sequence > 0,
+                    "managed Odin topology sequence is zero"
+                );
             }
-            ExpectedProviderAuthority::ExternalOperatorBinding { binding_target } => {
+            DependencyProviderAuthority::ExternalOperatorBinding { binding_target } => {
                 require_token(binding_target, "external binding target")?;
                 ensure!(
                     self.endpoint.is_some(),
@@ -204,14 +217,14 @@ impl ExpectedProviderRef {
     fn is_external_binding(&self) -> bool {
         matches!(
             &self.authority,
-            ExpectedProviderAuthority::ExternalOperatorBinding { .. }
+            DependencyProviderAuthority::ExternalOperatorBinding { .. }
         )
     }
 }
 
 pub fn external_binding_provider_refs(
     binding: &OperatorBinding,
-) -> Result<Vec<ExpectedProviderRef>> {
+) -> Result<Vec<DependencyProviderRef>> {
     binding.validate()?;
     let providers = binding
         .external_capabilities
@@ -227,10 +240,10 @@ pub fn external_binding_provider_refs(
 fn expected_external_provider(
     binding_target: &str,
     capability: &ExternalCapabilityBinding,
-) -> ExpectedProviderRef {
-    ExpectedProviderRef {
+) -> DependencyProviderRef {
+    DependencyProviderRef {
         provider_id: capability.provider_id.clone(),
-        authority: ExpectedProviderAuthority::ExternalOperatorBinding {
+        authority: DependencyProviderAuthority::ExternalOperatorBinding {
             binding_target: binding_target.to_owned(),
         },
         capability: capability.capability.clone(),
@@ -241,34 +254,61 @@ fn expected_external_provider(
     }
 }
 
-fn managed_expected_provider_refs(
-    expected_incarnations: &[ExpectedIncarnation],
-) -> Result<Vec<ExpectedProviderRef>> {
+/// Projects one authenticated Ready correlation into dependency-selection
+/// inputs. Authentication is not replay admission: the control-plane store
+/// must atomically admit `publisher_sequence` before calling this function and
+/// must re-check the selected receipt before promotion.
+fn managed_ready_provider_refs(
+    admitted: &SequenceAdmittedReady,
+) -> Result<Vec<DependencyProviderRef>> {
+    let expected = admitted.expected();
+    let topology = admitted.authenticated();
+    expected.validate()?;
+    let expected_projection_sha256 = expected.canonical_sha256()?;
+    let observed = topology.record();
+    ensure!(
+        observed.expected_projection_sha256 == expected_projection_sha256,
+        "Ready provider topology names a different Expected projection"
+    );
+    ensure!(
+        observed.target == expected.target && observed.runtime_id == expected.runtime_id,
+        "Ready provider topology names a different target or runtime"
+    );
+    ensure!(
+        observed.expected
+            && observed.present
+            && observed.ready
+            && observed.observed_presence_state.as_deref() == Some("active")
+            && observed.disagreements.is_empty(),
+        "managed provider topology is not Ready"
+    );
+    let odin_topology_correlation_sha256 = admitted.evidence_sha256().to_owned();
+    let endpoint = expected
+        .route
+        .as_ref()
+        .map(|route| route.candidate_endpoint.clone());
     let mut providers = Vec::new();
-    for expected in expected_incarnations {
-        expected.validate()?;
-        let expected_projection_sha256 = expected.canonical_sha256()?;
-        let endpoint = expected
-            .route
-            .as_ref()
-            .map(|route| route.candidate_endpoint.clone());
-        for capability in &expected.capabilities {
-            providers.push(ExpectedProviderRef {
-                provider_id: expected.runtime_id.clone(),
-                authority: ExpectedProviderAuthority::ManagedIncarnation {
-                    target: expected.target.clone(),
-                    incarnation_id: expected.incarnation_id.clone(),
-                    plan_id: expected.plan_id.clone(),
-                    sealed_release_id: expected.sealed_release_id.clone(),
-                    expected_projection_sha256: expected_projection_sha256.clone(),
-                },
-                capability: capability.capability.clone(),
-                schema: capability.schema.clone(),
-                compatibility: capability.compatibility.clone(),
-                capacity: capability.capacity,
-                endpoint: endpoint.clone(),
-            });
-        }
+    for capability in &observed.observed_capabilities {
+        providers.push(DependencyProviderRef {
+            provider_id: observed.runtime_id.clone(),
+            authority: DependencyProviderAuthority::ManagedReady {
+                target: expected.target.clone(),
+                incarnation_id: expected.incarnation_id.clone(),
+                plan_id: expected.plan_id.clone(),
+                sealed_release_id: expected.sealed_release_id.clone(),
+                expected_projection_sha256: expected_projection_sha256.clone(),
+                odin_topology_correlation_sha256: odin_topology_correlation_sha256.clone(),
+                odin_topology_publisher_sequence: admitted.publisher_sequence(),
+            },
+            capability: capability.capability.clone(),
+            schema: capability.schema.clone(),
+            compatibility: capability.compatibility.clone(),
+            capacity: capability.capacity,
+            endpoint: endpoint.clone(),
+        });
+    }
+    for provider in &providers {
+        provider.validate()?;
     }
     Ok(providers)
 }
@@ -277,7 +317,7 @@ fn managed_expected_provider_refs(
 #[serde(deny_unknown_fields)]
 pub struct DependencySelection {
     pub requirement: CapabilityDependency,
-    pub provider: Option<ExpectedProviderRef>,
+    pub provider: Option<DependencyProviderRef>,
 }
 
 impl DependencySelection {
@@ -321,7 +361,7 @@ impl DependencySelection {
         ) = match &self.provider {
             None => (None, None, None, None),
             Some(provider) => match &provider.authority {
-                ExpectedProviderAuthority::ManagedIncarnation {
+                DependencyProviderAuthority::ManagedReady {
                     expected_projection_sha256,
                     ..
                 } => (
@@ -330,7 +370,7 @@ impl DependencySelection {
                     Some(expected_projection_sha256.clone()),
                     provider.endpoint.clone(),
                 ),
-                ExpectedProviderAuthority::ExternalOperatorBinding { .. } => (
+                DependencyProviderAuthority::ExternalOperatorBinding { .. } => (
                     Some(provider.provider_id.clone()),
                     Some("external-operator-binding".into()),
                     None,
@@ -355,7 +395,7 @@ impl DependencySelection {
 
 pub fn select_dependencies(
     declaration: &TargetDeclaration,
-    providers: &[ExpectedProviderRef],
+    providers: &[DependencyProviderRef],
 ) -> Result<Vec<DependencySelection>> {
     declaration.validate()?;
     let mut unique_contracts = BTreeSet::new();
@@ -368,7 +408,7 @@ pub fn select_dependencies(
                 provider.schema.as_str(),
                 provider.compatibility.as_str(),
             )),
-            "expected provider contract is duplicated"
+            "dependency provider contract is duplicated"
         );
     }
     for conflict in &declaration.conflicts {
@@ -508,14 +548,14 @@ impl CompiledDeploymentPlan {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn compile_deployment_plan(
+pub(crate) fn compile_deployment_plan(
     recipe_bytes: &[u8],
     binding_bytes: &[u8],
     source: SourceSelectionFacts,
     incarnation_id: impl Into<String>,
     candidate_port: Option<u16>,
     created_at_unix_millis: u64,
-    managed_expected_incarnations: &[ExpectedIncarnation],
+    managed_ready_providers: &[SequenceAdmittedReady],
 ) -> Result<CompiledDeploymentPlan> {
     let recipe_text = std::str::from_utf8(recipe_bytes).context("recipe is not UTF-8")?;
     let binding_text = std::str::from_utf8(binding_bytes).context("binding is not UTF-8")?;
@@ -533,7 +573,10 @@ pub fn compile_deployment_plan(
         created_at_unix_millis >= source.selected_at_unix_millis,
         "deployment plan predates source selection"
     );
-    let mut providers = managed_expected_provider_refs(managed_expected_incarnations)?;
+    let mut providers = Vec::new();
+    for provider in managed_ready_providers {
+        providers.extend(managed_ready_provider_refs(provider)?);
+    }
     providers.extend(external_binding_provider_refs(&binding)?);
     let dependencies = select_dependencies(&declaration, &providers)?;
     let mut plan = CompiledDeploymentPlan {
@@ -697,11 +740,11 @@ impl SealedRelease {
         let mut capabilities = declaration
             .provides
             .iter()
-            .map(|capability| GameCultRuntimeCapability {
+            .map(|capability| IdunnExpectedCapability {
                 capability: capability.capability.clone(),
                 schema: capability.schema.clone(),
                 compatibility: capability.compatibility.clone(),
-                capacity: capability.capacity,
+                minimum_capacity: capability.capacity,
             })
             .collect::<Vec<_>>();
         capabilities.sort_by(|left, right| {
@@ -951,6 +994,13 @@ fn sha256_id(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cultnet_rs::{
+        authenticate_odin_runtime_topology_correlation, enroll_service_identity_at,
+        verify_runtime_authority, GameCultProviderHealthIdentity, GameCultRuntimeCapability,
+        IdunnRuntimeActivationLaunch, IdunnServiceIdentity, OdinRuntimeTopologyCorrelationPurpose,
+        OdinRuntimeTopologyCorrelationRecord, OdinTopologyAuthenticationContext,
+        OdinTopologyIdentity, ODIN_RUNTIME_TOPOLOGY_CORRELATION_SCHEMA,
+    };
 
     const RECIPE: &str = r#"
 schema = "gamecult.idunn.target_declaration.v1"
@@ -981,9 +1031,12 @@ executable = true
 
 [service]
 executable_artifact = "daemon"
+arguments = [
+  { kind = "binding", name = "state_root" },
+]
 transport = "http"
 route_required = true
-required_environment = ["GAMECULT_IDUNN_RUNTIME_BUNDLE", "SERVICE_BIND"]
+required_environment = ["GAMECULT_IDUNN_CANDIDATE_BIND", "GAMECULT_IDUNN_RUNTIME_BUNDLE"]
 
 [service.health]
 contract = "service.health"
@@ -1013,7 +1066,7 @@ compatibility = "v1"
 "#;
 
     const BINDING: &str = r#"
-schema = "gamecult.idunn.operator_binding.v1"
+schema = "gamecult.idunn.operator_binding.v2"
 target = "service"
 
 [repository]
@@ -1038,8 +1091,7 @@ tmpfs_mebibytes = 512
 
 [workload]
 driver = "systemd-transient"
-user = "service"
-group = "service"
+state_group = "service"
 unit_prefix = "idunn-service"
 release_root = "/srv/service/releases"
 state_root = "/var/lib/gamecult/service"
@@ -1049,8 +1101,8 @@ hardening = "strict"
 memory_mebibytes = 1024
 cpu_quota_percent = 100
 
-[workload.environment]
-SERVICE_BIND = "idunn.private_endpoint"
+[workload.argument_bindings]
+state_root = "/var/lib/gamecult/service"
 
 [runtime_identity]
 runtime_id = "service-yggdrasil"
@@ -1124,17 +1176,94 @@ nodes = ["yggdrasil"]
                 stable_endpoint: "tcp://10.77.0.1:17871".into(),
                 candidate_endpoint: "tcp://127.0.0.1:17871".into(),
             }),
-            capabilities: vec![GameCultRuntimeCapability {
+            capabilities: vec![IdunnExpectedCapability {
                 capability: "odin.verse-rendezvous".into(),
                 schema: "odin.verse-topology.v1".into(),
                 compatibility: "v1".into(),
-                capacity: 1,
+                minimum_capacity: 1,
             }],
             dependencies: Vec::new(),
         }
     }
 
+    fn ready_odin_provider(runtime_id: &str, capacity: u32) -> SequenceAdmittedReady {
+        (|| -> Result<SequenceAdmittedReady> {
+            let root = tempfile::tempdir()?;
+            let provider = enroll_service_identity_at::<GameCultProviderHealthIdentity>(
+                &root.path().join("provider.cc"),
+            )?;
+            let idunn =
+                enroll_service_identity_at::<IdunnServiceIdentity>(&root.path().join("idunn.cc"))?;
+            let odin_signer =
+                enroll_service_identity_at::<OdinTopologyIdentity>(&root.path().join("odin.cc"))?;
+            let mut expected = odin();
+            expected.runtime_id = runtime_id.into();
+            expected.expected_signer_identity_id = provider.entry().identity_id.clone();
+            let launch = IdunnRuntimeActivationLaunch::issue(&expected, digest(b'8'), 100, &idunn)?;
+            let activation = launch.activation().clone();
+            launch.write_credential(std::io::sink())?;
+            let authority = verify_runtime_authority(
+                &expected,
+                &activation,
+                &idunn.trust_anchor()?,
+                &provider.entry().public_key,
+            )?;
+            let mut topology = OdinRuntimeTopologyCorrelationRecord {
+                schema_version: ODIN_RUNTIME_TOPOLOGY_CORRELATION_SCHEMA.into(),
+                target: expected.target.clone(),
+                expected_projection_sha256: expected.canonical_sha256()?,
+                expected: true,
+                current_activation_sha256: Some(activation.canonical_sha256()?),
+                signed_presence_sha256: Some(digest(b'9')),
+                observed_presence_state: Some("active".into()),
+                observed_presence_publisher_sequence: Some(1),
+                observed_write_lease_sha256: None,
+                observed_capabilities: vec![GameCultRuntimeCapability {
+                    capability: "odin.verse-rendezvous".into(),
+                    schema: "odin.verse-topology.v1".into(),
+                    compatibility: "v1".into(),
+                    capacity,
+                }],
+                runtime_id: expected.runtime_id.clone(),
+                runtime_instance_id: Some(activation.runtime_instance_id.clone()),
+                present: true,
+                ready: true,
+                dependencies: Vec::new(),
+                disagreements: Vec::new(),
+                signer_identity_id: odin_signer.entry().identity_id.clone(),
+                publisher_sequence: 7,
+                observed_at_unix_millis: 110,
+                signature_algorithm: "ed25519".into(),
+                signature: Vec::new(),
+            };
+            topology.signature = odin_signer
+                .sign::<OdinRuntimeTopologyCorrelationPurpose>(
+                    &topology.unsigned_signature_payload()?,
+                )
+                .signature;
+            let bytes = topology.canonical_bytes()?;
+            let authenticated = authenticate_odin_runtime_topology_correlation(
+                &bytes,
+                &authority,
+                None,
+                &odin_signer.entry().public_key,
+                OdinTopologyAuthenticationContext {
+                    trusted_received_at_unix_millis: 120,
+                    maximum_age_millis: 30,
+                    maximum_future_skew_millis: 5,
+                },
+            )?;
+            SequenceAdmittedReady::for_test(&expected, authenticated, 120)
+        })()
+        .unwrap()
+    }
+
     fn plan() -> CompiledDeploymentPlan {
+        let providers = [ready_odin_provider("odin-yggdrasil", 1)];
+        plan_with(&providers)
+    }
+
+    fn plan_with(providers: &[SequenceAdmittedReady]) -> CompiledDeploymentPlan {
         compile_deployment_plan(
             RECIPE.as_bytes(),
             BINDING.as_bytes(),
@@ -1142,7 +1271,7 @@ nodes = ["yggdrasil"]
             "service-incarnation-1",
             Some(18001),
             110,
-            &[odin()],
+            providers,
         )
         .unwrap()
     }
@@ -1170,8 +1299,9 @@ nodes = ["yggdrasil"]
 
     #[test]
     fn compiler_parses_the_exact_bytes_it_receipts() {
-        let first = plan();
-        let second = plan();
+        let providers = [ready_odin_provider("odin-yggdrasil", 1)];
+        let first = plan_with(&providers);
+        let second = plan_with(&providers);
         assert_eq!(first, second);
         assert_eq!(first.recipe_blob.as_slice(), RECIPE.as_bytes());
         assert_eq!(first.binding_blob.as_slice(), BINDING.as_bytes());
@@ -1183,18 +1313,17 @@ nodes = ["yggdrasil"]
             "contract = \"service.health\"",
             "contract = \"service.health.v2\"",
         );
-        assert!(
-            compile_deployment_plan(
-                changed.as_bytes(),
-                BINDING.as_bytes(),
-                source(RECIPE),
-                "service-incarnation-2",
-                Some(18002),
-                111,
-                &[odin()],
-            )
-            .is_err()
-        );
+        let providers = [ready_odin_provider("odin-yggdrasil", 1)];
+        assert!(compile_deployment_plan(
+            changed.as_bytes(),
+            BINDING.as_bytes(),
+            source(RECIPE),
+            "service-incarnation-2",
+            Some(18002),
+            111,
+            &providers,
+        )
+        .is_err());
         let mut corrupted = first;
         corrupted
             .binding_blob
@@ -1247,16 +1376,29 @@ nodes = ["yggdrasil"]
     }
 
     #[test]
-    fn dependency_selection_uses_expected_identity_without_readiness() {
+    fn dependency_selection_uses_observed_ready_capacity_and_stable_identity_order() {
         let declaration = TargetDeclaration::parse(RECIPE).unwrap();
-        let mut later = odin();
-        later.runtime_id = "odin-z".into();
-        let providers = managed_expected_provider_refs(&[later, odin()]).unwrap();
+        let admitted = [
+            ready_odin_provider("odin-z", 4),
+            ready_odin_provider("odin-yggdrasil", 2),
+        ];
+        let providers = admitted
+            .iter()
+            .flat_map(|provider| managed_ready_provider_refs(provider).unwrap())
+            .collect::<Vec<_>>();
         let selected = select_dependencies(&declaration, &providers).unwrap();
         assert_eq!(
             selected[0].provider.as_ref().unwrap().provider_id,
             "odin-yggdrasil"
         );
+        assert_eq!(selected[0].provider.as_ref().unwrap().capacity, 2);
+        assert!(matches!(
+            &selected[0].provider.as_ref().unwrap().authority,
+            DependencyProviderAuthority::ManagedReady {
+                odin_topology_publisher_sequence: 7,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1276,7 +1418,7 @@ nodes = ["yggdrasil"]
         let selected = select_dependencies(&declaration, &providers).unwrap();
         assert!(matches!(
             &providers[0].authority,
-            ExpectedProviderAuthority::ExternalOperatorBinding { .. }
+            DependencyProviderAuthority::ExternalOperatorBinding { .. }
         ));
         assert_eq!(providers[0].capacity, 2);
         assert_eq!(
@@ -1349,7 +1491,7 @@ nodes = ["yggdrasil"]
             "service-incarnation-sorted",
             Some(18002),
             111,
-            &[odin()],
+            &[ready_odin_provider("odin-yggdrasil", 1)],
         )
         .unwrap();
         let release = SealedRelease::new(
