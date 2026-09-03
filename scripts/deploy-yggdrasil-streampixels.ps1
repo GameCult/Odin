@@ -1,13 +1,13 @@
 param(
   [string] $SshTarget = "yggdrasil",
-  [string] $RepoRoot = "E:\Projects\StreamPixels",
-  [string] $CultLibRoot = "E:\Projects\CultLib",
+  [string] $RepoRoot = (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) "StreamPixels"),
+  [string] $CultLibRoot = (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) "CultLib"),
   [string] $AppUser = "streampixels",
   [string] $RemoteAppHome = "/srv/streampixels",
   [string] $RemoteTarballName = "streampixels-source.tar",
   [string] $RemoteCultLibTarballName = "streampixels-cultlib.tar",
-  [string] $DeployScript = "E:\Projects\gamecult-ops\scripts\deploy-streampixels-preview.sh",
-  [string] $CheckScript = "E:\Projects\gamecult-ops\scripts\check-streampixels-preview.sh",
+  [string] $DeployScript = (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) "gamecult-ops\scripts\deploy-streampixels-preview.sh"),
+  [string] $CheckScript = (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) "gamecult-ops\scripts\check-streampixels-preview.sh"),
   [string] $UpstreamRemote = "origin",
   [string] $UpstreamBranch = "main",
   [string] $CultLibUpstreamRemote = "origin",
@@ -42,7 +42,7 @@ if ([string]::IsNullOrWhiteSpace($cultLibCommit)) {
   throw "Could not determine CultLib git revision."
 }
 
-$scratch = Join-Path "E:\Projects\Odin\scratch\idunn-deploy" "yggdrasil-streampixels"
+$scratch = Join-Path (Join-Path (Split-Path -Parent $PSScriptRoot) "scratch\idunn-deploy") "yggdrasil-streampixels"
 $sourceTarPath = Join-Path $scratch $RemoteTarballName
 $cultLibTarPath = Join-Path $scratch $RemoteCultLibTarballName
 $manifestPath = Join-Path $scratch "deployment-manifest.txt"

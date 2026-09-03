@@ -1,6 +1,6 @@
 param(
   [int] $StaleAfterSeconds = 120,
-  [string] $StateDir = "E:\Projects\Odin\scratch\idunn"
+  [string] $StateDir = (Join-Path (Split-Path -Parent $PSScriptRoot) "scratch\idunn")
 )
 
 $ErrorActionPreference = "Stop"

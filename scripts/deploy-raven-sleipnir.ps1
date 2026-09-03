@@ -1,5 +1,5 @@
 param(
-  [string] $LocalSleipnirExe = "E:\Projects\Odin\target\release\sleipnir.exe",
+  [string] $LocalSleipnirExe = (Join-Path (Split-Path -Parent $PSScriptRoot) "target\release\sleipnir.exe"),
   [string] $RavenHost = "raven",
   [string] $RemoteSleipnirExe = "C:\Meta\Odin\Sleipnir\sleipnir.exe",
   [string] $SshUser = "madman's lullaby",
