@@ -1104,6 +1104,9 @@ cpu_quota_percent = 100
 [workload.argument_bindings]
 state_root = "/var/lib/gamecult/service"
 
+[workload.secret_files]
+GAMECULT_RUNTIME_PRESENCE_IDENTITY = "/etc/gamecult/service/runtime-presence-identity.cc"
+
 [runtime_identity]
 runtime_id = "service-yggdrasil"
 expected_signer_identity_id = "service-runtime-signer"

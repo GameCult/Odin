@@ -20,19 +20,21 @@ use crate::control_plane::SequenceAdmittedWarming;
 use crate::deployment::{
     ArtifactOutput, ArtifactSource, IDUNN_PROCESS_WRITE_LEASE_ENVIRONMENT,
     IDUNN_RUNTIME_BUNDLE_ENVIRONMENT, IDUNN_RUNTIME_CANDIDATE_BIND_ENVIRONMENT, LaunchArgument,
-    OperatorBinding, RouteBinding, RouteDriver, RunnerBinding, SourceSelectionPolicy,
-    TargetDeclaration, WorkloadNetwork,
+    OperatorBinding, RUNTIME_PRESENCE_IDENTITY_BINDING, RUNTIME_PRESENCE_IDENTITY_FD_NAME,
+    RouteBinding, RouteDriver, RunnerBinding, SourceSelectionPolicy, TargetDeclaration,
+    WorkloadNetwork,
 };
 use crate::deployment_plan::{
     ArtifactReceipt, CompiledDeploymentPlan, ExternalInputMaterializationReceipt, GitlinkTreeFact,
     SOURCE_SELECTION_FACTS_SCHEMA, SealedRelease, SourceSelection, SourceSelectionFacts,
 };
 use cultnet_rs::{
-    IDUNN_EXPECTED_INCARNATION_SCHEMA, IDUNN_PROCESS_WRITE_LEASE_SCHEMA,
-    IDUNN_RUNTIME_ACTIVATION_CREDENTIAL_NAME, IDUNN_RUNTIME_ACTIVATION_SCHEMA,
-    IdunnExpectedIncarnationRecord, IdunnProcessWriteLeaseRecord, IdunnRuntimeActivationLaunch,
-    IdunnRuntimeActivationRecord, IdunnRuntimeActivationSigner,
+    GameCultProviderHealthIdentity, IDUNN_EXPECTED_INCARNATION_SCHEMA,
+    IDUNN_PROCESS_WRITE_LEASE_SCHEMA, IDUNN_RUNTIME_ACTIVATION_CREDENTIAL_NAME,
+    IDUNN_RUNTIME_ACTIVATION_SCHEMA, IdunnExpectedIncarnationRecord, IdunnProcessWriteLeaseRecord,
+    IdunnRuntimeActivationLaunch, IdunnRuntimeActivationRecord, IdunnRuntimeActivationSigner,
     ODIN_RUNTIME_TOPOLOGY_CORRELATION_SCHEMA, OdinRuntimeTopologyCorrelationRecord,
+    open_service_identity_credential_reader,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -155,6 +157,26 @@ pub struct ServiceCredentialObservation {
     pub sha256: String,
 }
 
+/// Root-owned source metadata for one descriptor that PID1 opens and passes
+/// only to the service's initial process. The process must consume and close
+/// descriptors 3 and 4 before spawning any child; no filesystem path is
+/// projected into the workload environment.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParentOnlyFileDescriptorObservation {
+    pub fd_number: u32,
+    pub fd_name: String,
+    pub source_path: PathBuf,
+    pub access: String,
+    pub device: u64,
+    pub inode: u64,
+    pub uid: u32,
+    pub gid: u32,
+    pub mode: u32,
+    pub links: u64,
+    pub size: u64,
+    pub sha256: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkloadObservation {
     pub unit: String,
@@ -203,13 +225,8 @@ pub struct WorkloadObservation {
     pub environment_names: Vec<String>,
     pub environment_contract_sha256: String,
     pub control_group: String,
-    pub credentials_directory: PathBuf,
-    pub activation_credential_device: u64,
-    pub activation_credential_inode: u64,
-    pub activation_credential_uid: u32,
-    pub activation_credential_gid: u32,
-    pub activation_credential_mode: u32,
-    pub activation_credential_size: u64,
+    pub credentials_directory: Option<PathBuf>,
+    pub parent_only_file_descriptors: Vec<ParentOnlyFileDescriptorObservation>,
     pub activation_signer_identity_id: String,
     pub activation_signer_public_key: Vec<u8>,
     pub service_credentials: Vec<ServiceCredentialObservation>,
@@ -227,6 +244,12 @@ struct LinuxProcessSecurityObservation {
     cap_ambient: u64,
     no_new_privileges: bool,
     namespace_pids: Vec<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SystemdUnitObservation {
+    properties: BTreeMap<String, String>,
+    open_files: Vec<String>,
 }
 
 pub trait WorkloadPort {
@@ -251,6 +274,13 @@ pub trait WorkloadPort {
         expected: &IdunnExpectedIncarnationRecord,
         activation: &IdunnRuntimeActivationRecord,
     ) -> Result<WorkloadObservation>;
+
+    fn discard_prepared(
+        &self,
+        plan: &CompiledDeploymentPlan,
+        expected: &IdunnExpectedIncarnationRecord,
+        activation: &IdunnRuntimeActivationRecord,
+    ) -> Result<()>;
 
     fn observe(
         &self,
@@ -1529,10 +1559,53 @@ impl SystemdTransientWorkloadDriver {
         Ok(())
     }
 
+    fn parent_only_file_descriptors(
+        &self,
+        binding: &OperatorBinding,
+        expected: &IdunnExpectedIncarnationRecord,
+        activation: &IdunnRuntimeActivationRecord,
+    ) -> Result<Vec<ParentOnlyFileDescriptorObservation>> {
+        let activation_source = self.activation_credential_source(activation)?;
+        self.validate_prepared_activation_credential(activation, &activation_source)?;
+        let presence_source = binding
+            .workload
+            .secret_files
+            .get(RUNTIME_PRESENCE_IDENTITY_BINDING)
+            .context("workload has no parent-only runtime presence identity source")?;
+        let presence_signer =
+            open_service_identity_credential_reader::<GameCultProviderHealthIdentity>(
+                open_native_read_only(presence_source).with_context(|| {
+                    format!(
+                        "opening runtime presence identity source {}",
+                        presence_source.display()
+                    )
+                })?,
+            )?;
+        ensure!(
+            presence_signer.entry().identity_id == expected.expected_signer_identity_id,
+            "runtime presence identity source differs from Expected"
+        );
+        let descriptors = vec![
+            observe_parent_only_file_descriptor(
+                3,
+                IDUNN_RUNTIME_ACTIVATION_CREDENTIAL_NAME,
+                &activation_source,
+            )?,
+            observe_parent_only_file_descriptor(
+                4,
+                RUNTIME_PRESENCE_IDENTITY_FD_NAME,
+                presence_source,
+            )?,
+        ];
+        parent_only_open_file_properties(&descriptors)?;
+        Ok(descriptors)
+    }
+
     fn stop_submitted_unit(&self, unit: &str, expected_description: &str) -> Result<()> {
-        let Some(values) = self.show_unit(unit)? else {
+        let Some(observation) = self.show_unit(unit)? else {
             return Ok(());
         };
+        let values = &observation.properties;
         ensure!(
             values.get("Description").map(String::as_str) == Some(expected_description),
             "refusing to stop a submitted unit whose description changed"
@@ -1541,7 +1614,8 @@ impl SystemdTransientWorkloadDriver {
             &self.systemctl_program,
             [OsString::from("stop"), OsString::from(unit)],
         )?;
-        if let Some(values) = self.show_unit(unit)? {
+        if let Some(observation) = self.show_unit(unit)? {
+            let values = &observation.properties;
             ensure!(
                 values
                     .get("ActiveState")
@@ -1550,29 +1624,6 @@ impl SystemdTransientWorkloadDriver {
             );
         }
         Ok(())
-    }
-
-    fn failed_start_error(
-        &self,
-        primary: anyhow::Error,
-        unit: &str,
-        expected_description: &str,
-        credential_source: &Path,
-    ) -> anyhow::Error {
-        let stop = self.stop_submitted_unit(unit, expected_description);
-        let remove = remove_activation_credential_source(credential_source);
-        match (stop, remove) {
-            (Ok(()), Ok(())) => primary,
-            (Err(stop), Ok(())) => {
-                primary.context(format!("stopping failed candidate also failed: {stop:#}"))
-            }
-            (Ok(()), Err(remove)) => primary.context(format!(
-                "deleting failed candidate activation credential also failed: {remove:#}"
-            )),
-            (Err(stop), Err(remove)) => primary.context(format!(
-                "failed candidate cleanup also failed (stop: {stop:#}; credential delete: {remove:#})"
-            )),
-        }
     }
 
     fn install_release(
@@ -1686,7 +1737,7 @@ impl SystemdTransientWorkloadDriver {
         Ok(bundle)
     }
 
-    fn show_unit(&self, unit: &str) -> Result<Option<BTreeMap<String, String>>> {
+    fn show_unit(&self, unit: &str) -> Result<Option<SystemdUnitObservation>> {
         ensure!(
             self.systemctl_program.is_absolute(),
             "systemctl program is not absolute"
@@ -1720,6 +1771,7 @@ impl SystemdTransientWorkloadDriver {
                 OsString::from("--property=UMask"),
                 OsString::from("--property=InaccessiblePaths"),
                 OsString::from("--property=LoadCredential"),
+                OsString::from("--property=OpenFile"),
                 OsString::from("--property=WorkingDirectory"),
                 OsString::from("--property=ControlGroup"),
             ])
@@ -1731,10 +1783,15 @@ impl SystemdTransientWorkloadDriver {
         let text =
             std::str::from_utf8(&output.stdout).context("systemd show output is not UTF-8")?;
         let mut values = BTreeMap::new();
+        let mut open_files = Vec::new();
         for line in text.lines().filter(|line| !line.is_empty()) {
             let (name, value) = line
                 .split_once('=')
                 .context("systemd show output is malformed")?;
+            if name == "OpenFile" {
+                open_files.push(value.to_owned());
+                continue;
+            }
             ensure!(
                 values.insert(name.to_owned(), value.to_owned()).is_none(),
                 "systemd show property is duplicated"
@@ -1751,7 +1808,10 @@ impl SystemdTransientWorkloadDriver {
             "systemd show failed for {unit}: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         );
-        Ok(Some(values))
+        Ok(Some(SystemdUnitObservation {
+            properties: values,
+            open_files,
+        }))
     }
 
     fn observe_unit(
@@ -1763,6 +1823,7 @@ impl SystemdTransientWorkloadDriver {
         activation_signer_public_key: &[u8],
         environment_names: &[String],
         service_credential_names: &[String],
+        parent_only_file_descriptors: &[ParentOnlyFileDescriptorObservation],
     ) -> Result<WorkloadObservation> {
         ensure!(
             service_credential_names
@@ -1770,9 +1831,15 @@ impl SystemdTransientWorkloadDriver {
                 .all(|pair| pair[0] < pair[1]),
             "service credential names are not unique and sorted"
         );
-        let values = self
+        let unit_observation = self
             .show_unit(unit)?
             .with_context(|| format!("systemd unit {unit} is absent"))?;
+        let values = &unit_observation.properties;
+        ensure!(
+            unit_observation.open_files
+                == parent_only_open_file_properties(parent_only_file_descriptors)?,
+            "systemd parent-only descriptor contract differs from the Idunn launch"
+        );
         ensure!(
             values
                 .get("ActiveState")
@@ -1831,7 +1898,12 @@ impl SystemdTransientWorkloadDriver {
                 && no_new_privileges
                 && umask == "0007"
                 && inaccessible_paths == self.credential_root.display().to_string()
-                && load_credential == "[unprintable]",
+                && load_credential
+                    == if service_credential_names.is_empty() {
+                        ""
+                    } else {
+                        "[unprintable]"
+                    },
             "systemd workload isolation properties differ from the Idunn contract"
         );
         let working_directory =
@@ -1956,70 +2028,41 @@ impl SystemdTransientWorkloadDriver {
             runtime_bundle.is_absolute(),
             "runtime bundle path is not absolute"
         );
-        let credentials_directory = PathBuf::from(required_process_environment_value(
-            &process_environment,
-            "CREDENTIALS_DIRECTORY",
-        )?);
-        ensure!(
-            credentials_directory == Path::new("/run/credentials").join(unit),
-            "systemd MainPID exposed an unexpected credential directory"
-        );
-        let credential_path = path_inside_process_root(
-            &process_root.join("root"),
-            &credentials_directory.join(IDUNN_RUNTIME_ACTIVATION_CREDENTIAL_NAME),
-        )?;
-        let credential_file = open_native_read_only(&credential_path).with_context(|| {
-            format!(
-                "opening delivered activation credential {}",
-                credential_path.display()
-            )
-        })?;
-        let credential_metadata = credential_file.metadata()?;
-        ensure!(
-            credential_metadata.is_file() && credential_metadata.len() == 32,
-            "delivered activation credential is not one exact 32-byte native file"
-        );
-        let activation_signer =
-            IdunnRuntimeActivationSigner::from_credential_reader(credential_file)?;
-        ensure!(
-            activation_signer.identity_id() == activation_signer_identity_id
-                && activation_signer.public_key() == activation_signer_public_key,
-            "delivered activation credential differs from the Idunn-signed activation"
-        );
-        #[cfg(unix)]
-        let (
-            activation_credential_device,
-            activation_credential_inode,
-            activation_credential_uid,
-            activation_credential_gid,
-            activation_credential_mode,
-        ) = {
-            use std::os::unix::fs::{MetadataExt, PermissionsExt};
-            (
-                credential_metadata.dev(),
-                credential_metadata.ino(),
-                credential_metadata.uid(),
-                credential_metadata.gid(),
-                credential_metadata.permissions().mode() & 0o777,
-            )
+        let credentials_directory = if service_credential_names.is_empty() {
+            ensure!(
+                !process_environment
+                    .iter()
+                    .any(|entry| entry.starts_with(b"CREDENTIALS_DIRECTORY=")),
+                "systemd MainPID exposed an unowned credential directory"
+            );
+            None
+        } else {
+            let path = PathBuf::from(required_process_environment_value(
+                &process_environment,
+                "CREDENTIALS_DIRECTORY",
+            )?);
+            ensure!(
+                path == Path::new("/run/credentials").join(unit),
+                "systemd MainPID exposed an unexpected credential directory"
+            );
+            Some(path)
         };
-        #[cfg(not(unix))]
-        let (
-            activation_credential_device,
-            activation_credential_inode,
-            activation_credential_uid,
-            activation_credential_gid,
-            activation_credential_mode,
-        ) = (0, 0, 0, 0, 0);
+        let activation_descriptor = &parent_only_file_descriptors[0];
         ensure!(
-            activation_credential_uid == process_security.uids[0]
-                && activation_credential_gid == process_security.gids[0]
-                && activation_credential_mode == 0o400,
-            "delivered activation credential is not readable only by the workload identity"
+            activation_descriptor.fd_name == IDUNN_RUNTIME_ACTIVATION_CREDENTIAL_NAME
+                && activation_descriptor.size == 32
+                && activation_descriptor.uid == 0
+                && activation_descriptor.gid == 0
+                && activation_descriptor.mode == 0o400
+                && activation_descriptor.links == 1,
+            "activation signing descriptor is not exact root-only source material"
         );
         let mut service_credentials = Vec::new();
         for name in service_credential_names {
-            let delivered_path = credentials_directory.join(name);
+            let delivered_path = credentials_directory
+                .as_ref()
+                .context("service credential has no systemd credential directory")?
+                .join(name);
             let delivered_value = delivered_path.display().to_string();
             ensure!(
                 selected_environment.get(name) == Some(&delivered_value),
@@ -2073,7 +2116,7 @@ impl SystemdTransientWorkloadDriver {
             .show_unit(unit)?
             .with_context(|| format!("systemd unit {unit} vanished during observation"))?;
         ensure!(
-            final_values == values
+            final_values == unit_observation
                 && linux_process_start_time(&process_root.join("stat"))? == process_start_time,
             "systemd workload identity changed during native observation"
         );
@@ -2125,14 +2168,9 @@ impl SystemdTransientWorkloadDriver {
             environment_contract_sha256: sha256_id(&rmp_serde::to_vec(&selected_environment)?),
             control_group,
             credentials_directory,
-            activation_credential_device,
-            activation_credential_inode,
-            activation_credential_uid,
-            activation_credential_gid,
-            activation_credential_mode,
-            activation_credential_size: credential_metadata.len(),
-            activation_signer_identity_id: activation_signer.identity_id(),
-            activation_signer_public_key: activation_signer.public_key(),
+            parent_only_file_descriptors: parent_only_file_descriptors.to_vec(),
+            activation_signer_identity_id: activation_signer_identity_id.to_owned(),
+            activation_signer_public_key: activation_signer_public_key.to_vec(),
             service_credentials,
         })
     }
@@ -2168,7 +2206,12 @@ impl SystemdTransientWorkloadDriver {
     ) -> Result<BTreeMap<String, String>> {
         let mut environment = binding.workload.environment.clone();
         let credentials_directory = Path::new("/run/credentials").join(unit);
-        for name in binding.workload.secret_files.keys() {
+        for name in binding
+            .workload
+            .secret_files
+            .keys()
+            .filter(|name| name.as_str() != RUNTIME_PRESENCE_IDENTITY_BINDING)
+        {
             ensure!(
                 environment
                     .insert(
@@ -2254,7 +2297,28 @@ impl SystemdTransientWorkloadDriver {
         );
         let expected_group = binding.workload.state_group.as_deref();
         let expected_group_id = expected_group.map(resolve_group_id).transpose()?;
-        let expected_credentials_directory = Path::new("/run/credentials").join(&observation.unit);
+        let regular_credential_names = binding
+            .workload
+            .secret_files
+            .keys()
+            .filter(|name| name.as_str() != RUNTIME_PRESENCE_IDENTITY_BINDING)
+            .cloned()
+            .collect::<Vec<_>>();
+        let expected_credentials_directory = (!regular_credential_names.is_empty())
+            .then(|| Path::new("/run/credentials").join(&observation.unit));
+        let descriptor_properties =
+            parent_only_open_file_properties(&observation.parent_only_file_descriptors)?;
+        let activation_source = self.activation_credential_source(activation)?;
+        let presence_source = binding
+            .workload
+            .secret_files
+            .get(RUNTIME_PRESENCE_IDENTITY_BINDING)
+            .context("workload has no parent-only runtime presence identity source")?;
+        let observed_credential_names = observation
+            .service_credentials
+            .iter()
+            .map(|credential| credential.environment_name.clone())
+            .collect::<Vec<_>>();
         ensure!(
             observation.unit_description == expected_description
                 && observation.service_type == "exec"
@@ -2276,7 +2340,12 @@ impl SystemdTransientWorkloadDriver {
                 && observation.no_new_privileges
                 && observation.umask == "0007"
                 && observation.inaccessible_paths == self.credential_root.display().to_string()
-                && observation.load_credential == "[unprintable]"
+                && observation.load_credential
+                    == if regular_credential_names.is_empty() {
+                        ""
+                    } else {
+                        "[unprintable]"
+                    }
                 && observation.working_directory == installed
                 && observation.runtime_bundle == bundle
                 && observation.credentials_directory == expected_credentials_directory
@@ -2284,11 +2353,15 @@ impl SystemdTransientWorkloadDriver {
                 && observation.environment_names == environment_names
                 && observation.environment_contract_sha256
                     == sha256_id(&rmp_serde::to_vec(&environment)?)
-                && observation.activation_credential_size == 32
+                && descriptor_properties.len() == 2
+                && observation.parent_only_file_descriptors[0].source_path == activation_source
+                && observation.parent_only_file_descriptors[0].size == 32
+                && observation.parent_only_file_descriptors[1].source_path == *presence_source
                 && observation.activation_signer_identity_id
                     == activation.activation_signer_identity_id
                 && observation.activation_signer_public_key
                     == activation.activation_signer_public_key
+                && observed_credential_names == regular_credential_names
                 && match expected_group_id {
                     Some(group_id) => observation.process_gids[0] == group_id,
                     None => observation.process_gids[0] == observation.process_uids[0],
@@ -2329,7 +2402,7 @@ impl SystemdTransientWorkloadDriver {
         installed: &Path,
         bundle: &Path,
         expected: &IdunnExpectedIncarnationRecord,
-        credential_source: &Path,
+        parent_only_file_descriptors: &[ParentOnlyFileDescriptorObservation],
         unit: &str,
     ) -> Result<()> {
         ensure!(
@@ -2351,6 +2424,8 @@ impl SystemdTransientWorkloadDriver {
             "operator binding attempts to replace the Idunn runtime bundle"
         );
         validate_service_credential_sources(&binding.workload.secret_files)?;
+        let parent_only_open_files =
+            parent_only_open_file_properties(parent_only_file_descriptors)?;
         let environment = self.launch_environment(binding, bundle, expected, unit)?;
         let executable_artifact =
             release_artifact(declaration, &declaration.service.executable_artifact)?;
@@ -2396,10 +2471,6 @@ impl SystemdTransientWorkloadDriver {
                 self.credential_root.display()
             )),
             OsString::from(format!(
-                "--property=LoadCredential={IDUNN_RUNTIME_ACTIVATION_CREDENTIAL_NAME}:{}",
-                credential_source.display()
-            )),
-            OsString::from(format!(
                 "--property=MemoryMax={}M",
                 binding.workload.memory_mebibytes
             )),
@@ -2411,6 +2482,9 @@ impl SystemdTransientWorkloadDriver {
             OsString::from(format!("--property=ReadOnlyPaths={}", installed.display())),
             OsString::from(format!("--property=ReadOnlyPaths={}", bundle.display())),
         ];
+        for open_file in parent_only_open_files {
+            args.push(OsString::from(format!("--property=OpenFile={open_file}")));
+        }
         if let Some(state_group) = &binding.workload.state_group {
             args.push(OsString::from(format!("--property=Group={state_group}")));
         }
@@ -2457,7 +2531,12 @@ impl SystemdTransientWorkloadDriver {
         for (name, value) in environment {
             args.push(OsString::from(format!("--setenv={name}={value}")));
         }
-        for (name, path) in &binding.workload.secret_files {
+        for (name, path) in binding
+            .workload
+            .secret_files
+            .iter()
+            .filter(|(name, _)| name.as_str() != RUNTIME_PRESENCE_IDENTITY_BINDING)
+        {
             args.push(OsString::from(format!(
                 "--property=LoadCredential={name}:{}",
                 path.display()
@@ -2568,72 +2647,26 @@ impl WorkloadPort for SystemdTransientWorkloadDriver {
             .workload
             .secret_files
             .keys()
+            .filter(|name| name.as_str() != RUNTIME_PRESENCE_IDENTITY_BINDING)
             .cloned()
             .collect::<Vec<_>>();
         let environment_names = self
             .launch_environment(&binding, &bundle, expected, &unit)?
             .into_keys()
             .collect::<Vec<_>>();
-        let unit_description = format!(
-            "Idunn {} {}",
-            binding.target, activation.runtime_instance_id
-        );
-        let credential_source = self.activation_credential_source(activation)?;
+        let parent_only_file_descriptors =
+            self.parent_only_file_descriptors(&binding, expected, activation)?;
         let unit_exists = self.show_unit(&unit)?.is_some();
-        match fs::symlink_metadata(&credential_source) {
-            Ok(_) => {
-                if let Err(error) =
-                    self.validate_prepared_activation_credential(activation, &credential_source)
-                {
-                    return if unit_exists {
-                        Err(self.failed_start_error(
-                            error,
-                            &unit,
-                            &unit_description,
-                            &credential_source,
-                        ))
-                    } else {
-                        match remove_activation_credential_source(&credential_source) {
-                            Ok(()) => Err(error),
-                            Err(cleanup) => Err(error.context(format!(
-                                "deleting mismatched prepared credential also failed: {cleanup:#}"
-                            ))),
-                        }
-                    };
-                }
-            }
-            Err(error) if error.kind() == ErrorKind::NotFound && unit_exists => {}
-            Err(error) if error.kind() == ErrorKind::NotFound => {
-                bail!(
-                    "prepared activation has neither a credential source nor an existing exact unit"
-                )
-            }
-            Err(error) => {
-                return Err(error).with_context(|| {
-                    format!(
-                        "inspecting prepared activation credential {}",
-                        credential_source.display()
-                    )
-                });
-            }
-        }
         if !unit_exists {
-            if let Err(error) = self.start_transient(
+            self.start_transient(
                 &declaration,
                 &binding,
                 &installed.root,
                 &bundle,
                 expected,
-                &credential_source,
+                &parent_only_file_descriptors,
                 &unit,
-            ) {
-                return Err(self.failed_start_error(
-                    error,
-                    &unit,
-                    &unit_description,
-                    &credential_source,
-                ));
-            }
+            )?;
         }
         let mut last_error = None;
         for _ in 0..100 {
@@ -2645,6 +2678,7 @@ impl WorkloadPort for SystemdTransientWorkloadDriver {
                 &activation.activation_signer_public_key,
                 &environment_names,
                 &service_credential_names,
+                &parent_only_file_descriptors,
             ) {
                 Ok(observation) => {
                     let validation = self.validate_launch_observation(
@@ -2663,48 +2697,7 @@ impl WorkloadPort for SystemdTransientWorkloadDriver {
                         );
                         Ok(())
                     }) {
-                        Ok(()) => {
-                            if let Err(error) =
-                                remove_activation_credential_source(&credential_source)
-                            {
-                                return Err(self.failed_start_error(
-                                    error.context(
-                                        "deleting observed one-shot activation credential source",
-                                    ),
-                                    &unit,
-                                    &unit_description,
-                                    &credential_source,
-                                ));
-                            }
-                            let after_unlink = self.observe_unit(
-                                &unit,
-                                &executable,
-                                &activation.runtime_instance_id,
-                                &activation.activation_signer_identity_id,
-                                &activation.activation_signer_public_key,
-                                &environment_names,
-                                &service_credential_names,
-                            );
-                            return match after_unlink {
-                                Ok(after_unlink) if after_unlink == observation => Ok(after_unlink),
-                                Ok(_) => Err(self.failed_start_error(
-                                    anyhow::anyhow!(
-                                        "workload identity changed after activation source deletion"
-                                    ),
-                                    &unit,
-                                    &unit_description,
-                                    &credential_source,
-                                )),
-                                Err(error) => Err(self.failed_start_error(
-                                    error.context(
-                                        "reobserving copied activation credential after source deletion",
-                                    ),
-                                    &unit,
-                                    &unit_description,
-                                    &credential_source,
-                                )),
-                            };
-                        }
+                        Ok(()) => return Ok(observation),
                         Err(error) => last_error = Some(error),
                     }
                 }
@@ -2712,12 +2705,40 @@ impl WorkloadPort for SystemdTransientWorkloadDriver {
             }
             thread::sleep(Duration::from_millis(50));
         }
-        Err(self.failed_start_error(
-            last_error.unwrap_or_else(|| anyhow::anyhow!("systemd did not expose the candidate")),
-            &unit,
-            &unit_description,
-            &credential_source,
-        ))
+        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("systemd did not expose the candidate")))
+    }
+
+    fn discard_prepared(
+        &self,
+        plan: &CompiledDeploymentPlan,
+        expected: &IdunnExpectedIncarnationRecord,
+        activation: &IdunnRuntimeActivationRecord,
+    ) -> Result<()> {
+        plan.validate()?;
+        expected.validate()?;
+        activation.validate()?;
+        ensure!(
+            expected.plan_id == plan.plan_id
+                && activation.expected_projection_sha256 == expected.canonical_sha256()?,
+            "discarded activation does not belong to the prepared deployment"
+        );
+        let (_, binding) = plan.parsed_inputs()?;
+        ensure!(
+            binding.target == expected.target,
+            "discarded activation target differs from its binding"
+        );
+        let unit = self.unit_name(
+            &binding.workload.unit_prefix,
+            &activation.runtime_instance_id,
+        )?;
+        let unit_description = format!(
+            "Idunn {} {}",
+            binding.target, activation.runtime_instance_id
+        );
+        self.stop_submitted_unit(&unit, &unit_description)
+            .context("stopping prepared candidate without a durable workload observation")?;
+        remove_activation_credential_source(&self.activation_credential_source(activation)?)
+            .context("deleting discarded activation credential source")
     }
 
     fn observe(
@@ -2745,6 +2766,7 @@ impl WorkloadPort for SystemdTransientWorkloadDriver {
                 .iter()
                 .map(|credential| credential.environment_name.clone())
                 .collect::<Vec<_>>(),
+            &prior.parent_only_file_descriptors,
         )?;
         ensure!(
             observed == *prior && observed.executable_sha256 == expected.artifact_sha256,
@@ -2765,6 +2787,7 @@ impl WorkloadPort for SystemdTransientWorkloadDriver {
                 .iter()
                 .map(|credential| credential.environment_name.clone())
                 .collect::<Vec<_>>(),
+            &prior.parent_only_file_descriptors,
         )?;
         ensure!(
             after_unlink == observed,
@@ -2774,9 +2797,10 @@ impl WorkloadPort for SystemdTransientWorkloadDriver {
     }
 
     fn stop(&self, observation: &WorkloadObservation) -> Result<()> {
-        let Some(values) = self.show_unit(&observation.unit)? else {
+        let Some(unit_observation) = self.show_unit(&observation.unit)? else {
             return Ok(());
         };
+        let values = &unit_observation.properties;
         let active = required_systemd_property(&values, "ActiveState")?;
         let sub = required_systemd_property(&values, "SubState")?;
         if active == "active" && sub == "running" {
@@ -2792,6 +2816,7 @@ impl WorkloadPort for SystemdTransientWorkloadDriver {
                     .iter()
                     .map(|credential| credential.environment_name.clone())
                     .collect::<Vec<_>>(),
+                &observation.parent_only_file_descriptors,
             )?;
             ensure!(
                 current == *observation,
@@ -2809,7 +2834,8 @@ impl WorkloadPort for SystemdTransientWorkloadDriver {
             &self.systemctl_program,
             [OsString::from("stop"), OsString::from(&observation.unit)],
         )?;
-        if let Some(values) = self.show_unit(&observation.unit)? {
+        if let Some(unit_observation) = self.show_unit(&observation.unit)? {
+            let values = &unit_observation.properties;
             ensure!(
                 values
                     .get("ActiveState")
@@ -3953,6 +3979,112 @@ fn harden_runtime_bundle(bundle: &Path) -> Result<()> {
 #[cfg(not(unix))]
 fn harden_runtime_bundle(_bundle: &Path) -> Result<()> {
     bail!("systemd runtime bundles require Unix permissions")
+}
+
+fn observe_parent_only_file_descriptor(
+    fd_number: u32,
+    fd_name: &str,
+    source_path: &Path,
+) -> Result<ParentOnlyFileDescriptorObservation> {
+    validate_open_file_component(fd_name, "parent-only descriptor name")?;
+    ensure!(
+        source_path.is_absolute(),
+        "parent-only descriptor source is not absolute"
+    );
+    validate_open_file_component(
+        &source_path.as_os_str().to_string_lossy(),
+        "parent-only descriptor source",
+    )?;
+    let mut file = open_native_read_only(source_path).with_context(|| {
+        format!(
+            "opening parent-only descriptor source {}",
+            source_path.display()
+        )
+    })?;
+    let metadata = file.metadata()?;
+    ensure!(
+        metadata.is_file() && metadata.len() > 0,
+        "parent-only descriptor source is not one nonempty native file"
+    );
+    #[cfg(unix)]
+    let (device, inode, uid, gid, mode, links) = {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        (
+            metadata.dev(),
+            metadata.ino(),
+            metadata.uid(),
+            metadata.gid(),
+            metadata.permissions().mode() & 0o777,
+            metadata.nlink(),
+        )
+    };
+    #[cfg(not(unix))]
+    let (device, inode, uid, gid, mode, links) = (0, 0, 0, 0, 0, 0);
+    ensure!(
+        uid == 0 && gid == 0 && mode == 0o400 && links == 1,
+        "parent-only descriptor source is not root-owned, 0400, and singly linked"
+    );
+    Ok(ParentOnlyFileDescriptorObservation {
+        fd_number,
+        fd_name: fd_name.to_owned(),
+        source_path: source_path.to_owned(),
+        access: "read-only".into(),
+        device,
+        inode,
+        uid,
+        gid,
+        mode,
+        links,
+        size: metadata.len(),
+        sha256: sha256_reader(&mut file)?,
+    })
+}
+
+fn parent_only_open_file_properties(
+    descriptors: &[ParentOnlyFileDescriptorObservation],
+) -> Result<Vec<String>> {
+    ensure!(
+        descriptors.len() == 2
+            && descriptors[0].fd_number == 3
+            && descriptors[0].fd_name == IDUNN_RUNTIME_ACTIVATION_CREDENTIAL_NAME
+            && descriptors[1].fd_number == 4
+            && descriptors[1].fd_name == RUNTIME_PRESENCE_IDENTITY_FD_NAME,
+        "parent-only descriptor set is not the exact ordered activation/presence pair"
+    );
+    descriptors
+        .iter()
+        .map(|descriptor| {
+            validate_open_file_component(&descriptor.fd_name, "parent-only descriptor name")?;
+            validate_open_file_component(
+                &descriptor.source_path.as_os_str().to_string_lossy(),
+                "parent-only descriptor source",
+            )?;
+            ensure!(
+                descriptor.source_path.is_absolute()
+                    && descriptor.access == "read-only"
+                    && descriptor.uid == 0
+                    && descriptor.gid == 0
+                    && descriptor.mode == 0o400
+                    && descriptor.links == 1
+                    && descriptor.size > 0,
+                "parent-only descriptor metadata is outside the Idunn contract"
+            );
+            Ok(format!(
+                "{}:{}:{}",
+                descriptor.source_path.display(),
+                descriptor.fd_name,
+                descriptor.access
+            ))
+        })
+        .collect()
+}
+
+fn validate_open_file_component(value: &str, label: &str) -> Result<()> {
+    ensure!(
+        !value.is_empty() && !value.contains(':') && !value.chars().any(char::is_control),
+        "{label} cannot be represented by systemd OpenFile"
+    );
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -5312,6 +5444,50 @@ mod tests {
 
     fn digest(byte: char) -> String {
         format!("sha256-{}", byte.to_string().repeat(64))
+    }
+
+    fn parent_only_descriptor(
+        fd_number: u32,
+        fd_name: &str,
+        source: &str,
+    ) -> ParentOnlyFileDescriptorObservation {
+        ParentOnlyFileDescriptorObservation {
+            fd_number,
+            fd_name: fd_name.into(),
+            source_path: PathBuf::from(source),
+            access: "read-only".into(),
+            device: 1,
+            inode: u64::from(fd_number),
+            uid: 0,
+            gid: 0,
+            mode: 0o400,
+            links: 1,
+            size: 32,
+            sha256: digest('a'),
+        }
+    }
+
+    #[test]
+    fn signer_sources_lower_to_exactly_two_ordered_parent_only_open_files() -> Result<()> {
+        let activation = parent_only_descriptor(
+            3,
+            IDUNN_RUNTIME_ACTIVATION_CREDENTIAL_NAME,
+            "/run/idunn/activation-credentials/activation.credential",
+        );
+        let presence = parent_only_descriptor(
+            4,
+            RUNTIME_PRESENCE_IDENTITY_FD_NAME,
+            "/etc/gamecult/service/runtime-presence-identity.cc",
+        );
+        assert_eq!(
+            parent_only_open_file_properties(&[activation.clone(), presence.clone()])?,
+            vec![
+                "/run/idunn/activation-credentials/activation.credential:gamecult-idunn-runtime-activation-key:read-only",
+                "/etc/gamecult/service/runtime-presence-identity.cc:gamecult-runtime-presence-identity:read-only",
+            ]
+        );
+        assert!(parent_only_open_file_properties(&[presence, activation]).is_err());
+        Ok(())
     }
 
     #[cfg(unix)]

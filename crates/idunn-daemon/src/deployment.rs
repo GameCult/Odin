@@ -9,6 +9,8 @@ pub const OPERATOR_BINDING_SCHEMA: &str = "gamecult.idunn.operator_binding.v2";
 pub const IDUNN_RUNTIME_BUNDLE_ENVIRONMENT: &str = "GAMECULT_IDUNN_RUNTIME_BUNDLE";
 pub const IDUNN_RUNTIME_CANDIDATE_BIND_ENVIRONMENT: &str = "GAMECULT_IDUNN_CANDIDATE_BIND";
 pub const IDUNN_PROCESS_WRITE_LEASE_ENVIRONMENT: &str = "GAMECULT_IDUNN_PROCESS_WRITE_LEASE";
+pub const RUNTIME_PRESENCE_IDENTITY_BINDING: &str = "GAMECULT_RUNTIME_PRESENCE_IDENTITY";
+pub const RUNTIME_PRESENCE_IDENTITY_FD_NAME: &str = "gamecult-runtime-presence-identity";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1000,6 +1002,27 @@ impl OperatorBinding {
         for path in self.workload.secret_files.values() {
             require_absolute_path(path, "secret file")?;
         }
+        ensure!(
+            !self
+                .workload
+                .environment
+                .contains_key(RUNTIME_PRESENCE_IDENTITY_BINDING),
+            "runtime presence identity must be a parent-only secret source, not environment"
+        );
+        let presence_identity = self
+            .workload
+            .secret_files
+            .get(RUNTIME_PRESENCE_IDENTITY_BINDING)
+            .context("workload has no parent-only runtime presence identity source")?;
+        ensure!(
+            self.workload
+                .secret_files
+                .iter()
+                .filter(|(_, path)| *path == presence_identity)
+                .count()
+                == 1,
+            "runtime presence identity source is duplicated under another secret binding"
+        );
         if let Some(route) = self.route.as_ref() {
             require_id(&route.route_id, "route id")?;
             require_value(&route.stable_endpoint, "stable endpoint")?;
@@ -1205,7 +1228,12 @@ impl OperatorBinding {
             .workload
             .environment
             .keys()
-            .chain(self.workload.secret_files.keys())
+            .chain(
+                self.workload
+                    .secret_files
+                    .keys()
+                    .filter(|name| name.as_str() != RUNTIME_PRESENCE_IDENTITY_BINDING),
+            )
             .cloned()
             .collect();
         available_environment.insert(IDUNN_RUNTIME_BUNDLE_ENVIRONMENT.into());
@@ -1228,6 +1256,10 @@ impl OperatorBinding {
             .union(&declaration.service.optional_environment)
             .cloned()
             .collect();
+        ensure!(
+            !declared_environment.contains(RUNTIME_PRESENCE_IDENTITY_BINDING),
+            "runtime presence identity is a named parent-only descriptor, not service environment"
+        );
         ensure!(
             available_environment.is_subset(&declared_environment),
             "operator service environment contains an undeclared launch input"
@@ -1640,6 +1672,9 @@ cpu_quota_percent = 200
 [workload.argument_bindings]
 state_root = "/var/lib/gamecult/test-service"
 
+[workload.secret_files]
+GAMECULT_RUNTIME_PRESENCE_IDENTITY = "/etc/gamecult/test-service/runtime-presence-identity.cc"
+
 [runtime_identity]
 runtime_id = "test-service-yggdrasil"
 expected_signer_identity_id = "test-service-runtime-signer"
@@ -1759,6 +1794,30 @@ nodes = ["yggdrasil"]
             "[workload.environment]\nUNDECLARED = \"no\"\n\n[workload.argument_bindings]",
         );
         let binding = OperatorBinding::parse(&input).unwrap();
+        assert!(binding.admit(&recipe).is_err());
+    }
+
+    #[test]
+    fn runtime_presence_identity_is_exactly_one_parent_only_secret_source() {
+        let secret = "[workload.secret_files]\nGAMECULT_RUNTIME_PRESENCE_IDENTITY = \"/etc/gamecult/test-service/runtime-presence-identity.cc\"\n\n";
+        assert!(OperatorBinding::parse(&BINDING.replace(secret, "")).is_err());
+        assert!(OperatorBinding::parse(&BINDING.replace(
+            secret,
+            "[workload.environment]\nGAMECULT_RUNTIME_PRESENCE_IDENTITY = \"/etc/gamecult/test-service/runtime-presence-identity.cc\"\n\n",
+        ))
+        .is_err());
+        assert!(OperatorBinding::parse(&BINDING.replace(
+            secret,
+            "[workload.secret_files]\nGAMECULT_RUNTIME_PRESENCE_IDENTITY = \"/etc/gamecult/test-service/runtime-presence-identity.cc\"\nDUPLICATE_IDENTITY = \"/etc/gamecult/test-service/runtime-presence-identity.cc\"\n\n",
+        ))
+        .is_err());
+
+        let recipe = TargetDeclaration::parse(&RECIPE.replace(
+            "required_environment = [",
+            "required_environment = [\"GAMECULT_RUNTIME_PRESENCE_IDENTITY\", ",
+        ))
+        .unwrap();
+        let binding = OperatorBinding::parse(BINDING).unwrap();
         assert!(binding.admit(&recipe).is_err());
     }
 

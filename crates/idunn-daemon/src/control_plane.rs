@@ -400,14 +400,14 @@ impl CleanupEvidence {
 #[serde(deny_unknown_fields)]
 struct PreFencingAbort {
     error: String,
-    candidate_stop: CleanupEvidence,
+    candidate_cleanup: CleanupEvidence,
     topology_reconciliation: CleanupEvidence,
     source_cleanup: CleanupEvidence,
 }
 
 impl PreFencingAbort {
     fn is_complete(&self) -> bool {
-        self.candidate_stop.is_complete()
+        self.candidate_cleanup.is_complete()
             && self.topology_reconciliation.is_complete()
             && self.source_cleanup.is_complete()
     }
@@ -609,7 +609,7 @@ impl DeploymentTransaction {
         transaction.last_error = Some(detail.clone());
         transaction.pre_fencing_abort = Some(PreFencingAbort {
             error: detail.clone(),
-            candidate_stop: CleanupEvidence::Skipped,
+            candidate_cleanup: CleanupEvidence::Skipped,
             topology_reconciliation: CleanupEvidence::Skipped,
             source_cleanup: CleanupEvidence::Skipped,
         });
@@ -708,6 +708,10 @@ impl DeploymentTransaction {
                 );
             }
         }
+        ensure!(
+            self.workload.is_none() || self.activation.is_some(),
+            "workload observation exists without its prepared activation"
+        );
         for evidence in [&self.latest_odin_observation, &self.warming, &self.ready]
             .into_iter()
             .flatten()
@@ -778,11 +782,14 @@ impl DeploymentTransaction {
             );
             ensure!(
                 matches!(
-                    (self.workload.is_some(), abort.candidate_stop),
+                    (
+                        self.workload.is_some() || self.activation.is_some(),
+                        abort.candidate_cleanup
+                    ),
                     (true, CleanupEvidence::Pending | CleanupEvidence::Complete)
                         | (false, CleanupEvidence::Skipped)
                 ),
-                "abort candidate-stop evidence differs from its candidate observation"
+                "abort candidate cleanup differs from its prepared activation"
             );
             let topology_cleanup_required = self.command_kind == CommandKind::Deploy
                 && self.expected_publication_sha256.is_some();
@@ -2860,38 +2867,6 @@ impl Engine {
         let expected = required(&current.value.expected, "Expected projection")?;
         let activation = required(&current.value.activation, "activation")?;
         if current.value.routing.is_none() {
-            let current_lease = current
-                .value
-                .leasing
-                .as_ref()
-                .and_then(LeasingEvidence::lease_sha256);
-            if let Some((admitted, authenticated)) =
-                self.admit_latest_topology(current, current_lease)?
-            {
-                if admitted.envelope != current.envelope {
-                    return Ok(());
-                }
-                let latest = required(
-                    &admitted.value.latest_odin_observation,
-                    "latest sequence-admitted topology",
-                )?;
-                if current.value.ready.as_ref() != Some(latest) {
-                    if is_semantic_ready(&authenticated) {
-                        let evidence = latest.clone();
-                        let _token = SequenceAdmittedReady {
-                            transaction_id: admitted.value.transaction_id.clone(),
-                            evidence: evidence.clone(),
-                            expected: expected.clone(),
-                            authenticated,
-                        };
-                        return self.persist_same_phase(&admitted, |next| {
-                            next.ready = Some(evidence);
-                            Ok(())
-                        });
-                    }
-                    return Ok(());
-                }
-            }
             let ready = self.rehydrate_ready_token(&current.value, now, false)?;
             ensure!(
                 ready.transaction_id() == current.value.transaction_id,
@@ -3503,11 +3478,10 @@ impl Engine {
         );
         let abort = PreFencingAbort {
             error: truncate(&format!("{error:#}"), 2048),
-            candidate_stop: if current.value.workload.is_some() {
-                CleanupEvidence::Pending
-            } else {
-                CleanupEvidence::Skipped
-            },
+            candidate_cleanup: candidate_cleanup_requirement(
+                current.value.activation.is_some(),
+                current.value.workload.is_some(),
+            ),
             topology_reconciliation: if current.value.command_kind == CommandKind::Deploy
                 && current.value.expected_publication_sha256.is_some()
             {
@@ -3533,15 +3507,22 @@ impl Engine {
             "pre-fencing abort crossed the fencing boundary"
         );
         let abort = required(&current.value.pre_fencing_abort, "pre-fencing abort intent")?;
-        if abort.candidate_stop == CleanupEvidence::Pending {
+        if abort.candidate_cleanup == CleanupEvidence::Pending {
+            if let Some(workload) = &current.value.workload {
+                self.workload
+                    .stop(workload)
+                    .context("stopping exact pre-fence candidate")?;
+            }
             self.workload
-                .stop(required(
-                    &current.value.workload,
-                    "pre-fencing candidate observation",
-                )?)
-                .context("stopping exact pre-fence candidate")?;
+                .discard_prepared(
+                    required(&current.value.plan, "pre-fencing candidate plan")?,
+                    required(&current.value.expected, "pre-fencing Expected projection")?,
+                    required(&current.value.activation, "pre-fencing activation")?,
+                )
+                .context("discarding exact pre-fence activation material")?;
             return self.persist_same_phase(current, |next| {
-                next.pre_fencing_abort.as_mut().unwrap().candidate_stop = CleanupEvidence::Complete;
+                next.pre_fencing_abort.as_mut().unwrap().candidate_cleanup =
+                    CleanupEvidence::Complete;
                 Ok(())
             });
         }
@@ -3643,6 +3624,17 @@ impl Engine {
         }
         ensure!(cleanup.is_complete(), "post-commit cleanup is incomplete");
         Ok(())
+    }
+}
+
+fn candidate_cleanup_requirement(
+    has_prepared_activation: bool,
+    has_workload_observation: bool,
+) -> CleanupEvidence {
+    if has_prepared_activation || has_workload_observation {
+        CleanupEvidence::Pending
+    } else {
+        CleanupEvidence::Skipped
     }
 }
 
@@ -4009,13 +4001,8 @@ mod tests {
             environment_names: Vec::new(),
             environment_contract_sha256: sha256_id(&[3]),
             control_group: format!("/system.slice/idunn-{uid}.service"),
-            credentials_directory: PathBuf::from("/run/credentials/test"),
-            activation_credential_device: 1,
-            activation_credential_inode: 2,
-            activation_credential_uid: uid,
-            activation_credential_gid: uid,
-            activation_credential_mode: 0o400,
-            activation_credential_size: 32,
+            credentials_directory: None,
+            parent_only_file_descriptors: Vec::new(),
             activation_signer_identity_id: "activation".into(),
             activation_signer_public_key: vec![1; 32],
             service_credentials: Vec::new(),
@@ -4163,7 +4150,7 @@ mod tests {
             DeploymentTransaction::new(&command, "ghostlight".into(), 0, None, 100)?;
         transaction.pre_fencing_abort = Some(PreFencingAbort {
             error: "sealed source was rejected".into(),
-            candidate_stop: CleanupEvidence::Skipped,
+            candidate_cleanup: CleanupEvidence::Skipped,
             topology_reconciliation: CleanupEvidence::Skipped,
             source_cleanup: CleanupEvidence::Pending,
         });
@@ -4183,6 +4170,22 @@ mod tests {
         transaction.validate()?;
         assert!(transaction.is_terminal());
         Ok(())
+    }
+
+    #[test]
+    fn activation_without_workload_still_requires_durable_candidate_cleanup() {
+        assert_eq!(
+            candidate_cleanup_requirement(true, false),
+            CleanupEvidence::Pending
+        );
+        assert_eq!(
+            candidate_cleanup_requirement(true, true),
+            CleanupEvidence::Pending
+        );
+        assert_eq!(
+            candidate_cleanup_requirement(false, false),
+            CleanupEvidence::Skipped
+        );
     }
 
     #[test]
