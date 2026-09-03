@@ -1,7 +1,9 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$bifrostRoot = "E:\Projects\Bifrost"
+$repoRoot = Split-Path -Parent $PSScriptRoot
+$projectsRoot = Split-Path -Parent $repoRoot
+$bifrostRoot = Join-Path $projectsRoot "Bifrost"
 $publisherScript = Join-Path $bifrostRoot "tools\operator-notification.mjs"
 
 if (-not (Test-Path -LiteralPath $publisherScript)) {

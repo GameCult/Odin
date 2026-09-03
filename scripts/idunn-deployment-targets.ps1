@@ -1,4 +1,5 @@
 $repoRoot = Split-Path -Parent $PSScriptRoot
+$projectsRoot = Split-Path -Parent $repoRoot
 
 $IdunnDeploymentSharedActuators = @(
   "$repoRoot\scripts\deploy-yggdrasil-source-app.ps1"
@@ -8,7 +9,7 @@ $IdunnDeploymentTargets = @(
   [pscustomobject]@{
     Id = "odin"
     Repo = "Odin"
-    LocalPath = "E:\Projects\Odin"
+    LocalPath = "$projectsRoot\Odin"
     Host = "starfire"
     Service = "odin-coordinator"
     Status = "runtime-enforced"
@@ -21,7 +22,7 @@ $IdunnDeploymentTargets = @(
   [pscustomobject]@{
     Id = "idunn"
     Repo = "Odin"
-    LocalPath = "E:\Projects\Odin"
+    LocalPath = "$projectsRoot\Odin"
     Host = "starfire"
     Service = "idunn swarm supervisor"
     Status = "runtime-enforced"
@@ -34,7 +35,7 @@ $IdunnDeploymentTargets = @(
   [pscustomobject]@{
     Id = "hermodr"
     Repo = "Odin"
-    LocalPath = "E:\Projects\Odin"
+    LocalPath = "$projectsRoot\Odin"
     Host = "starfire"
     Service = "Hermodr browser lowering"
     Status = "runtime-enforced"
@@ -47,7 +48,7 @@ $IdunnDeploymentTargets = @(
   [pscustomobject]@{
     Id = "stonks"
     Repo = "Stonks"
-    LocalPath = "E:\Projects\Stonks"
+    LocalPath = "$projectsRoot\Stonks"
     Host = "starfire"
     Service = "stonks daemon"
     Status = "runtime-enforced"
@@ -60,7 +61,7 @@ $IdunnDeploymentTargets = @(
   [pscustomobject]@{
     Id = "weksa"
     Repo = "weksa"
-    LocalPath = "E:\Projects\weksa"
+    LocalPath = "$projectsRoot\weksa"
     Host = "starfire"
     Service = "weksa daemon"
     Status = "runtime-enforced"
@@ -73,7 +74,7 @@ $IdunnDeploymentTargets = @(
   [pscustomobject]@{
     Id = "starfire-muninn"
     Repo = "Odin"
-    LocalPath = "E:\Projects\Odin"
+    LocalPath = "$projectsRoot\Odin"
     Host = "starfire"
     Service = "muninn serve --host starfire"
     Status = "runtime-enforced"
@@ -86,7 +87,7 @@ $IdunnDeploymentTargets = @(
   [pscustomobject]@{
     Id = "raven-muninn"
     Repo = "Odin"
-    LocalPath = "E:\Projects\Odin"
+    LocalPath = "$projectsRoot\Odin"
     Host = "raven"
     Service = "muninn serve --host raven"
     Status = "runtime-enforced"
@@ -99,7 +100,7 @@ $IdunnDeploymentTargets = @(
   [pscustomobject]@{
     Id = "nightwing-muninn"
     Repo = "Odin"
-    LocalPath = "E:\Projects\Odin"
+    LocalPath = "$projectsRoot\Odin"
     Host = "nightwing"
     Service = "muninn serve --host nightwing"
     Status = "runtime-enforced"
@@ -112,7 +113,7 @@ $IdunnDeploymentTargets = @(
   [pscustomobject]@{
     Id = "vili"
     Repo = "Vili"
-    LocalPath = "E:\Projects\Vili"
+    LocalPath = "$projectsRoot\Vili"
     Host = "raven"
     Service = "GameCult\\Vili"
     Status = "runtime-enforced"
@@ -125,7 +126,7 @@ $IdunnDeploymentTargets = @(
   [pscustomobject]@{
     Id = "raven-sleipnir"
     Repo = "Odin"
-    LocalPath = "E:\Projects\Odin"
+    LocalPath = "$projectsRoot\Odin"
     Host = "raven"
     Service = "sleipnir --host raven"
     Status = "runtime-enforced"
@@ -156,7 +157,7 @@ $IdunnDeploymentTargets = @(
   [pscustomobject]@{
     Id = "yggdrasil-bifrost"
     Repo = "Bifrost"
-    LocalPath = "E:\Projects\Bifrost"
+    LocalPath = "$projectsRoot\Bifrost"
     Host = "yggdrasil"
     Service = "bifrost.service"
     Status = "blocked"
@@ -169,7 +170,7 @@ $IdunnDeploymentTargets = @(
   [pscustomobject]@{
     Id = "yggdrasil-streampixels"
     Repo = "StreamPixels"
-    LocalPath = "E:\Projects\StreamPixels"
+    LocalPath = "$projectsRoot\StreamPixels"
     Host = "yggdrasil"
     Service = "streampixels-service/streampixels-web"
     Status = "enforced"
@@ -187,7 +188,7 @@ $IdunnDeploymentTargets = @(
   [pscustomobject]@{
     Id = "yggdrasil-heimdall"
     Repo = "Heimdall"
-    LocalPath = "E:\Projects\Heimdall"
+    LocalPath = "$projectsRoot\Heimdall"
     Host = "yggdrasil"
     Service = "heimdall.service"
     Status = "enforced"
@@ -205,7 +206,7 @@ $IdunnDeploymentTargets = @(
   [pscustomobject]@{
     Id = "yggdrasil-repixelizer"
     Repo = "repixelizer"
-    LocalPath = "E:\Projects\repixelizer"
+    LocalPath = "$projectsRoot\repixelizer"
     Host = "yggdrasil"
     Service = "repixelizer-gui.service"
     Status = "enforced"
@@ -223,7 +224,7 @@ $IdunnDeploymentTargets = @(
   [pscustomobject]@{
     Id = "github-pages-gamecult-site"
     Repo = "gamecult-site"
-    LocalPath = "E:\Projects\gamecult-site"
+    LocalPath = "$projectsRoot\gamecult-site"
     Host = "github-pages"
     Service = "gamecult.org/www"
     Status = "external-owned"
@@ -236,7 +237,7 @@ $IdunnDeploymentTargets = @(
   [pscustomobject]@{
     Id = "eve-ipad-evecanvas"
     Repo = "Eve"
-    LocalPath = "E:\Projects\Eve"
+    LocalPath = "$projectsRoot\Eve"
     Host = "eve-ipad"
     Service = "org.gamecult.evecanvas"
     Status = "blocked"
@@ -249,7 +250,7 @@ $IdunnDeploymentTargets = @(
   [pscustomobject]@{
     Id = "periwinkle-eve-android"
     Repo = "Eve"
-    LocalPath = "E:\Projects\Eve"
+    LocalPath = "$projectsRoot\Eve"
     Host = "periwinkle"
     Service = "Eve Android proof APK"
     Status = "blocked"
@@ -262,7 +263,7 @@ $IdunnDeploymentTargets = @(
   [pscustomobject]@{
     Id = "nightwing-eve-dashboard"
     Repo = "Mimir"
-    LocalPath = "E:\Projects\Mimir"
+    LocalPath = "$projectsRoot\Mimir"
     Host = "nightwing"
     Service = "nightwing-eve-dashboard.service"
     Status = "archived"
@@ -275,7 +276,7 @@ $IdunnDeploymentTargets = @(
   [pscustomobject]@{
     Id = "nightwing-eve-browser-reference"
     Repo = "Eve"
-    LocalPath = "E:\Projects\Eve"
+    LocalPath = "$projectsRoot\Eve"
     Host = "nightwing"
     Service = "nightwing-eve-browser-reference.service"
     Status = "runtime-enforced"

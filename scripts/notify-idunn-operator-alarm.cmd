@@ -1,2 +1,2 @@
 @echo off
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File E:\Projects\Odin\scripts\notify-idunn-operator-alarm.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0notify-idunn-operator-alarm.ps1"
