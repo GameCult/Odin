@@ -166,19 +166,29 @@ mod linux {
                 }
                 let serial = unsafe { text(psmove_get_serial(handle)) };
                 let move_id = format!("move-{}", serial.replace(':', "").to_ascii_lowercase());
-                if self.controllers.iter().any(|controller| controller.move_id == move_id) {
+                if self
+                    .controllers
+                    .iter()
+                    .any(|controller| controller.move_id == move_id)
+                {
                     unsafe { psmove_disconnect(handle) };
                     continue;
                 }
-                let Some((_, color)) = self.colors.iter().find(|(identity, _)| {
-                    identity.eq_ignore_ascii_case(&move_id)
-                }) else {
+                let Some((_, color)) = self
+                    .colors
+                    .iter()
+                    .find(|(identity, _)| identity.eq_ignore_ascii_case(&move_id))
+                else {
                     unsafe { psmove_disconnect(handle) };
                     continue;
                 };
                 let status = unsafe {
                     psmove_tracker_enable_color_observer(
-                        self.tracker, handle, color[0], color[1], color[2]
+                        self.tracker,
+                        handle,
+                        color[0],
+                        color[1],
+                        color[2],
                     )
                 };
                 if status == TRACKER_CALIBRATED {
@@ -192,9 +202,11 @@ mod linux {
         }
 
         pub fn set_expected_color(&mut self, move_id: &str, color: [u8; 3]) -> bool {
-            let Some(controller) = self.controllers.iter().find(|controller| {
-                controller.move_id.eq_ignore_ascii_case(move_id)
-            }) else {
+            let Some(controller) = self
+                .controllers
+                .iter()
+                .find(|controller| controller.move_id.eq_ignore_ascii_case(move_id))
+            else {
                 return false;
             };
             unsafe {
@@ -275,7 +287,9 @@ mod linux {
         if value.is_null() {
             return String::new();
         }
-        unsafe { CStr::from_ptr(value) }.to_string_lossy().into_owned()
+        unsafe { CStr::from_ptr(value) }
+            .to_string_lossy()
+            .into_owned()
     }
 }
 
@@ -301,20 +315,29 @@ impl PsmoveApiTracker {
         unreachable!()
     }
 
-    pub fn calibrate_connected(&mut self) -> usize { 0 }
+    pub fn calibrate_connected(&mut self) -> usize {
+        0
+    }
 
-    pub fn observe_connected(&mut self) -> usize { 0 }
+    pub fn observe_connected(&mut self) -> usize {
+        0
+    }
 
-    pub fn set_expected_color(&mut self, _move_id: &str, _color: [u8; 3]) -> bool { false }
+    pub fn set_expected_color(&mut self, _move_id: &str, _color: [u8; 3]) -> bool {
+        false
+    }
 
-    pub fn tracked_controller_count(&self) -> usize { 0 }
+    pub fn tracked_controller_count(&self) -> usize {
+        0
+    }
 
     pub fn update(&mut self) -> Vec<PsmoveApiObservation> {
         Vec::new()
     }
 
-
-    pub fn rgb_image(&self) -> Option<(u32, u32, Vec<u8>)> { None }
+    pub fn rgb_image(&self) -> Option<(u32, u32, Vec<u8>)> {
+        None
+    }
 }
 
 #[cfg(test)]

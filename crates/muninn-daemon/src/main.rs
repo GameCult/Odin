@@ -7,31 +7,28 @@ use crate::media_packetizer::{
 };
 use anyhow::{Context, Result, anyhow};
 use cultmesh_rs::{
-    CultMesh, CultMeshNodeOptions,
-    CultMeshRudpDocumentPublishOptions, CultMeshRudpSnapshotOptions, CultMeshSharedMemoryFrameRing,
-    CultMeshStreamBodyTransport, CultMeshStreamCatalog, CultMeshStreamClock,
-    CultMeshStreamDescriptor, CultMeshStreamKind,
+    CultMesh, CultMeshNodeOptions, CultMeshRudpDocumentPublishOptions, CultMeshRudpSnapshotOptions,
+    CultMeshSharedMemoryFrameRing, CultMeshStreamBodyTransport, CultMeshStreamCatalog,
+    CultMeshStreamClock, CultMeshStreamDescriptor, CultMeshStreamKind,
 };
 use cultnet_rs::{
     CultNetMessage, CultNetRawDocumentRecord, CultNetRawPayloadEncoding,
     CultNetRudpSocketTransportConnection, CultNetRudpSocketTransportOptions, CultNetTransportFrame,
     CultNetWireContract, decode_cultnet_message_from_slice, encode_cultnet_message_to_vec,
 };
+#[cfg(feature = "psmoveapi-tracker")]
+use odin_core::MuninnMoveTrackerHealthRecord;
 use odin_core::{
     EVE_PROVIDER_ADVERTISEMENT_SCHEMA, EveProviderAdvertisementRecord, EveSurfaceStateRecord,
-    IdunnDaemonHealthRecord,
-    MUNINN_MOVE_HUE_PROGRAM_SCHEMA,
-    MUNINN_OBS_STREAM_CATALOG_SCHEMA,
+    IdunnDaemonHealthRecord, MUNINN_MOVE_HUE_PROGRAM_SCHEMA, MUNINN_OBS_STREAM_CATALOG_SCHEMA,
     MuninnCaptureStreamCommandRecord, MuninnCaptureStreamRecord, MuninnCommandBoundaryCompatRecord,
     MuninnHidControllerStateRecord, MuninnMediaReceiverFeedbackRecord,
-    MuninnMoveControllerStateRecord, MuninnMoveEvidenceTransportHealthRecord, MuninnMoveHueProgramRecord, MuninnMoveIdentityRecord,
-    MuninnMoveLightCommandRecord,
+    MuninnMoveControllerStateRecord, MuninnMoveEvidenceTransportHealthRecord,
+    MuninnMoveHueProgramRecord, MuninnMoveIdentityRecord, MuninnMoveLightCommandRecord,
     MuninnMoveMarkerCandidateRecord, MuninnObsStreamCatalogRecord, MuninnQuestAccessRecord,
     MuninnTelemetrySurfaceRecord, MuninnTransportProfileCompatRecord, OdinDocuments,
     OdinEndpointQuery, discover_provider_endpoints,
 };
-#[cfg(feature = "psmoveapi-tracker")]
-use odin_core::MuninnMoveTrackerHealthRecord;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -46,7 +43,11 @@ use std::net::{SocketAddr, UdpSocket};
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex, atomic::{AtomicU64, Ordering}, mpsc};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicU64, Ordering},
+    mpsc,
+};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -316,7 +317,8 @@ struct ActiveMoveMarkerCameraSource {
     frame_source: MoveMarkerFrameSource,
     sequence: u64,
     #[cfg(feature = "psmoveapi-tracker")]
-    psmoveapi_observations: Option<Arc<Mutex<Option<Vec<muninn_psmoveapi_tracker::PsmoveApiObservation>>>>>,
+    psmoveapi_observations:
+        Option<Arc<Mutex<Option<Vec<muninn_psmoveapi_tracker::PsmoveApiObservation>>>>>,
     #[cfg(feature = "psmoveapi-tracker")]
     psmoveapi_health: Option<Arc<Mutex<Option<MuninnMoveTrackerHealthRecord>>>>,
 }
@@ -409,17 +411,20 @@ fn serve(options: Options) -> Result<()> {
     let mut active_capture_streams = Vec::new();
     let move_evidence_rudp_sender = start_hid_controller_rudp_ingress(
         &options,
-        move_evidence_stream.as_ref().map(|stream| Arc::clone(&stream.counters)),
+        move_evidence_stream
+            .as_ref()
+            .map(|stream| Arc::clone(&stream.counters)),
     )?;
     if let Some(stream) = move_evidence_stream.as_mut() {
         stream.rudp_sender = move_evidence_rudp_sender;
     }
-    let move_evidence_transport_health = move_evidence_stream.as_ref().map(|stream| {
-        MoveEvidenceTransportHealth {
-            stream_id: stream.stream_id.clone(),
-            counters: Arc::clone(&stream.counters),
-        }
-    });
+    let move_evidence_transport_health =
+        move_evidence_stream
+            .as_ref()
+            .map(|stream| MoveEvidenceTransportHealth {
+                stream_id: stream.stream_id.clone(),
+                counters: Arc::clone(&stream.counters),
+            });
     let latest_move_controller_states = Arc::new(Mutex::new(Vec::new()));
     if let Some(stream) = move_evidence_stream.take() {
         start_move_evidence_aggregator(
@@ -470,11 +475,10 @@ fn serve(options: Options) -> Result<()> {
                 None,
                 hid_controller_stream.as_mut(),
             )?;
-            let controller_states: Vec<MuninnMoveControllerStateRecord> =
-                active_move_states
-                    .iter()
-                    .filter_map(|state| state.latest_move_record.clone())
-                    .collect();
+            let controller_states: Vec<MuninnMoveControllerStateRecord> = active_move_states
+                .iter()
+                .filter_map(|state| state.latest_move_record.clone())
+                .collect();
             if let Ok(mut latest) = latest_move_controller_states.lock() {
                 *latest = controller_states;
             }
@@ -557,9 +561,9 @@ fn load_or_initialize_move_hue_program(
 ) -> Result<Arc<Mutex<MuninnMoveHueProgramRecord>>> {
     let key = move_hue_program_key(&options.host_id);
     let mut node = open_node(options, "muninn-move-hue-program-bootstrap")?;
-    let program = node.get::<MuninnMoveHueProgramRecord>(&key)?.unwrap_or_else(|| {
-        bootstrap_move_hue_program(options)
-    });
+    let program = node
+        .get::<MuninnMoveHueProgramRecord>(&key)?
+        .unwrap_or_else(|| bootstrap_move_hue_program(options));
     validate_move_hue_program(&program)?;
     node.put(&key, &program)?;
     Ok(Arc::new(Mutex::new(program)))
@@ -592,9 +596,14 @@ fn validate_move_hue_program(program: &MuninnMoveHueProgramRecord) -> Result<()>
         program.order_mode.as_str(),
         "descending" | "ascending" | "bounce" | "rotating-lead" | "golden-permutation"
     ) {
-        return Err(anyhow!("unsupported Move hue order mode {}", program.order_mode));
+        return Err(anyhow!(
+            "unsupported Move hue order mode {}",
+            program.order_mode
+        ));
     }
-    if program.transition_percent > 100 { return Err(anyhow!("Move hue transition_percent must be at most 100")); }
+    if program.transition_percent > 100 {
+        return Err(anyhow!("Move hue transition_percent must be at most 100"));
+    }
     Ok(())
 }
 
@@ -607,7 +616,11 @@ fn move_hue_program_timestamp_ns(program: &MuninnMoveHueProgramRecord, now_ns: i
 }
 
 fn effective_transition_percent(program: &MuninnMoveHueProgramRecord) -> u8 {
-    if program.transition_percent_explicit { program.transition_percent } else { 100 }
+    if program.transition_percent_explicit {
+        program.transition_percent
+    } else {
+        100
+    }
 }
 
 fn start_move_hue_program_sync_worker(
@@ -621,32 +634,34 @@ fn start_move_hue_program_sync_worker(
         .as_ref()
         .cloned()
         .unwrap_or_else(|| options.store_path.clone());
-    thread::spawn(move || loop {
-        let key = move_hue_program_key(&options.host_id);
-        let main_program = open_node(&options, "muninn-move-hue-program-sync")
+    thread::spawn(move || {
+        loop {
+            let key = move_hue_program_key(&options.host_id);
+            let main_program = open_node(&options, "muninn-move-hue-program-sync")
+                .ok()
+                .and_then(|node| node.get::<MuninnMoveHueProgramRecord>(&key).ok().flatten());
+            let activation_program = open_node(
+                &activation_options,
+                "muninn-move-hue-program-activation-sync",
+            )
             .ok()
             .and_then(|node| node.get::<MuninnMoveHueProgramRecord>(&key).ok().flatten());
-        let activation_program = open_node(
-            &activation_options,
-            "muninn-move-hue-program-activation-sync",
-        )
-        .ok()
-        .and_then(|node| node.get::<MuninnMoveHueProgramRecord>(&key).ok().flatten());
-        let program = [main_program, activation_program]
-            .into_iter()
-            .flatten()
-            .filter(|program| validate_move_hue_program(program).is_ok())
-            .max_by_key(|program| unix_timestamp_sort_key(&program.updated_at));
-        if let Some(program) = program
-            && let Ok(mut current) = runtime_program.lock()
-            && *current != program
-        {
-            *current = program.clone();
-            if let Ok(mut node) = open_node(&options, "muninn-move-hue-program-projection") {
-                let _ = node.put(&key, &program);
+            let program = [main_program, activation_program]
+                .into_iter()
+                .flatten()
+                .filter(|program| validate_move_hue_program(program).is_ok())
+                .max_by_key(|program| unix_timestamp_sort_key(&program.updated_at));
+            if let Some(program) = program
+                && let Ok(mut current) = runtime_program.lock()
+                && *current != program
+            {
+                *current = program.clone();
+                if let Ok(mut node) = open_node(&options, "muninn-move-hue-program-projection") {
+                    let _ = node.put(&key, &program);
+                }
             }
+            thread::sleep(Duration::from_millis(250));
         }
-        thread::sleep(Duration::from_millis(250));
     });
 }
 
@@ -674,8 +689,8 @@ fn run_provider_command_ingress(
     options: Options,
     runtime_program: Arc<Mutex<MuninnMoveHueProgramRecord>>,
 ) -> Result<()> {
-    let mut transport = CultNetRudpSocketTransportConnection::new(
-        CultNetRudpSocketTransportOptions {
+    let mut transport =
+        CultNetRudpSocketTransportConnection::new(CultNetRudpSocketTransportOptions {
             runtime_id: format!("muninn-{}-command-ingress", options.host_id),
             socket,
             mode: cultnet_rs::CultNetRudpSocketMode::Server,
@@ -688,9 +703,8 @@ fn run_provider_command_ingress(
             max_fragment_bytes: Some(1200),
             max_pending_reliable_packets: Some(64),
             media_reliable_expire_after_ms: None,
-                    reconnect_policy: None,
-        },
-    )?;
+            reconnect_policy: None,
+        })?;
     loop {
         if let Some(frame) = transport.receive_once()?
             && frame.channel_id == "schema"
@@ -735,7 +749,10 @@ fn apply_provider_command_document(
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default();
     if provider_id != muninn_provider_id(options) {
-        return Err(anyhow!("Move hue command targets provider {provider_id}, not {}", muninn_provider_id(options)));
+        return Err(anyhow!(
+            "Move hue command targets provider {provider_id}, not {}",
+            muninn_provider_id(options)
+        ));
     }
     let mut program = runtime_program
         .lock()
@@ -753,8 +770,12 @@ fn apply_provider_command_document(
     if let Some(cycle_ms) = payload.get("cycleMs").and_then(serde_json::Value::as_u64) {
         program.cycle_ms = cycle_ms;
     }
-    if let Some(value) = payload.get("transitionPercent").and_then(serde_json::Value::as_u64) {
-        program.transition_percent = u8::try_from(value).map_err(|_| anyhow!("Move hue transitionPercent must be at most 100"))?;
+    if let Some(value) = payload
+        .get("transitionPercent")
+        .and_then(serde_json::Value::as_u64)
+    {
+        program.transition_percent = u8::try_from(value)
+            .map_err(|_| anyhow!("Move hue transitionPercent must be at most 100"))?;
         program.transition_percent_explicit = true;
     }
     program.requested_by = value
@@ -1519,9 +1540,10 @@ fn merge_move_state_sources(
                 continue;
             }
         }
-        if !sources.iter().any(|discovered| {
-            discovered == source || discovered.move_id == source.move_id
-        }) {
+        if !sources
+            .iter()
+            .any(|discovered| discovered == source || discovered.move_id == source.move_id)
+        {
             sources.push(source.clone());
         }
     }
@@ -3032,7 +3054,12 @@ fn publish_move_hue_eve_surface(
         .unwrap_or_else(|| bootstrap_move_hue_program(options));
     let provider_id = muninn_provider_id(options);
     let surface_key = move_hue_surface_key(&options.host_id);
-    let action = |id: &str, label: &str, mode: Option<&str>, order_mode: Option<&str>, cycle_ms: Option<u64>, transition_percent: Option<u8>| {
+    let action = |id: &str,
+                  label: &str,
+                  mode: Option<&str>,
+                  order_mode: Option<&str>,
+                  cycle_ms: Option<u64>,
+                  transition_percent: Option<u8>| {
         json!({
             "id": format!("{provider_id}.move-hue.{id}"),
             "kind": "card",
@@ -3816,7 +3843,10 @@ fn publish_move_evidence_stream_frame(
     let published_at_ns = timestamp_ns()?;
     let frame_id = format!("{}:{}", stream.stream_id, stream.frame_counter);
     stream.frame_counter = stream.frame_counter.saturating_add(1);
-    stream.counters.produced_frames.fetch_add(1, Ordering::Relaxed);
+    stream
+        .counters
+        .produced_frames
+        .fetch_add(1, Ordering::Relaxed);
     let frame = MuninnMoveEvidenceStreamFrame(
         &frame_id,
         &stream.producer_peer_id,
@@ -3827,8 +3857,13 @@ fn publish_move_evidence_stream_frame(
     let payload =
         rmp_serde::to_vec(&frame).context("encoding Muninn Move evidence stream frame")?;
     if let Some(sender) = stream.rudp_sender.as_ref() {
-        if let Ok(mut latest) = sender.lock() { *latest = Some(payload.clone()); }
-        stream.counters.remote_handoffs.fetch_add(1, Ordering::Relaxed);
+        if let Ok(mut latest) = sender.lock() {
+            *latest = Some(payload.clone());
+        }
+        stream
+            .counters
+            .remote_handoffs
+            .fetch_add(1, Ordering::Relaxed);
     }
     if let Some(path) = stream.snapshot_path.as_deref() {
         write_move_evidence_snapshot(
@@ -3841,15 +3876,20 @@ fn publish_move_evidence_stream_frame(
         )?;
     }
     let handle = if stream.local_ring_enabled {
-        let ring: &mut CultMeshSharedMemoryFrameRing = stream.catalog
-            .ring_mut(&stream.stream_id)
-            .ok_or_else(|| anyhow!("missing Muninn Move evidence ring"))?;
+        let ring: &mut CultMeshSharedMemoryFrameRing =
+            stream
+                .catalog
+                .ring_mut(&stream.stream_id)
+                .ok_or_else(|| anyhow!("missing Muninn Move evidence ring"))?;
         ring.try_publish_copy(&payload, published_at_ns, 0)?
     } else {
         None
     };
     if let Some(handle) = handle {
-        stream.counters.local_ring_admissions.fetch_add(1, Ordering::Relaxed);
+        stream
+            .counters
+            .local_ring_admissions
+            .fetch_add(1, Ordering::Relaxed);
         stream.catalog.publish_frame(handle.clone())?;
         Ok(Some(handle))
     } else {
@@ -4699,18 +4739,27 @@ fn active_move_marker_camera_sources(
             );
             #[cfg(feature = "psmoveapi-tracker")]
             let (psmoveapi_observations, psmoveapi_health) = if options.move_psmoveapi_tracker {
-                video_device_index(&source.device_path).and_then(|camera_index| {
-                    Some(start_psmoveapi_tracker_worker(
-                        options.store_path.clone(),
-                        options.host_id.clone(),
-                        source.camera_id.clone(),
-                        camera_index,
-                        options.move_tracker_camera_exposure_milli.get(&source.camera_id)
-                            .copied().unwrap_or(options.move_tracker_exposure_milli) as f32 / 1000.0,
-                        serve_move_state_sources(options, true),
-                        Arc::clone(&_move_hue_program),
-                    ))
-                }).map_or((None, None), |(observations, health)| (Some(observations), Some(health)))
+                video_device_index(&source.device_path)
+                    .and_then(|camera_index| {
+                        Some(start_psmoveapi_tracker_worker(
+                            options.store_path.clone(),
+                            options.host_id.clone(),
+                            source.camera_id.clone(),
+                            camera_index,
+                            options
+                                .move_tracker_camera_exposure_milli
+                                .get(&source.camera_id)
+                                .copied()
+                                .unwrap_or(options.move_tracker_exposure_milli)
+                                as f32
+                                / 1000.0,
+                            serve_move_state_sources(options, true),
+                            Arc::clone(&_move_hue_program),
+                        ))
+                    })
+                    .map_or((None, None), |(observations, health)| {
+                        (Some(observations), Some(health))
+                    })
             } else {
                 (None, None)
             };
@@ -4821,7 +4870,11 @@ fn publish_move_marker_camera_frames(
         #[cfg(feature = "psmoveapi-tracker")]
         if let Some(latest) = camera.psmoveapi_observations.as_ref() {
             let observed_at = timestamp()?;
-            let observations = latest.lock().ok().and_then(|mut value| value.take()).unwrap_or_default();
+            let observations = latest
+                .lock()
+                .ok()
+                .and_then(|mut value| value.take())
+                .unwrap_or_default();
             marker_candidates.extend(observations.into_iter().map(|observation| {
                 let radius = observation.radius_px.max(0.0);
                 MuninnMoveMarkerCandidateRecord {
@@ -4875,52 +4928,94 @@ fn start_psmoveapi_tracker_worker(
     exposure: f32,
     move_state_sources: Vec<MoveStateSource>,
     move_hue_program: Arc<Mutex<MuninnMoveHueProgramRecord>>,
-) -> (Arc<Mutex<Option<Vec<muninn_psmoveapi_tracker::PsmoveApiObservation>>>>, Arc<Mutex<Option<MuninnMoveTrackerHealthRecord>>>) {
+) -> (
+    Arc<Mutex<Option<Vec<muninn_psmoveapi_tracker::PsmoveApiObservation>>>>,
+    Arc<Mutex<Option<MuninnMoveTrackerHealthRecord>>>,
+) {
     let observations_latest = Arc::new(Mutex::new(None));
     let health_latest = Arc::new(Mutex::new(None));
     let observations_output = Arc::clone(&observations_latest);
     let health_output = Arc::clone(&health_latest);
     thread::spawn(move || {
-        let mut command = Command::new(env::current_exe().unwrap_or_else(|_| PathBuf::from("muninn")));
-        command.arg("move-tracker-worker")
-            .arg("--store").arg(store_path)
-            .arg("--host").arg(&host_id)
-            .arg("--move-marker-camera").arg(format!("{camera_id}=/dev/video{camera_index}"))
-            .arg("--move-tracker-exposure-milli").arg(((exposure * 1000.0).round() as u32).to_string());
+        let mut command =
+            Command::new(env::current_exe().unwrap_or_else(|_| PathBuf::from("muninn")));
+        command
+            .arg("move-tracker-worker")
+            .arg("--store")
+            .arg(store_path)
+            .arg("--host")
+            .arg(&host_id)
+            .arg("--move-marker-camera")
+            .arg(format!("{camera_id}=/dev/video{camera_index}"))
+            .arg("--move-tracker-exposure-milli")
+            .arg(((exposure * 1000.0).round() as u32).to_string());
         for source in move_state_sources {
-            command.arg("--move-state").arg(format!("{}={}", source.move_id, source.hidraw_path));
+            command
+                .arg("--move-state")
+                .arg(format!("{}={}", source.move_id, source.hidraw_path));
         }
-        let child = command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit()).spawn();
-        let Ok(mut child) = child else { return; };
-        let Some(mut stdin) = child.stdin.take() else { return; };
+        let child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn();
+        let Ok(mut child) = child else {
+            return;
+        };
+        let Some(mut stdin) = child.stdin.take() else {
+            return;
+        };
         let program_source = Arc::clone(&move_hue_program);
         thread::spawn(move || {
             let mut previous = None;
             loop {
-                let Some(program) = program_source.lock().ok().map(|value| MoveTrackerWorkerProgram::from(&*value)) else { return; };
+                let Some(program) = program_source
+                    .lock()
+                    .ok()
+                    .map(|value| MoveTrackerWorkerProgram::from(&*value))
+                else {
+                    return;
+                };
                 if previous.as_ref() != Some(&program) {
-                    if write_length_framed_message(&mut stdin, &program).is_err() { return; }
+                    if write_length_framed_message(&mut stdin, &program).is_err() {
+                        return;
+                    }
                     previous = Some(program);
                 }
                 thread::sleep(Duration::from_millis(100));
             }
         });
-        let Some(stdout) = child.stdout.take() else { return; };
+        let Some(stdout) = child.stdout.take() else {
+            return;
+        };
         let mut reader = BufReader::new(stdout);
         loop {
             let frame = match read_move_tracker_worker_frame(&mut reader) {
                 Ok(frame) => frame,
                 Err(error) => {
-                    eprintln!("Muninn Move tracker worker stream stopped camera={camera_id}: {error:#}");
+                    eprintln!(
+                        "Muninn Move tracker worker stream stopped camera={camera_id}: {error:#}"
+                    );
                     break;
                 }
             };
-            let observations = frame.observations.into_iter().map(|value| muninn_psmoveapi_tracker::PsmoveApiObservation {
-                move_id: value.move_id, center_x_px: value.center_x_px, center_y_px: value.center_y_px,
-                radius_px: value.radius_px, age_ms: value.age_ms,
-            }).collect();
-            if let Ok(mut latest) = health_output.lock() { *latest = Some(frame.health); }
-            if let Ok(mut latest) = observations_output.lock() { *latest = Some(observations); }
+            let observations = frame
+                .observations
+                .into_iter()
+                .map(|value| muninn_psmoveapi_tracker::PsmoveApiObservation {
+                    move_id: value.move_id,
+                    center_x_px: value.center_x_px,
+                    center_y_px: value.center_y_px,
+                    radius_px: value.radius_px,
+                    age_ms: value.age_ms,
+                })
+                .collect();
+            if let Ok(mut latest) = health_output.lock() {
+                *latest = Some(frame.health);
+            }
+            if let Ok(mut latest) = observations_output.lock() {
+                *latest = Some(observations);
+            }
         }
         let _ = child.wait();
     });
@@ -4937,14 +5032,19 @@ fn read_length_framed_message<T: for<'de> Deserialize<'de>>(reader: &mut impl Re
     let mut length = [0u8; 4];
     reader.read_exact(&mut length)?;
     let length = u32::from_le_bytes(length) as usize;
-    if length > 1024 * 1024 { return Err(anyhow!("Move tracker worker frame exceeds 1 MiB")); }
+    if length > 1024 * 1024 {
+        return Err(anyhow!("Move tracker worker frame exceeds 1 MiB"));
+    }
     let mut payload = vec![0u8; length];
     reader.read_exact(&mut payload)?;
     rmp_serde::from_slice(&payload).context("decoding length-framed MessagePack")
 }
 
 #[cfg(feature = "psmoveapi-tracker")]
-fn write_move_tracker_worker_frame(writer: &mut impl Write, frame: &MoveTrackerWorkerFrame) -> Result<()> {
+fn write_move_tracker_worker_frame(
+    writer: &mut impl Write,
+    frame: &MoveTrackerWorkerFrame,
+) -> Result<()> {
     write_length_framed_message(writer, frame)
 }
 
@@ -4960,33 +5060,52 @@ fn write_length_framed_message(writer: &mut impl Write, value: &impl Serialize) 
 #[cfg(feature = "psmoveapi-tracker")]
 impl From<&MuninnMoveHueProgramRecord> for MoveTrackerWorkerProgram {
     fn from(value: &MuninnMoveHueProgramRecord) -> Self {
-        Self { mode: value.mode.clone(), cycle_ms: value.cycle_ms, epoch_ns: value.epoch_ns,
-            hold_at_ns: value.hold_at_ns, order_mode: value.order_mode.clone(), transition_percent: value.transition_percent,
-            transition_percent_explicit: value.transition_percent_explicit }
+        Self {
+            mode: value.mode.clone(),
+            cycle_ms: value.cycle_ms,
+            epoch_ns: value.epoch_ns,
+            hold_at_ns: value.hold_at_ns,
+            order_mode: value.order_mode.clone(),
+            transition_percent: value.transition_percent,
+            transition_percent_explicit: value.transition_percent_explicit,
+        }
     }
 }
 
 #[cfg(feature = "psmoveapi-tracker")]
 impl MoveTrackerWorkerProgram {
     fn as_record(&self, host_id: &str) -> MuninnMoveHueProgramRecord {
-        MuninnMoveHueProgramRecord { program_id: move_hue_program_key(host_id), host_id: host_id.to_string(),
-            mode: self.mode.clone(), cycle_ms: self.cycle_ms, epoch_ns: self.epoch_ns, hold_at_ns: self.hold_at_ns,
-            requested_by: "parent-worker-pipe".to_string(), updated_at: "worker-live".to_string(), order_mode: self.order_mode.clone(),
-            transition_percent: self.transition_percent, transition_percent_explicit: self.transition_percent_explicit }
+        MuninnMoveHueProgramRecord {
+            program_id: move_hue_program_key(host_id),
+            host_id: host_id.to_string(),
+            mode: self.mode.clone(),
+            cycle_ms: self.cycle_ms,
+            epoch_ns: self.epoch_ns,
+            hold_at_ns: self.hold_at_ns,
+            requested_by: "parent-worker-pipe".to_string(),
+            updated_at: "worker-live".to_string(),
+            order_mode: self.order_mode.clone(),
+            transition_percent: self.transition_percent,
+            transition_percent_explicit: self.transition_percent_explicit,
+        }
     }
 }
 
 #[cfg(feature = "psmoveapi-tracker")]
 fn run_move_tracker_worker(options: Options) -> Result<()> {
-    let source = options.move_marker_camera_sources.first()
+    let source = options
+        .move_marker_camera_sources
+        .first()
         .context("move-tracker-worker requires one --move-marker-camera")?;
     if options.move_marker_camera_sources.len() != 1 {
         return Err(anyhow!("move-tracker-worker accepts exactly one camera"));
     }
     let camera_index = video_device_index(&source.device_path)
         .context("move-tracker-worker camera must be /dev/videoN")?;
-    let mut roster = serve_move_state_sources(&options, true).into_iter()
-        .map(|source| source.move_id).collect::<Vec<_>>();
+    let mut roster = serve_move_state_sources(&options, true)
+        .into_iter()
+        .map(|source| source.move_id)
+        .collect::<Vec<_>>();
     roster.sort();
     roster.dedup();
     let mut input = BufReader::new(std::io::stdin());
@@ -5003,7 +5122,8 @@ fn run_move_tracker_worker(options: Options) -> Result<()> {
     });
     let exposure = options.move_tracker_exposure_milli as f32 / 1000.0;
     let colors = tracker_colors(&roster, &program);
-    let mut tracker = muninn_psmoveapi_tracker::PsmoveApiTracker::open(camera_index, exposure, &colors)?;
+    let mut tracker =
+        muninn_psmoveapi_tracker::PsmoveApiTracker::open(camera_index, exposure, &colors)?;
     let camera_info = tracker.camera_info().clone();
     let mut update_count = 0u64;
     let mut observation_count = 0u64;
@@ -5022,7 +5142,9 @@ fn run_move_tracker_worker(options: Options) -> Result<()> {
     let stdout = std::io::stdout();
     let mut writer = stdout.lock();
     loop {
-        while let Ok(latest) = program_receiver.try_recv() { program = latest.as_record(&options.host_id); }
+        while let Ok(latest) = program_receiver.try_recv() {
+            program = latest.as_record(&options.host_id);
+        }
         if last_calibration.elapsed() >= Duration::from_secs(30) {
             tracker.observe_connected();
             last_calibration = Instant::now();
@@ -5032,45 +5154,98 @@ fn run_move_tracker_worker(options: Options) -> Result<()> {
             tracker.set_expected_color(identity, *color);
         }
         let observed_now = Instant::now();
-        let observations = tracker.update().into_iter().filter(|observation| {
-            match admit_psmoveapi_observation(observation, camera_info.width, camera_info.height,
-                admitted.get(&observation.move_id), observed_now) {
-                Ok(next) => { admitted.insert(observation.move_id.clone(), next); true }
-                Err(PsmoveApiObservationRejection::Stale) => { rejected_stale_count = rejected_stale_count.saturating_add(1); false }
-                Err(PsmoveApiObservationRejection::Radius) => { rejected_radius_count = rejected_radius_count.saturating_add(1); false }
-                Err(PsmoveApiObservationRejection::Bounds) => { rejected_bounds_count = rejected_bounds_count.saturating_add(1); false }
-                Err(PsmoveApiObservationRejection::Continuity) => { rejected_continuity_count = rejected_continuity_count.saturating_add(1); false }
-            }
-        }).collect::<Vec<_>>();
+        let observations = tracker
+            .update()
+            .into_iter()
+            .filter(|observation| {
+                match admit_psmoveapi_observation(
+                    observation,
+                    camera_info.width,
+                    camera_info.height,
+                    admitted.get(&observation.move_id),
+                    observed_now,
+                ) {
+                    Ok(next) => {
+                        admitted.insert(observation.move_id.clone(), next);
+                        true
+                    }
+                    Err(PsmoveApiObservationRejection::Stale) => {
+                        rejected_stale_count = rejected_stale_count.saturating_add(1);
+                        false
+                    }
+                    Err(PsmoveApiObservationRejection::Radius) => {
+                        rejected_radius_count = rejected_radius_count.saturating_add(1);
+                        false
+                    }
+                    Err(PsmoveApiObservationRejection::Bounds) => {
+                        rejected_bounds_count = rejected_bounds_count.saturating_add(1);
+                        false
+                    }
+                    Err(PsmoveApiObservationRejection::Continuity) => {
+                        rejected_continuity_count = rejected_continuity_count.saturating_add(1);
+                        false
+                    }
+                }
+            })
+            .collect::<Vec<_>>();
         update_count = update_count.saturating_add(1);
         observation_count = observation_count.saturating_add(observations.len() as u64);
-        if !observations.is_empty() { last_observation_at = timestamp()?; }
+        if !observations.is_empty() {
+            last_observation_at = timestamp()?;
+        }
         if last_image_evidence.elapsed() >= Duration::from_millis(250) {
             if let Some((_, _, rgb)) = tracker.rgb_image() {
-                (image_mean_rgb, image_peak_rgb, color_evidence_move_ids, color_evidence_pixel_counts) =
-                    summarize_tracker_rgb(&rgb, &expected_colors);
+                (
+                    image_mean_rgb,
+                    image_peak_rgb,
+                    color_evidence_move_ids,
+                    color_evidence_pixel_counts,
+                ) = summarize_tracker_rgb(&rgb, &expected_colors);
             }
             last_image_evidence = Instant::now();
         }
         let health = MuninnMoveTrackerHealthRecord {
-            health_id: format!("muninn:{}:{}:move-tracker-health", options.host_id, source.camera_id),
-            host_id: options.host_id.clone(), camera_id: source.camera_id.clone(), camera_index,
-            state: "running".to_string(), camera_name: camera_info.name.clone(), camera_api: camera_info.api.clone(),
-            width: camera_info.width, height: camera_info.height, exposure: camera_info.exposure,
-            calibrated_controller_count: tracker.tracked_controller_count() as u32, update_count, observation_count,
-            latest_observation_count: observations.len() as u32, last_observation_at: last_observation_at.clone(),
-            detail: "private subprocess worker".to_string(), updated_at: timestamp()?,
-            image_mean_rgb: image_mean_rgb.clone(), image_peak_rgb: image_peak_rgb.clone(),
+            health_id: format!(
+                "muninn:{}:{}:move-tracker-health",
+                options.host_id, source.camera_id
+            ),
+            host_id: options.host_id.clone(),
+            camera_id: source.camera_id.clone(),
+            camera_index,
+            state: "running".to_string(),
+            camera_name: camera_info.name.clone(),
+            camera_api: camera_info.api.clone(),
+            width: camera_info.width,
+            height: camera_info.height,
+            exposure: camera_info.exposure,
+            calibrated_controller_count: tracker.tracked_controller_count() as u32,
+            update_count,
+            observation_count,
+            latest_observation_count: observations.len() as u32,
+            last_observation_at: last_observation_at.clone(),
+            detail: "private subprocess worker".to_string(),
+            updated_at: timestamp()?,
+            image_mean_rgb: image_mean_rgb.clone(),
+            image_peak_rgb: image_peak_rgb.clone(),
             color_evidence_move_ids: color_evidence_move_ids.clone(),
             color_evidence_pixel_counts: color_evidence_pixel_counts.clone(),
-            rejected_stale_count, rejected_radius_count, rejected_bounds_count, rejected_continuity_count,
+            rejected_stale_count,
+            rejected_radius_count,
+            rejected_bounds_count,
+            rejected_continuity_count,
         };
         let frame = MoveTrackerWorkerFrame {
             health,
-            observations: observations.into_iter().map(|value| MoveTrackerWorkerObservation {
-                move_id: value.move_id, center_x_px: value.center_x_px, center_y_px: value.center_y_px,
-                radius_px: value.radius_px, age_ms: value.age_ms,
-            }).collect(),
+            observations: observations
+                .into_iter()
+                .map(|value| MoveTrackerWorkerObservation {
+                    move_id: value.move_id,
+                    center_x_px: value.center_x_px,
+                    center_y_px: value.center_y_px,
+                    radius_px: value.radius_px,
+                    age_ms: value.age_ms,
+                })
+                .collect(),
         };
         write_move_tracker_worker_frame(&mut writer, &frame)?;
         thread::sleep(Duration::from_millis(4));
@@ -5079,23 +5254,49 @@ fn run_move_tracker_worker(options: Options) -> Result<()> {
 
 #[cfg(feature = "psmoveapi-tracker")]
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct AdmittedMoveObservation { center_x_px: f32, center_y_px: f32, radius_px: f32, admitted_at: Instant }
+struct AdmittedMoveObservation {
+    center_x_px: f32,
+    center_y_px: f32,
+    radius_px: f32,
+    admitted_at: Instant,
+}
 
 #[cfg(feature = "psmoveapi-tracker")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PsmoveApiObservationRejection { Stale, Radius, Bounds, Continuity }
+enum PsmoveApiObservationRejection {
+    Stale,
+    Radius,
+    Bounds,
+    Continuity,
+}
 
 #[cfg(feature = "psmoveapi-tracker")]
-fn admit_psmoveapi_observation(observation: &muninn_psmoveapi_tracker::PsmoveApiObservation, width: u32, height: u32,
-    previous: Option<&AdmittedMoveObservation>, now: Instant) -> std::result::Result<AdmittedMoveObservation, PsmoveApiObservationRejection> {
-    if observation.age_ms < 0 || observation.age_ms > 50 { return Err(PsmoveApiObservationRejection::Stale); }
-    if !observation.radius_px.is_finite() || observation.radius_px < 2.0 { return Err(PsmoveApiObservationRejection::Radius); }
-    if !observation.center_x_px.is_finite() || !observation.center_y_px.is_finite() || observation.center_x_px < 0.0
-        || observation.center_x_px >= width as f32 || observation.center_y_px < 0.0 || observation.center_y_px >= height as f32 {
+fn admit_psmoveapi_observation(
+    observation: &muninn_psmoveapi_tracker::PsmoveApiObservation,
+    width: u32,
+    height: u32,
+    previous: Option<&AdmittedMoveObservation>,
+    now: Instant,
+) -> std::result::Result<AdmittedMoveObservation, PsmoveApiObservationRejection> {
+    if observation.age_ms < 0 || observation.age_ms > 50 {
+        return Err(PsmoveApiObservationRejection::Stale);
+    }
+    if !observation.radius_px.is_finite() || observation.radius_px < 2.0 {
+        return Err(PsmoveApiObservationRejection::Radius);
+    }
+    if !observation.center_x_px.is_finite()
+        || !observation.center_y_px.is_finite()
+        || observation.center_x_px < 0.0
+        || observation.center_x_px >= width as f32
+        || observation.center_y_px < 0.0
+        || observation.center_y_px >= height as f32
+    {
         return Err(PsmoveApiObservationRejection::Bounds);
     }
     if let Some(previous) = previous {
-        let elapsed = now.saturating_duration_since(previous.admitted_at).as_secs_f32();
+        let elapsed = now
+            .saturating_duration_since(previous.admitted_at)
+            .as_secs_f32();
         let dx = observation.center_x_px - previous.center_x_px;
         let dy = observation.center_y_px - previous.center_y_px;
         let distance = (dx * dx + dy * dy).sqrt();
@@ -5104,70 +5305,163 @@ fn admit_psmoveapi_observation(observation: &muninn_psmoveapi_tracker::PsmoveApi
             return Err(PsmoveApiObservationRejection::Continuity);
         }
     }
-    Ok(AdmittedMoveObservation { center_x_px: observation.center_x_px, center_y_px: observation.center_y_px,
-        radius_px: observation.radius_px, admitted_at: now })
+    Ok(AdmittedMoveObservation {
+        center_x_px: observation.center_x_px,
+        center_y_px: observation.center_y_px,
+        radius_px: observation.radius_px,
+        admitted_at: now,
+    })
 }
 
 #[cfg(all(test, feature = "psmoveapi-tracker"))]
 mod psmoveapi_observation_admission_tests {
     use super::*;
-    fn observation(x: f32, y: f32, radius: f32, age_ms: i32) -> muninn_psmoveapi_tracker::PsmoveApiObservation {
-        muninn_psmoveapi_tracker::PsmoveApiObservation { move_id: "move-test".to_string(), center_x_px: x, center_y_px: y, radius_px: radius, age_ms }
+    fn observation(
+        x: f32,
+        y: f32,
+        radius: f32,
+        age_ms: i32,
+    ) -> muninn_psmoveapi_tracker::PsmoveApiObservation {
+        muninn_psmoveapi_tracker::PsmoveApiObservation {
+            move_id: "move-test".to_string(),
+            center_x_px: x,
+            center_y_px: y,
+            radius_px: radius,
+            age_ms,
+        }
     }
     #[test]
     fn rejects_stale_tiny_and_out_of_frame_positions() {
         let now = Instant::now();
-        assert_eq!(Err(PsmoveApiObservationRejection::Stale), admit_psmoveapi_observation(&observation(100.0, 100.0, 8.0, 51), 640, 480, None, now));
-        assert_eq!(Err(PsmoveApiObservationRejection::Radius), admit_psmoveapi_observation(&observation(100.0, 100.0, 0.7, 1), 640, 480, None, now));
-        assert_eq!(Err(PsmoveApiObservationRejection::Bounds), admit_psmoveapi_observation(&observation(641.0, 100.0, 8.0, 1), 640, 480, None, now));
+        assert_eq!(
+            Err(PsmoveApiObservationRejection::Stale),
+            admit_psmoveapi_observation(&observation(100.0, 100.0, 8.0, 51), 640, 480, None, now)
+        );
+        assert_eq!(
+            Err(PsmoveApiObservationRejection::Radius),
+            admit_psmoveapi_observation(&observation(100.0, 100.0, 0.7, 1), 640, 480, None, now)
+        );
+        assert_eq!(
+            Err(PsmoveApiObservationRejection::Bounds),
+            admit_psmoveapi_observation(&observation(641.0, 100.0, 8.0, 1), 640, 480, None, now)
+        );
     }
     #[test]
     fn rejects_fresh_teleport_without_calling_age_confidence() {
         let now = Instant::now();
-        let previous = admit_psmoveapi_observation(&observation(100.0, 100.0, 8.0, 1), 640, 480, None, now).unwrap();
-        assert_eq!(Err(PsmoveApiObservationRejection::Continuity), admit_psmoveapi_observation(
-            &observation(500.0, 400.0, 8.0, 1), 640, 480, Some(&previous), now + Duration::from_millis(4)));
-        assert!(admit_psmoveapi_observation(&observation(108.0, 104.0, 8.3, 1), 640, 480, Some(&previous), now + Duration::from_millis(4)).is_ok());
+        let previous =
+            admit_psmoveapi_observation(&observation(100.0, 100.0, 8.0, 1), 640, 480, None, now)
+                .unwrap();
+        assert_eq!(
+            Err(PsmoveApiObservationRejection::Continuity),
+            admit_psmoveapi_observation(
+                &observation(500.0, 400.0, 8.0, 1),
+                640,
+                480,
+                Some(&previous),
+                now + Duration::from_millis(4)
+            )
+        );
+        assert!(
+            admit_psmoveapi_observation(
+                &observation(108.0, 104.0, 8.3, 1),
+                640,
+                480,
+                Some(&previous),
+                now + Duration::from_millis(4)
+            )
+            .is_ok()
+        );
     }
 }
 
 #[cfg(feature = "psmoveapi-tracker")]
-fn summarize_tracker_rgb(rgb: &[u8], expected: &[(String, [u8; 3])]) -> (Vec<u32>, Vec<u32>, Vec<String>, Vec<u32>) {
+fn summarize_tracker_rgb(
+    rgb: &[u8],
+    expected: &[(String, [u8; 3])],
+) -> (Vec<u32>, Vec<u32>, Vec<String>, Vec<u32>) {
     let mut sums = [0u64; 3];
     let mut peaks = [0u32; 3];
     let mut counts = vec![0u32; expected.len()];
     let pixels = rgb.len() / 3;
     for pixel in rgb.chunks_exact(3) {
-        for channel in 0..3 { sums[channel] += u64::from(pixel[channel]); peaks[channel] = peaks[channel].max(u32::from(pixel[channel])); }
+        for channel in 0..3 {
+            sums[channel] += u64::from(pixel[channel]);
+            peaks[channel] = peaks[channel].max(u32::from(pixel[channel]));
+        }
         let max = *pixel.iter().max().unwrap_or(&0);
         let min = *pixel.iter().min().unwrap_or(&0);
-        if max < 40 || max.saturating_sub(min) < 30 { continue; }
-        let pixel_norm = (pixel.iter().map(|value| f64::from(*value).powi(2)).sum::<f64>()).sqrt();
+        if max < 40 || max.saturating_sub(min) < 30 {
+            continue;
+        }
+        let pixel_norm = (pixel
+            .iter()
+            .map(|value| f64::from(*value).powi(2))
+            .sum::<f64>())
+        .sqrt();
         for (index, (_, color)) in expected.iter().enumerate() {
-            let color_norm = (color.iter().map(|value| f64::from(*value).powi(2)).sum::<f64>()).sqrt();
-            let dot = pixel.iter().zip(color).map(|(left, right)| f64::from(*left) * f64::from(*right)).sum::<f64>();
+            let color_norm = (color
+                .iter()
+                .map(|value| f64::from(*value).powi(2))
+                .sum::<f64>())
+            .sqrt();
+            let dot = pixel
+                .iter()
+                .zip(color)
+                .map(|(left, right)| f64::from(*left) * f64::from(*right))
+                .sum::<f64>();
             if pixel_norm > 0.0 && color_norm > 0.0 && dot / (pixel_norm * color_norm) >= 0.985 {
                 counts[index] = counts[index].saturating_add(1);
             }
         }
     }
-    let means = if pixels == 0 { vec![0, 0, 0] } else { sums.iter().map(|sum| (*sum / pixels as u64) as u32).collect() };
-    (means, peaks.to_vec(), expected.iter().map(|(id, _)| id.clone()).collect(), counts)
+    let means = if pixels == 0 {
+        vec![0, 0, 0]
+    } else {
+        sums.iter()
+            .map(|sum| (*sum / pixels as u64) as u32)
+            .collect()
+    };
+    (
+        means,
+        peaks.to_vec(),
+        expected.iter().map(|(id, _)| id.clone()).collect(),
+        counts,
+    )
 }
 
 #[cfg(feature = "psmoveapi-tracker")]
-fn tracker_colors(roster: &[String], program: &MuninnMoveHueProgramRecord) -> Vec<(String, [u8; 3])> {
-    let now_ns = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos() as i128;
+fn tracker_colors(
+    roster: &[String],
+    program: &MuninnMoveHueProgramRecord,
+) -> Vec<(String, [u8; 3])> {
+    let now_ns = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as i128;
     let timestamp_ns = move_hue_program_timestamp_ns(program, now_ns);
-    roster.iter().filter_map(|identity| scheduled_golden_move_color_with_order(
-        identity, roster, i128::from(program.epoch_ns), i128::from(program.cycle_ms) * 1_000_000,
-        timestamp_ns, &program.order_mode, effective_transition_percent(program),
-    ).map(|(color, _, _)| (identity.clone(), [color.0, color.1, color.2]))).collect()
+    roster
+        .iter()
+        .filter_map(|identity| {
+            scheduled_golden_move_color_with_order(
+                identity,
+                roster,
+                i128::from(program.epoch_ns),
+                i128::from(program.cycle_ms) * 1_000_000,
+                timestamp_ns,
+                &program.order_mode,
+                effective_transition_percent(program),
+            )
+            .map(|(color, _, _)| (identity.clone(), [color.0, color.1, color.2]))
+        })
+        .collect()
 }
 
 #[cfg(not(feature = "psmoveapi-tracker"))]
 fn run_move_tracker_worker(_options: Options) -> Result<()> {
-    Err(anyhow!("move-tracker-worker requires the psmoveapi-tracker feature"))
+    Err(anyhow!(
+        "move-tracker-worker requires the psmoveapi-tracker feature"
+    ))
 }
 
 #[cfg(feature = "psmoveapi-tracker")]
@@ -5200,30 +5494,47 @@ struct MoveTrackerWorkerProgram {
 }
 
 #[cfg(feature = "psmoveapi-tracker")]
-fn publish_move_tracker_health(node: &mut cultmesh_rs::CultMeshNode, active: &mut [ActiveMoveMarkerCameraSource]) -> Result<()> {
+fn publish_move_tracker_health(
+    node: &mut cultmesh_rs::CultMeshNode,
+    active: &mut [ActiveMoveMarkerCameraSource],
+) -> Result<()> {
     for camera in active {
-        let Some(latest) = camera.psmoveapi_health.as_ref() else { continue; };
+        let Some(latest) = camera.psmoveapi_health.as_ref() else {
+            continue;
+        };
         let record = latest.lock().ok().and_then(|mut value| value.take());
-        if let Some(record) = record { node.put(&record.health_id, &record)?; }
+        if let Some(record) = record {
+            node.put(&record.health_id, &record)?;
+        }
     }
     Ok(())
 }
 
 #[cfg(not(feature = "psmoveapi-tracker"))]
-fn publish_move_tracker_health(_node: &mut cultmesh_rs::CultMeshNode, _active: &mut [ActiveMoveMarkerCameraSource]) -> Result<()> { Ok(()) }
+fn publish_move_tracker_health(
+    _node: &mut cultmesh_rs::CultMeshNode,
+    _active: &mut [ActiveMoveMarkerCameraSource],
+) -> Result<()> {
+    Ok(())
+}
 
 fn publish_move_evidence_transport_health(
     node: &mut cultmesh_rs::CultMeshNode,
     options: &Options,
     stream: Option<&MoveEvidenceTransportHealth>,
 ) -> Result<()> {
-    let Some(stream) = stream else { return Ok(()); };
+    let Some(stream) = stream else {
+        return Ok(());
+    };
     let record = MuninnMoveEvidenceTransportHealthRecord {
         health_id: format!("muninn:{}:move-evidence-transport-health", options.host_id),
         host_id: options.host_id.clone(),
         stream_id: stream.stream_id.clone(),
         produced_frames: stream.counters.produced_frames.load(Ordering::Relaxed),
-        local_ring_admissions: stream.counters.local_ring_admissions.load(Ordering::Relaxed),
+        local_ring_admissions: stream
+            .counters
+            .local_ring_admissions
+            .load(Ordering::Relaxed),
         remote_handoffs: stream.counters.remote_handoffs.load(Ordering::Relaxed),
         remote_sends: stream.counters.remote_sends.load(Ordering::Relaxed),
         updated_at: timestamp()?,
@@ -5234,7 +5545,11 @@ fn publish_move_evidence_transport_health(
 
 #[cfg(feature = "psmoveapi-tracker")]
 fn video_device_index(path: &Path) -> Option<i32> {
-    path.file_name()?.to_str()?.strip_prefix("video")?.parse().ok()
+    path.file_name()?
+        .to_str()?
+        .strip_prefix("video")?
+        .parse()
+        .ok()
 }
 
 fn stable_marker_camera_source_hash(source: &MoveMarkerFrameSource) -> u64 {
@@ -5475,7 +5790,7 @@ fn run_hid_controller_rudp_ingress(
             max_fragment_bytes: Some(HID_CONTROLLER_RUDP_MAX_FRAGMENT_BYTES),
             max_pending_reliable_packets: Some(256),
             media_reliable_expire_after_ms: Some(25),
-                    reconnect_policy: None,
+            reconnect_policy: None,
         })?;
     let mut sources = live_move_state_sources(&options)
         .into_iter()
@@ -5545,7 +5860,10 @@ fn run_hid_controller_rudp_ingress(
             continue;
         }
         if transport.connected() {
-            let payload = move_evidence_latest.lock().ok().and_then(|mut latest| latest.take());
+            let payload = move_evidence_latest
+                .lock()
+                .ok()
+                .and_then(|mut latest| latest.take());
             if let Some(payload) = payload {
                 if let Err(error) = transport.send("move-evidence", payload) {
                     eprintln!("Muninn Move evidence RUDP send warning: {error:#}");
@@ -6020,7 +6338,7 @@ fn create_hid_controller_stream(options: &Options) -> Result<Option<ActiveHidCon
         max_fragment_bytes: Some(HID_CONTROLLER_RUDP_MAX_FRAGMENT_BYTES),
         max_pending_reliable_packets: Some(256),
         media_reliable_expire_after_ms: Some(25),
-            reconnect_policy: None,
+        reconnect_policy: None,
     })?;
     Ok(Some(ActiveHidControllerStream {
         target,
@@ -6795,7 +7113,9 @@ fn scheduled_golden_move_color_with_order(
     let completed_cycles = completed_steps.div_euclid(roster_len);
     let completed_in_cycle = completed_steps.rem_euclid(roster_len);
     let update_order = move_hue_update_order(roster.len(), completed_cycles, order_mode);
-    let order_position = update_order.iter().position(|index| *index == identity_index as usize)? as i128;
+    let order_position = update_order
+        .iter()
+        .position(|index| *index == identity_index as usize)? as i128;
     let advanced_in_cycle = i128::from(order_position < completed_in_cycle);
     let sequence_index = identity_index + completed_cycles + advanced_in_cycle;
     let source_hue = (sequence_index as f64 * GOLDEN_RATIO_CONJUGATE).fract();
@@ -6805,7 +7125,10 @@ fn scheduled_golden_move_color_with_order(
         let amount = if transition_percent == 0 {
             1.0
         } else {
-            let transition_ns = subslot_ns.saturating_mul(i128::from(transition_percent.min(100))).div_euclid(100).max(1);
+            let transition_ns = subslot_ns
+                .saturating_mul(i128::from(transition_percent.min(100)))
+                .div_euclid(100)
+                .max(1);
             smootherstep((subslot_elapsed_ns as f64 / transition_ns as f64).min(1.0))
         };
         let target_hue = ((sequence_index + 1) as f64 * GOLDEN_RATIO_CONJUGATE).fract();
@@ -8697,7 +9020,10 @@ fn publish_idunn_rudp_health(
 ) -> Result<()> {
     let mut transport = connect_idunn_rudp_health(options)?;
     transport
-        .send("schema", idunn_health_payload(options, state, detail, observed_at)?)
+        .send(
+            "schema",
+            idunn_health_payload(options, state, detail, observed_at)?,
+        )
         .with_context(|| format!("sending Idunn health to {}", options.endpoint))?;
     Ok(())
 }
@@ -8728,7 +9054,10 @@ fn run_daemon_health_publisher(options: &Options) -> Result<()> {
                 Err(error) => ("failed", error.to_string()),
             };
             transport
-                .send("schema", idunn_health_payload(idunn, state, &detail, &observed_at)?)
+                .send(
+                    "schema",
+                    idunn_health_payload(idunn, state, &detail, &observed_at)?,
+                )
                 .with_context(|| format!("sending Idunn health to {}", idunn.endpoint))?;
             next_publish_at = Instant::now() + cadence;
         }
@@ -10059,14 +10388,20 @@ impl Options {
                 }
                 "--move-tracker-camera-exposure" => {
                     let value = take_value(&mut args, "--move-tracker-camera-exposure")?;
-                    let (camera_id, exposure) = value.split_once('=')
+                    let (camera_id, exposure) = value
+                        .split_once('=')
                         .context("--move-tracker-camera-exposure must be camera-id=0..1000")?;
-                    let exposure = exposure.parse::<u32>()
+                    let exposure = exposure
+                        .parse::<u32>()
                         .context("--move-tracker-camera-exposure must be camera-id=0..1000")?;
                     if camera_id.trim().is_empty() || exposure > 1000 {
-                        return Err(anyhow!("--move-tracker-camera-exposure must be camera-id=0..1000"));
+                        return Err(anyhow!(
+                            "--move-tracker-camera-exposure must be camera-id=0..1000"
+                        ));
                     }
-                    options.move_tracker_camera_exposure_milli.insert(camera_id.to_string(), exposure);
+                    options
+                        .move_tracker_camera_exposure_milli
+                        .insert(camera_id.to_string(), exposure);
                 }
                 "--move-evidence-stream" => {
                     options.move_evidence_stream_id =
@@ -10208,8 +10543,7 @@ impl Options {
                     options.move_hue_mode = Some(take_value(&mut args, "--move-hue-mode")?)
                 }
                 "--move-hue-order" => {
-                    options.move_hue_order_mode =
-                        Some(take_value(&mut args, "--move-hue-order")?)
+                    options.move_hue_order_mode = Some(take_value(&mut args, "--move-hue-order")?)
                 }
                 "--command" => options.command_id = Some(take_value(&mut args, "--command")?),
                 "--move-host" => {
@@ -10291,7 +10625,9 @@ impl Options {
             ));
         }
         if options.move_tracker_exposure_milli > 1000 {
-            return Err(anyhow!("--move-tracker-exposure-milli must be within 0..=1000"));
+            return Err(anyhow!(
+                "--move-tracker-exposure-milli must be within 0..=1000"
+            ));
         }
         if options.move_psmoveapi_tracker && !cfg!(feature = "psmoveapi-tracker") {
             return Err(anyhow!(
@@ -11988,8 +12324,8 @@ mod tests {
         client_socket
             .set_read_timeout(Some(Duration::from_millis(5)))
             .unwrap();
-        let mut client = CultNetRudpSocketTransportConnection::new(
-            CultNetRudpSocketTransportOptions {
+        let mut client =
+            CultNetRudpSocketTransportConnection::new(CultNetRudpSocketTransportOptions {
                 runtime_id: "muninn-provider-command-test-client".to_string(),
                 socket: client_socket,
                 mode: cultnet_rs::CultNetRudpSocketMode::Client,
@@ -12002,10 +12338,9 @@ mod tests {
                 max_fragment_bytes: Some(1200),
                 max_pending_reliable_packets: Some(64),
                 media_reliable_expire_after_ms: None,
-                            reconnect_policy: None,
-            },
-        )
-        .unwrap();
+                reconnect_policy: None,
+            })
+            .unwrap();
         client.connect(Vec::new()).unwrap();
         let deadline = Instant::now() + Duration::from_secs(2);
         while !client.connected() && Instant::now() < deadline {
@@ -12101,8 +12436,15 @@ mod tests {
             "move-000704a800d0",
         ];
         let colors = roster.map(default_move_color_for_identity);
-        assert_eq!(colors.into_iter().collect::<HashSet<_>>().len(), roster.len());
-        assert!(colors.into_iter().all(|color| color.0.max(color.1).max(color.2) == 255));
+        assert_eq!(
+            colors.into_iter().collect::<HashSet<_>>().len(),
+            roster.len()
+        );
+        assert!(
+            colors
+                .into_iter()
+                .all(|color| color.0.max(color.1).max(color.2) == 255)
+        );
     }
 
     #[test]
@@ -12118,7 +12460,11 @@ mod tests {
             .map(|identity| golden_move_color_for_roster(identity, &roster))
             .collect::<Vec<_>>();
         assert_eq!(colors.iter().copied().collect::<HashSet<_>>().len(), 4);
-        assert!(colors.iter().all(|color| color.0.max(color.1).max(color.2) == 255));
+        assert!(
+            colors
+                .iter()
+                .all(|color| color.0.max(color.1).max(color.2) == 255)
+        );
         assert!(colors.iter().any(|color| color.0 == 255 && color.1 < 100));
         assert!(colors.iter().any(|color| color.1 == 255 && color.0 < 100));
         assert!(colors.iter().any(|color| color.2 == 255 && color.0 < 100));
@@ -12126,7 +12472,9 @@ mod tests {
 
     #[test]
     fn scheduled_golden_colors_shift_window_in_descending_move_order() {
-        let roster = (0..4).map(|index| format!("move-{index}")).collect::<Vec<_>>();
+        let roster = (0..4)
+            .map(|index| format!("move-{index}"))
+            .collect::<Vec<_>>();
         let state = |millis: i128| {
             roster
                 .iter()
@@ -12144,44 +12492,91 @@ mod tests {
                 .collect::<Vec<_>>()
         };
 
-        assert_eq!(state(0), vec![(0, false), (1, false), (2, false), (3, true)]);
-        assert_eq!(state(249), vec![(0, false), (1, false), (2, false), (3, true)]);
-        assert_eq!(state(250), vec![(0, false), (1, false), (2, true), (4, false)]);
-        assert_eq!(state(500), vec![(0, false), (1, true), (3, false), (4, false)]);
-        assert_eq!(state(750), vec![(0, true), (2, false), (3, false), (4, false)]);
-        assert_eq!(state(1_000), vec![(1, false), (2, false), (3, false), (4, true)]);
+        assert_eq!(
+            state(0),
+            vec![(0, false), (1, false), (2, false), (3, true)]
+        );
+        assert_eq!(
+            state(249),
+            vec![(0, false), (1, false), (2, false), (3, true)]
+        );
+        assert_eq!(
+            state(250),
+            vec![(0, false), (1, false), (2, true), (4, false)]
+        );
+        assert_eq!(
+            state(500),
+            vec![(0, false), (1, true), (3, false), (4, false)]
+        );
+        assert_eq!(
+            state(750),
+            vec![(0, true), (2, false), (3, false), (4, false)]
+        );
+        assert_eq!(
+            state(1_000),
+            vec![(1, false), (2, false), (3, false), (4, true)]
+        );
     }
 
     #[test]
     fn scheduled_golden_color_smoothersteps_across_the_full_subslot() {
-        let roster = (0..4).map(|index| format!("move-{index}")).collect::<Vec<_>>();
+        let roster = (0..4)
+            .map(|index| format!("move-{index}"))
+            .collect::<Vec<_>>();
         let color_at = |millis: i128| {
-            scheduled_golden_move_color(
+            scheduled_golden_move_color("move-3", &roster, 0, 1_000_000_000, millis * 1_000_000)
+                .unwrap()
+                .0
+        };
+
+        assert_eq!(
+            color_at(0),
+            hsv_to_rgb(
+                (3.0 * 0.618_033_988_749_894_9_f64).fract() * 360.0,
+                1.0,
+                1.0
+            )
+        );
+        assert_eq!(
+            color_at(125),
+            hsv_to_rgb(
+                wrapped_hue_lerp(
+                    (3.0 * 0.618_033_988_749_894_9_f64).fract(),
+                    (4.0 * 0.618_033_988_749_894_9_f64).fract(),
+                    0.5,
+                ) * 360.0,
+                1.0,
+                1.0
+            )
+        );
+        assert_eq!(
+            color_at(250),
+            hsv_to_rgb(
+                (4.0 * 0.618_033_988_749_894_9_f64).fract() * 360.0,
+                1.0,
+                1.0
+            )
+        );
+    }
+
+    #[test]
+    fn scheduled_golden_color_transition_uses_selected_subslot_percentage() {
+        let roster = (0..4)
+            .map(|index| format!("move-{index}"))
+            .collect::<Vec<_>>();
+        let color_at = |millis: i128| {
+            scheduled_golden_move_color_with_order(
                 "move-3",
                 &roster,
                 0,
                 1_000_000_000,
                 millis * 1_000_000,
+                "descending",
+                25,
             )
             .unwrap()
             .0
         };
-
-        assert_eq!(color_at(0), hsv_to_rgb((3.0 * 0.618_033_988_749_894_9_f64).fract() * 360.0, 1.0, 1.0));
-        assert_eq!(color_at(125), hsv_to_rgb(wrapped_hue_lerp(
-            (3.0 * 0.618_033_988_749_894_9_f64).fract(),
-            (4.0 * 0.618_033_988_749_894_9_f64).fract(),
-            0.5,
-        ) * 360.0, 1.0, 1.0));
-        assert_eq!(color_at(250), hsv_to_rgb((4.0 * 0.618_033_988_749_894_9_f64).fract() * 360.0, 1.0, 1.0));
-    }
-
-    #[test]
-    fn scheduled_golden_color_transition_uses_selected_subslot_percentage() {
-        let roster = (0..4).map(|index| format!("move-{index}")).collect::<Vec<_>>();
-        let color_at = |millis: i128| scheduled_golden_move_color_with_order(
-            "move-3", &roster, 0, 1_000_000_000, millis * 1_000_000, "descending", 25,
-        ).unwrap().0;
         let source = (3.0 * 0.618_033_988_749_894_9_f64).fract();
         let target = (4.0 * 0.618_033_988_749_894_9_f64).fract();
         assert_ne!(color_at(31), hsv_to_rgb(source * 360.0, 1.0, 1.0));
@@ -12192,10 +12587,20 @@ mod tests {
 
     #[test]
     fn zero_percent_transition_hard_steps_at_subslot_boundary() {
-        let roster = (0..4).map(|index| format!("move-{index}")).collect::<Vec<_>>();
+        let roster = (0..4)
+            .map(|index| format!("move-{index}"))
+            .collect::<Vec<_>>();
         let color = scheduled_golden_move_color_with_order(
-            "move-3", &roster, 0, 1_000_000_000, 0, "descending", 0,
-        ).unwrap().0;
+            "move-3",
+            &roster,
+            0,
+            1_000_000_000,
+            0,
+            "descending",
+            0,
+        )
+        .unwrap()
+        .0;
         let target = (4.0 * 0.618_033_988_749_894_9_f64).fract();
         assert_eq!(color, hsv_to_rgb(target * 360.0, 1.0, 1.0));
     }
@@ -12206,8 +12611,14 @@ mod tests {
         assert_eq!(move_hue_update_order(4, 0, "ascending"), vec![0, 1, 2, 3]);
         assert_eq!(move_hue_update_order(4, 0, "bounce"), vec![3, 2, 1, 0]);
         assert_eq!(move_hue_update_order(4, 1, "bounce"), vec![0, 1, 2, 3]);
-        assert_eq!(move_hue_update_order(4, 0, "rotating-lead"), vec![3, 2, 1, 0]);
-        assert_eq!(move_hue_update_order(4, 1, "rotating-lead"), vec![2, 1, 0, 3]);
+        assert_eq!(
+            move_hue_update_order(4, 0, "rotating-lead"),
+            vec![3, 2, 1, 0]
+        );
+        assert_eq!(
+            move_hue_update_order(4, 1, "rotating-lead"),
+            vec![2, 1, 0, 3]
+        );
         let first = move_hue_update_order(4, 23, "golden-permutation");
         assert_eq!(first, move_hue_update_order(4, 23, "golden-permutation"));
         assert_eq!(first.iter().copied().collect::<HashSet<_>>().len(), 4);
@@ -13122,10 +13533,12 @@ Device 00:07:04:A8:00:D0 (public)
             .value
             .get("routes")
             .and_then(|value| value.as_array())
-            .and_then(|routes| routes.iter().find(|route| {
-                route.get("role").and_then(|value| value.as_str())
-                    == Some("muninn provider command ingress")
-            }))
+            .and_then(|routes| {
+                routes.iter().find(|route| {
+                    route.get("role").and_then(|value| value.as_str())
+                        == Some("muninn provider command ingress")
+                })
+            })
             .expect("provider-owned command route");
         assert_eq!(
             command_route.get("uri").and_then(|value| value.as_str()),
@@ -13618,7 +14031,10 @@ Device 00:07:04:A8:00:D0 (public)
             hidraw_path: "/dev/input/js2".to_string(),
         }];
 
-        assert_eq!(merge_move_state_sources(discovered.clone(), &configured), discovered);
+        assert_eq!(
+            merge_move_state_sources(discovered.clone(), &configured),
+            discovered
+        );
     }
 
     #[test]
@@ -13701,7 +14117,11 @@ Device 00:07:04:A8:00:D0 (public)
             .and_then(CultMeshSharedMemoryFrameRing::try_acquire_latest_read)
             .expect("latest frame should be readable");
         let decoded: DecodedMoveEvidenceStreamFrame = rmp_serde::from_slice(lease.bytes()).unwrap();
-        let remote_payload = rudp_latest.lock().unwrap().take().expect("RUDP evidence copy");
+        let remote_payload = rudp_latest
+            .lock()
+            .unwrap()
+            .take()
+            .expect("RUDP evidence copy");
         assert_eq!(remote_payload, lease.bytes());
 
         assert_eq!(decoded.0, "muninn:nightwing:move-evidence:0");

@@ -2227,7 +2227,7 @@ fn create_rudp_stream(
                 max_fragment_bytes: Some(HID_RUDP_MAX_FRAGMENT_BYTES),
                 max_pending_reliable_packets: Some(256),
                 media_reliable_expire_after_ms: Some(25),
-                            reconnect_policy: None,
+                reconnect_policy: None,
             })?;
         transport.connect(Vec::new())?;
         return Ok(Some(ActiveRudpStream {
@@ -2268,7 +2268,7 @@ fn create_rudp_stream(
             max_fragment_bytes: Some(HID_RUDP_MAX_FRAGMENT_BYTES),
             max_pending_reliable_packets: Some(256),
             media_reliable_expire_after_ms: Some(25),
-                    reconnect_policy: None,
+            reconnect_policy: None,
         })?,
         target: None,
         last_connect_attempt_at: None,
