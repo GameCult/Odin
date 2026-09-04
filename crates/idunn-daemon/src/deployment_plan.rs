@@ -1,20 +1,20 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{Context, Result, bail, ensure};
 pub use cultnet_rs::IdunnExpectedIncarnationRecord as ExpectedIncarnation;
 use cultnet_rs::{
-    IdunnExpectedCapability, IdunnExpectedDependency, IdunnExpectedRoute,
-    IDUNN_EXPECTED_INCARNATION_SCHEMA,
+    IDUNN_EXPECTED_INCARNATION_SCHEMA, IdunnExpectedCapability, IdunnExpectedDependency,
+    IdunnExpectedRoute,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::control_plane::SequenceAdmittedReady;
 use crate::deployment::{
-    capability_compatible, CapabilityDependency, DependencyKind, ExternalCapabilityBinding,
-    OperatorBinding, ServiceTransport, SourceSelectionPolicy, StartupOrder, StateDeclaration,
-    TargetDeclaration,
+    CapabilityDependency, DependencyKind, ExternalCapabilityBinding, OperatorBinding,
+    ServiceTransport, SourceSelectionPolicy, StartupOrder, StateDeclaration, TargetDeclaration,
+    capability_compatible,
 };
 
 pub const SOURCE_SELECTION_FACTS_SCHEMA: &str = "idunn.source_selection_facts.v1";
@@ -286,11 +286,11 @@ fn managed_ready_provider_refs(
     let endpoint = expected
         .route
         .as_ref()
-        .map(|route| route.candidate_endpoint.clone());
+        .map(|route| route.stable_endpoint.clone());
     let mut providers = Vec::new();
     for capability in &observed.observed_capabilities {
         providers.push(DependencyProviderRef {
-            provider_id: observed.runtime_id.clone(),
+            provider_id: expected.target.clone(),
             authority: DependencyProviderAuthority::ManagedReady {
                 target: expected.target.clone(),
                 incarnation_id: expected.incarnation_id.clone(),
@@ -995,11 +995,12 @@ fn sha256_id(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use cultnet_rs::{
+        GameCultProviderHealthIdentity, GameCultRuntimeCapability, IdunnRuntimeActivationLaunch,
+        IdunnServiceIdentity, ODIN_RUNTIME_TOPOLOGY_CORRELATION_SCHEMA,
+        OdinRuntimeTopologyCorrelationPurpose, OdinRuntimeTopologyCorrelationRecord,
+        OdinTopologyAuthenticationContext, OdinTopologyIdentity,
         authenticate_odin_runtime_topology_correlation, enroll_service_identity_at,
-        verify_runtime_authority, GameCultProviderHealthIdentity, GameCultRuntimeCapability,
-        IdunnRuntimeActivationLaunch, IdunnServiceIdentity, OdinRuntimeTopologyCorrelationPurpose,
-        OdinRuntimeTopologyCorrelationRecord, OdinTopologyAuthenticationContext,
-        OdinTopologyIdentity, ODIN_RUNTIME_TOPOLOGY_CORRELATION_SCHEMA,
+        verify_runtime_authority,
     };
 
     const RECIPE: &str = r#"
@@ -1113,13 +1114,13 @@ expected_signer_identity_id = "service-runtime-signer"
 trust_anchor_store = "/etc/gamecult/trust/service.cc"
 
 [route]
-driver = "nginx-http"
+driver = "nginx-stream-tcp"
 route_id = "service"
-stable_endpoint = "https://example.invalid/service/"
+stable_endpoint = "http://127.0.0.1:17999"
 private_host = "127.0.0.1"
 private_port_start = 18000
 private_port_end = 18009
-config_path = "/etc/nginx/idunn-routes/service.conf"
+config_path = "/etc/nginx/idunn-stream-routes/service.conf"
 reload_unit = "nginx.service"
 
 [brakes]
@@ -1189,7 +1190,7 @@ nodes = ["yggdrasil"]
         }
     }
 
-    fn ready_odin_provider(runtime_id: &str, capacity: u32) -> SequenceAdmittedReady {
+    fn ready_odin_provider(target: &str, runtime_id: &str, capacity: u32) -> SequenceAdmittedReady {
         (|| -> Result<SequenceAdmittedReady> {
             let root = tempfile::tempdir()?;
             let provider = enroll_service_identity_at::<GameCultProviderHealthIdentity>(
@@ -1200,6 +1201,7 @@ nodes = ["yggdrasil"]
             let odin_signer =
                 enroll_service_identity_at::<OdinTopologyIdentity>(&root.path().join("odin.cc"))?;
             let mut expected = odin();
+            expected.target = target.into();
             expected.runtime_id = runtime_id.into();
             expected.expected_signer_identity_id = provider.entry().identity_id.clone();
             let launch = IdunnRuntimeActivationLaunch::issue(&expected, digest(b'8'), 100, &idunn)?;
@@ -1262,7 +1264,7 @@ nodes = ["yggdrasil"]
     }
 
     fn plan() -> CompiledDeploymentPlan {
-        let providers = [ready_odin_provider("odin-yggdrasil", 1)];
+        let providers = [ready_odin_provider("odin", "odin-yggdrasil", 1)];
         plan_with(&providers)
     }
 
@@ -1302,7 +1304,7 @@ nodes = ["yggdrasil"]
 
     #[test]
     fn compiler_parses_the_exact_bytes_it_receipts() {
-        let providers = [ready_odin_provider("odin-yggdrasil", 1)];
+        let providers = [ready_odin_provider("odin", "odin-yggdrasil", 1)];
         let first = plan_with(&providers);
         let second = plan_with(&providers);
         assert_eq!(first, second);
@@ -1316,17 +1318,19 @@ nodes = ["yggdrasil"]
             "contract = \"service.health\"",
             "contract = \"service.health.v2\"",
         );
-        let providers = [ready_odin_provider("odin-yggdrasil", 1)];
-        assert!(compile_deployment_plan(
-            changed.as_bytes(),
-            BINDING.as_bytes(),
-            source(RECIPE),
-            "service-incarnation-2",
-            Some(18002),
-            111,
-            &providers,
-        )
-        .is_err());
+        let providers = [ready_odin_provider("odin", "odin-yggdrasil", 1)];
+        assert!(
+            compile_deployment_plan(
+                changed.as_bytes(),
+                BINDING.as_bytes(),
+                source(RECIPE),
+                "service-incarnation-2",
+                Some(18002),
+                111,
+                &providers,
+            )
+            .is_err()
+        );
         let mut corrupted = first;
         corrupted
             .binding_blob
@@ -1382,8 +1386,8 @@ nodes = ["yggdrasil"]
     fn dependency_selection_uses_observed_ready_capacity_and_stable_identity_order() {
         let declaration = TargetDeclaration::parse(RECIPE).unwrap();
         let admitted = [
-            ready_odin_provider("odin-z", 4),
-            ready_odin_provider("odin-yggdrasil", 2),
+            ready_odin_provider("odin-z", "odin-runtime-z", 4),
+            ready_odin_provider("odin-yggdrasil", "odin-runtime-yggdrasil", 2),
         ];
         let providers = admitted
             .iter()
@@ -1395,6 +1399,10 @@ nodes = ["yggdrasil"]
             "odin-yggdrasil"
         );
         assert_eq!(selected[0].provider.as_ref().unwrap().capacity, 2);
+        assert_eq!(
+            selected[0].provider.as_ref().unwrap().endpoint.as_deref(),
+            Some("tcp://10.77.0.1:17871")
+        );
         assert!(matches!(
             &selected[0].provider.as_ref().unwrap().authority,
             DependencyProviderAuthority::ManagedReady {
@@ -1459,7 +1467,7 @@ nodes = ["yggdrasil"]
         assert!(!expected.write_lease_required);
         assert_eq!(
             expected.dependencies[0].provider_id.as_deref(),
-            Some("odin-yggdrasil")
+            Some("odin")
         );
         assert_eq!(
             expected.dependencies[0].provider_authority.as_deref(),
@@ -1494,7 +1502,7 @@ nodes = ["yggdrasil"]
             "service-incarnation-sorted",
             Some(18002),
             111,
-            &[ready_odin_provider("odin-yggdrasil", 1)],
+            &[ready_odin_provider("odin", "odin-yggdrasil", 1)],
         )
         .unwrap();
         let release = SealedRelease::new(

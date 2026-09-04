@@ -5,35 +5,36 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{anyhow, bail, ensure, Context, Result};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use cultcache_rs::{
     CultCacheEnvelope, CultCacheExpectedEnvelope, DatabaseEntry, SingleFileMessagePackBackingStore,
 };
 use cultnet_rs::{
-    authenticate_odin_runtime_topology_correlation, derive_service_identity_id,
-    evaluate_idunn_continuity_restart, evaluate_idunn_deployment_brake, open_service_identity_at,
-    verify_idunn_deployment_brake_authorization, verify_runtime_authority,
     AuthenticatedOdinRuntimeTopologyCorrelation, GameCultProviderHealthIdentity,
+    IDUNN_DEPLOYMENT_BRAKE_SCHEMA, IDUNN_LIFECYCLE_BRAKE_SCHEMA, IDUNN_PROCESS_WRITE_LEASE_SCHEMA,
     IdunnDeploymentBrakeObservation, IdunnDeploymentBrakeOperatorIdentity,
     IdunnDeploymentBrakeRecord, IdunnExpectedIncarnationRecord, IdunnLifecycleBrakeObservation,
     IdunnLifecycleBrakeRecord, IdunnProcessWriteLeaseRecord, IdunnRuntimeActivationLaunch,
     IdunnRuntimeActivationRecord, IdunnServiceIdentity, OdinTopologyAuthenticationContext,
-    OdinTopologyIdentity, ServiceIdentityProfile, ServiceIdentitySigner,
-    ServiceIdentityTrustAnchor, IDUNN_DEPLOYMENT_BRAKE_SCHEMA, IDUNN_LIFECYCLE_BRAKE_SCHEMA,
-    IDUNN_PROCESS_WRITE_LEASE_SCHEMA,
+    OdinTopologyDisagreement, OdinTopologyIdentity, RuntimePresenceAuthenticationContext,
+    ServiceIdentityProfile, ServiceIdentitySigner, ServiceIdentityTrustAnchor,
+    authenticate_odin_runtime_topology_correlation, authenticate_runtime_presence_claim,
+    correlate_runtime_presence_claim, derive_service_identity_id,
+    evaluate_idunn_continuity_restart, evaluate_idunn_deployment_brake, open_service_identity_at,
+    verify_idunn_deployment_brake_authorization, verify_runtime_authority,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::deployment::{DependencyKind, OperatorBinding, StartupOrder};
+use crate::deployment::{DependencyKind, OperatorBinding, RouteBinding, capability_compatible};
 use crate::deployment_plan::{
-    compile_deployment_plan, CompiledDeploymentPlan, DependencyProviderAuthority, SealedRelease,
+    CompiledDeploymentPlan, DependencyProviderAuthority, SealedRelease, compile_deployment_plan,
 };
 use crate::drivers::{
     CultCacheTopologyDriver, CultCacheWriteLeaseDriver, DockerRunnerDriver, FrozenSourceReceipt,
     GitSourceDriver, InstalledReleaseObservation, NginxRouteDriver, ProcessIdentity,
-    RouteObservation, RoutePort, RoutePreflightReceipt, RunnerPort, SourcePort,
+    RouteObservation, RoutePreflightReceipt, RunnerPort, SourcePort,
     SystemdTransientWorkloadDriver, TopologyPort, WorkloadObservation, WorkloadPort,
     WriteLeasePort,
 };
@@ -188,17 +189,127 @@ impl TopologyEvidence {
     }
 }
 
-/// Opaque capability minted only after the transaction CAS advances the Odin
-/// replay cursor and stores these exact bytes. Adjacent drivers may inspect the
-/// authenticated receipt, but cannot construct replay admission themselves.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimePresenceEvidence {
+    canonical_bytes: Vec<u8>,
+    canonical_sha256: String,
+    message_id: String,
+    challenged_at_unix_millis: u64,
+    admitted_at_unix_millis: u64,
+}
+
+impl RuntimePresenceEvidence {
+    fn from_present(
+        present: &cultnet_rs::VerifiedRuntimePresence,
+        message_id: String,
+        challenged_at_unix_millis: u64,
+        admitted_at_unix_millis: u64,
+    ) -> Result<Self> {
+        let evidence = Self {
+            canonical_bytes: present.canonical_bytes().to_vec(),
+            canonical_sha256: present.signed_presence_sha256().to_owned(),
+            message_id,
+            challenged_at_unix_millis,
+            admitted_at_unix_millis,
+        };
+        evidence.validate_shape()?;
+        Ok(evidence)
+    }
+
+    fn validate_shape(&self) -> Result<()> {
+        ensure!(
+            !self.canonical_bytes.is_empty()
+                && self.canonical_sha256 == sha256_id(&self.canonical_bytes),
+            "runtime presence evidence bytes or digest are invalid"
+        );
+        require_id(&self.message_id, "runtime presence challenge")?;
+        ensure!(
+            self.challenged_at_unix_millis > 0
+                && self.admitted_at_unix_millis >= self.challenged_at_unix_millis,
+            "runtime presence evidence timeline is invalid"
+        );
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "source", rename_all = "kebab-case", deny_unknown_fields)]
+enum WarmingEvidence {
+    OdinTopology { evidence: TopologyEvidence },
+    FirstOdinDirect { evidence: RuntimePresenceEvidence },
+}
+
+impl WarmingEvidence {
+    fn validate_shape(&self) -> Result<()> {
+        match self {
+            Self::OdinTopology { evidence } => evidence.validate_shape(),
+            Self::FirstOdinDirect { evidence } => evidence.validate_shape(),
+        }
+    }
+
+    fn canonical_sha256(&self) -> &str {
+        match self {
+            Self::OdinTopology { evidence } => &evidence.canonical_sha256,
+            Self::FirstOdinDirect { evidence } => &evidence.canonical_sha256,
+        }
+    }
+}
+
+/// Opaque capability minted only after the transaction CAS stores exact
+/// Warming evidence. Adjacent drivers receive only the candidate identity and
+/// signed-presence digest needed to bind the write lease; they cannot inspect
+/// or construct semantic admission.
 #[derive(Clone, Debug)]
 pub struct SequenceAdmittedWarming {
     transaction_id: String,
-    evidence: TopologyEvidence,
-    authenticated: AuthenticatedOdinRuntimeTopologyCorrelation,
+    evidence: WarmingEvidence,
+    signed_presence_sha256: String,
+    runtime_instance_id: String,
 }
 
 impl SequenceAdmittedWarming {
+    fn from_topology(
+        transaction_id: String,
+        evidence: TopologyEvidence,
+        authenticated: AuthenticatedOdinRuntimeTopologyCorrelation,
+    ) -> Result<Self> {
+        let record = authenticated.record();
+        let signed_presence_sha256 = record
+            .signed_presence_sha256
+            .clone()
+            .context("Warming topology has no signed presence")?;
+        let runtime_instance_id = record
+            .runtime_instance_id
+            .clone()
+            .context("Warming topology has no runtime instance")?;
+        Ok(Self {
+            transaction_id,
+            evidence: WarmingEvidence::OdinTopology { evidence },
+            signed_presence_sha256,
+            runtime_instance_id,
+        })
+    }
+
+    fn from_first_odin_presence(
+        transaction_id: String,
+        evidence: RuntimePresenceEvidence,
+        present: cultnet_rs::VerifiedRuntimePresence,
+    ) -> Result<Self> {
+        ensure!(
+            present.canonical_bytes() == evidence.canonical_bytes
+                && present.signed_presence_sha256() == evidence.canonical_sha256,
+            "direct first-Odin Warming evidence differs from its authenticated presence"
+        );
+        let runtime_instance_id = present.record().runtime_instance_id.clone();
+        Ok(Self {
+            transaction_id,
+            signed_presence_sha256: evidence.canonical_sha256.clone(),
+            evidence: WarmingEvidence::FirstOdinDirect { evidence },
+            runtime_instance_id,
+        })
+    }
+
     #[cfg(test)]
     pub(crate) fn for_test(
         transaction_id: impl Into<String>,
@@ -218,15 +329,21 @@ impl SequenceAdmittedWarming {
         require_id(&transaction_id, "test transaction id")?;
         let evidence =
             TopologyEvidence::from_authenticated(&authenticated, admitted_at_unix_millis)?;
-        Ok(Self {
-            transaction_id,
-            evidence,
-            authenticated,
-        })
-    }
-
-    pub(crate) fn authenticated(&self) -> &AuthenticatedOdinRuntimeTopologyCorrelation {
-        &self.authenticated
+        let signed_presence_sha256 = record
+            .signed_presence_sha256
+            .clone()
+            .context("test Warming receipt has no signed presence")?;
+        let runtime_instance_id = record
+            .runtime_instance_id
+            .clone()
+            .context("test Warming receipt has no runtime instance")?;
+        let token = Self::from_topology(transaction_id, evidence, authenticated)?;
+        ensure!(
+            token.signed_presence_sha256 == signed_presence_sha256
+                && token.runtime_instance_id == runtime_instance_id,
+            "test Warming token extraction changed"
+        );
+        Ok(token)
     }
 
     pub(crate) fn transaction_id(&self) -> &str {
@@ -234,7 +351,15 @@ impl SequenceAdmittedWarming {
     }
 
     pub(crate) fn evidence_sha256(&self) -> &str {
-        &self.evidence.canonical_sha256
+        self.evidence.canonical_sha256()
+    }
+
+    pub(crate) fn signed_presence_sha256(&self) -> &str {
+        &self.signed_presence_sha256
+    }
+
+    pub(crate) fn runtime_instance_id(&self) -> &str {
+        &self.runtime_instance_id
     }
 }
 
@@ -352,14 +477,27 @@ impl LeasingEvidence {
 #[serde(tag = "result", rename_all = "kebab-case", deny_unknown_fields)]
 enum RoutingEvidence {
     SkippedUnrouted,
-    Promoted { observation: RouteObservation },
+    Promoted {
+        observation: RouteObservation,
+        promoted_at_unix_millis: u64,
+    },
 }
 
 impl RoutingEvidence {
     fn observation(&self) -> Option<&RouteObservation> {
         match self {
             Self::SkippedUnrouted => None,
-            Self::Promoted { observation } => Some(observation),
+            Self::Promoted { observation, .. } => Some(observation),
+        }
+    }
+
+    fn promoted_at_unix_millis(&self) -> Option<u64> {
+        match self {
+            Self::SkippedUnrouted => None,
+            Self::Promoted {
+                promoted_at_unix_millis,
+                ..
+            } => Some(*promoted_at_unix_millis),
         }
     }
 }
@@ -464,7 +602,7 @@ impl PostCommitCleanup {
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
 #[cultcache(
     type = "idunn.deployment_transaction",
-    schema = "idunn.deployment_transaction.v1"
+    schema = "idunn.deployment_transaction.v2"
 )]
 struct DeploymentTransaction {
     #[cultcache(key = 0)]
@@ -512,7 +650,7 @@ struct DeploymentTransaction {
     #[cultcache(key = 21)]
     latest_odin_observation: Option<TopologyEvidence>,
     #[cultcache(key = 22)]
-    warming: Option<TopologyEvidence>,
+    warming: Option<WarmingEvidence>,
     #[cultcache(key = 23)]
     route_preflight: Option<RoutePreflightReceipt>,
     #[cultcache(key = 24)]
@@ -641,6 +779,17 @@ impl DeploymentTransaction {
         self.phase != DeploymentPhase::Complete
     }
 
+    /// Admission has moved to the new generation at Complete, but an exact
+    /// draining incumbent still reserves its process and candidate endpoint.
+    /// No later mutation for the same target may overlap that cleanup.
+    fn blocks_new_target_mutation(&self) -> bool {
+        self.owns_target_authority()
+            || self
+                .post_commit_cleanup
+                .as_ref()
+                .is_some_and(|cleanup| !cleanup.is_complete())
+    }
+
     fn validate(&self) -> Result<()> {
         ensure!(
             self.schema_version == DEPLOYMENT_TRANSACTION_SCHEMA,
@@ -712,7 +861,7 @@ impl DeploymentTransaction {
             self.workload.is_none() || self.activation.is_some(),
             "workload observation exists without its prepared activation"
         );
-        for evidence in [&self.latest_odin_observation, &self.warming, &self.ready]
+        for evidence in [&self.latest_odin_observation, &self.ready]
             .into_iter()
             .flatten()
         {
@@ -721,6 +870,19 @@ impl DeploymentTransaction {
                 evidence.publisher_sequence <= self.odin_publisher_sequence_cursor,
                 "topology evidence exceeds the transaction replay cursor"
             );
+        }
+        if let Some(warming) = &self.warming {
+            warming.validate_shape()?;
+            match warming {
+                WarmingEvidence::OdinTopology { evidence } => ensure!(
+                    evidence.publisher_sequence <= self.odin_publisher_sequence_cursor,
+                    "Warming topology evidence exceeds the transaction replay cursor"
+                ),
+                WarmingEvidence::FirstOdinDirect { .. } => ensure!(
+                    self.target == "odin" && self.incumbent_generation_id.is_none(),
+                    "direct Warming evidence is reserved for first Odin bootstrap"
+                ),
+            }
         }
         if let Some(leasing) = &self.leasing {
             if let Some(expected) = &self.expected {
@@ -891,6 +1053,9 @@ impl DeploymentTransaction {
                         == self.route_preflight.is_some(),
                     "route preflight does not match routed Expected"
                 );
+                if let Some(preflight) = &self.route_preflight {
+                    preflight.validate()?;
+                }
             }
             if self.phase >= DeploymentPhase::Leasing {
                 ensure!(self.fencing.is_some(), "Leasing lacks fencing evidence");
@@ -910,6 +1075,18 @@ impl DeploymentTransaction {
             }
             if self.phase >= DeploymentPhase::Committing {
                 ensure!(self.routing.is_some(), "Committing lacks routing evidence");
+            }
+            if let Some(RoutingEvidence::Promoted {
+                observation,
+                promoted_at_unix_millis,
+            }) = &self.routing
+            {
+                observation.validate()?;
+                ensure!(
+                    *promoted_at_unix_millis > 0
+                        && *promoted_at_unix_millis <= self.updated_at_unix_millis,
+                    "route promotion time is outside the durable transaction timeline"
+                );
             }
             if self.phase == DeploymentPhase::Complete {
                 ensure!(
@@ -1010,7 +1187,7 @@ impl AdmittedOdinAuthority {
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
 #[cultcache(
     type = "idunn.admitted_generation",
-    schema = "idunn.admitted_generation.v1"
+    schema = "idunn.admitted_generation.v2"
 )]
 struct AdmittedGeneration {
     #[cultcache(key = 0)]
@@ -1049,6 +1226,8 @@ struct AdmittedGeneration {
     odin_authority: AdmittedOdinAuthority,
     #[cultcache(key = 17)]
     odin_publisher_sequence_cursor: u64,
+    #[cultcache(key = 18)]
+    route_repair_started_at_unix_millis: Option<u64>,
 }
 
 impl AdmittedGeneration {
@@ -1085,6 +1264,7 @@ impl AdmittedGeneration {
             routing: required(&transaction.routing, "route disposition")?.clone(),
             odin_authority,
             odin_publisher_sequence_cursor: transaction.odin_publisher_sequence_cursor,
+            route_repair_started_at_unix_millis: None,
         };
         generation.validate()?;
         Ok(generation)
@@ -1127,6 +1307,20 @@ impl AdmittedGeneration {
             self.expected.route.is_some() == self.routing.observation().is_some(),
             "admitted route disposition differs from Expected"
         );
+        if let Some(route) = self.routing.observation() {
+            route.validate()?;
+            ensure!(
+                route.runtime_instance_id == self.activation.runtime_instance_id,
+                "admitted route observation belongs to another runtime instance"
+            );
+        }
+        if let Some(started_at) = self.route_repair_started_at_unix_millis {
+            ensure!(started_at > 0, "admitted route repair has no start time");
+            ensure!(
+                matches!(&self.routing, RoutingEvidence::Promoted { .. }),
+                "only a promoted routed generation can own route repair intent"
+            );
+        }
         Ok(())
     }
 }
@@ -1532,7 +1726,7 @@ impl ControlSnapshot {
         })
     }
 
-    fn max_odin_sequence(&self, signer_identity_id: &str) -> u64 {
+    fn max_odin_sequence(&self, target: &str, signer_identity_id: &str) -> u64 {
         let transaction_max = self
             .transactions
             .iter()
@@ -1541,7 +1735,10 @@ impl ControlSnapshot {
                     .value
                     .latest_odin_observation
                     .as_ref()
-                    .filter(|evidence| evidence.signer_identity_id == signer_identity_id)
+                    .filter(|evidence| {
+                        stored.value.target == target
+                            && evidence.signer_identity_id == signer_identity_id
+                    })
                     .map(|evidence| evidence.publisher_sequence)
             })
             .max()
@@ -1549,7 +1746,10 @@ impl ControlSnapshot {
         let admitted_max = self
             .admitted
             .iter()
-            .filter(|stored| stored.value.odin_authority.signer_identity_id == signer_identity_id)
+            .filter(|stored| {
+                stored.value.target == target
+                    && stored.value.odin_authority.signer_identity_id == signer_identity_id
+            })
             .map(|stored| stored.value.odin_publisher_sequence_cursor)
             .max()
             .unwrap_or(0);
@@ -1672,7 +1872,83 @@ fn load_bindings(directory: &Path) -> Result<BTreeMap<String, LoadedBinding>> {
         );
     }
     ensure!(!bindings.is_empty(), "Idunn binding directory is empty");
+    validate_route_bindings(&bindings)?;
     Ok(bindings)
+}
+
+fn validate_route_bindings(bindings: &BTreeMap<String, LoadedBinding>) -> Result<()> {
+    let routes = bindings
+        .iter()
+        .filter_map(|(target, loaded)| {
+            loaded
+                .binding
+                .route
+                .as_ref()
+                .map(|route| (target.as_str(), route))
+        })
+        .collect::<Vec<_>>();
+    validate_route_binding_set(&routes)
+}
+
+fn validate_route_binding_set(routes: &[(&str, &RouteBinding)]) -> Result<()> {
+    for (index, (target, route)) in routes.iter().enumerate() {
+        let (stable_host, stable_port) = route.stable_socket()?;
+        let private_host = route
+            .private_host
+            .parse::<std::net::IpAddr>()
+            .context("validated route private host stopped being an IP address")?;
+        ensure!(
+            stable_host != private_host
+                || !(route.private_port_start..=route.private_port_end).contains(&stable_port),
+            "route {target} stable socket overlaps its candidate port range"
+        );
+
+        for (other_target, other) in &routes[index + 1..] {
+            ensure!(
+                route.route_id != other.route_id,
+                "route id {} is shared by targets {target} and {other_target}",
+                route.route_id
+            );
+            ensure!(
+                route.config_path != other.config_path,
+                "route fragment {} is shared by targets {target} and {other_target}",
+                route.config_path.display()
+            );
+            let other_stable = other.stable_socket()?;
+            ensure!(
+                route.driver != other.driver || (stable_host, stable_port) != other_stable,
+                "stable route socket {}:{} is shared by targets {target} and {other_target}",
+                stable_host,
+                stable_port
+            );
+            if route.driver != other.driver {
+                continue;
+            }
+            let other_private_host = other
+                .private_host
+                .parse::<std::net::IpAddr>()
+                .context("validated route private host stopped being an IP address")?;
+            let ranges_overlap = route.private_host == other.private_host
+                && route.private_port_start <= other.private_port_end
+                && other.private_port_start <= route.private_port_end;
+            ensure!(
+                !ranges_overlap,
+                "candidate port ranges overlap for targets {target} and {other_target}"
+            );
+            ensure!(
+                stable_host != other_private_host
+                    || !(other.private_port_start..=other.private_port_end).contains(&stable_port),
+                "stable route socket for {target} overlaps {other_target}'s candidate range"
+            );
+            ensure!(
+                other_stable.0 != private_host
+                    || !(route.private_port_start..=route.private_port_end)
+                        .contains(&other_stable.1),
+                "stable route socket for {other_target} overlaps {target}'s candidate range"
+            );
+        }
+    }
+    Ok(())
 }
 
 fn resolve_selector(
@@ -1978,18 +2254,38 @@ impl Engine {
                 validate_authenticated_evidence(evidence, &authenticated)?;
             }
             if let Some(evidence) = &transaction.warming {
-                let authenticated = self.authenticate_topology_bytes(
-                    snapshot,
-                    transaction,
-                    &evidence.canonical_bytes,
-                    None,
-                    evidence.admitted_at_unix_millis,
-                )?;
-                validate_authenticated_evidence(evidence, &authenticated)?;
-                ensure!(
-                    is_semantic_warming(&authenticated),
-                    "durable Warming label is not exact semantic Warming"
-                );
+                match evidence {
+                    WarmingEvidence::OdinTopology { evidence } => {
+                        let authenticated = self.authenticate_topology_bytes(
+                            snapshot,
+                            transaction,
+                            &evidence.canonical_bytes,
+                            None,
+                            evidence.admitted_at_unix_millis,
+                        )?;
+                        validate_authenticated_evidence(evidence, &authenticated)?;
+                        let incumbent_lease_sha256 =
+                            self.incumbent_lease_sha256_for_warming(snapshot, transaction)?;
+                        ensure!(
+                            is_semantic_warming(
+                                required(&transaction.expected, "Warming Expected projection",)?,
+                                required(&transaction.activation, "Warming activation")?,
+                                incumbent_lease_sha256.as_deref(),
+                                &authenticated,
+                            )?,
+                            "durable Warming gate is not supported by current runtime evidence"
+                        );
+                    }
+                    WarmingEvidence::FirstOdinDirect { evidence } => {
+                        self.authenticate_first_odin_warming_presence(
+                            transaction,
+                            &evidence.message_id,
+                            evidence.challenged_at_unix_millis,
+                            evidence.admitted_at_unix_millis,
+                            &evidence.canonical_bytes,
+                        )?;
+                    }
+                }
             }
             if let Some(evidence) = &transaction.ready {
                 let authenticated = self.authenticate_topology_bytes(
@@ -2062,14 +2358,9 @@ fn serve(options: RuntimeOptions) -> Result<()> {
     engine.validate_durable_authority(&ControlSnapshot::read(&engine.options.state_store)?)?;
 
     loop {
-        if engine.resume_one_transaction()? {
-            thread::sleep(Duration::from_millis(engine.options.poll_millis));
-            continue;
-        }
-        if engine.supervise_one_admitted_generation()? {
-            continue;
-        }
-        if engine.freeze_one_queued_command()? {
+        let transaction_progress = engine.resume_one_transaction()?;
+        let continuity_progress = engine.supervise_one_admitted_generation()?;
+        if !transaction_progress && !continuity_progress && engine.freeze_one_queued_command()? {
             continue;
         }
         thread::sleep(Duration::from_millis(engine.options.poll_millis));
@@ -2083,6 +2374,7 @@ impl Engine {
     /// own command, so one target brake cannot suspend unrelated continuity.
     fn resume_one_transaction(&self) -> Result<bool> {
         let snapshot = ControlSnapshot::read(&self.options.state_store)?;
+        let mut progressed = false;
         let mut candidates = snapshot
             .transactions
             .iter()
@@ -2099,12 +2391,22 @@ impl Engine {
             if snapshot.has_earlier_authority_sibling(&current.value) {
                 continue;
             }
-            match self.advance_transaction(current) {
-                Ok(()) => {}
-                Err(error) if current.value.phase < DeploymentPhase::Fencing => {
-                    self.begin_pre_fencing_abort(current, error)?;
+            if let Err(error) = self.advance_transaction(current) {
+                let latest_snapshot = ControlSnapshot::read(&self.options.state_store)?;
+                let latest = latest_snapshot
+                    .transactions
+                    .iter()
+                    .find(|stored| stored.value.transaction_id == current.value.transaction_id)
+                    .context("transaction disappeared while recording an execution error")?;
+                if latest.value.is_terminal() {
+                    progressed = true;
+                } else if latest.value.phase < DeploymentPhase::Fencing
+                    && latest.value.pre_fencing_abort.is_none()
+                {
+                    self.begin_pre_fencing_abort(latest, error)?;
+                } else {
+                    self.record_resumable_error(latest, &error)?;
                 }
-                Err(error) => self.record_resumable_error(current, &error)?,
             }
             let after = ControlSnapshot::read(&self.options.state_store)?;
             let live = after
@@ -2113,10 +2415,10 @@ impl Engine {
                 .find(|stored| stored.value.transaction_id == current.value.transaction_id)
                 .context("transaction disappeared while checking scheduler progress")?;
             if live.envelope != current.envelope {
-                return Ok(true);
+                progressed = true;
             }
         }
-        Ok(false)
+        Ok(progressed)
     }
 
     fn freeze_one_queued_command(&self) -> Result<bool> {
@@ -2171,7 +2473,7 @@ impl Engine {
         let busy = snapshot
             .transactions
             .iter()
-            .filter(|stored| stored.value.owns_target_authority())
+            .filter(|stored| stored.value.blocks_new_target_mutation())
             .map(|stored| stored.value.target.as_str())
             .collect::<BTreeSet<_>>();
         if targets.iter().any(|target| busy.contains(target.as_str())) {
@@ -2213,35 +2515,161 @@ impl Engine {
 
     fn supervise_one_admitted_generation(&self) -> Result<bool> {
         let snapshot = ControlSnapshot::read(&self.options.state_store)?;
-        let busy = snapshot
-            .transactions
-            .iter()
-            .filter(|stored| stored.value.owns_target_authority())
-            .map(|stored| stored.value.target.as_str())
-            .collect::<BTreeSet<_>>();
+        let mut progressed = false;
         let mut admitted = snapshot.admitted.iter().collect::<Vec<_>>();
         admitted.sort_by_key(|stored| stored.value.target.as_str());
         for current in admitted {
-            if busy.contains(current.value.target.as_str()) {
+            let blocker = snapshot.transactions.iter().find(|stored| {
+                stored.value.target == current.value.target
+                    && stored.value.blocks_new_target_mutation()
+            });
+            if blocker.is_some_and(|stored| {
+                stored.value.phase >= DeploymentPhase::Fencing
+                    && stored.value.phase < DeploymentPhase::Complete
+            }) {
                 continue;
             }
+            match self.supervise_admitted_route(current) {
+                Ok(true) => {
+                    progressed = true;
+                    continue;
+                }
+                Ok(false) => {}
+                Err(error) => eprintln!(
+                    "Idunn rejected admitted {} route continuity: {error:#}",
+                    current.value.target
+                ),
+            }
             match self.refresh_admitted_topology(&snapshot, current) {
-                Ok(true) => return Ok(true),
+                Ok(true) => {
+                    progressed = true;
+                    continue;
+                }
                 Ok(false) => {}
                 Err(error) => eprintln!(
                     "Idunn preserved admitted {} after rejecting topology observation: {error:#}",
                     current.value.target
                 ),
             }
-            if self
-                .workload
-                .observe(
-                    &current.value.expected,
-                    &current.value.activation,
-                    &current.value.workload,
-                )
-                .is_ok()
-            {
+            let mut operational_error = None;
+            let observation = match self.workload.observe(
+                &current.value.expected,
+                &current.value.activation,
+                &current.value.workload,
+            ) {
+                Ok(observation) => {
+                    let lease_is_missing = if let Some(lease) = current.value.leasing.lease() {
+                        let lease_health = (|| -> Result<bool> {
+                            let lease_path = current
+                                .value
+                                .plan
+                                .parsed_inputs()?
+                                .1
+                                .process_write_lease
+                                .context("admitted lease has no operator binding")?
+                                .record_path;
+                            let driver =
+                                CultCacheWriteLeaseDriver::new(&current.value.target, lease_path);
+                            if driver.observe_exact(lease)? {
+                                return Ok(true);
+                            }
+                            if driver.observe_empty()? {
+                                return Ok(false);
+                            }
+                            bail!("write-lease store contains unexpected authority")
+                        })();
+                        match lease_health {
+                            Ok(true) => false,
+                            Ok(false) => {
+                                operational_error =
+                                    Some(anyhow!("admitted physical write lease is missing"));
+                                true
+                            }
+                            Err(error) => {
+                                eprintln!(
+                                    "Idunn preserved admitted {} after refusing an unsafe write-lease mutation: {error:#}",
+                                    current.value.target
+                                );
+                                continue;
+                            }
+                        }
+                    } else {
+                        false
+                    };
+                    if lease_is_missing {
+                        None
+                    } else {
+                        Some(observation)
+                    }
+                }
+                Err(error) => {
+                    operational_error = Some(error);
+                    None
+                }
+            };
+            if let Some(observation) = observation {
+                if blocker.is_none()
+                    || blocker.is_some_and(|stored| stored.value.phase == DeploymentPhase::Complete)
+                {
+                    let repair = (|| -> Result<()> {
+                        let topology = self.topology();
+                        let provider_anchor = self.provider_anchor_for_plan(&current.value.plan)?;
+                        if !topology.admitted_runtime_projection_is_exact(
+                            &current.value.expected,
+                            &provider_anchor,
+                            &current.value.activation,
+                            current.value.leasing.lease(),
+                        )? {
+                            ensure!(
+                                topology
+                                    .publish_expected(&current.value.expected, &provider_anchor,)?
+                                    == current.value.expected.canonical_sha256()?,
+                                "admitted Expected projection repair differs"
+                            );
+                            ensure!(
+                                topology.publish_observed_activation(
+                                    &current.value.expected,
+                                    &current.value.activation,
+                                    &observation,
+                                )? == current.value.activation.canonical_sha256()?,
+                                "admitted activation projection repair differs"
+                            );
+                            if let Some(lease) = current.value.leasing.lease() {
+                                ensure!(
+                                    topology.publish_process_write_lease(
+                                        &current.value.expected,
+                                        &current.value.activation,
+                                        lease,
+                                    )? == lease.canonical_sha256()?,
+                                    "admitted write-lease projection repair differs"
+                                );
+                            }
+                        }
+                        Ok(())
+                    })();
+                    if let Err(error) = repair {
+                        eprintln!(
+                            "Idunn preserved admitted {} after refusing topology projection repair: {error:#}",
+                            current.value.target
+                        );
+                    }
+                }
+                continue;
+            }
+            let workload_error = operational_error
+                .context("admitted operational state has neither observation nor error")?;
+            if let Some(blocker) = blocker {
+                if blocker.value.phase < DeploymentPhase::Fencing
+                    && blocker.value.pre_fencing_abort.is_none()
+                {
+                    self.begin_pre_fencing_abort(
+                        blocker,
+                        anyhow!(
+                            "admitted incumbent failed before candidate fencing; deployment yielded to continuity: {workload_error:#}"
+                        ),
+                    )?;
+                    progressed = true;
+                }
                 continue;
             }
             let now = now_millis()?;
@@ -2278,9 +2706,129 @@ impl Engine {
                     )?,
                 "continuity scheduling lost its command/transaction CAS"
             );
+            progressed = true;
+        }
+        Ok(progressed)
+    }
+
+    fn supervise_admitted_route(&self, current: &Stored<AdmittedGeneration>) -> Result<bool> {
+        let Some(expected_route) = current.value.expected.route.as_ref() else {
+            ensure!(
+                matches!(&current.value.routing, RoutingEvidence::SkippedUnrouted)
+                    && current.value.route_repair_started_at_unix_millis.is_none(),
+                "unrouted admitted generation carries route authority"
+            );
+            return Ok(false);
+        };
+        let RoutingEvidence::Promoted {
+            observation,
+            promoted_at_unix_millis,
+        } = &current.value.routing
+        else {
+            bail!("routed admitted generation has no promoted route receipt")
+        };
+        ensure!(
+            observation.route_id == expected_route.route_id
+                && observation.runtime_instance_id == current.value.activation.runtime_instance_id,
+            "admitted route receipt names another incarnation"
+        );
+        let binding = current.value.plan.parsed_inputs()?.1;
+        let lease_driver = if let Some(lease) = current.value.leasing.lease() {
+            let lease_path = &binding
+                .process_write_lease
+                .as_ref()
+                .context("stateful admitted generation has no write-lease binding")?
+                .record_path;
+            let driver = CultCacheWriteLeaseDriver::new(&current.value.target, lease_path);
+            ensure!(
+                driver.observe_exact(lease)?,
+                "admitted process write lease is no longer exact"
+            );
+            Some(driver)
+        } else {
+            None
+        };
+        let route_binding = binding
+            .route
+            .context("routed admitted generation has no operator route binding")?;
+        let driver = NginxRouteDriver::new(route_binding);
+
+        let membership_is_exact =
+            driver.observe_membership(&current.value.expected, &observation.membership_sha256)?;
+        let now = now_millis()?;
+        if membership_is_exact
+            && route_observation_is_current(
+                observation.observed_at_unix_millis,
+                now,
+                self.options.topology_maximum_age_millis,
+                self.options.topology_maximum_future_skew_millis,
+            )
+            && current.value.route_repair_started_at_unix_millis.is_none()
+        {
+            return Ok(false);
+        }
+        if current.value.route_repair_started_at_unix_millis.is_none() {
+            let mut next = current.value.clone();
+            next.route_repair_started_at_unix_millis = Some(now);
+            next.validate()?;
+            ensure!(
+                SingleFileMessagePackBackingStore::new(&self.options.state_store)
+                    .compare_exchange(
+                        &[CultCacheExpectedEnvelope {
+                            r#type: AdmittedGeneration::TYPE.into(),
+                            key: current.value.target.clone(),
+                            current: Some(current.envelope.clone()),
+                        }],
+                        &[admitted_envelope(&next, now)?],
+                    )?,
+                "admitted generation changed before route repair intent CAS"
+            );
             return Ok(true);
         }
-        Ok(false)
+        driver
+            .restore_admitted_membership(&current.value.expected, &observation.membership_sha256)?;
+        let authority = self.runtime_authority_parts(
+            &current.value.plan,
+            &current.value.expected,
+            &current.value.activation,
+        )?;
+        let refreshed = self.prove_stable_route_against(
+            &current.value.expected,
+            &current.value.activation,
+            &authority,
+            current.value.leasing.lease_sha256(),
+            &driver,
+            observation.membership_sha256.clone(),
+        )?;
+        ensure!(
+            driver.observe_membership(&current.value.expected, &refreshed.membership_sha256)?,
+            "admitted route membership changed during its continuity challenge"
+        );
+        if let (Some(lease_driver), Some(lease)) = (&lease_driver, current.value.leasing.lease()) {
+            ensure!(
+                lease_driver.observe_exact(lease)?,
+                "admitted process write lease changed during its continuity challenge"
+            );
+        }
+        let mut next = current.value.clone();
+        next.routing = RoutingEvidence::Promoted {
+            observation: refreshed,
+            promoted_at_unix_millis: *promoted_at_unix_millis,
+        };
+        next.route_repair_started_at_unix_millis = None;
+        next.validate()?;
+        ensure!(
+            SingleFileMessagePackBackingStore::new(&self.options.state_store).compare_exchange(
+                &[CultCacheExpectedEnvelope {
+                    r#type: AdmittedGeneration::TYPE.into(),
+                    key: current.value.target.clone(),
+                    current: Some(current.envelope.clone()),
+                }],
+                &[admitted_envelope(&next, now)?],
+            )?,
+            "admitted generation changed before route continuity receipt CAS"
+        );
+        Ok(true)
     }
 
     fn refresh_admitted_topology(
@@ -2312,7 +2860,7 @@ impl Engine {
         let evidence = TopologyEvidence::from_authenticated(&authenticated, now)?;
         if !sequence_requires_admission(
             Some(&current.value.latest_odin_observation),
-            snapshot.max_odin_sequence(&evidence.signer_identity_id),
+            snapshot.max_odin_sequence(&current.value.target, &evidence.signer_identity_id),
             &evidence,
         )? {
             return Ok(false);
@@ -2434,8 +2982,12 @@ impl Engine {
 
         if current.value.expected_publication_sha256.is_none() {
             let now = now_millis()?;
+            let plan = required(&current.value.plan, "transaction plan")?;
             let expected = required(&current.value.expected, "Expected projection")?;
-            let digest = self.topology().publish_expected(expected)?;
+            let provider_anchor = self.provider_anchor_for_plan(plan)?;
+            let digest = self
+                .topology()
+                .publish_expected(expected, &provider_anchor)?;
             return self.persist_same_phase(current, |next| {
                 next.expected_publication_sha256 = Some(digest);
                 next.updated_at_unix_millis = now;
@@ -2541,35 +3093,64 @@ impl Engine {
         let activation = required(&current.value.activation, "activation")?;
         let workload = required(&current.value.workload, "workload")?;
         self.workload.observe(expected, activation, workload)?;
-        {
+        let snapshot = ControlSnapshot::read(&self.options.state_store)?;
+        let incumbent_lease_sha256 =
+            self.incumbent_lease_sha256_for_warming(&snapshot, &current.value)?;
+        if current.value.warming.is_none() {
+            if current.value.target == "odin" && snapshot.admitted_for("odin").is_none() {
+                ensure!(
+                    current.value.incumbent_generation_id.is_none()
+                        && expected.write_lease_required,
+                    "first Odin bootstrap must be a stateful first incarnation"
+                );
+                let (evidence, present) = self.observe_first_odin_warming(&current.value)?;
+                let _token = SequenceAdmittedWarming::from_first_odin_presence(
+                    current.value.transaction_id.clone(),
+                    evidence.clone(),
+                    present,
+                )?;
+                return self.persist_same_phase(current, |next| {
+                    next.warming = Some(WarmingEvidence::FirstOdinDirect { evidence });
+                    Ok(())
+                });
+            }
             let Some((admitted, authenticated)) = self.admit_latest_topology(current, None)? else {
                 return Ok(());
             };
             if admitted.envelope != current.envelope {
                 return Ok(());
             }
-            let semantic_warming = is_semantic_warming(&authenticated);
+            let semantic_warming = is_semantic_warming(
+                expected,
+                activation,
+                incumbent_lease_sha256.as_deref(),
+                &authenticated,
+            )?;
             let latest = required(
                 &admitted.value.latest_odin_observation,
                 "sequence-admitted warming evidence",
             )?;
-            if current.value.warming.as_ref() == Some(latest) {
-                ensure!(semantic_warming, "stored Warming receipt changed meaning");
-            } else if semantic_warming {
+            if semantic_warming {
                 let evidence = latest.clone();
-                let _token = SequenceAdmittedWarming {
-                    transaction_id: admitted.value.transaction_id.clone(),
-                    evidence: evidence.clone(),
+                let _token = SequenceAdmittedWarming::from_topology(
+                    admitted.value.transaction_id.clone(),
+                    evidence.clone(),
                     authenticated,
-                };
+                )?;
                 return self.persist_same_phase(&admitted, |next| {
-                    next.warming = Some(evidence);
+                    next.warming = Some(WarmingEvidence::OdinTopology { evidence });
                     Ok(())
                 });
             } else {
                 return Ok(());
             }
         }
+        let warming = self.rehydrate_warming_token(&current.value, now_millis()?, false)?;
+        ensure!(
+            warming.transaction_id() == current.value.transaction_id
+                && warming.runtime_instance_id() == activation.runtime_instance_id.as_str(),
+            "durable Warming evidence belongs to another candidate"
+        );
 
         if expected.route.is_some() && current.value.route_preflight.is_none() {
             let now = now_millis()?;
@@ -2632,12 +3213,21 @@ impl Engine {
                     })
                     .transpose()?;
                 if let (Some(lease), Some(path)) = (incumbent_lease, &incumbent_lease_path) {
+                    let incumbent = incumbent.context("incumbent lease lost its generation")?;
+                    self.workload
+                        .stop(&incumbent.value.workload)
+                        .context("stopping the exact incumbent before revoking its lifetime-held write lease")?;
                     let driver = CultCacheWriteLeaseDriver::new(&current.value.target, path);
                     driver.revoke_exact(Some(lease))?;
                     ensure!(
                         driver.observe_empty()?,
                         "incumbent write lease remained after exact fencing"
                     );
+                    self.topology().withdraw_process_write_lease(
+                        &incumbent.value.expected,
+                        &incumbent.value.activation,
+                        Some(lease),
+                    )?;
                 }
                 let candidate_lease_path = if expected.write_lease_required {
                     Some(
@@ -2665,6 +3255,11 @@ impl Engine {
                         );
                     }
                 }
+                self.topology().withdraw_process_write_lease(
+                    expected,
+                    required(&current.value.activation, "candidate activation")?,
+                    None,
+                )?;
                 FencingEvidence::Revoked {
                     incumbent_lease_sha256: incumbent_lease
                         .map(IdunnProcessWriteLeaseRecord::canonical_sha256)
@@ -2684,74 +3279,64 @@ impl Engine {
     }
 
     fn advance_leasing(&self, current: &Stored<DeploymentTransaction>) -> Result<()> {
-        if current.value.leasing.is_none() {
-            let now = now_millis()?;
-            let expected = required(&current.value.expected, "Expected projection")?;
-            let evidence = if expected.write_lease_required {
-                let warming = self.rehydrate_warming_token(&current.value, now)?;
-                ensure!(
-                    warming.transaction_id() == current.value.transaction_id
-                        && Some(warming.evidence_sha256())
-                            == current
-                                .value
-                                .warming
-                                .as_ref()
-                                .map(|value| value.canonical_sha256.as_str()),
-                    "Warming token does not bind this transaction's durable admission"
-                );
-                let activation = required(&current.value.activation, "activation")?;
-                let binding = current.value.plan.as_ref().unwrap().parsed_inputs()?.1;
-                let _lease_path = binding
-                    .process_write_lease
-                    .context("stateful target has no write-lease binding")?
-                    .record_path;
-                let snapshot = ControlSnapshot::read(&self.options.state_store)?;
-                let epoch = self
-                    .exact_incumbent(&snapshot, &current.value)?
-                    .and_then(|generation| generation.value.leasing.lease())
-                    .map_or(1, |lease| lease.lease_epoch.saturating_add(1));
-                let warming_presence_sha256 = warming
-                    .authenticated()
-                    .record()
-                    .signed_presence_sha256
-                    .clone()
-                    .context("warming token has no signed presence")?;
-                let lease = IdunnProcessWriteLeaseRecord {
-                    schema_version: IDUNN_PROCESS_WRITE_LEASE_SCHEMA.into(),
-                    target: expected.target.clone(),
-                    expected_projection_sha256: expected.canonical_sha256()?,
-                    plan_id: expected.plan_id.clone(),
-                    incarnation_id: expected.incarnation_id.clone(),
-                    sealed_release_id: expected.sealed_release_id.clone(),
-                    activation_witness_sha256: activation.canonical_sha256()?,
-                    state_schema_generation: expected
-                        .state_schema_generation
-                        .clone()
-                        .context("stateful Expected has no schema generation")?,
-                    state_contract_sha256: expected
-                        .state_contract_sha256
-                        .clone()
-                        .context("stateful Expected has no state contract")?,
-                    runtime_id: expected.runtime_id.clone(),
-                    runtime_instance_id: activation.runtime_instance_id.clone(),
-                    warming_presence_sha256,
-                    lease_epoch: epoch,
-                    issued_at_unix_millis: now,
-                };
-                lease.validate()?;
-                let lease_sha256 = lease.canonical_sha256()?;
-                LeasingEvidence::Prepared {
-                    lease,
-                    lease_sha256,
-                }
-            } else {
-                LeasingEvidence::SkippedStateless
-            };
-            return self.persist_same_phase(current, |next| {
-                next.leasing = Some(evidence);
-                next.updated_at_unix_millis = now;
-                Ok(())
-            });
+        let expected = required(&current.value.expected, "Expected projection")?;
+        if !expected.write_lease_required {
+            if current.value.leasing.is_none() {
+                let now = now_millis()?;
+                return self.persist_same_phase(current, |next| {
+                    next.leasing = Some(LeasingEvidence::SkippedStateless);
+                    next.updated_at_unix_millis = now;
+                    Ok(())
+                });
+            }
+            return self.transition(current, DeploymentPhase::AwaitingReady);
+        }
+
+        let binding = current.value.plan.as_ref().unwrap().parsed_inputs()?.1;
+        let lease_path = binding
+            .process_write_lease
+            .context("stateful target has no write-lease binding")?
+            .record_path;
+        let driver = CultCacheWriteLeaseDriver::new(&current.value.target, lease_path);
+
+        if matches!(
+            current.value.leasing.as_ref(),
+            Some(LeasingEvidence::Granted { .. })
+        ) {
+            let activation = required(&current.value.activation, "activation")?;
+            let warming = self.rehydrate_warming_token(&current.value, now_millis()?, false)?;
+            let lease = current
+                .value
+                .leasing
+                .as_ref()
+                .and_then(LeasingEvidence::lease)
+                .context("granted Leasing evidence has no write lease")?;
+            let recorded_sha256 = current
+                .value
+                .leasing
+                .as_ref()
+                .and_then(LeasingEvidence::lease_sha256)
+                .context("granted Leasing evidence has no lease digest")?;
+            ensure!(
+                driver.observe_exact(lease)?,
+                "physical write lease disappeared after Granted became durable"
+            );
+            self.workload.observe(
+                expected,
+                activation,
+                required(&current.value.workload, "candidate workload")?,
+            )?;
+            ensure!(
+                driver.grant(expected, activation, &warming, lease)? == recorded_sha256,
+                "replayed physical write lease differs from Granted evidence"
+            );
+            ensure!(
+                self.topology()
+                    .publish_process_write_lease(expected, activation, lease)?
+                    == recorded_sha256,
+                "replayed write-lease projection differs from Granted evidence"
+            );
+            return self.transition(current, DeploymentPhase::AwaitingReady);
         }
 
         if let Some((lease, prepared_sha256)) = current
@@ -2761,42 +3346,101 @@ impl Engine {
             .and_then(LeasingEvidence::prepared_lease)
         {
             let now = now_millis()?;
-            let expected = required(&current.value.expected, "Expected projection")?;
             let activation = required(&current.value.activation, "activation")?;
-            let warming = self.rehydrate_warming_token(&current.value, now)?;
-            ensure!(
-                warming.transaction_id() == current.value.transaction_id
-                    && Some(warming.evidence_sha256())
-                        == current
-                            .value
-                            .warming
-                            .as_ref()
-                            .map(|value| value.canonical_sha256.as_str()),
-                "Warming token does not bind this transaction's durable admission"
-            );
-            let binding = current.value.plan.as_ref().unwrap().parsed_inputs()?.1;
-            let lease_path = binding
-                .process_write_lease
-                .context("stateful target has no write-lease binding")?
-                .record_path;
-            let driver = CultCacheWriteLeaseDriver::new(&current.value.target, lease_path);
+            let historical_warming = self.rehydrate_warming_token(&current.value, now, false)?;
+            let physical_is_exact = driver.observe_exact(lease)?;
+            let warming = if physical_is_exact {
+                historical_warming
+            } else {
+                ensure!(
+                    driver.observe_empty()?,
+                    "candidate write-lease store contains authority other than its durable prepared lease"
+                );
+                match self.rehydrate_warming_token(&current.value, now, true) {
+                    Ok(warming) => warming,
+                    Err(_) => {
+                        let Some((admitted, fresh_evidence, fresh_warming)) =
+                            self.fresh_warming_for_lease(current, now)?
+                        else {
+                            return Ok(());
+                        };
+                        let replacement = self.prepare_candidate_write_lease(
+                            &admitted.value,
+                            &fresh_warming,
+                            now,
+                        )?;
+                        let replacement_sha256 = replacement.canonical_sha256()?;
+                        return self.persist_same_phase(&admitted, |next| {
+                            next.warming = Some(fresh_evidence);
+                            next.leasing = Some(LeasingEvidence::Prepared {
+                                lease: replacement,
+                                lease_sha256: replacement_sha256,
+                            });
+                            next.updated_at_unix_millis = now;
+                            Ok(())
+                        });
+                    }
+                }
+            };
+            self.workload.observe(
+                expected,
+                activation,
+                required(&current.value.workload, "candidate workload")?,
+            )?;
+            if !physical_is_exact {
+                ensure!(
+                    driver.observe_empty()?,
+                    "candidate write-lease store changed before physical grant"
+                );
+            }
             let granted_sha256 = driver.grant(expected, activation, &warming, lease)?;
             ensure!(
                 granted_sha256 == prepared_sha256,
                 "granted write lease differs from the durable prepared lease"
             );
+            let projected_sha256 = self
+                .topology()
+                .publish_process_write_lease(expected, activation, lease)?;
+            ensure!(
+                projected_sha256 == granted_sha256,
+                "projected write lease differs from the granted process authority"
+            );
             let lease = lease.clone();
             return self.persist_same_phase(current, |next| {
                 next.leasing = Some(LeasingEvidence::Granted {
                     lease,
-                    lease_sha256: granted_sha256,
+                    lease_sha256: projected_sha256,
                 });
                 next.updated_at_unix_millis = now;
                 Ok(())
             });
         }
 
-        self.transition(current, DeploymentPhase::AwaitingReady)
+        ensure!(
+            current.value.leasing.is_none(),
+            "stateful Leasing phase carries invalid lease evidence"
+        );
+        ensure!(
+            driver.observe_empty()?,
+            "candidate write-lease store contains authority before lease preparation"
+        );
+        let now = now_millis()?;
+        let Some((admitted, fresh_evidence, fresh_warming)) =
+            self.fresh_warming_for_lease(current, now)?
+        else {
+            return Ok(());
+        };
+        let lease = self.prepare_candidate_write_lease(&admitted.value, &fresh_warming, now)?;
+        let lease_sha256 = lease.canonical_sha256()?;
+        self.persist_same_phase(&admitted, |next| {
+            next.warming = Some(fresh_evidence);
+            next.leasing = Some(LeasingEvidence::Prepared {
+                lease,
+                lease_sha256,
+            });
+            next.updated_at_unix_millis = now;
+            Ok(())
+        })
     }
 
     fn advance_awaiting_ready(&self, current: &Stored<DeploymentTransaction>) -> Result<()> {
@@ -2804,7 +3448,7 @@ impl Engine {
         let expected = required(&current.value.expected, "Expected projection")?;
         if expected.write_lease_required {
             let activation = required(&current.value.activation, "activation")?;
-            let warming = self.rehydrate_warming_token(&current.value, now)?;
+            let warming = self.rehydrate_warming_token(&current.value, now, false)?;
             let lease = current
                 .value
                 .leasing
@@ -2863,43 +3507,108 @@ impl Engine {
     }
 
     fn advance_routing(&self, current: &Stored<DeploymentTransaction>) -> Result<()> {
-        let now = now_millis()?;
         let expected = required(&current.value.expected, "Expected projection")?;
         let activation = required(&current.value.activation, "activation")?;
         if current.value.routing.is_none() {
-            let ready = self.rehydrate_ready_token(&current.value, now, false)?;
+            let current_lease = current
+                .value
+                .leasing
+                .as_ref()
+                .and_then(LeasingEvidence::lease_sha256);
+            let Some((admitted, authenticated)) =
+                self.admit_latest_topology(current, current_lease)?
+            else {
+                return Ok(());
+            };
+            if admitted.envelope != current.envelope {
+                return Ok(());
+            }
             ensure!(
-                ready.transaction_id() == current.value.transaction_id,
+                is_semantic_ready(&authenticated),
+                "latest Odin observation is not Ready at route admission"
+            );
+            let latest = required(
+                &admitted.value.latest_odin_observation,
+                "current route-admission topology evidence",
+            )?;
+            if admitted.value.ready.as_ref() != Some(latest) {
+                let latest = latest.clone();
+                return self.persist_same_phase(&admitted, |next| {
+                    next.ready = Some(latest);
+                    Ok(())
+                });
+            }
+            let ready = self.rehydrate_ready_token(&admitted.value, now_millis()?, true)?;
+            ensure!(
+                ready.transaction_id() == admitted.value.transaction_id,
                 "Ready token belongs to another transaction"
             );
+            validate_live_providers_for_deploy(admitted.value.command_kind, || {
+                self.validate_selected_providers_current(
+                    required(&admitted.value.plan, "transaction plan")?,
+                    now_millis()?,
+                )
+            })?;
+            self.ensure_transaction_write_lease_current(&admitted.value, now_millis()?)?;
             let evidence = if expected.route.is_some() {
-                let binding = current.value.plan.as_ref().unwrap().parsed_inputs()?.1;
+                let binding = admitted.value.plan.as_ref().unwrap().parsed_inputs()?.1;
                 let route_binding = binding.route.context("routed plan has no route binding")?;
-                let preflight = required(&current.value.route_preflight, "route preflight")?;
+                let preflight = required(&admitted.value.route_preflight, "route preflight")?;
                 let driver = NginxRouteDriver::new(route_binding);
-                let exact_candidate = RouteObservation {
-                    route_id: preflight.route_id.clone(),
-                    runtime_instance_id: preflight.candidate_runtime_instance_id.clone(),
-                    membership_sha256: preflight.candidate_membership_sha256.clone(),
-                };
                 ensure!(
-                    exact_candidate.runtime_instance_id == activation.runtime_instance_id,
+                    preflight.candidate_runtime_instance_id == activation.runtime_instance_id,
                     "route preflight belongs to another runtime instance"
                 );
-                let observation = if driver.observe(expected, &exact_candidate)? {
-                    exact_candidate
-                } else {
-                    driver.promote(expected, &activation.runtime_instance_id, preflight)?
+                let rollback_allowed = may_rollback_route_after_failed_proof(required(
+                    &admitted.value.fencing,
+                    "route fencing evidence",
+                )?);
+                let membership_sha256 = driver.install(
+                    expected,
+                    &activation.runtime_instance_id,
+                    preflight,
+                    rollback_allowed,
+                )?;
+                let observation = match self.prove_stable_route(
+                    &admitted.value,
+                    &driver,
+                    membership_sha256,
+                ) {
+                    Ok(observation) => observation,
+                    Err(proof_error) if !rollback_allowed => {
+                        return Err(proof_error).context(
+                            "incumbent authority was fenced; candidate route remains installed for fail-closed retry",
+                        );
+                    }
+                    Err(proof_error) => {
+                        return match driver.rollback(
+                            expected,
+                            &activation.runtime_instance_id,
+                            preflight,
+                        ) {
+                            Ok(()) => Err(proof_error)
+                                .context("candidate did not answer its stable route challenge"),
+                            Err(rollback_error) => Err(proof_error).context(format!(
+                                "candidate did not answer its stable route challenge; exact route rollback also failed: {rollback_error:#}"
+                            )),
+                        };
+                    }
                 };
                 ensure!(
-                    driver.observe(expected, &observation)?,
-                    "promoted route is not the exact candidate membership"
+                    driver.observe_membership(expected, &observation.membership_sha256)?,
+                    "route membership changed during its signed stable-listener observation"
                 );
-                RoutingEvidence::Promoted { observation }
+                self.ensure_transaction_write_lease_current(&admitted.value, now_millis()?)?;
+                let promoted_at_unix_millis = observation.observed_at_unix_millis;
+                RoutingEvidence::Promoted {
+                    observation,
+                    promoted_at_unix_millis,
+                }
             } else {
                 RoutingEvidence::SkippedUnrouted
             };
-            return self.persist_same_phase(current, |next| {
+            let now = now_millis()?;
+            return self.persist_same_phase(&admitted, |next| {
                 next.routing = Some(evidence);
                 next.updated_at_unix_millis = now;
                 Ok(())
@@ -2909,64 +3618,145 @@ impl Engine {
     }
 
     fn advance_committing(&self, current: &Stored<DeploymentTransaction>) -> Result<()> {
-        let now = now_millis()?;
-        let expected = required(&current.value.expected, "Expected projection")?;
-        let activation = required(&current.value.activation, "activation")?;
-        let workload = required(&current.value.workload, "workload")?;
-        self.workload.observe(expected, activation, workload)?;
-        let _ready = self.rehydrate_ready_token(&current.value, now, false)?;
-
-        if let Some(lease) = current
+        let current_lease_sha256 = current
             .value
             .leasing
             .as_ref()
-            .and_then(LeasingEvidence::lease)
-        {
-            let warming = self.rehydrate_warming_token(&current.value, now)?;
-            let binding = current.value.plan.as_ref().unwrap().parsed_inputs()?.1;
-            let path = binding
-                .process_write_lease
-                .context("stateful target has no write-lease binding")?
-                .record_path;
-            ensure!(
-                CultCacheWriteLeaseDriver::new(&current.value.target, path)
-                    .observe(expected, activation, &warming, lease)?,
-                "write lease changed before admission commit"
-            );
+            .and_then(LeasingEvidence::lease_sha256)
+            .map(str::to_owned);
+        let Some((ready_current, authenticated)) =
+            self.admit_latest_topology(current, current_lease_sha256.as_deref())?
+        else {
+            return Ok(());
+        };
+        if ready_current.envelope != current.envelope {
+            return Ok(());
         }
-        if let Some(route) = current
+        ensure!(
+            is_semantic_ready(&authenticated),
+            "latest Odin observation is not Ready at admission commit"
+        );
+        ensure!(
+            ready_current.value.latest_odin_observation.as_ref()
+                == ready_current.value.ready.as_ref(),
+            "latest Odin observation differs from the durable Ready receipt at admission commit"
+        );
+        self.rehydrate_ready_token(&ready_current.value, now_millis()?, true)?;
+        validate_live_providers_for_deploy(ready_current.value.command_kind, || {
+            self.validate_selected_providers_current(
+                required(&ready_current.value.plan, "transaction plan")?,
+                now_millis()?,
+            )
+        })?;
+
+        let expected = required(&ready_current.value.expected, "Expected projection")?;
+        let activation = required(&ready_current.value.activation, "activation")?;
+        let workload = required(&ready_current.value.workload, "workload")?;
+        self.workload.observe(expected, activation, workload)?;
+        self.ensure_transaction_write_lease_current(&ready_current.value, now_millis()?)?;
+        if let Some(route) = ready_current
             .value
             .routing
             .as_ref()
             .and_then(RoutingEvidence::observation)
         {
-            let binding = current.value.plan.as_ref().unwrap().parsed_inputs()?.1;
+            let binding = ready_current
+                .value
+                .plan
+                .as_ref()
+                .unwrap()
+                .parsed_inputs()?
+                .1;
             let driver =
                 NginxRouteDriver::new(binding.route.context("routed plan has no route binding")?);
             ensure!(
-                driver.observe(expected, route)?,
-                "route changed before admission commit"
+                driver.observe_membership(expected, &route.membership_sha256)?,
+                "route membership changed before admission commit"
             );
+            let current_route = self.prove_stable_route(
+                &ready_current.value,
+                &driver,
+                route.membership_sha256.clone(),
+            )?;
+            ensure!(
+                current_route.route_id == route.route_id
+                    && current_route.runtime_instance_id == route.runtime_instance_id,
+                "stable route changed incarnation before admission commit"
+            );
+            ensure!(
+                driver.observe_membership(expected, &route.membership_sha256)?,
+                "route membership changed during the final signed admission challenge"
+            );
+            self.ensure_transaction_write_lease_current(&ready_current.value, now_millis()?)?;
         }
 
+        let current_lease_sha256 = ready_current
+            .value
+            .leasing
+            .as_ref()
+            .and_then(LeasingEvidence::lease_sha256)
+            .map(str::to_owned);
+        let Some((commit_current, authenticated)) =
+            self.admit_latest_topology(&ready_current, current_lease_sha256.as_deref())?
+        else {
+            return Ok(());
+        };
+        if commit_current.envelope != ready_current.envelope {
+            return Ok(());
+        }
+        ensure!(
+            is_semantic_ready(&authenticated),
+            "latest Odin observation is not Ready after the final admission challenge"
+        );
+        ensure!(
+            commit_current.value.latest_odin_observation.as_ref()
+                == commit_current.value.ready.as_ref(),
+            "latest Odin observation differs from the durable Ready receipt after the final admission challenge"
+        );
+        let now = now_millis()?;
+        self.rehydrate_ready_token(&commit_current.value, now, true)?;
+        validate_live_providers_for_deploy(commit_current.value.command_kind, || {
+            self.validate_selected_providers_current(
+                required(&commit_current.value.plan, "transaction plan")?,
+                now,
+            )
+        })?;
+        self.workload.observe(
+            required(&commit_current.value.expected, "Expected projection")?,
+            required(&commit_current.value.activation, "activation")?,
+            required(&commit_current.value.workload, "workload")?,
+        )?;
+        self.ensure_transaction_write_lease_current(&commit_current.value, now)?;
+
         let snapshot = ControlSnapshot::read(&self.options.state_store)?;
-        let incumbent = self.exact_incumbent(&snapshot, &current.value)?;
+        let incumbent = self.exact_incumbent(&snapshot, &commit_current.value)?;
         let odin_authority = self.current_odin_authority(&snapshot)?;
-        let generation = AdmittedGeneration::from_transaction(&current.value, odin_authority, now)?;
+        let generation =
+            AdmittedGeneration::from_transaction(&commit_current.value, odin_authority, now)?;
         let post_commit_cleanup = PostCommitCleanup {
             incumbent: match incumbent {
+                Some(incumbent)
+                    if incumbent_was_stopped_during_fencing(required(
+                        &commit_current.value.fencing,
+                        "commit fencing evidence",
+                    )?) =>
+                {
+                    IncumbentCleanupEvidence::Complete {
+                        generation_id: incumbent.value.generation_id.clone(),
+                    }
+                }
                 Some(incumbent) => IncumbentCleanupEvidence::Pending {
                     generation_id: incumbent.value.generation_id.clone(),
                     workload: incumbent.value.workload.clone(),
                 },
                 None => IncumbentCleanupEvidence::SkippedNoIncumbent,
             },
-            source: match current.value.command_kind {
+            source: match commit_current.value.command_kind {
                 CommandKind::Deploy => SourceCleanupEvidence::Pending,
                 CommandKind::Continuity => SourceCleanupEvidence::SkippedContinuity,
             },
         };
-        let mut complete = current.value.clone();
+        let mut complete = commit_current.value.clone();
         complete.phase = DeploymentPhase::Complete;
         complete.updated_at_unix_millis = now;
         complete.last_error = None;
@@ -2986,8 +3776,8 @@ impl Engine {
                 &[
                     CultCacheExpectedEnvelope {
                         r#type: DeploymentTransaction::TYPE.into(),
-                        key: current.value.transaction_id.clone(),
-                        current: Some(current.envelope.clone()),
+                        key: commit_current.value.transaction_id.clone(),
+                        current: Some(commit_current.envelope.clone()),
                     },
                     admitted_expected,
                 ],
@@ -3016,6 +3806,187 @@ impl Engine {
         }
     }
 
+    fn incumbent_lease_sha256_for_warming(
+        &self,
+        snapshot: &ControlSnapshot,
+        transaction: &DeploymentTransaction,
+    ) -> Result<Option<String>> {
+        if let Some(fencing) = &transaction.fencing {
+            return match fencing {
+                FencingEvidence::SkippedStateless => Ok(None),
+                FencingEvidence::Revoked {
+                    incumbent_lease_sha256,
+                    ..
+                } => Ok(incumbent_lease_sha256.clone()),
+            };
+        }
+        self.exact_incumbent(snapshot, transaction)?
+            .and_then(|incumbent| incumbent.value.leasing.lease())
+            .map(IdunnProcessWriteLeaseRecord::canonical_sha256)
+            .transpose()
+    }
+
+    fn fresh_warming_for_lease(
+        &self,
+        current: &Stored<DeploymentTransaction>,
+        now: u64,
+    ) -> Result<
+        Option<(
+            Stored<DeploymentTransaction>,
+            WarmingEvidence,
+            SequenceAdmittedWarming,
+        )>,
+    > {
+        let prior = self.rehydrate_warming_token(&current.value, now, false)?;
+        match required(&current.value.warming, "pre-fence Warming evidence")?.clone() {
+            WarmingEvidence::FirstOdinDirect { .. } => {
+                let snapshot = ControlSnapshot::read(&self.options.state_store)?;
+                ensure!(
+                    snapshot.admitted_for("odin").is_none()
+                        && self.exact_incumbent(&snapshot, &current.value)?.is_none(),
+                    "direct first-Odin Warming refresh found an admitted Odin"
+                );
+                let (evidence, present) = self.observe_first_odin_warming(&current.value)?;
+                let token = SequenceAdmittedWarming::from_first_odin_presence(
+                    current.value.transaction_id.clone(),
+                    evidence.clone(),
+                    present,
+                )?;
+                ensure!(
+                    token.signed_presence_sha256() != prior.signed_presence_sha256(),
+                    "first Odin replayed its pre-fence Warming presence"
+                );
+                Ok(Some((
+                    current.clone(),
+                    WarmingEvidence::FirstOdinDirect { evidence },
+                    token,
+                )))
+            }
+            WarmingEvidence::OdinTopology {
+                evidence: prior_evidence,
+            } => {
+                let Some((admitted, authenticated)) = self.admit_latest_topology(current, None)?
+                else {
+                    return Ok(None);
+                };
+                let fresh_evidence = required(
+                    &admitted.value.latest_odin_observation,
+                    "post-fence Odin Warming observation",
+                )?
+                .clone();
+                let snapshot = ControlSnapshot::read(&self.options.state_store)?;
+                let incumbent_lease_sha256 =
+                    self.incumbent_lease_sha256_for_warming(&snapshot, &admitted.value)?;
+                if !is_semantic_warming(
+                    required(&admitted.value.expected, "Warming Expected projection")?,
+                    required(&admitted.value.activation, "Warming activation")?,
+                    incumbent_lease_sha256.as_deref(),
+                    &authenticated,
+                )? {
+                    return Ok(None);
+                }
+                let token = SequenceAdmittedWarming::from_topology(
+                    admitted.value.transaction_id.clone(),
+                    fresh_evidence.clone(),
+                    authenticated,
+                )?;
+                if !provider_warming_advanced(
+                    prior_evidence.publisher_sequence,
+                    prior.signed_presence_sha256(),
+                    fresh_evidence.publisher_sequence,
+                    token.signed_presence_sha256(),
+                ) {
+                    return Ok(None);
+                }
+                Ok(Some((
+                    admitted,
+                    WarmingEvidence::OdinTopology {
+                        evidence: fresh_evidence,
+                    },
+                    token,
+                )))
+            }
+        }
+    }
+
+    fn prepare_candidate_write_lease(
+        &self,
+        transaction: &DeploymentTransaction,
+        warming: &SequenceAdmittedWarming,
+        now: u64,
+    ) -> Result<IdunnProcessWriteLeaseRecord> {
+        let expected = required(&transaction.expected, "Expected projection")?;
+        let activation = required(&transaction.activation, "activation")?;
+        ensure!(
+            expected.write_lease_required
+                && warming.transaction_id() == transaction.transaction_id
+                && warming.runtime_instance_id() == activation.runtime_instance_id,
+            "fresh Warming token does not own this stateful candidate"
+        );
+        let snapshot = ControlSnapshot::read(&self.options.state_store)?;
+        let epoch = self
+            .exact_incumbent(&snapshot, transaction)?
+            .and_then(|generation| generation.value.leasing.lease())
+            .map_or(1, |lease| lease.lease_epoch.saturating_add(1));
+        let lease = IdunnProcessWriteLeaseRecord {
+            schema_version: IDUNN_PROCESS_WRITE_LEASE_SCHEMA.into(),
+            target: expected.target.clone(),
+            expected_projection_sha256: expected.canonical_sha256()?,
+            plan_id: expected.plan_id.clone(),
+            incarnation_id: expected.incarnation_id.clone(),
+            sealed_release_id: expected.sealed_release_id.clone(),
+            activation_witness_sha256: activation.canonical_sha256()?,
+            state_schema_generation: expected
+                .state_schema_generation
+                .clone()
+                .context("stateful Expected has no schema generation")?,
+            state_contract_sha256: expected
+                .state_contract_sha256
+                .clone()
+                .context("stateful Expected has no state contract")?,
+            runtime_id: expected.runtime_id.clone(),
+            runtime_instance_id: activation.runtime_instance_id.clone(),
+            warming_presence_sha256: warming.signed_presence_sha256().to_owned(),
+            lease_epoch: epoch,
+            issued_at_unix_millis: now,
+        };
+        lease.validate()?;
+        Ok(lease)
+    }
+
+    fn ensure_transaction_write_lease_current(
+        &self,
+        transaction: &DeploymentTransaction,
+        now: u64,
+    ) -> Result<()> {
+        let expected = required(&transaction.expected, "Expected projection")?;
+        let lease = transaction
+            .leasing
+            .as_ref()
+            .and_then(LeasingEvidence::lease);
+        ensure!(
+            expected.write_lease_required == lease.is_some(),
+            "transaction write-lease disposition differs from Expected"
+        );
+        let Some(lease) = lease else {
+            return Ok(());
+        };
+        let activation = required(&transaction.activation, "activation")?;
+        let warming = self.rehydrate_warming_token(transaction, now, false)?;
+        let lease_path = required(&transaction.plan, "transaction plan")?
+            .parsed_inputs()?
+            .1
+            .process_write_lease
+            .context("stateful target has no write-lease binding")?
+            .record_path;
+        ensure!(
+            CultCacheWriteLeaseDriver::new(&transaction.target, lease_path)
+                .observe(expected, activation, &warming, lease,)?,
+            "process write lease changed across the authority boundary"
+        );
+        Ok(())
+    }
+
     fn select_candidate_port(&self, binding: &OperatorBinding) -> Result<Option<u16>> {
         let Some(route) = &binding.route else {
             return Ok(None);
@@ -3030,7 +4001,7 @@ impl Engine {
                 snapshot
                     .transactions
                     .iter()
-                    .filter(|stored| stored.value.owns_target_authority())
+                    .filter(|stored| stored.value.blocks_new_target_mutation())
                     .filter_map(|stored| stored.value.plan.as_ref()),
             )
         {
@@ -3143,22 +4114,225 @@ impl Engine {
         )
     }
 
+    fn authenticate_routed_presence(
+        &self,
+        authority: &cultnet_rs::VerifiedRuntimeAuthority,
+        current_write_lease_sha256: Option<&str>,
+        message_id: &str,
+        challenged_at_unix_millis: u64,
+        received_at_unix_millis: u64,
+        canonical_presence: &[u8],
+    ) -> Result<(String, u64)> {
+        ensure!(
+            received_at_unix_millis >= challenged_at_unix_millis,
+            "route observation predates its challenge"
+        );
+        let authenticated = authenticate_runtime_presence_claim(
+            canonical_presence,
+            authority,
+            RuntimePresenceAuthenticationContext {
+                trusted_received_at_unix_millis: received_at_unix_millis,
+                maximum_age_millis: self.options.topology_maximum_age_millis,
+                maximum_future_skew_millis: self.options.topology_maximum_future_skew_millis,
+            },
+        )?;
+        let signed_presence_sha256 = authenticated.signed_presence_sha256().to_owned();
+        let correlation = correlate_runtime_presence_claim(authenticated, authority)?;
+        ensure!(
+            correlation.disagreements().is_empty(),
+            "stable route answered with a runtime that disagrees with current authority"
+        );
+        let present = correlation.into_undisputed_present()?;
+        let presence = present.record();
+        ensure!(
+            presence.observed_at_unix_millis >= challenged_at_unix_millis,
+            "stable route returned a presence minted before the route challenge"
+        );
+        ensure!(
+            presence.state == "active",
+            "stable route runtime is not Active"
+        );
+        ensure!(
+            presence.detail == format!("route-observation:{message_id}"),
+            "stable route response is not bound to the exact challenge"
+        );
+        ensure!(
+            presence.write_lease_sha256.as_deref() == current_write_lease_sha256,
+            "stable route runtime does not hold the exact current process write lease"
+        );
+        Ok((signed_presence_sha256, received_at_unix_millis))
+    }
+
+    fn authenticate_first_odin_warming_presence(
+        &self,
+        transaction: &DeploymentTransaction,
+        message_id: &str,
+        challenged_at_unix_millis: u64,
+        received_at_unix_millis: u64,
+        canonical_presence: &[u8],
+    ) -> Result<cultnet_rs::VerifiedRuntimePresence> {
+        ensure!(
+            transaction.target == "odin"
+                && transaction.incumbent_generation_id.is_none()
+                && required(&transaction.expected, "first Odin Expected")?.write_lease_required,
+            "direct Warming presence is reserved for stateful first Odin bootstrap"
+        );
+        ensure!(
+            received_at_unix_millis >= challenged_at_unix_millis,
+            "first Odin Warming observation predates its challenge"
+        );
+        let authority = self.runtime_authority(transaction)?;
+        let authenticated = authenticate_runtime_presence_claim(
+            canonical_presence,
+            &authority,
+            RuntimePresenceAuthenticationContext {
+                trusted_received_at_unix_millis: received_at_unix_millis,
+                maximum_age_millis: self.options.topology_maximum_age_millis,
+                maximum_future_skew_millis: self.options.topology_maximum_future_skew_millis,
+            },
+        )?;
+        let correlation = correlate_runtime_presence_claim(authenticated, &authority)?;
+        ensure!(
+            correlation.disagreements().is_empty(),
+            "first Odin Warming presence disagrees with its Expected activation"
+        );
+        let present = correlation.into_undisputed_present()?;
+        let presence = present.record();
+        ensure!(
+            presence.observed_at_unix_millis >= challenged_at_unix_millis
+                && presence.state == "warming"
+                && presence.write_lease_sha256.is_none()
+                && presence.detail == format!("idunn-warming:{message_id}"),
+            "first Odin candidate did not return exact fresh pre-lease Warming evidence"
+        );
+        Ok(present)
+    }
+
+    fn observe_first_odin_warming(
+        &self,
+        transaction: &DeploymentTransaction,
+    ) -> Result<(RuntimePresenceEvidence, cultnet_rs::VerifiedRuntimePresence)> {
+        let expected = required(&transaction.expected, "first Odin Expected")?;
+        let binding = required(&transaction.plan, "first Odin plan")?
+            .parsed_inputs()?
+            .1;
+        let driver = NginxRouteDriver::new(
+            binding
+                .route
+                .context("first Odin bootstrap has no candidate route binding")?,
+        );
+        let message_id = format!("warming-{}", Uuid::new_v4().simple());
+        let challenged_at_unix_millis = now_millis()?;
+        let response = driver.request_candidate_runtime_presence(expected, &message_id)?;
+        ensure!(
+            response.message_id == message_id,
+            "first Odin candidate transport substituted its challenge identity"
+        );
+        let admitted_at_unix_millis = now_millis()?;
+        let present = self.authenticate_first_odin_warming_presence(
+            transaction,
+            &message_id,
+            challenged_at_unix_millis,
+            admitted_at_unix_millis,
+            &response.canonical_presence,
+        )?;
+        let evidence = RuntimePresenceEvidence::from_present(
+            &present,
+            message_id,
+            challenged_at_unix_millis,
+            admitted_at_unix_millis,
+        )?;
+        Ok((evidence, present))
+    }
+
+    fn prove_stable_route(
+        &self,
+        transaction: &DeploymentTransaction,
+        driver: &NginxRouteDriver,
+        membership_sha256: String,
+    ) -> Result<RouteObservation> {
+        let expected = required(&transaction.expected, "route Expected projection")?;
+        let activation = required(&transaction.activation, "route activation")?;
+        let authority = self.runtime_authority(transaction)?;
+        let current_write_lease_sha256 = transaction
+            .leasing
+            .as_ref()
+            .and_then(LeasingEvidence::lease_sha256);
+        self.prove_stable_route_against(
+            expected,
+            activation,
+            &authority,
+            current_write_lease_sha256,
+            driver,
+            membership_sha256,
+        )
+    }
+
+    fn prove_stable_route_against(
+        &self,
+        expected: &IdunnExpectedIncarnationRecord,
+        activation: &IdunnRuntimeActivationRecord,
+        authority: &cultnet_rs::VerifiedRuntimeAuthority,
+        current_write_lease_sha256: Option<&str>,
+        driver: &NginxRouteDriver,
+        membership_sha256: String,
+    ) -> Result<RouteObservation> {
+        let message_id = format!("route-{}", Uuid::new_v4().simple());
+        let challenged_at_unix_millis = now_millis()?;
+        let response = driver.request_runtime_presence(expected, &message_id)?;
+        ensure!(
+            response.message_id == message_id,
+            "route transport substituted its challenge identity"
+        );
+        let received_at_unix_millis = now_millis()?;
+        let (signed_presence_sha256, observed_at_unix_millis) = self.authenticate_routed_presence(
+            authority,
+            current_write_lease_sha256,
+            &message_id,
+            challenged_at_unix_millis,
+            received_at_unix_millis,
+            &response.canonical_presence,
+        )?;
+        let observation = RouteObservation {
+            route_id: driver.binding.route_id.clone(),
+            runtime_instance_id: activation.runtime_instance_id.clone(),
+            membership_sha256,
+            signed_presence_sha256,
+            observed_at_unix_millis,
+        };
+        observation.validate()?;
+        Ok(observation)
+    }
+
     fn runtime_authority_parts(
         &self,
         plan: &CompiledDeploymentPlan,
         expected: &IdunnExpectedIncarnationRecord,
         activation: &IdunnRuntimeActivationRecord,
     ) -> Result<cultnet_rs::VerifiedRuntimeAuthority> {
-        let binding = plan.parsed_inputs()?.1;
-        let provider_anchor = read_trust_anchor::<GameCultProviderHealthIdentity>(
-            &binding.runtime_identity.trust_anchor_store,
-        )?;
+        let provider_anchor = self.provider_anchor_for_plan(plan)?;
         verify_runtime_authority(
             expected,
             activation,
             &self.idunn_anchor,
             &provider_anchor.public_key,
         )
+    }
+
+    fn provider_anchor_for_plan(
+        &self,
+        plan: &CompiledDeploymentPlan,
+    ) -> Result<ServiceIdentityTrustAnchor> {
+        let binding = plan.parsed_inputs()?.1;
+        let provider_anchor = read_trust_anchor::<GameCultProviderHealthIdentity>(
+            &binding.runtime_identity.trust_anchor_store,
+        )?;
+        ensure!(
+            provider_anchor.schema_version
+                == <GameCultProviderHealthIdentity as ServiceIdentityProfile>::TRUST_ANCHOR_SCHEMA,
+            "provider runtime presence trust anchor schema is unsupported"
+        );
+        Ok(provider_anchor)
     }
 
     fn authenticate_topology_bytes(
@@ -3220,7 +4394,7 @@ impl Engine {
         let evidence = TopologyEvidence::from_authenticated(&authenticated, now)?;
         if !sequence_requires_admission(
             live.value.latest_odin_observation.as_ref(),
-            snapshot.max_odin_sequence(&evidence.signer_identity_id),
+            snapshot.max_odin_sequence(&live.value.target, &evidence.signer_identity_id),
             &evidence,
         )? {
             return Ok(Some((live.clone(), authenticated)));
@@ -3247,27 +4421,61 @@ impl Engine {
     fn rehydrate_warming_token(
         &self,
         transaction: &DeploymentTransaction,
-        _now: u64,
+        now: u64,
+        require_current: bool,
     ) -> Result<SequenceAdmittedWarming> {
         let evidence = required(&transaction.warming, "durable warming evidence")?.clone();
-        let snapshot = ControlSnapshot::read(&self.options.state_store)?;
-        let authenticated = self.authenticate_topology_bytes(
-            &snapshot,
-            transaction,
-            &evidence.canonical_bytes,
-            None,
-            evidence.admitted_at_unix_millis,
-        )?;
-        validate_authenticated_evidence(&evidence, &authenticated)?;
-        ensure!(
-            is_semantic_warming(&authenticated),
-            "durable warming evidence no longer authenticates as Warming"
-        );
-        Ok(SequenceAdmittedWarming {
-            transaction_id: transaction.transaction_id.clone(),
-            evidence,
-            authenticated,
-        })
+        match evidence {
+            WarmingEvidence::OdinTopology { evidence } => {
+                let snapshot = ControlSnapshot::read(&self.options.state_store)?;
+                let authenticated = self.authenticate_topology_bytes(
+                    &snapshot,
+                    transaction,
+                    &evidence.canonical_bytes,
+                    None,
+                    if require_current {
+                        now
+                    } else {
+                        evidence.admitted_at_unix_millis
+                    },
+                )?;
+                validate_authenticated_evidence(&evidence, &authenticated)?;
+                let incumbent_lease_sha256 =
+                    self.incumbent_lease_sha256_for_warming(&snapshot, transaction)?;
+                ensure!(
+                    is_semantic_warming(
+                        required(&transaction.expected, "Warming Expected projection")?,
+                        required(&transaction.activation, "Warming activation")?,
+                        incumbent_lease_sha256.as_deref(),
+                        &authenticated,
+                    )?,
+                    "durable warming evidence no longer satisfies the Warming gate"
+                );
+                SequenceAdmittedWarming::from_topology(
+                    transaction.transaction_id.clone(),
+                    evidence,
+                    authenticated,
+                )
+            }
+            WarmingEvidence::FirstOdinDirect { evidence } => {
+                let present = self.authenticate_first_odin_warming_presence(
+                    transaction,
+                    &evidence.message_id,
+                    evidence.challenged_at_unix_millis,
+                    if require_current {
+                        now
+                    } else {
+                        evidence.admitted_at_unix_millis
+                    },
+                    &evidence.canonical_bytes,
+                )?;
+                SequenceAdmittedWarming::from_first_odin_presence(
+                    transaction.transaction_id.clone(),
+                    evidence,
+                    present,
+                )
+            }
+        }
     }
 
     fn rehydrate_ready_token(
@@ -3399,16 +4607,32 @@ impl Engine {
                     && admitted.value.plan.plan_id == *plan_id
                     && admitted.value.sealed_release.sealed_release_id == *sealed_release_id
                     && admitted.value.expected.canonical_sha256()? == *expected_projection_sha256
-                    && token.evidence_sha256() == odin_topology_correlation_sha256
-                    && token.publisher_sequence() == *odin_topology_publisher_sequence,
+                    && token.publisher_sequence() >= *odin_topology_publisher_sequence,
                 "selected dependency authority changed before actuation"
             );
-            if selection.requirement.startup == StartupOrder::BeforeStart {
-                ensure!(
-                    token.authenticated().record().ready,
-                    "before-start dependency is not Ready"
-                );
-            }
+            ensure!(
+                token.publisher_sequence() != *odin_topology_publisher_sequence
+                    || token.evidence_sha256() == odin_topology_correlation_sha256,
+                "selected dependency Odin sequence changed evidence"
+            );
+            ensure!(
+                token
+                    .authenticated()
+                    .record()
+                    .observed_capabilities
+                    .iter()
+                    .any(|capability| {
+                        capability_compatible(
+                            &selection.requirement.capability,
+                            &selection.requirement.schema,
+                            &selection.requirement.compatibility,
+                            &capability.capability,
+                            &capability.schema,
+                            &capability.compatibility,
+                        ) && capability.capacity >= selection.requirement.minimum_capacity
+                    }),
+                "selected dependency no longer provides its required capability"
+            );
         }
         Ok(())
     }
@@ -3531,29 +4755,35 @@ impl Engine {
             let snapshot = ControlSnapshot::read(&self.options.state_store)?;
             if let Some(incumbent) = self.exact_incumbent(&snapshot, &current.value)? {
                 let topology = self.topology();
-                let expected_sha256 = topology.publish_expected(&incumbent.value.expected)?;
+                let failed_provider_anchor = self.provider_anchor_for_plan(required(
+                    &current.value.plan,
+                    "failed transaction plan",
+                )?)?;
+                let admitted_provider_anchor =
+                    self.provider_anchor_for_plan(&incumbent.value.plan)?;
+                let expected_sha256 = topology.restore_admitted_expected_only(
+                    expected,
+                    &failed_provider_anchor,
+                    current.value.activation.as_ref(),
+                    &incumbent.value.expected,
+                    &admitted_provider_anchor,
+                    &incumbent.value.activation,
+                    incumbent.value.leasing.lease(),
+                )?;
                 ensure!(
                     expected_sha256 == incumbent.value.expected.canonical_sha256()?,
                     "restored incumbent Expected receipt differs"
                 );
-                if let Ok(observation) = self.workload.observe(
-                    &incumbent.value.expected,
-                    &incumbent.value.activation,
-                    &incumbent.value.workload,
-                ) {
-                    let activation_sha256 = topology.publish_observed_activation(
-                        &incumbent.value.expected,
-                        &incumbent.value.activation,
-                        &observation,
-                    )?;
-                    ensure!(
-                        activation_sha256 == incumbent.value.activation.canonical_sha256()?,
-                        "restored incumbent activation receipt differs"
-                    );
-                }
             } else {
+                let plan = required(&current.value.plan, "failed transaction plan")?;
+                let provider_anchor = self.provider_anchor_for_plan(plan)?;
                 self.topology()
-                    .withdraw_expected(expected)
+                    .withdraw_expected(
+                        expected,
+                        &provider_anchor,
+                        current.value.activation.as_ref(),
+                        None,
+                    )
                     .context("withdrawing exact failed Expected projection")?;
             }
             return self.persist_same_phase(current, |next| {
@@ -3600,6 +4830,21 @@ impl Engine {
             workload,
         } = &cleanup.incumbent
         {
+            let binding = required(&current.value.plan, "committed transaction plan")?
+                .parsed_inputs()?
+                .1;
+            if let Some(promoted_at_unix_millis) = required(
+                &current.value.routing,
+                "committed transaction routing evidence",
+            )?
+            .promoted_at_unix_millis()
+            {
+                let retire_not_before =
+                    route_drain_deadline(promoted_at_unix_millis, binding.rollout.drain_seconds)?;
+                if now_millis()? < retire_not_before {
+                    return Ok(());
+                }
+            }
             self.workload
                 .stop(workload)
                 .with_context(|| format!("retiring admitted incumbent {generation_id}"))?;
@@ -3625,6 +4870,50 @@ impl Engine {
         ensure!(cleanup.is_complete(), "post-commit cleanup is incomplete");
         Ok(())
     }
+}
+
+fn route_drain_deadline(promoted_at_unix_millis: u64, drain_seconds: u32) -> Result<u64> {
+    promoted_at_unix_millis
+        .checked_add(
+            u64::from(drain_seconds)
+                .checked_mul(1_000)
+                .context("route drain duration overflows milliseconds")?,
+        )
+        .context("route drain deadline overflows Unix milliseconds")
+}
+
+fn route_observation_is_current(
+    observed_at_unix_millis: u64,
+    now_unix_millis: u64,
+    maximum_age_millis: u64,
+    maximum_future_skew_millis: u64,
+) -> bool {
+    observed_at_unix_millis <= now_unix_millis.saturating_add(maximum_future_skew_millis)
+        && now_unix_millis.saturating_sub(observed_at_unix_millis) <= maximum_age_millis
+}
+
+fn provider_warming_advanced(
+    prior_odin_sequence: u64,
+    prior_signed_presence_sha256: &str,
+    candidate_odin_sequence: u64,
+    candidate_signed_presence_sha256: &str,
+) -> bool {
+    candidate_odin_sequence > prior_odin_sequence
+        && candidate_signed_presence_sha256 != prior_signed_presence_sha256
+}
+
+fn may_rollback_route_after_failed_proof(fencing: &FencingEvidence) -> bool {
+    matches!(fencing, FencingEvidence::SkippedStateless)
+}
+
+fn incumbent_was_stopped_during_fencing(fencing: &FencingEvidence) -> bool {
+    matches!(
+        fencing,
+        FencingEvidence::Revoked {
+            incumbent_lease_sha256: Some(_),
+            ..
+        }
+    )
 }
 
 fn candidate_cleanup_requirement(
@@ -3734,13 +5023,54 @@ fn validate_authenticated_evidence(
     Ok(())
 }
 
-fn is_semantic_warming(authenticated: &AuthenticatedOdinRuntimeTopologyCorrelation) -> bool {
+fn is_semantic_warming(
+    expected: &IdunnExpectedIncarnationRecord,
+    activation: &IdunnRuntimeActivationRecord,
+    incumbent_lease_sha256: Option<&str>,
+    authenticated: &AuthenticatedOdinRuntimeTopologyCorrelation,
+) -> Result<bool> {
     let record = authenticated.record();
-    record.present
-        && !record.ready
-        && record.observed_presence_state.as_deref() == Some("warming")
-        && record.observed_write_lease_sha256.is_none()
-        && record.disagreements.is_empty()
+    if !record.present || record.observed_write_lease_sha256.is_some() {
+        return Ok(false);
+    }
+    let expected_projection_detail = format!(
+        "expected:{};activation:{}",
+        expected.canonical_sha256()?,
+        activation.canonical_sha256()?
+    );
+    if !warming_disagreements_match_incumbent(
+        &expected_projection_detail,
+        incumbent_lease_sha256,
+        &record.disagreements,
+    ) {
+        return Ok(false);
+    }
+    Ok(if expected.write_lease_required {
+        !record.ready && record.observed_presence_state.as_deref() == Some("warming")
+    } else {
+        matches!(
+            record.observed_presence_state.as_deref(),
+            Some("warming" | "active")
+        )
+    })
+}
+
+fn warming_disagreements_match_incumbent(
+    expected_projection_detail: &str,
+    incumbent_lease_sha256: Option<&str>,
+    disagreements: &[OdinTopologyDisagreement],
+) -> bool {
+    if disagreements.is_empty() {
+        true
+    } else if let (Some(incumbent_lease_sha256), [disagreement]) =
+        (incumbent_lease_sha256, disagreements)
+    {
+        disagreement.code == "projected-write-lease"
+            && disagreement.expected.as_deref() == Some(expected_projection_detail)
+            && disagreement.observed.as_deref() == Some(incumbent_lease_sha256)
+    } else {
+        false
+    }
 }
 
 fn is_semantic_ready(authenticated: &AuthenticatedOdinRuntimeTopologyCorrelation) -> bool {
@@ -3928,6 +5258,28 @@ fn usage() -> &'static str {
 mod tests {
     use super::*;
 
+    fn digest(byte: char) -> String {
+        byte.to_string().repeat(64)
+    }
+
+    fn route_binding(
+        route_id: &str,
+        stable_port: u16,
+        private_port_start: u16,
+        private_port_end: u16,
+    ) -> RouteBinding {
+        RouteBinding {
+            driver: crate::deployment::RouteDriver::NginxStreamTcp,
+            route_id: route_id.into(),
+            stable_endpoint: format!("tcp://127.0.0.1:{stable_port}"),
+            private_host: "127.0.0.1".into(),
+            private_port_start,
+            private_port_end,
+            config_path: PathBuf::from(format!("/etc/nginx/idunn-stream-routes/{route_id}.conf")),
+            reload_unit: "nginx.service".into(),
+        }
+    }
+
     fn command(kind: CommandKind) -> DeploymentCommand {
         DeploymentCommand {
             schema_version: DEPLOYMENT_COMMAND_SCHEMA.into(),
@@ -4056,6 +5408,37 @@ mod tests {
     }
 
     #[test]
+    fn route_bindings_are_one_global_socket_and_candidate_authority_map() {
+        let first = route_binding("first", 4103, 14103, 14111);
+        let second = route_binding("second", 8831, 18831, 18839);
+        validate_route_binding_set(&[("first", &first), ("second", &second)]).unwrap();
+
+        let mut duplicate_id = second.clone();
+        duplicate_id.route_id = first.route_id.clone();
+        assert!(
+            validate_route_binding_set(&[("first", &first), ("second", &duplicate_id)]).is_err()
+        );
+
+        let mut overlapping_candidates = second.clone();
+        overlapping_candidates.private_port_start = 14111;
+        overlapping_candidates.private_port_end = 14120;
+        assert!(
+            validate_route_binding_set(&[("first", &first), ("second", &overlapping_candidates),])
+                .is_err()
+        );
+
+        let mut stable_inside_other_range = second;
+        stable_inside_other_range.stable_endpoint = "tcp://127.0.0.1:14105".into();
+        assert!(
+            validate_route_binding_set(&[
+                ("first", &first),
+                ("second", &stable_inside_other_range),
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
     fn deployment_command_is_immutable_positional_fact() -> Result<()> {
         let value = command(CommandKind::Deploy);
         value.validate()?;
@@ -4079,9 +5462,11 @@ mod tests {
             DeploymentPhase::Committing,
             DeploymentPhase::Complete,
         ];
-        assert!(phases
-            .windows(2)
-            .all(|pair| pair[1] as u8 == pair[0] as u8 + 1));
+        assert!(
+            phases
+                .windows(2)
+                .all(|pair| pair[1] as u8 == pair[0] as u8 + 1)
+        );
     }
 
     #[test]
@@ -4104,6 +5489,44 @@ mod tests {
     }
 
     #[test]
+    fn odin_sequence_cursors_are_scoped_by_target_and_signer() -> Result<()> {
+        let command = command(CommandKind::Deploy);
+        let mut ghostlight =
+            DeploymentTransaction::new(&command, "ghostlight".into(), 0, None, 100)?;
+        ghostlight.latest_odin_observation = Some(topology(7, 1));
+        ghostlight.odin_publisher_sequence_cursor = 7;
+        let mut odin = DeploymentTransaction::new(&command, "odin".into(), 1, None, 100)?;
+        odin.latest_odin_observation = Some(topology(41, 2));
+        odin.odin_publisher_sequence_cursor = 41;
+        let envelope = |key: &str| CultCacheEnvelope {
+            key: key.into(),
+            r#type: DeploymentTransaction::TYPE.into(),
+            payload: Vec::new(),
+            stored_at: "1970-01-01T00:00:00.100Z".into(),
+            schema_id: Some(DEPLOYMENT_TRANSACTION_SCHEMA.into()),
+        };
+        let snapshot = ControlSnapshot {
+            commands: Vec::new(),
+            transactions: vec![
+                Stored {
+                    envelope: envelope("ghostlight"),
+                    value: ghostlight,
+                },
+                Stored {
+                    envelope: envelope("odin"),
+                    value: odin,
+                },
+            ],
+            admitted: Vec::new(),
+        };
+
+        assert_eq!(snapshot.max_odin_sequence("ghostlight", "odin-signer"), 7);
+        assert_eq!(snapshot.max_odin_sequence("odin", "odin-signer"), 41);
+        assert_eq!(snapshot.max_odin_sequence("ghostlight", "other-signer"), 0);
+        Ok(())
+    }
+
+    #[test]
     fn stale_odin_provider_receipt_cannot_gate_continuity_restart() -> Result<()> {
         let touched = std::cell::Cell::new(false);
         validate_live_providers_for_deploy(CommandKind::Continuity, || {
@@ -4111,10 +5534,12 @@ mod tests {
             bail!("Odin provider receipt is stale")
         })?;
         assert!(!touched.get());
-        assert!(validate_live_providers_for_deploy(CommandKind::Deploy, || {
-            bail!("Odin provider receipt is stale")
-        })
-        .is_err());
+        assert!(
+            validate_live_providers_for_deploy(CommandKind::Deploy, || {
+                bail!("Odin provider receipt is stale")
+            })
+            .is_err()
+        );
         Ok(())
     }
 
@@ -4229,6 +5654,103 @@ mod tests {
     }
 
     #[test]
+    fn routed_incumbent_retirement_waits_for_the_declared_drain_deadline() -> Result<()> {
+        assert_eq!(route_drain_deadline(1_000, 30)?, 31_000);
+        assert!(route_drain_deadline(u64::MAX, 1).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn admitted_route_receipt_refreshes_when_stale_or_implausibly_future_dated() {
+        assert!(route_observation_is_current(900, 1_000, 100, 10));
+        assert!(route_observation_is_current(1_010, 1_000, 100, 10));
+        assert!(!route_observation_is_current(899, 1_000, 100, 10));
+        assert!(!route_observation_is_current(1_011, 1_000, 100, 10));
+    }
+
+    #[test]
+    fn lease_warming_requires_both_new_odin_and_new_provider_evidence() {
+        let old = digest('1');
+        let fresh = digest('2');
+        assert!(!provider_warming_advanced(7, &old, 7, &fresh));
+        assert!(!provider_warming_advanced(7, &old, 8, &old));
+        assert!(provider_warming_advanced(7, &old, 8, &fresh));
+    }
+
+    #[test]
+    fn failed_route_proof_never_restores_any_fenced_incumbent() {
+        assert!(!may_rollback_route_after_failed_proof(
+            &FencingEvidence::Revoked {
+                incumbent_lease_sha256: Some(digest('1')),
+                candidate_lease_path_verified_empty: false,
+            }
+        ));
+        assert!(!may_rollback_route_after_failed_proof(
+            &FencingEvidence::Revoked {
+                incumbent_lease_sha256: None,
+                candidate_lease_path_verified_empty: true,
+            }
+        ));
+        assert!(may_rollback_route_after_failed_proof(
+            &FencingEvidence::SkippedStateless
+        ));
+    }
+
+    #[test]
+    fn fenced_writer_is_already_retired_before_post_commit_cleanup() {
+        assert!(incumbent_was_stopped_during_fencing(
+            &FencingEvidence::Revoked {
+                incumbent_lease_sha256: Some(digest('1')),
+                candidate_lease_path_verified_empty: false,
+            }
+        ));
+        assert!(!incumbent_was_stopped_during_fencing(
+            &FencingEvidence::Revoked {
+                incumbent_lease_sha256: None,
+                candidate_lease_path_verified_empty: true,
+            }
+        ));
+        assert!(!incumbent_was_stopped_during_fencing(
+            &FencingEvidence::SkippedStateless
+        ));
+    }
+
+    #[test]
+    fn warming_accepts_only_the_exact_projected_incumbent_lease_disagreement() {
+        let expected_detail = format!("expected:{};activation:{}", digest('1'), digest('2'));
+        let incumbent = digest('3');
+        let exact = OdinTopologyDisagreement {
+            code: "projected-write-lease".into(),
+            expected: Some(expected_detail.clone()),
+            observed: Some(incumbent.clone()),
+        };
+
+        assert!(warming_disagreements_match_incumbent(
+            &expected_detail,
+            Some(&incumbent),
+            &[exact.clone()],
+        ));
+        assert!(!warming_disagreements_match_incumbent(
+            &expected_detail,
+            None,
+            &[exact.clone()],
+        ));
+
+        let mut substituted = exact.clone();
+        substituted.observed = Some(digest('4'));
+        assert!(!warming_disagreements_match_incumbent(
+            &expected_detail,
+            Some(&incumbent),
+            &[substituted],
+        ));
+        assert!(!warming_disagreements_match_incumbent(
+            &expected_detail,
+            Some(&incumbent),
+            &[exact.clone(), exact],
+        ));
+    }
+
+    #[test]
     fn candidate_and_incumbent_must_differ_in_all_three_native_boundaries() {
         let incumbent = workload(1001, 40, 50);
         assert!(prove_isolation(&workload(1002, 41, 51), Some(&incumbent)).is_ok());
@@ -4305,6 +5827,7 @@ mod tests {
 
         assert!(!transaction.is_terminal());
         assert!(!transaction.owns_target_authority());
+        assert!(transaction.blocks_new_target_mutation());
         Ok(())
     }
 

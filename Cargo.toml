@@ -6,6 +6,7 @@ members = [
     "crates/muninn-move-tracker",
     "crates/muninn-psmoveapi-tracker",
     "crates/odin-core",
+    "crates/odin-daemon",
 ]
 resolver = "3"
 exclude = [

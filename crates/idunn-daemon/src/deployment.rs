@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::net::IpAddr;
 use std::path::{Component, Path, PathBuf};
 
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 
 pub const TARGET_DECLARATION_SCHEMA: &str = "gamecult.idunn.target_declaration.v1";
@@ -425,11 +426,45 @@ pub struct RouteBinding {
     pub reload_unit: String,
 }
 
+impl RouteBinding {
+    pub(crate) fn stable_socket(&self) -> Result<(IpAddr, u16)> {
+        let authority = match self.driver {
+            RouteDriver::NginxStreamTcp => self
+                .stable_endpoint
+                .strip_prefix("http://")
+                .or_else(|| self.stable_endpoint.strip_prefix("tcp://")),
+            RouteDriver::NginxStreamUdp => self.stable_endpoint.strip_prefix("rudp://"),
+        }
+        .context("stable endpoint transport does not match its route driver")?;
+        ensure!(
+            !authority
+                .chars()
+                .any(|character| matches!(character, '/' | '?' | '#' | '@' | '[' | ']')),
+            "stable endpoint is not a plain IP address and port"
+        );
+        let (host, port) = authority
+            .rsplit_once(':')
+            .context("stable endpoint has no port")?;
+        let host = host
+            .parse::<IpAddr>()
+            .context("stable endpoint host is not an IP address")?;
+        ensure!(
+            matches!(host, IpAddr::V4(_)),
+            "route binding v2 stable endpoints use explicit IPv4 addresses"
+        );
+        let port = port
+            .parse::<u16>()
+            .context("stable endpoint port is not a u16")?;
+        ensure!(port > 0, "stable endpoint port is zero");
+        Ok((host, port))
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RouteDriver {
-    NginxHttp,
     NginxStreamTcp,
+    NginxStreamUdp,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1027,6 +1062,14 @@ impl OperatorBinding {
             require_id(&route.route_id, "route id")?;
             require_value(&route.stable_endpoint, "stable endpoint")?;
             require_host(&route.private_host)?;
+            let private_host: IpAddr = route
+                .private_host
+                .parse()
+                .context("route private host is not an IP address")?;
+            ensure!(
+                private_host.is_loopback(),
+                "systemd-transient candidate routes must use a loopback private host"
+            );
             ensure!(
                 route.private_port_start > 0,
                 "private port range starts at zero"
@@ -1035,6 +1078,7 @@ impl OperatorBinding {
                 route.private_port_start < route.private_port_end,
                 "candidate rollout requires at least two private ports"
             );
+            route.stable_socket()?;
             require_absolute_path(&route.config_path, "route config")?;
             require_unit(&route.reload_unit, "route reload unit")?;
         }
@@ -1301,11 +1345,10 @@ impl OperatorBinding {
             self.route.as_ref(),
         ) {
             (true, ServiceTransport::Http, Some(route))
-                if route.driver == RouteDriver::NginxHttp =>
+                if route.driver == RouteDriver::NginxStreamTcp =>
             {
                 ensure!(
-                    route.stable_endpoint.starts_with("http://")
-                        || route.stable_endpoint.starts_with("https://"),
+                    route.stable_endpoint.starts_with("http://"),
                     "HTTP stable endpoint is not an HTTP URI"
                 );
             }
@@ -1315,6 +1358,14 @@ impl OperatorBinding {
                 ensure!(
                     route.stable_endpoint.starts_with("tcp://"),
                     "TCP stable endpoint is not a TCP URI"
+                );
+            }
+            (true, ServiceTransport::Rudp, Some(route))
+                if route.driver == RouteDriver::NginxStreamUdp =>
+            {
+                ensure!(
+                    route.stable_endpoint.starts_with("rudp://"),
+                    "RUDP stable endpoint is not an RUDP URI"
                 );
             }
             (false, _, None) => {}
@@ -1681,13 +1732,13 @@ expected_signer_identity_id = "test-service-runtime-signer"
 trust_anchor_store = "/etc/gamecult/trust/test-service.cc"
 
 [route]
-driver = "nginx-http"
+driver = "nginx-stream-tcp"
 route_id = "test-service-public"
-stable_endpoint = "https://yggdrasil.gamecult.org/test-service/"
+stable_endpoint = "http://127.0.0.1:18830"
 private_host = "127.0.0.1"
 private_port_start = 18831
 private_port_end = 18839
-config_path = "/etc/nginx/idunn-routes/test-service.conf"
+config_path = "/etc/nginx/idunn-stream-routes/test-service.conf"
 reload_unit = "nginx.service"
 
 [process_write_lease]
@@ -1765,16 +1816,33 @@ nodes = ["yggdrasil"]
     #[test]
     fn route_transport_mismatch_is_rejected() {
         let recipe = TargetDeclaration::parse(RECIPE).unwrap();
-        let binding =
-            OperatorBinding::parse(&BINDING.replace("nginx-http", "nginx-stream-tcp")).unwrap();
-        assert!(binding.admit(&recipe).is_err());
+        assert!(
+            OperatorBinding::parse(&BINDING.replace("nginx-stream-tcp", "nginx-stream-udp"))
+                .is_err()
+        );
 
-        let binding = OperatorBinding::parse(&BINDING.replace(
-            "https://yggdrasil.gamecult.org/test-service/",
-            "tcp://yggdrasil.gamecult.org:443",
-        ))
+        assert!(
+            OperatorBinding::parse(
+                &BINDING.replace("http://127.0.0.1:18830", "tcp://yggdrasil.gamecult.org:443",),
+            )
+            .is_err()
+        );
+        assert!(recipe.service.route_required);
+    }
+
+    #[test]
+    fn rudp_route_uses_the_udp_stream_driver() {
+        let recipe = TargetDeclaration::parse(
+            &RECIPE.replace("transport = \"http\"", "transport = \"rudp\""),
+        )
         .unwrap();
-        assert!(binding.admit(&recipe).is_err());
+        let binding = OperatorBinding::parse(
+            &BINDING
+                .replace("nginx-stream-tcp", "nginx-stream-udp")
+                .replace("http://127.0.0.1:18830", "rudp://127.0.0.1:17872"),
+        )
+        .unwrap();
+        assert!(binding.admit(&recipe).is_ok());
     }
 
     #[test]
@@ -1892,24 +1960,30 @@ nodes = ["yggdrasil"]
 
     #[test]
     fn v2_binding_is_explicitly_singleton() {
-        assert!(OperatorBinding::parse(
-            &BINDING.replace("desired_replicas = 1", "desired_replicas = 2")
-        )
-        .is_err());
-        assert!(OperatorBinding::parse(&BINDING.replace(
-            "nodes = [\"yggdrasil\"]",
-            "nodes = [\"yggdrasil\", \"raven\"]"
-        ))
-        .is_err());
+        assert!(
+            OperatorBinding::parse(
+                &BINDING.replace("desired_replicas = 1", "desired_replicas = 2")
+            )
+            .is_err()
+        );
+        assert!(
+            OperatorBinding::parse(&BINDING.replace(
+                "nodes = [\"yggdrasil\"]",
+                "nodes = [\"yggdrasil\", \"raven\"]"
+            ))
+            .is_err()
+        );
     }
 
     #[test]
     fn legacy_static_workload_identity_has_no_authority_in_v2() {
-        assert!(OperatorBinding::parse(&BINDING.replace(
-            "schema = \"gamecult.idunn.operator_binding.v2\"",
-            "schema = \"gamecult.idunn.operator_binding.v1\"",
-        ),)
-        .is_err());
+        assert!(
+            OperatorBinding::parse(&BINDING.replace(
+                "schema = \"gamecult.idunn.operator_binding.v2\"",
+                "schema = \"gamecult.idunn.operator_binding.v1\"",
+            ),)
+            .is_err()
+        );
         let with_static_identity = BINDING.replace(
             "driver = \"systemd-transient\"",
             "driver = \"systemd-transient\"\nuser = \"test-service\"\ngroup = \"test-service\"",
@@ -1923,10 +1997,12 @@ nodes = ["yggdrasil"]
             OperatorBinding::parse(&BINDING.replace("state_group = \"test-service\"\n", ""),)
                 .is_err()
         );
-        assert!(OperatorBinding::parse(
-            &BINDING.replace("state_group = \"test-service\"", "state_group = \"root\""),
-        )
-        .is_err());
+        assert!(
+            OperatorBinding::parse(
+                &BINDING.replace("state_group = \"test-service\"", "state_group = \"root\""),
+            )
+            .is_err()
+        );
     }
 
     #[test]

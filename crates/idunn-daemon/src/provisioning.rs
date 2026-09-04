@@ -5,10 +5,12 @@ use cultcache_rs::{
 use cultnet_rs::{
     GameCultProviderHealthIdentity, IDUNN_DEPLOYMENT_BRAKE_AUTHORITY, IDUNN_DEPLOYMENT_BRAKE_ID,
     IDUNN_DEPLOYMENT_BRAKE_SCHEMA, IDUNN_DEPLOYMENT_BRAKE_SCOPE, IDUNN_DEPLOYMENT_RELEASE_PURPOSE,
+    IDUNN_LIFECYCLE_BRAKE_AUTHORITY, IDUNN_LIFECYCLE_BRAKE_SCHEMA, IDUNN_LIFECYCLE_BRAKE_SCOPE,
     IdunnDeploymentBrakeObservation, IdunnDeploymentBrakeOperatorIdentity,
-    IdunnDeploymentBrakeRecord, IdunnDeploymentBrakeReleasePurpose, IdunnServiceIdentity,
-    ServiceIdentityProfile, ServiceIdentityTrustAnchor, derive_service_identity_id,
-    enroll_service_identity_at, evaluate_idunn_deployment_brake,
+    IdunnDeploymentBrakeRecord, IdunnDeploymentBrakeReleasePurpose, IdunnLifecycleBrakeObservation,
+    IdunnLifecycleBrakeRecord, IdunnServiceIdentity, OdinTopologyIdentity, ServiceIdentityProfile,
+    ServiceIdentityTrustAnchor, derive_service_identity_id, enroll_service_identity_at,
+    evaluate_idunn_continuity_restart, evaluate_idunn_deployment_brake,
     export_service_identity_trust_anchor, open_service_identity_at,
 };
 use odin_core::{
@@ -49,39 +51,34 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<()> {
             let public_key = provider_health_public_key(&options)?;
             println!("{public_key}");
         }
-        "enroll-idunn-identity" => {
-            require_only(&options, &["private-store"])?;
-            enroll_service_identity_at::<IdunnServiceIdentity>(&path(&options, "private-store")?)?;
-        }
+        "export-provider-health-public-anchor" => export_identity_anchor::<
+            GameCultProviderHealthIdentity,
+        >(
+            &options, "provider health public anchor"
+        )?,
+        "enroll-idunn-identity" => enroll_identity::<IdunnServiceIdentity>(&options)?,
         "export-idunn-public-anchor" => {
-            require_only(&options, &["private-store", "public-anchor"])?;
-            let private = path(&options, "private-store")?;
-            let public = path(&options, "public-anchor")?;
-            reject_alias(&private, &public)?;
-            refuse_existing(&public, "public anchor")?;
-            let signer = open_service_identity_at::<IdunnServiceIdentity>(&private)?;
-            export_service_identity_trust_anchor(&signer, &public)?;
+            export_identity_anchor::<IdunnServiceIdentity>(&options, "Idunn public anchor")?
+        }
+        "enroll-odin-topology-identity" => enroll_identity::<OdinTopologyIdentity>(&options)?,
+        "export-odin-topology-public-anchor" => {
+            export_identity_anchor::<OdinTopologyIdentity>(&options, "Odin topology public anchor")?
         }
         "enroll-deployment-brake-operator" => {
-            require_only(&options, &["private-store"])?;
-            enroll_service_identity_at::<IdunnDeploymentBrakeOperatorIdentity>(&path(
-                &options,
-                "private-store",
-            )?)?;
+            enroll_identity::<IdunnDeploymentBrakeOperatorIdentity>(&options)?
         }
         "export-deployment-brake-operator-anchor" => {
-            require_only(&options, &["private-store", "public-anchor"])?;
-            let private = path(&options, "private-store")?;
-            let public = path(&options, "public-anchor")?;
-            reject_alias(&private, &public)?;
-            refuse_existing(&public, "deployment brake operator anchor")?;
-            let signer =
-                open_service_identity_at::<IdunnDeploymentBrakeOperatorIdentity>(&private)?;
-            export_service_identity_trust_anchor(&signer, &public)?;
+            export_identity_anchor::<IdunnDeploymentBrakeOperatorIdentity>(
+                &options,
+                "deployment brake operator anchor",
+            )?
         }
         "deployment-brake-engage" => deployment_brake_engage(&options)?,
         "deployment-brake-release" => deployment_brake_release(&options)?,
         "deployment-brake-status" => deployment_brake_status(&options)?,
+        "lifecycle-brake-engage" => lifecycle_brake_engage(&options)?,
+        "lifecycle-brake-release" => lifecycle_brake_release(&options)?,
+        "lifecycle-brake-status" => lifecycle_brake_status(&options)?,
         "create-daemon-health-trust-binding" => create_health_binding(&options)?,
         "add-daemon-health-trust-binding" => add_health_binding(&options)?,
         "require-daemon-health-release-binding" => require_health_binding_release(&options)?,
@@ -94,6 +91,26 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<()> {
         "validate-provider-projection-trust-anchor" => validate_projection_anchor(&options)?,
         _ => bail!("unknown command {command:?}\n{}", usage()),
     }
+    Ok(())
+}
+
+fn enroll_identity<P: ServiceIdentityProfile>(options: &BTreeMap<String, String>) -> Result<()> {
+    require_only(options, &["private-store"])?;
+    enroll_service_identity_at::<P>(&path(options, "private-store")?)?;
+    Ok(())
+}
+
+fn export_identity_anchor<P: ServiceIdentityProfile>(
+    options: &BTreeMap<String, String>,
+    label: &str,
+) -> Result<()> {
+    require_only(options, &["private-store", "public-anchor"])?;
+    let private = path(options, "private-store")?;
+    let public = path(options, "public-anchor")?;
+    reject_alias(&private, &public)?;
+    refuse_existing(&public, label)?;
+    let signer = open_service_identity_at::<P>(&private)?;
+    export_service_identity_trust_anchor(&signer, &public)?;
     Ok(())
 }
 
@@ -260,6 +277,184 @@ fn deployment_brake_status(options: &BTreeMap<String, String>) -> Result<()> {
         record.updated_by
     );
     Ok(())
+}
+
+fn lifecycle_brake_engage(options: &BTreeMap<String, String>) -> Result<()> {
+    require_only(
+        options,
+        &[
+            "store",
+            "runtime-id",
+            "target",
+            "reason",
+            "updated-at-unix-millis",
+        ],
+    )?;
+    let updated = parse_u64(options, "updated-at-unix-millis")?;
+    let record = IdunnLifecycleBrakeRecord {
+        schema_version: IDUNN_LIFECYCLE_BRAKE_SCHEMA.into(),
+        authority: IDUNN_LIFECYCLE_BRAKE_AUTHORITY.into(),
+        runtime_id: required(options, "runtime-id")?.into(),
+        target: required(options, "target")?.into(),
+        scope: IDUNN_LIFECYCLE_BRAKE_SCOPE.into(),
+        status: "engaged".into(),
+        reason: required(options, "reason")?.into(),
+        updated_at_unix_millis: updated,
+        released_until_unix_millis: None,
+    };
+    replace_lifecycle_brake(&path(options, "store")?, record)
+}
+
+fn lifecycle_brake_release(options: &BTreeMap<String, String>) -> Result<()> {
+    allow_only(
+        options,
+        &[
+            "store",
+            "runtime-id",
+            "target",
+            "reason",
+            "updated-at-unix-millis",
+            "released-until-unix-millis",
+        ],
+    )?;
+    let updated = parse_u64(options, "updated-at-unix-millis")?;
+    let record = IdunnLifecycleBrakeRecord {
+        schema_version: IDUNN_LIFECYCLE_BRAKE_SCHEMA.into(),
+        authority: IDUNN_LIFECYCLE_BRAKE_AUTHORITY.into(),
+        runtime_id: required(options, "runtime-id")?.into(),
+        target: required(options, "target")?.into(),
+        scope: IDUNN_LIFECYCLE_BRAKE_SCOPE.into(),
+        status: "released".into(),
+        reason: required(options, "reason")?.into(),
+        updated_at_unix_millis: updated,
+        released_until_unix_millis: options
+            .get("released-until-unix-millis")
+            .map(|value| {
+                value
+                    .parse()
+                    .context("--released-until-unix-millis must be u64")
+            })
+            .transpose()?,
+    };
+    replace_lifecycle_brake(&path(options, "store")?, record)
+}
+
+fn lifecycle_brake_status(options: &BTreeMap<String, String>) -> Result<()> {
+    require_only(
+        options,
+        &["store", "runtime-id", "target", "now-unix-millis"],
+    )?;
+    let runtime_id = lifecycle_identifier(options, "runtime-id")?;
+    let target = lifecycle_identifier(options, "target")?;
+    let now = parse_u64(options, "now-unix-millis")?;
+    match read_lifecycle_brake(&path(options, "store")?)? {
+        None => {
+            evaluate_idunn_continuity_restart(
+                IdunnLifecycleBrakeObservation::Missing,
+                runtime_id,
+                target,
+                now,
+            )
+            .map_err(|denial| anyhow!("lifecycle brake denied continuity restart: {denial:?}"))?;
+            println!("allowed runtime={runtime_id} target={target} brake=absent");
+        }
+        Some(record) => {
+            evaluate_idunn_continuity_restart(
+                IdunnLifecycleBrakeObservation::Present(&record),
+                runtime_id,
+                target,
+                now,
+            )
+            .map_err(|denial| anyhow!("lifecycle brake denied continuity restart: {denial:?}"))?;
+            if let Some(expires) = record.released_until_unix_millis {
+                println!(
+                    "allowed runtime={} target={} brake=released expires={expires}",
+                    record.runtime_id, record.target
+                );
+            } else {
+                println!(
+                    "allowed runtime={} target={} brake=released expires=never",
+                    record.runtime_id, record.target
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn replace_lifecycle_brake(path: &Path, record: IdunnLifecycleBrakeRecord) -> Result<()> {
+    record.validate()?;
+    let store = SingleFileMessagePackBackingStore::new(path);
+    let entries = store.pull_all_read_only_snapshot()?;
+    let current = match entries.as_slice() {
+        [] => None,
+        [entry]
+            if entry.r#type == IdunnLifecycleBrakeRecord::TYPE
+                && entry.schema_id.as_deref() == Some(IDUNN_LIFECYCLE_BRAKE_SCHEMA) =>
+        {
+            let current_record = IdunnLifecycleBrakeRecord::decode_canonical(&entry.payload)?;
+            if entry.key != current_record.target {
+                bail!("lifecycle brake envelope key does not match its target");
+            }
+            if current_record.runtime_id != record.runtime_id
+                || current_record.target != record.target
+            {
+                bail!("lifecycle brake store is bound to another runtime or target");
+            }
+            if record.updated_at_unix_millis <= current_record.updated_at_unix_millis {
+                bail!("lifecycle brake update time must advance");
+            }
+            Some(entry.clone())
+        }
+        _ => bail!("lifecycle brake store is corrupt or ambiguous"),
+    };
+    let next = typed_envelope(
+        &record.target,
+        &record,
+        IDUNN_LIFECYCLE_BRAKE_SCHEMA,
+        record.updated_at_unix_millis,
+    )?;
+    if !store.compare_exchange(
+        &[CultCacheExpectedEnvelope {
+            r#type: IdunnLifecycleBrakeRecord::TYPE.into(),
+            key: record.target.clone(),
+            current,
+        }],
+        &[next],
+    )? {
+        bail!("lifecycle brake changed during transition");
+    }
+    Ok(())
+}
+
+fn read_lifecycle_brake(path: &Path) -> Result<Option<IdunnLifecycleBrakeRecord>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let entries = SingleFileMessagePackBackingStore::new(path).pull_all_read_only_snapshot()?;
+    let entry = match entries.as_slice() {
+        [] => return Ok(None),
+        [entry] => entry,
+        _ => bail!("lifecycle brake store is ambiguous"),
+    };
+    if entry.r#type != IdunnLifecycleBrakeRecord::TYPE
+        || entry.schema_id.as_deref() != Some(IDUNN_LIFECYCLE_BRAKE_SCHEMA)
+    {
+        bail!("lifecycle brake store contains a foreign record");
+    }
+    let record = IdunnLifecycleBrakeRecord::decode_canonical(&entry.payload)?;
+    if entry.key != record.target {
+        bail!("lifecycle brake envelope key does not match its target");
+    }
+    Ok(Some(record))
+}
+
+fn lifecycle_identifier<'a>(options: &'a BTreeMap<String, String>, name: &str) -> Result<&'a str> {
+    let value = required(options, name)?;
+    if value.trim().is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
+        bail!("--{name} is empty, oversized, or contains control characters");
+    }
+    Ok(value)
 }
 
 fn replace_brake(path: &Path, record: IdunnDeploymentBrakeRecord, millis: u64) -> Result<()> {
@@ -907,7 +1102,7 @@ fn normalized(path: &Path) -> Result<PathBuf> {
 }
 
 fn usage() -> &'static str {
-    "Usage: idunn-provision enroll-provider-health-identity --private-store <path>\n       idunn-provision provider-health-public-key --private-store <path>\n       idunn-provision enroll-idunn-identity --private-store <path>\n       idunn-provision export-idunn-public-anchor --private-store <path> --public-anchor <path>\n       idunn-provision enroll-deployment-brake-operator --private-store <path>\n       idunn-provision export-deployment-brake-operator-anchor --private-store <path> --public-anchor <path>\n       idunn-provision deployment-brake-engage --store <path> --runtime-id <id> --owner <principal> --reason <text> --observed-at-unix-millis <u64>\n       idunn-provision deployment-brake-release --store <path> --private-store <path> --runtime-id <id> --owner <principal> --reason <text> --authorization-id <id> --release-id <id> --deployment-id <id> --issued-at-unix-millis <u64> --expires-at-unix-millis <u64>\n       idunn-provision deployment-brake-status --store <path> --operator-anchor <path> --runtime-id <id> [--release-id <id> --deployment-id <id> --now-unix-millis <u64>]\n       idunn-provision create-daemon-health-trust-binding --output <path> --binding-id <id> --daemon <id> --health-contract <id> --source-runtime <id> --signer-public-key-hex <hex> --bound-at-unix-millis <u64> --release-binding-required <true|false>\n       idunn-provision add-daemon-health-trust-binding --output <path> --binding-id <id> --daemon <id> --health-contract <id> --source-runtime <id> --signer-public-key-hex <hex> --bound-at-unix-millis <u64> --release-binding-required <true|false>\n       idunn-provision require-daemon-health-release-binding --store <path> --binding-id <id> --daemon <id> --health-contract <id> --source-runtime <id> --signer-public-key-hex <hex>\n       idunn-provision rotate-daemon-health-trust-signer --output <path> --binding-id <id> --signer-public-key-hex <hex> --bound-at-unix-millis <u64>\n       idunn-provision validate-daemon-health-trust-binding --input <path>\n       idunn-provision create-provider-projection-trust-anchor --output <path> --trust-anchor-id <id> --runtime-id <id> --idunn-public-anchor <path> --bound-at-unix-millis <u64> --expires-at-unix-millis <u64>\n       idunn-provision validate-provider-projection-trust-anchor --input <path> --idunn-public-anchor <path>"
+    "Usage: idunn-provision enroll-provider-health-identity --private-store <path>\n       idunn-provision provider-health-public-key --private-store <path>\n       idunn-provision export-provider-health-public-anchor --private-store <path> --public-anchor <path>\n       idunn-provision enroll-idunn-identity --private-store <path>\n       idunn-provision export-idunn-public-anchor --private-store <path> --public-anchor <path>\n       idunn-provision enroll-odin-topology-identity --private-store <path>\n       idunn-provision export-odin-topology-public-anchor --private-store <path> --public-anchor <path>\n       idunn-provision enroll-deployment-brake-operator --private-store <path>\n       idunn-provision export-deployment-brake-operator-anchor --private-store <path> --public-anchor <path>\n       idunn-provision deployment-brake-engage --store <path> --runtime-id <id> --owner <principal> --reason <text> --observed-at-unix-millis <u64>\n       idunn-provision deployment-brake-release --store <path> --private-store <path> --runtime-id <id> --owner <principal> --reason <text> --authorization-id <id> --release-id <id> --deployment-id <id> --issued-at-unix-millis <u64> --expires-at-unix-millis <u64>\n       idunn-provision deployment-brake-status --store <path> --operator-anchor <path> --runtime-id <id> [--release-id <id> --deployment-id <id> --now-unix-millis <u64>]\n       idunn-provision lifecycle-brake-engage --store <path> --runtime-id <id> --target <id> --reason <text> --updated-at-unix-millis <u64>\n       idunn-provision lifecycle-brake-release --store <path> --runtime-id <id> --target <id> --reason <text> --updated-at-unix-millis <u64> [--released-until-unix-millis <u64>]\n       idunn-provision lifecycle-brake-status --store <path> --runtime-id <id> --target <id> --now-unix-millis <u64>\n       idunn-provision create-daemon-health-trust-binding --output <path> --binding-id <id> --daemon <id> --health-contract <id> --source-runtime <id> --signer-public-key-hex <hex> --bound-at-unix-millis <u64> --release-binding-required <true|false>\n       idunn-provision add-daemon-health-trust-binding --output <path> --binding-id <id> --daemon <id> --health-contract <id> --source-runtime <id> --signer-public-key-hex <hex> --bound-at-unix-millis <u64> --release-binding-required <true|false>\n       idunn-provision require-daemon-health-release-binding --store <path> --binding-id <id> --daemon <id> --health-contract <id> --source-runtime <id> --signer-public-key-hex <hex>\n       idunn-provision rotate-daemon-health-trust-signer --output <path> --binding-id <id> --signer-public-key-hex <hex> --bound-at-unix-millis <u64>\n       idunn-provision validate-daemon-health-trust-binding --input <path>\n       idunn-provision create-provider-projection-trust-anchor --output <path> --trust-anchor-id <id> --runtime-id <id> --idunn-public-anchor <path> --bound-at-unix-millis <u64> --expires-at-unix-millis <u64>\n       idunn-provision validate-provider-projection-trust-anchor --input <path> --idunn-public-anchor <path>"
 }
 
 #[cfg(test)]
@@ -1477,6 +1672,144 @@ mod tests {
     }
 
     #[test]
+    fn provider_and_odin_anchor_exports_are_profile_exact_immutable_and_non_aliasing() -> Result<()>
+    {
+        let temp = TempDir::new()?;
+        let provider_private = temp.path().join("provider-private.cc");
+        let provider_anchor = temp.path().join("provider-anchor.cc");
+        invoke(&[
+            "enroll-provider-health-identity",
+            "--private-store",
+            provider_private.to_str().unwrap(),
+        ])?;
+        assert!(
+            invoke(&[
+                "export-provider-health-public-anchor",
+                "--private-store",
+                provider_private.to_str().unwrap(),
+                "--public-anchor",
+                provider_private.to_str().unwrap(),
+            ])
+            .is_err()
+        );
+        invoke(&[
+            "export-provider-health-public-anchor",
+            "--private-store",
+            provider_private.to_str().unwrap(),
+            "--public-anchor",
+            provider_anchor.to_str().unwrap(),
+        ])?;
+        let provider_entries = store_snapshot(&provider_anchor)?;
+        let [provider_envelope] = provider_entries.as_slice() else {
+            panic!("provider anchor store must contain exactly one envelope");
+        };
+        assert_eq!(
+            provider_envelope.r#type,
+            GameCultProviderHealthIdentity::TRUST_ANCHOR_TYPE
+        );
+        assert_eq!(
+            provider_envelope.key,
+            GameCultProviderHealthIdentity::TRUST_ANCHOR_KEY
+        );
+        assert_eq!(
+            provider_envelope.schema_id.as_deref(),
+            Some(GameCultProviderHealthIdentity::TRUST_ANCHOR_SCHEMA)
+        );
+        let provider: ServiceIdentityTrustAnchor =
+            rmp_serde::from_slice(&provider_envelope.payload)?;
+        assert_eq!(rmp_serde::to_vec(&provider)?, provider_envelope.payload);
+        assert_eq!(
+            provider.identity_id,
+            derive_service_identity_id::<GameCultProviderHealthIdentity>(&provider.public_key)?
+        );
+        assert!(open_service_identity_at::<OdinTopologyIdentity>(&provider_private).is_err());
+        let provider_before = std::fs::read(&provider_anchor)?;
+        assert!(
+            invoke(&[
+                "export-provider-health-public-anchor",
+                "--private-store",
+                provider_private.to_str().unwrap(),
+                "--public-anchor",
+                provider_anchor.to_str().unwrap(),
+            ])
+            .is_err()
+        );
+        assert_eq!(std::fs::read(&provider_anchor)?, provider_before);
+
+        let odin_private = temp.path().join("odin-private.cc");
+        let odin_anchor = temp.path().join("odin-anchor.cc");
+        invoke(&[
+            "enroll-odin-topology-identity",
+            "--private-store",
+            odin_private.to_str().unwrap(),
+        ])?;
+        assert!(open_service_identity_at::<GameCultProviderHealthIdentity>(&odin_private).is_err());
+        assert!(
+            invoke(&[
+                "export-odin-topology-public-anchor",
+                "--private-store",
+                odin_private.to_str().unwrap(),
+                "--public-anchor",
+                odin_private.to_str().unwrap(),
+            ])
+            .is_err()
+        );
+        invoke(&[
+            "export-odin-topology-public-anchor",
+            "--private-store",
+            odin_private.to_str().unwrap(),
+            "--public-anchor",
+            odin_anchor.to_str().unwrap(),
+        ])?;
+        let odin_entries = store_snapshot(&odin_anchor)?;
+        let [odin_envelope] = odin_entries.as_slice() else {
+            panic!("Odin anchor store must contain exactly one envelope");
+        };
+        assert_eq!(
+            odin_envelope.r#type,
+            OdinTopologyIdentity::TRUST_ANCHOR_TYPE
+        );
+        assert_eq!(odin_envelope.key, OdinTopologyIdentity::TRUST_ANCHOR_KEY);
+        assert_eq!(
+            odin_envelope.schema_id.as_deref(),
+            Some(OdinTopologyIdentity::TRUST_ANCHOR_SCHEMA)
+        );
+        let odin: ServiceIdentityTrustAnchor = rmp_serde::from_slice(&odin_envelope.payload)?;
+        assert_eq!(rmp_serde::to_vec(&odin)?, odin_envelope.payload);
+        assert_eq!(
+            odin.identity_id,
+            derive_service_identity_id::<OdinTopologyIdentity>(&odin.public_key)?
+        );
+        assert_ne!(provider.identity_id, odin.identity_id);
+        let odin_before = std::fs::read(&odin_anchor)?;
+        assert!(
+            invoke(&[
+                "export-odin-topology-public-anchor",
+                "--private-store",
+                odin_private.to_str().unwrap(),
+                "--public-anchor",
+                odin_anchor.to_str().unwrap(),
+            ])
+            .is_err()
+        );
+        assert_eq!(std::fs::read(&odin_anchor)?, odin_before);
+
+        let wrong_profile_output = temp.path().join("wrong-profile.cc");
+        assert!(
+            invoke(&[
+                "export-provider-health-public-anchor",
+                "--private-store",
+                odin_private.to_str().unwrap(),
+                "--public-anchor",
+                wrong_profile_output.to_str().unwrap(),
+            ])
+            .is_err()
+        );
+        assert!(!wrong_profile_output.exists());
+        Ok(())
+    }
+
+    #[test]
     fn identity_enrollment_and_export_are_immutable_and_paths_cannot_alias() -> Result<()> {
         let temp = TempDir::new()?;
         let private = temp.path().join("identity.cc");
@@ -1913,6 +2246,159 @@ mod tests {
             ])
             .is_err()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn lifecycle_brake_is_absence_allow_and_exact_to_runtime_target_and_expiry() -> Result<()> {
+        let temp = TempDir::new()?;
+        let missing = temp.path().join("missing-lifecycle.cc");
+        invoke(&[
+            "lifecycle-brake-status",
+            "--store",
+            missing.to_str().unwrap(),
+            "--runtime-id",
+            "idunn-yggdrasil",
+            "--target",
+            "ghostlight",
+            "--now-unix-millis",
+            "100",
+        ])?;
+        assert!(!missing.exists());
+
+        let store = temp.path().join("ghostlight-lifecycle.cc");
+        invoke(&[
+            "lifecycle-brake-engage",
+            "--store",
+            store.to_str().unwrap(),
+            "--runtime-id",
+            "idunn-yggdrasil",
+            "--target",
+            "ghostlight",
+            "--reason",
+            "operator maintenance",
+            "--updated-at-unix-millis",
+            "200",
+        ])?;
+        let engaged = read_lifecycle_brake(&store)?.context("lifecycle brake must exist")?;
+        assert_eq!(engaged.status, "engaged");
+        assert_eq!(engaged.runtime_id, "idunn-yggdrasil");
+        assert_eq!(engaged.target, "ghostlight");
+        assert!(read_brake(&store).is_err());
+        assert!(
+            invoke(&[
+                "lifecycle-brake-status",
+                "--store",
+                store.to_str().unwrap(),
+                "--runtime-id",
+                "idunn-yggdrasil",
+                "--target",
+                "ghostlight",
+                "--now-unix-millis",
+                "201",
+            ])
+            .is_err()
+        );
+
+        let engaged_bytes = std::fs::read(&store)?;
+        assert!(
+            invoke(&[
+                "lifecycle-brake-release",
+                "--store",
+                store.to_str().unwrap(),
+                "--runtime-id",
+                "idunn-nightwing",
+                "--target",
+                "ghostlight",
+                "--reason",
+                "wrong runtime",
+                "--updated-at-unix-millis",
+                "300",
+            ])
+            .is_err()
+        );
+        assert!(
+            invoke(&[
+                "lifecycle-brake-release",
+                "--store",
+                store.to_str().unwrap(),
+                "--runtime-id",
+                "idunn-yggdrasil",
+                "--target",
+                "odin",
+                "--reason",
+                "wrong target",
+                "--updated-at-unix-millis",
+                "300",
+            ])
+            .is_err()
+        );
+        assert_eq!(std::fs::read(&store)?, engaged_bytes);
+
+        invoke(&[
+            "lifecycle-brake-release",
+            "--store",
+            store.to_str().unwrap(),
+            "--runtime-id",
+            "idunn-yggdrasil",
+            "--target",
+            "ghostlight",
+            "--reason",
+            "bounded continuity window",
+            "--updated-at-unix-millis",
+            "300",
+            "--released-until-unix-millis",
+            "500",
+        ])?;
+        invoke(&[
+            "lifecycle-brake-status",
+            "--store",
+            store.to_str().unwrap(),
+            "--runtime-id",
+            "idunn-yggdrasil",
+            "--target",
+            "ghostlight",
+            "--now-unix-millis",
+            "499",
+        ])?;
+        for (runtime, target, now) in [
+            ("idunn-nightwing", "ghostlight", "499"),
+            ("idunn-yggdrasil", "odin", "499"),
+            ("idunn-yggdrasil", "ghostlight", "500"),
+        ] {
+            assert!(
+                invoke(&[
+                    "lifecycle-brake-status",
+                    "--store",
+                    store.to_str().unwrap(),
+                    "--runtime-id",
+                    runtime,
+                    "--target",
+                    target,
+                    "--now-unix-millis",
+                    now,
+                ])
+                .is_err()
+            );
+        }
+        let released_bytes = std::fs::read(&store)?;
+        assert!(
+            invoke(&[
+                "lifecycle-brake-engage",
+                "--store",
+                store.to_str().unwrap(),
+                "--runtime-id",
+                "idunn-yggdrasil",
+                "--target",
+                "ghostlight",
+                "--reason",
+                "stale replay",
+                "--updated-at-unix-millis",
+                "300",
+            ])
+            .is_err()
+        );
+        assert_eq!(std::fs::read(&store)?, released_bytes);
         Ok(())
     }
 

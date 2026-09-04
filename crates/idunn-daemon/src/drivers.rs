@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
+use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::thread;
@@ -10,8 +11,9 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail, ensure};
 use cultcache_rs::{
     CacheBackingStore, CultCacheEnvelope, CultCacheExpectedEnvelope, DatabaseEntry,
-    SingleFileMessagePackBackingStore,
+    SingleFileMessagePackBackingStore, TryCompareExchangeSnapshotOutcome,
 };
+use cultmesh_rs::{CultMeshRudpSnapshotOptions, request_raw_snapshot_from_rudp_catalog};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -29,11 +31,16 @@ use crate::deployment_plan::{
     SOURCE_SELECTION_FACTS_SCHEMA, SealedRelease, SourceSelection, SourceSelectionFacts,
 };
 use cultnet_rs::{
-    GameCultProviderHealthIdentity, IDUNN_EXPECTED_INCARNATION_SCHEMA,
+    CultNetMessage, CultNetRawPayloadEncoding, CultNetWireContract,
+    GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA, GAMECULT_RUNTIME_PRESENCE_HEALTH_SIGNING_PURPOSE,
+    GAMECULT_SERVICE_TRUST_ANCHOR_SCHEMA, GameCultProviderHealthIdentity,
+    GameCultServiceTrustAnchorRecord, IDUNN_EXPECTED_INCARNATION_SCHEMA,
     IDUNN_PROCESS_WRITE_LEASE_SCHEMA, IDUNN_RUNTIME_ACTIVATION_CREDENTIAL_NAME,
     IDUNN_RUNTIME_ACTIVATION_SCHEMA, IdunnExpectedIncarnationRecord, IdunnProcessWriteLeaseRecord,
     IdunnRuntimeActivationLaunch, IdunnRuntimeActivationRecord, IdunnRuntimeActivationSigner,
     ODIN_RUNTIME_TOPOLOGY_CORRELATION_SCHEMA, OdinRuntimeTopologyCorrelationRecord,
+    ServiceIdentityProfile, ServiceIdentityTrustAnchor, decode_cultnet_message_from_slice,
+    derive_service_identity_id, encode_cultnet_message_to_vec, encode_frame,
     open_service_identity_credential_reader,
 };
 
@@ -293,14 +300,36 @@ pub trait WorkloadPort {
 }
 
 pub trait TopologyPort {
-    fn publish_expected(&self, expected: &IdunnExpectedIncarnationRecord) -> Result<String>;
-    fn withdraw_expected(&self, expected: &IdunnExpectedIncarnationRecord) -> Result<()>;
+    fn publish_expected(
+        &self,
+        expected: &IdunnExpectedIncarnationRecord,
+        provider_anchor: &ServiceIdentityTrustAnchor,
+    ) -> Result<String>;
+    fn withdraw_expected(
+        &self,
+        expected: &IdunnExpectedIncarnationRecord,
+        provider_anchor: &ServiceIdentityTrustAnchor,
+        activation: Option<&IdunnRuntimeActivationRecord>,
+        lease: Option<&IdunnProcessWriteLeaseRecord>,
+    ) -> Result<()>;
     fn publish_observed_activation(
         &self,
         expected: &IdunnExpectedIncarnationRecord,
         activation: &IdunnRuntimeActivationRecord,
         observation: &WorkloadObservation,
     ) -> Result<String>;
+    fn publish_process_write_lease(
+        &self,
+        expected: &IdunnExpectedIncarnationRecord,
+        activation: &IdunnRuntimeActivationRecord,
+        lease: &IdunnProcessWriteLeaseRecord,
+    ) -> Result<String>;
+    fn withdraw_process_write_lease(
+        &self,
+        expected: &IdunnExpectedIncarnationRecord,
+        activation: &IdunnRuntimeActivationRecord,
+        lease: Option<&IdunnProcessWriteLeaseRecord>,
+    ) -> Result<()>;
     fn receive(&self, target: &str) -> Result<Option<ReceivedOdinTopologyCorrelation>>;
 }
 
@@ -313,6 +342,7 @@ pub struct ReceivedOdinTopologyCorrelation {
 pub trait WriteLeasePort {
     fn revoke_exact(&self, incumbent: Option<&IdunnProcessWriteLeaseRecord>) -> Result<()>;
     fn observe_empty(&self) -> Result<bool>;
+    fn observe_exact(&self, lease: &IdunnProcessWriteLeaseRecord) -> Result<bool>;
     fn grant(
         &self,
         expected: &IdunnExpectedIncarnationRecord,
@@ -334,6 +364,22 @@ pub struct RouteObservation {
     pub route_id: String,
     pub runtime_instance_id: String,
     pub membership_sha256: String,
+    pub signed_presence_sha256: String,
+    pub observed_at_unix_millis: u64,
+}
+
+impl RouteObservation {
+    pub fn validate(&self) -> Result<()> {
+        require_driver_id(&self.route_id, "route observation")?;
+        require_sha256_id(&self.runtime_instance_id, "route runtime instance")?;
+        require_sha256_id(&self.membership_sha256, "route membership")?;
+        require_sha256_id(&self.signed_presence_sha256, "route signed presence")?;
+        ensure!(
+            self.observed_at_unix_millis > 0,
+            "route observation has no trusted receipt time"
+        );
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -343,26 +389,53 @@ pub struct RoutePreflightReceipt {
     pub candidate_membership_sha256: String,
     pub incumbent_runtime_instance_id: Option<String>,
     pub incumbent_membership_sha256: Option<String>,
+    pub incumbent_configuration: Option<Vec<u8>>,
 }
 
-pub trait RoutePort {
-    fn preflight(
-        &self,
-        expected: &IdunnExpectedIncarnationRecord,
-        runtime_instance_id: &str,
-        incumbent: Option<&RouteObservation>,
-    ) -> Result<RoutePreflightReceipt>;
-    fn promote(
-        &self,
-        expected: &IdunnExpectedIncarnationRecord,
-        runtime_instance_id: &str,
-        preflight: &RoutePreflightReceipt,
-    ) -> Result<RouteObservation>;
-    fn observe(
-        &self,
-        expected: &IdunnExpectedIncarnationRecord,
-        observation: &RouteObservation,
-    ) -> Result<bool>;
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RouteSnapshotResponse {
+    pub message_id: String,
+    pub canonical_presence: Vec<u8>,
+}
+
+const ROUTE_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(3);
+const ROUTE_SNAPSHOT_MAX_BYTES: usize = 1024 * 1024;
+const ROUTE_HTTP_MAX_HEADER_BYTES: usize = 32 * 1024;
+const ROUTE_HTTP_SNAPSHOT_PATH: &str = "/cultnet/snapshot";
+
+impl RoutePreflightReceipt {
+    pub fn validate(&self) -> Result<()> {
+        require_driver_id(&self.route_id, "route preflight")?;
+        require_sha256_id(
+            &self.candidate_runtime_instance_id,
+            "candidate route runtime instance",
+        )?;
+        require_sha256_id(
+            &self.candidate_membership_sha256,
+            "candidate route membership",
+        )?;
+        match (
+            &self.incumbent_runtime_instance_id,
+            &self.incumbent_membership_sha256,
+            &self.incumbent_configuration,
+        ) {
+            (None, None, None) => {}
+            (Some(runtime), Some(membership), Some(configuration)) => {
+                require_sha256_id(runtime, "incumbent route runtime instance")?;
+                require_sha256_id(membership, "incumbent route membership")?;
+                ensure!(
+                    !configuration.is_empty(),
+                    "incumbent route configuration is empty"
+                );
+                ensure!(
+                    sha256_id(configuration) == *membership,
+                    "incumbent route configuration differs from its membership digest"
+                );
+            }
+            _ => bail!("incumbent route preflight evidence is partial"),
+        }
+        Ok(())
+    }
 }
 
 /// Fixed-argv Git source driver. It never interprets recipe text as a command
@@ -1295,7 +1368,7 @@ impl RunnerPort for DockerRunnerDriver {
         &self,
         source: &FrozenSource,
         plan: &CompiledDeploymentPlan,
-        staging_root: &Path,
+        staging_parent: &Path,
         sealed_at_unix_millis: u64,
     ) -> Result<MaterializedRelease> {
         plan.validate()?;
@@ -1305,11 +1378,12 @@ impl RunnerPort for DockerRunnerDriver {
             "runner source differs from the compiled plan"
         );
         let (declaration, binding) = plan.parsed_inputs()?;
-        ensure!(
-            !staging_root.exists(),
-            "release staging root already exists"
-        );
-        fs::create_dir_all(staging_root)?;
+        fs::create_dir_all(staging_parent)?;
+        let staging_root = staging_parent.join(&source.receipt.transaction_id);
+        if staging_root.exists() {
+            remove_tree_inside(staging_parent, &staging_root)?;
+        }
+        fs::create_dir_all(&staging_root)?;
 
         let mut workspaces = BTreeMap::new();
         for runner_id in binding.runners.keys() {
@@ -1375,12 +1449,12 @@ impl RunnerPort for DockerRunnerDriver {
                 &declaration,
                 source,
                 &workspaces,
-                staging_root,
+                &staging_root,
                 &artifact.id,
             )?);
         }
         for workspace in workspaces.values() {
-            remove_tree_inside(staging_root, workspace)?;
+            remove_tree_inside(&staging_root, workspace)?;
         }
         let release = SealedRelease::new(
             plan,
@@ -1390,7 +1464,7 @@ impl RunnerPort for DockerRunnerDriver {
         )?;
         Ok(MaterializedRelease {
             release,
-            root: staging_root.to_owned(),
+            root: staging_root,
         })
     }
 }
@@ -2848,9 +2922,10 @@ impl WorkloadPort for SystemdTransientWorkloadDriver {
 }
 
 /// One dedicated CultCache file is the write-lease authority for one target.
-/// Its sibling lock is shared by the target only around durable commit edges;
-/// Idunn's compare-exchange therefore fences the old writer before replacing
-/// the record. Route membership never enters this store.
+/// The admitted target holds its sibling lock shared for that process lifetime.
+/// Grant and revocation therefore make one nonblocking CAS attempt; revocation
+/// follows an exact incumbent stop. A foreign or stuck holder cannot freeze
+/// Idunn's control loop. Route membership never enters this store.
 pub struct CultCacheWriteLeaseDriver {
     pub target: String,
     pub record_path: PathBuf,
@@ -2914,11 +2989,6 @@ impl CultCacheWriteLeaseDriver {
         lease.validate()?;
         let expected_sha256 = expected.canonical_sha256()?;
         let activation_sha256 = activation.canonical_sha256()?;
-        let warming = warming.authenticated().record();
-        let warming_presence_sha256 = warming
-            .signed_presence_sha256
-            .as_deref()
-            .context("warming observation has no signed presence")?;
         ensure!(
             self.target == expected.target
                 && lease.target == expected.target
@@ -2939,14 +3009,8 @@ impl CultCacheWriteLeaseDriver {
                         .state_contract_sha256
                         .as_deref()
                         .context("write-lease Expected has no state contract")?
-                && lease.warming_presence_sha256 == warming_presence_sha256
-                && warming.present
-                && !warming.ready
-                && warming.observed_presence_state.as_deref() == Some("warming")
-                && warming.runtime_instance_id.as_deref()
-                    == Some(activation.runtime_instance_id.as_str())
-                && warming.observed_write_lease_sha256.is_none()
-                && warming.disagreements.is_empty(),
+                && lease.warming_presence_sha256 == warming.signed_presence_sha256()
+                && warming.runtime_instance_id() == activation.runtime_instance_id.as_str(),
             "process write lease does not bind the exact warming candidate"
         );
         Ok(())
@@ -2971,15 +3035,30 @@ impl WriteLeasePort for CultCacheWriteLeaseDriver {
             "refusing to revoke an unexpected process write lease"
         );
         let store = SingleFileMessagePackBackingStore::new(&self.record_path);
-        ensure!(
-            store.compare_exchange_snapshot(std::slice::from_ref(&envelope), &[])?,
-            "process write lease changed while fencing the incumbent"
-        );
-        Ok(())
+        match store.try_compare_exchange_snapshot(std::slice::from_ref(&envelope), &[])? {
+            TryCompareExchangeSnapshotOutcome::Exchanged => Ok(()),
+            TryCompareExchangeSnapshotOutcome::Mismatch => {
+                bail!("process write lease changed while fencing the incumbent")
+            }
+            TryCompareExchangeSnapshotOutcome::LockContended => {
+                bail!("process write lease is held by a shared-lock consumer")
+            }
+        }
     }
 
     fn observe_empty(&self) -> Result<bool> {
         Ok(self.current()?.is_none())
+    }
+
+    fn observe_exact(&self, lease: &IdunnProcessWriteLeaseRecord) -> Result<bool> {
+        lease.validate()?;
+        ensure!(
+            lease.target == self.target,
+            "observed process write lease belongs to another target"
+        );
+        Ok(self
+            .current()?
+            .is_some_and(|(_, current)| current == *lease))
     }
 
     fn grant(
@@ -2995,20 +3074,21 @@ impl WriteLeasePort for CultCacheWriteLeaseDriver {
                 current == *lease,
                 "another process already owns the write lease"
             );
+            harden_root_authority_file(&self.record_path)?;
+            harden_root_authority_file(&authority_lock_path(&self.record_path))?;
             return lease.canonical_sha256();
         }
         let envelope = self.envelope(lease)?;
-        ensure!(
-            SingleFileMessagePackBackingStore::new(&self.record_path).compare_exchange(
-                &[CultCacheExpectedEnvelope {
-                    r#type: IdunnProcessWriteLeaseRecord::TYPE.into(),
-                    key: lease.target.clone(),
-                    current: None,
-                }],
-                &[envelope],
-            )?,
-            "process write-lease grant lost its empty-store compare-exchange"
-        );
+        let store = SingleFileMessagePackBackingStore::new(&self.record_path);
+        match store.try_compare_exchange_snapshot(&[], &[envelope])? {
+            TryCompareExchangeSnapshotOutcome::Exchanged => {}
+            TryCompareExchangeSnapshotOutcome::Mismatch => {
+                bail!("process write-lease grant lost its empty-store compare-exchange")
+            }
+            TryCompareExchangeSnapshotOutcome::LockContended => {
+                bail!("process write lease is held by a shared-lock consumer")
+            }
+        }
         harden_root_authority_file(&self.record_path)?;
         harden_root_authority_file(&authority_lock_path(&self.record_path))?;
         lease.canonical_sha256()
@@ -3028,43 +3108,581 @@ impl WriteLeasePort for CultCacheWriteLeaseDriver {
     }
 }
 
-/// The local CultCache projection is Idunn's typed provider surface into
-/// CultMesh. Odin writes a separate signed correlation store. Reading that
-/// store never lets Idunn manufacture Present or Ready from its own config.
+/// Idunn projects desired identity plus its own activation and current-lease
+/// facts here. Service presence is absent by construction; only Odin may
+/// correlate these records with signed runtime observation into Present/Ready.
 pub struct CultCacheTopologyDriver {
     pub projection_store: PathBuf,
     pub correlation_store: PathBuf,
 }
 
-impl TopologyPort for CultCacheTopologyDriver {
-    fn publish_expected(&self, expected: &IdunnExpectedIncarnationRecord) -> Result<String> {
+impl CultCacheTopologyDriver {
+    /// Atomically demotes a failed pre-fence candidate back to the admitted
+    /// generation's Expected projection. Runtime activation and write-lease
+    /// records are deliberately absent until admitted-body supervision proves
+    /// the physical process and lease again.
+    pub fn restore_admitted_expected_only(
+        &self,
+        failed_expected: &IdunnExpectedIncarnationRecord,
+        failed_provider_anchor: &ServiceIdentityTrustAnchor,
+        failed_activation: Option<&IdunnRuntimeActivationRecord>,
+        admitted_expected: &IdunnExpectedIncarnationRecord,
+        admitted_provider_anchor: &ServiceIdentityTrustAnchor,
+        admitted_activation: &IdunnRuntimeActivationRecord,
+        admitted_lease: Option<&IdunnProcessWriteLeaseRecord>,
+    ) -> Result<String> {
+        failed_expected.validate()?;
+        admitted_expected.validate()?;
+        ensure!(
+            failed_expected.target == admitted_expected.target,
+            "projection restoration crosses deployment targets"
+        );
+        let failed_anchor = runtime_presence_trust_anchor(failed_expected, failed_provider_anchor)?;
+        let admitted_anchor =
+            runtime_presence_trust_anchor(admitted_expected, admitted_provider_anchor)?;
+        if let Some(activation) = failed_activation {
+            activation.validate()?;
+            ensure!(
+                activation.expected_projection_sha256 == failed_expected.canonical_sha256()?,
+                "failed activation does not bind the failed Expected projection"
+            );
+        }
+        admitted_activation.validate()?;
+        ensure!(
+            admitted_activation.expected_projection_sha256
+                == admitted_expected.canonical_sha256()?,
+            "admitted activation does not bind the admitted Expected projection"
+        );
+        if let Some(lease) = admitted_lease {
+            validate_topology_lease(admitted_expected, admitted_activation, lease)?;
+        }
+        if let Some(parent) = self.projection_store.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let store = SingleFileMessagePackBackingStore::new(&self.projection_store);
+        let target = admitted_expected.target.as_str();
+        let anchor_key = runtime_presence_trust_anchor_id(target);
+        for _ in 0..8 {
+            let entries = store.pull_all_read_only_snapshot()?;
+            let current_expected =
+                projection_entry(&entries, IdunnExpectedIncarnationRecord::TYPE, target)?;
+            if let Some(envelope) = current_expected {
+                ensure!(
+                    envelope.schema_id.as_deref() == Some(IDUNN_EXPECTED_INCARNATION_SCHEMA),
+                    "restored Expected projection schema is foreign"
+                );
+                let current = IdunnExpectedIncarnationRecord::decode_canonical(&envelope.payload)?;
+                ensure!(
+                    current == *failed_expected || current == *admitted_expected,
+                    "refusing to replace an unknown Expected projection"
+                );
+            }
+            let current_anchor = projection_entry(
+                &entries,
+                GameCultServiceTrustAnchorRecord::TYPE,
+                &anchor_key,
+            )?;
+            if let Some(envelope) = current_anchor {
+                let current = service_trust_anchor_from_envelope(envelope)?;
+                ensure!(
+                    current == failed_anchor || current == admitted_anchor,
+                    "refusing to replace an unknown runtime presence trust anchor"
+                );
+            }
+            let current_activation =
+                projection_entry(&entries, IdunnRuntimeActivationRecord::TYPE, target)?;
+            if let Some(envelope) = current_activation {
+                ensure!(
+                    envelope.schema_id.as_deref() == Some(IDUNN_RUNTIME_ACTIVATION_SCHEMA),
+                    "restored activation projection schema is foreign"
+                );
+                let current = IdunnRuntimeActivationRecord::decode_canonical(&envelope.payload)?;
+                ensure!(
+                    failed_activation == Some(&current) || admitted_activation == &current,
+                    "refusing to remove an unknown runtime activation projection"
+                );
+            }
+            let current_lease =
+                projection_entry(&entries, IdunnProcessWriteLeaseRecord::TYPE, target)?;
+            if let Some(envelope) = current_lease {
+                ensure!(
+                    envelope.schema_id.as_deref() == Some(IDUNN_PROCESS_WRITE_LEASE_SCHEMA),
+                    "restored write-lease projection schema is foreign"
+                );
+                let current = IdunnProcessWriteLeaseRecord::decode_canonical(&envelope.payload)?;
+                ensure!(
+                    admitted_lease == Some(&current),
+                    "refusing to remove an unknown process write-lease projection"
+                );
+            }
+            if current_expected.is_some_and(|envelope| {
+                IdunnExpectedIncarnationRecord::decode_canonical(&envelope.payload)
+                    .is_ok_and(|current| current == *admitted_expected)
+            }) && current_anchor.is_some_and(|envelope| {
+                service_trust_anchor_from_envelope(envelope)
+                    .is_ok_and(|current| current == admitted_anchor)
+            }) && current_activation.is_none()
+                && current_lease.is_none()
+            {
+                return admitted_expected.canonical_sha256();
+            }
+            let mut replacement = entries
+                .iter()
+                .filter(|envelope| {
+                    !((envelope.key == target
+                        && matches!(
+                            envelope.r#type.as_str(),
+                            IdunnExpectedIncarnationRecord::TYPE
+                                | IdunnRuntimeActivationRecord::TYPE
+                                | IdunnProcessWriteLeaseRecord::TYPE
+                        ))
+                        || (envelope.key == anchor_key
+                            && envelope.r#type == GameCultServiceTrustAnchorRecord::TYPE))
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            replacement.extend([
+                CultCacheEnvelope {
+                    key: admitted_expected.target.clone(),
+                    r#type: IdunnExpectedIncarnationRecord::TYPE.into(),
+                    payload: admitted_expected.canonical_bytes()?,
+                    stored_at: chrono::Utc::now().to_rfc3339(),
+                    schema_id: Some(IDUNN_EXPECTED_INCARNATION_SCHEMA.into()),
+                },
+                CultCacheEnvelope {
+                    key: admitted_anchor.trust_anchor_id.clone(),
+                    r#type: GameCultServiceTrustAnchorRecord::TYPE.into(),
+                    payload: rmp_serde::to_vec(&admitted_anchor)?,
+                    stored_at: rfc3339_millis(admitted_anchor.bound_at_unix_millis)?,
+                    schema_id: Some(GAMECULT_SERVICE_TRUST_ANCHOR_SCHEMA.into()),
+                },
+            ]);
+            if store.compare_exchange_snapshot(&entries, &replacement)? {
+                return admitted_expected.canonical_sha256();
+            }
+        }
+        bail!("topology projection changed repeatedly during admitted restoration")
+    }
+
+    pub fn admitted_runtime_projection_is_exact(
+        &self,
+        expected: &IdunnExpectedIncarnationRecord,
+        provider_anchor: &ServiceIdentityTrustAnchor,
+        activation: &IdunnRuntimeActivationRecord,
+        lease: Option<&IdunnProcessWriteLeaseRecord>,
+    ) -> Result<bool> {
         expected.validate()?;
-        upsert_record(
-            &self.projection_store,
-            CultCacheEnvelope {
-                key: expected.target.clone(),
+        activation.validate()?;
+        ensure!(
+            activation.expected_projection_sha256 == expected.canonical_sha256()?,
+            "admitted activation does not bind its Expected projection"
+        );
+        if let Some(lease) = lease {
+            validate_topology_lease(expected, activation, lease)?;
+        }
+        if !self.projection_store.exists() {
+            return Ok(false);
+        }
+        let entries = SingleFileMessagePackBackingStore::new(&self.projection_store)
+            .pull_all_read_only_snapshot()?;
+        let anchor = runtime_presence_trust_anchor(expected, provider_anchor)?;
+        let expected_is_exact = match projection_entry(
+            &entries,
+            IdunnExpectedIncarnationRecord::TYPE,
+            &expected.target,
+        )? {
+            Some(envelope) => {
+                ensure!(
+                    envelope.schema_id.as_deref() == Some(IDUNN_EXPECTED_INCARNATION_SCHEMA),
+                    "admitted Expected projection schema is foreign"
+                );
+                ensure!(
+                    IdunnExpectedIncarnationRecord::decode_canonical(&envelope.payload)?
+                        == *expected,
+                    "admitted Expected projection was replaced by another incarnation"
+                );
+                true
+            }
+            None => false,
+        };
+        let anchor_is_exact = match projection_entry(
+            &entries,
+            GameCultServiceTrustAnchorRecord::TYPE,
+            &anchor.trust_anchor_id,
+        )? {
+            Some(envelope) => {
+                ensure!(
+                    service_trust_anchor_from_envelope(envelope)? == anchor,
+                    "admitted runtime presence trust anchor was replaced"
+                );
+                true
+            }
+            None => false,
+        };
+        let activation_is_exact = match projection_entry(
+            &entries,
+            IdunnRuntimeActivationRecord::TYPE,
+            &expected.target,
+        )? {
+            Some(envelope) => {
+                ensure!(
+                    envelope.schema_id.as_deref() == Some(IDUNN_RUNTIME_ACTIVATION_SCHEMA),
+                    "admitted activation projection schema is foreign"
+                );
+                ensure!(
+                    IdunnRuntimeActivationRecord::decode_canonical(&envelope.payload)?
+                        == *activation,
+                    "admitted activation projection was replaced"
+                );
+                true
+            }
+            None => false,
+        };
+        let lease_is_exact = match projection_entry(
+            &entries,
+            IdunnProcessWriteLeaseRecord::TYPE,
+            &expected.target,
+        )? {
+            Some(envelope) => {
+                ensure!(
+                    envelope.schema_id.as_deref() == Some(IDUNN_PROCESS_WRITE_LEASE_SCHEMA),
+                    "admitted write-lease projection schema is foreign"
+                );
+                let current = IdunnProcessWriteLeaseRecord::decode_canonical(&envelope.payload)?;
+                ensure!(
+                    lease == Some(&current),
+                    "admitted write-lease projection was replaced"
+                );
+                true
+            }
+            None => lease.is_none(),
+        };
+        Ok(expected_is_exact && anchor_is_exact && activation_is_exact && lease_is_exact)
+    }
+}
+
+fn runtime_presence_trust_anchor(
+    expected: &IdunnExpectedIncarnationRecord,
+    provider_anchor: &ServiceIdentityTrustAnchor,
+) -> Result<GameCultServiceTrustAnchorRecord> {
+    expected.validate()?;
+    ensure!(
+        provider_anchor.schema_version
+            == <GameCultProviderHealthIdentity as ServiceIdentityProfile>::TRUST_ANCHOR_SCHEMA,
+        "runtime presence trust anchor schema is unsupported"
+    );
+    ensure!(
+        derive_service_identity_id::<GameCultProviderHealthIdentity>(&provider_anchor.public_key)?
+            == provider_anchor.identity_id
+            && provider_anchor.identity_id == expected.expected_signer_identity_id,
+        "runtime presence trust anchor does not bind the Expected signer"
+    );
+    let bound_at_unix_millis: u64 =
+        chrono::DateTime::parse_from_rfc3339(&provider_anchor.identity_created_at)?
+            .timestamp_millis()
+            .try_into()
+            .context("runtime presence trust anchor creation time predates Unix epoch")?;
+    let anchor = GameCultServiceTrustAnchorRecord {
+        schema_version: GAMECULT_SERVICE_TRUST_ANCHOR_SCHEMA.into(),
+        trust_anchor_id: runtime_presence_trust_anchor_id(&expected.target),
+        service_id: expected.target.clone(),
+        runtime_id: expected.runtime_id.clone(),
+        signer_identity_id: provider_anchor.identity_id.clone(),
+        signer_public_key: provider_anchor.public_key.clone(),
+        signature_algorithm: "ed25519".into(),
+        signing_purpose: GAMECULT_RUNTIME_PRESENCE_HEALTH_SIGNING_PURPOSE.into(),
+        signed_schema: GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA.into(),
+        binding_authority: "root".into(),
+        bound_at_unix_millis,
+        expires_at_unix_millis: None,
+        private_state_exposed: false,
+    };
+    anchor.validate()?;
+    Ok(anchor)
+}
+
+fn runtime_presence_trust_anchor_id(target: &str) -> String {
+    format!("root/{target}/runtime-presence")
+}
+
+fn validate_topology_lease(
+    expected: &IdunnExpectedIncarnationRecord,
+    activation: &IdunnRuntimeActivationRecord,
+    lease: &IdunnProcessWriteLeaseRecord,
+) -> Result<()> {
+    expected.validate()?;
+    activation.validate()?;
+    lease.validate()?;
+    ensure!(
+        expected.write_lease_required
+            && lease.target == expected.target
+            && lease.expected_projection_sha256 == expected.canonical_sha256()?
+            && lease.plan_id == expected.plan_id
+            && lease.incarnation_id == expected.incarnation_id
+            && lease.sealed_release_id == expected.sealed_release_id
+            && lease.activation_witness_sha256 == activation.canonical_sha256()?
+            && lease.state_schema_generation
+                == expected
+                    .state_schema_generation
+                    .as_deref()
+                    .context("write-lease Expected has no state generation")?
+            && lease.state_contract_sha256
+                == expected
+                    .state_contract_sha256
+                    .as_deref()
+                    .context("write-lease Expected has no state contract")?
+            && lease.runtime_id == expected.runtime_id
+            && lease.runtime_instance_id == activation.runtime_instance_id,
+        "topology write lease does not bind the exact Expected activation"
+    );
+    Ok(())
+}
+
+fn service_trust_anchor_from_envelope(
+    envelope: &CultCacheEnvelope,
+) -> Result<GameCultServiceTrustAnchorRecord> {
+    ensure!(
+        envelope.schema_id.as_deref() == Some(GAMECULT_SERVICE_TRUST_ANCHOR_SCHEMA),
+        "service trust-anchor projection schema is foreign"
+    );
+    let anchor: GameCultServiceTrustAnchorRecord = rmp_serde::from_slice(&envelope.payload)?;
+    ensure!(
+        rmp_serde::to_vec(&anchor)? == envelope.payload,
+        "service trust-anchor projection is noncanonical"
+    );
+    anchor.validate()?;
+    Ok(anchor)
+}
+
+fn replace_records_atomically(path: &Path, replacements: &[CultCacheEnvelope]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    ensure!(
+        replacements.iter().enumerate().all(|(index, entry)| {
+            replacements[index + 1..].iter().all(|other| {
+                (entry.r#type.as_str(), entry.key.as_str())
+                    != (other.r#type.as_str(), other.key.as_str())
+            })
+        }),
+        "atomic projection set contains a duplicate identity"
+    );
+    let store = SingleFileMessagePackBackingStore::new(path);
+    for _ in 0..8 {
+        let entries = store.pull_all_read_only_snapshot()?;
+        let conditions = replacements
+            .iter()
+            .map(|replacement| {
+                Ok(CultCacheExpectedEnvelope {
+                    r#type: replacement.r#type.clone(),
+                    key: replacement.key.clone(),
+                    current: projection_entry(&entries, &replacement.r#type, &replacement.key)?
+                        .cloned(),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if conditions
+            .iter()
+            .zip(replacements)
+            .all(|(condition, replacement)| condition.current.as_ref() == Some(replacement))
+        {
+            return Ok(());
+        }
+        if store.compare_exchange(&conditions, replacements)? {
+            return Ok(());
+        }
+    }
+    bail!("CultCache projection changed too often to publish atomic set")
+}
+
+fn projection_entry<'a>(
+    entries: &'a [CultCacheEnvelope],
+    r#type: &str,
+    key: &str,
+) -> Result<Option<&'a CultCacheEnvelope>> {
+    let mut matches = entries
+        .iter()
+        .filter(|entry| entry.r#type == r#type && entry.key == key);
+    let current = matches.next();
+    ensure!(
+        matches.next().is_none(),
+        "CultCache projection identity is ambiguous"
+    );
+    Ok(current)
+}
+
+fn insert_exact_process_lease(
+    path: &Path,
+    expected: &IdunnExpectedIncarnationRecord,
+    activation: &IdunnRuntimeActivationRecord,
+    replacement: CultCacheEnvelope,
+) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let store = SingleFileMessagePackBackingStore::new(path);
+    for _ in 0..8 {
+        let entries = store.pull_all_read_only_snapshot()?;
+        let projected_expected = projection_entry(
+            &entries,
+            IdunnExpectedIncarnationRecord::TYPE,
+            &expected.target,
+        )?
+        .context("process write lease has no current Expected projection")?;
+        ensure!(
+            projected_expected.schema_id.as_deref() == Some(IDUNN_EXPECTED_INCARNATION_SCHEMA)
+                && IdunnExpectedIncarnationRecord::decode_canonical(&projected_expected.payload)?
+                    == *expected,
+            "process write lease current Expected projection is substituted"
+        );
+        let projected_activation = projection_entry(
+            &entries,
+            IdunnRuntimeActivationRecord::TYPE,
+            &expected.target,
+        )?
+        .context("process write lease has no observed activation projection")?;
+        ensure!(
+            projected_activation.schema_id.as_deref() == Some(IDUNN_RUNTIME_ACTIVATION_SCHEMA)
+                && IdunnRuntimeActivationRecord::decode_canonical(&projected_activation.payload)?
+                    == *activation,
+            "process write lease observed activation projection is substituted"
+        );
+        let projected_anchor = service_trust_anchor_from_envelope(
+            projection_entry(
+                &entries,
+                GameCultServiceTrustAnchorRecord::TYPE,
+                &runtime_presence_trust_anchor_id(&expected.target),
+            )?
+            .context("process write lease has no runtime presence trust anchor")?,
+        )?;
+        ensure!(
+            projected_anchor.service_id == expected.target
+                && projected_anchor.runtime_id == expected.runtime_id
+                && projected_anchor.signer_identity_id == expected.expected_signer_identity_id
+                && projected_anchor.signing_purpose
+                    == GAMECULT_RUNTIME_PRESENCE_HEALTH_SIGNING_PURPOSE
+                && projected_anchor.signed_schema == GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA,
+            "process write lease runtime presence trust anchor is substituted"
+        );
+        let current = projection_entry(&entries, &replacement.r#type, &replacement.key)?;
+        if current == Some(&replacement) {
+            return Ok(());
+        }
+        ensure!(
+            current.is_none(),
+            "refusing to replace a different current process write-lease projection"
+        );
+        let conditions = [
+            CultCacheExpectedEnvelope {
                 r#type: IdunnExpectedIncarnationRecord::TYPE.into(),
-                payload: expected.canonical_bytes()?,
-                stored_at: chrono::Utc::now().to_rfc3339(),
-                schema_id: Some(IDUNN_EXPECTED_INCARNATION_SCHEMA.into()),
+                key: expected.target.clone(),
+                current: Some(projected_expected.clone()),
             },
+            CultCacheExpectedEnvelope {
+                r#type: IdunnRuntimeActivationRecord::TYPE.into(),
+                key: expected.target.clone(),
+                current: Some(projected_activation.clone()),
+            },
+            CultCacheExpectedEnvelope {
+                r#type: GameCultServiceTrustAnchorRecord::TYPE.into(),
+                key: runtime_presence_trust_anchor_id(&expected.target),
+                current: projection_entry(
+                    &entries,
+                    GameCultServiceTrustAnchorRecord::TYPE,
+                    &runtime_presence_trust_anchor_id(&expected.target),
+                )?
+                .cloned(),
+            },
+            CultCacheExpectedEnvelope {
+                r#type: replacement.r#type.clone(),
+                key: replacement.key.clone(),
+                current: None,
+            },
+        ];
+        if store.compare_exchange(&conditions, std::slice::from_ref(&replacement))? {
+            return Ok(());
+        }
+    }
+    bail!("CultCache projection changed too often to publish exact record")
+}
+
+impl TopologyPort for CultCacheTopologyDriver {
+    fn publish_expected(
+        &self,
+        expected: &IdunnExpectedIncarnationRecord,
+        provider_anchor: &ServiceIdentityTrustAnchor,
+    ) -> Result<String> {
+        expected.validate()?;
+        let anchor = runtime_presence_trust_anchor(expected, provider_anchor)?;
+        replace_records_atomically(
+            &self.projection_store,
+            &[
+                CultCacheEnvelope {
+                    key: expected.target.clone(),
+                    r#type: IdunnExpectedIncarnationRecord::TYPE.into(),
+                    payload: expected.canonical_bytes()?,
+                    stored_at: chrono::Utc::now().to_rfc3339(),
+                    schema_id: Some(IDUNN_EXPECTED_INCARNATION_SCHEMA.into()),
+                },
+                CultCacheEnvelope {
+                    key: anchor.trust_anchor_id.clone(),
+                    r#type: GameCultServiceTrustAnchorRecord::TYPE.into(),
+                    payload: rmp_serde::to_vec(&anchor)?,
+                    stored_at: rfc3339_millis(anchor.bound_at_unix_millis)?,
+                    schema_id: Some(GAMECULT_SERVICE_TRUST_ANCHOR_SCHEMA.into()),
+                },
+            ],
         )?;
         expected.canonical_sha256()
     }
 
-    fn withdraw_expected(&self, expected: &IdunnExpectedIncarnationRecord) -> Result<()> {
+    fn withdraw_expected(
+        &self,
+        expected: &IdunnExpectedIncarnationRecord,
+        provider_anchor: &ServiceIdentityTrustAnchor,
+        activation: Option<&IdunnRuntimeActivationRecord>,
+        lease: Option<&IdunnProcessWriteLeaseRecord>,
+    ) -> Result<()> {
         expected.validate()?;
+        let exact_anchor = runtime_presence_trust_anchor(expected, provider_anchor)?;
+        if let Some(activation) = activation {
+            activation.validate()?;
+            ensure!(
+                activation.expected_projection_sha256 == expected.canonical_sha256()?
+                    && activation.runtime_id == expected.runtime_id,
+                "withdrawn activation does not bind the exact Expected projection"
+            );
+        }
+        if let Some(lease) = lease {
+            validate_topology_lease(
+                expected,
+                activation.context("withdrawn lease has no exact activation")?,
+                lease,
+            )?;
+        }
         if !self.projection_store.exists() {
             return Ok(());
         }
-        let expected_sha256 = expected.canonical_sha256()?;
         let store = SingleFileMessagePackBackingStore::new(&self.projection_store);
         for _ in 0..8 {
             let entries = store.pull_all_read_only_snapshot()?;
             let mut found_expected = false;
+            let mut found_anchor = false;
             let mut found_activation = false;
+            let mut found_lease = false;
             let mut retained = Vec::with_capacity(entries.len());
             for envelope in &entries {
+                if envelope.r#type == GameCultServiceTrustAnchorRecord::TYPE
+                    && envelope.key == exact_anchor.trust_anchor_id
+                {
+                    ensure!(
+                        !found_anchor
+                            && service_trust_anchor_from_envelope(envelope)? == exact_anchor,
+                        "refusing to withdraw a substituted runtime presence trust anchor"
+                    );
+                    found_anchor = true;
+                    continue;
+                }
                 if envelope.key != expected.target {
                     retained.push(envelope.clone());
                     continue;
@@ -3082,22 +3700,34 @@ impl TopologyPort for CultCacheTopologyDriver {
                     continue;
                 }
                 if envelope.r#type == IdunnRuntimeActivationRecord::TYPE {
-                    let activation =
+                    let current =
                         IdunnRuntimeActivationRecord::decode_canonical(&envelope.payload)?;
                     ensure!(
                         !found_activation
                             && envelope.schema_id.as_deref()
                                 == Some(IDUNN_RUNTIME_ACTIVATION_SCHEMA)
-                            && activation.expected_projection_sha256 == expected_sha256
-                            && activation.runtime_id == expected.runtime_id,
+                            && activation == Some(&current),
                         "refusing to withdraw a substituted runtime activation"
                     );
                     found_activation = true;
                     continue;
                 }
+                if envelope.r#type == IdunnProcessWriteLeaseRecord::TYPE {
+                    let current =
+                        IdunnProcessWriteLeaseRecord::decode_canonical(&envelope.payload)?;
+                    ensure!(
+                        !found_lease
+                            && envelope.schema_id.as_deref()
+                                == Some(IDUNN_PROCESS_WRITE_LEASE_SCHEMA)
+                            && lease == Some(&current),
+                        "refusing to withdraw a substituted process write lease"
+                    );
+                    found_lease = true;
+                    continue;
+                }
                 retained.push(envelope.clone());
             }
-            if !found_expected && !found_activation {
+            if !found_expected && !found_anchor && !found_activation && !found_lease {
                 return Ok(());
             }
             if store.compare_exchange_snapshot(&entries, &retained)? {
@@ -3134,6 +3764,73 @@ impl TopologyPort for CultCacheTopologyDriver {
         activation.canonical_sha256()
     }
 
+    fn publish_process_write_lease(
+        &self,
+        expected: &IdunnExpectedIncarnationRecord,
+        activation: &IdunnRuntimeActivationRecord,
+        lease: &IdunnProcessWriteLeaseRecord,
+    ) -> Result<String> {
+        validate_topology_lease(expected, activation, lease)?;
+        insert_exact_process_lease(
+            &self.projection_store,
+            expected,
+            activation,
+            CultCacheEnvelope {
+                key: expected.target.clone(),
+                r#type: IdunnProcessWriteLeaseRecord::TYPE.into(),
+                payload: lease.canonical_bytes()?,
+                stored_at: rfc3339_millis(lease.issued_at_unix_millis)?,
+                schema_id: Some(IDUNN_PROCESS_WRITE_LEASE_SCHEMA.into()),
+            },
+        )?;
+        lease.canonical_sha256()
+    }
+
+    fn withdraw_process_write_lease(
+        &self,
+        expected: &IdunnExpectedIncarnationRecord,
+        activation: &IdunnRuntimeActivationRecord,
+        lease: Option<&IdunnProcessWriteLeaseRecord>,
+    ) -> Result<()> {
+        expected.validate()?;
+        activation.validate()?;
+        if let Some(lease) = lease {
+            validate_topology_lease(expected, activation, lease)?;
+        }
+        if !self.projection_store.exists() {
+            return Ok(());
+        }
+        let store = SingleFileMessagePackBackingStore::new(&self.projection_store);
+        for _ in 0..8 {
+            let entries = store.pull_all_read_only_snapshot()?;
+            let mut found = false;
+            let mut retained = Vec::with_capacity(entries.len());
+            for envelope in &entries {
+                if envelope.key != expected.target
+                    || envelope.r#type != IdunnProcessWriteLeaseRecord::TYPE
+                {
+                    retained.push(envelope.clone());
+                    continue;
+                }
+                let current = IdunnProcessWriteLeaseRecord::decode_canonical(&envelope.payload)?;
+                ensure!(
+                    !found
+                        && envelope.schema_id.as_deref() == Some(IDUNN_PROCESS_WRITE_LEASE_SCHEMA)
+                        && lease == Some(&current),
+                    "refusing to withdraw an unexpected process write-lease projection"
+                );
+                found = true;
+            }
+            if !found {
+                return Ok(());
+            }
+            if store.compare_exchange_snapshot(&entries, &retained)? {
+                return Ok(());
+            }
+        }
+        bail!("process write-lease projection changed repeatedly while withdrawing it")
+    }
+
     fn receive(&self, target: &str) -> Result<Option<ReceivedOdinTopologyCorrelation>> {
         require_driver_id(target, "topology target")?;
         if !self.correlation_store.exists() {
@@ -3163,8 +3860,9 @@ impl TopologyPort for CultCacheTopologyDriver {
 }
 
 /// nginx owns proxy mechanics. Idunn supplies one exact backend membership,
-/// validates the complete nginx configuration, reloads it, and then observes
-/// that nginx's loaded configuration contains those exact bytes.
+/// validates the complete nginx configuration, and reloads it. Configuration
+/// bytes are actuator state, not proof that the selected runtime answered on
+/// the stable route; the control plane admits that proof separately.
 pub struct NginxRouteDriver {
     pub binding: RouteBinding,
     pub nginx_program: PathBuf,
@@ -3211,12 +3909,9 @@ impl NginxRouteDriver {
         Ok(output)
     }
 
-    fn render(
-        &self,
-        expected: &IdunnExpectedIncarnationRecord,
-        runtime_instance_id: &str,
-    ) -> Result<Vec<u8>> {
+    fn render(&self, expected: &IdunnExpectedIncarnationRecord) -> Result<Vec<u8>> {
         expected.validate()?;
+        let expected_projection_sha256 = expected.canonical_sha256()?;
         let route = expected
             .route
             .as_ref()
@@ -3226,13 +3921,14 @@ impl NginxRouteDriver {
                 && route.stable_endpoint == self.binding.stable_endpoint,
             "route driver binding differs from Expected"
         );
-        let (candidate_host, candidate_port) = endpoint_host_port(
-            &route.candidate_endpoint,
-            match self.binding.driver {
-                RouteDriver::NginxHttp => "http://",
-                RouteDriver::NginxStreamTcp => "tcp://",
-            },
-        )?;
+        let endpoint_prefix = match (self.binding.driver, route.transport.as_str()) {
+            (RouteDriver::NginxStreamTcp, "http") => "http://",
+            (RouteDriver::NginxStreamTcp, "tcp") => "tcp://",
+            (RouteDriver::NginxStreamUdp, "rudp") => "rudp://",
+            _ => bail!("route driver cannot carry the Expected transport"),
+        };
+        let (candidate_host, candidate_port) =
+            endpoint_host_port(&route.candidate_endpoint, endpoint_prefix)?;
         ensure!(
             candidate_host == self.binding.private_host
                 && (self.binding.private_port_start..=self.binding.private_port_end)
@@ -3241,40 +3937,30 @@ impl NginxRouteDriver {
         );
         let upstream = nginx_identifier(&self.binding.route_id)?;
         let rendered = match self.binding.driver {
-            RouteDriver::NginxHttp => format!(
-                "# Idunn runtime {runtime_instance_id}\nupstream {upstream} {{\n    server {candidate_host}:{candidate_port};\n    keepalive 16;\n}}\n"
-            ),
             RouteDriver::NginxStreamTcp => {
                 let (stable_host, stable_port) =
-                    endpoint_host_port(&route.stable_endpoint, "tcp://")?;
+                    endpoint_host_port(&route.stable_endpoint, endpoint_prefix)?;
                 format!(
-                    "# Idunn runtime {runtime_instance_id}\nupstream {upstream} {{\n    server {candidate_host}:{candidate_port};\n}}\nserver {{\n    listen {stable_host}:{stable_port};\n    proxy_pass {upstream};\n}}\n"
+                    "# Idunn Expected {expected_projection_sha256}\nupstream {upstream} {{\n    server {candidate_host}:{candidate_port};\n}}\nserver {{\n    listen {stable_host}:{stable_port};\n    proxy_pass {upstream};\n}}\n"
+                )
+            }
+            RouteDriver::NginxStreamUdp => {
+                let (stable_host, stable_port) =
+                    endpoint_host_port(&route.stable_endpoint, "rudp://")?;
+                format!(
+                    "# Idunn Expected {expected_projection_sha256}\nupstream {upstream} {{\n    server {candidate_host}:{candidate_port};\n}}\nserver {{\n    listen {stable_host}:{stable_port} udp reuseport;\n    proxy_pass {upstream};\n}}\n"
                 )
             }
         };
         Ok(rendered.into_bytes())
     }
 
-    fn loaded_matches(&self, rendered: &[u8]) -> Result<bool> {
-        let output = self.command(&self.nginx_program, [OsString::from("-T")])?;
-        let loaded = std::str::from_utf8(&output.stdout)
-            .context("nginx loaded configuration is not UTF-8")?;
-        Ok(nginx_config_section(loaded, &self.binding.config_path)?
-            .is_some_and(|section| section.as_bytes() == rendered))
-    }
-
-    fn current_and_loaded(&self) -> Result<(Option<Vec<u8>>, Option<Vec<u8>>)> {
-        let current = match fs::read(&self.binding.config_path) {
+    fn current_configuration(&self) -> Result<Option<Vec<u8>>> {
+        Ok(match fs::read(&self.binding.config_path) {
             Ok(bytes) => Some(bytes),
             Err(error) if error.kind() == ErrorKind::NotFound => None,
             Err(error) => return Err(error).context("reading route fragment"),
-        };
-        let output = self.command(&self.nginx_program, [OsString::from("-T")])?;
-        let dump = std::str::from_utf8(&output.stdout)
-            .context("nginx loaded configuration is not UTF-8")?;
-        let loaded = nginx_config_section(dump, &self.binding.config_path)?
-            .map(|section| section.as_bytes().to_vec());
-        Ok((current, loaded))
+        })
     }
 
     fn write_fragment(&self, content: Option<&[u8]>) -> Result<()> {
@@ -3344,12 +4030,12 @@ impl NginxRouteDriver {
         self.reload()
     }
 
-    fn fail_after_rollback(
+    fn fail_after_rollback<T>(
         &self,
         prior: Option<&[u8]>,
         failure: anyhow::Error,
         context: &str,
-    ) -> Result<()> {
+    ) -> Result<T> {
         match self.restore(prior) {
             Ok(()) => Err(failure).context(context.to_owned()),
             Err(rollback) => Err(failure).context(format!(
@@ -3357,22 +4043,16 @@ impl NginxRouteDriver {
             )),
         }
     }
-}
 
-impl RoutePort for NginxRouteDriver {
-    fn preflight(
+    pub fn preflight(
         &self,
         expected: &IdunnExpectedIncarnationRecord,
         runtime_instance_id: &str,
         incumbent: Option<&RouteObservation>,
     ) -> Result<RoutePreflightReceipt> {
-        let rendered = self.render(expected, runtime_instance_id)?;
+        let rendered = self.render(expected)?;
         ensure!(!rendered.is_empty(), "candidate route rendered empty");
-        let (current, loaded) = self.current_and_loaded()?;
-        ensure!(
-            current == loaded,
-            "nginx route baseline differs from its loaded configuration"
-        );
+        let current = self.current_configuration()?;
         let incumbent_membership_sha256 = current.as_ref().map(|bytes| sha256_id(bytes));
         match incumbent {
             Some(incumbent) => ensure!(
@@ -3387,86 +4067,379 @@ impl RoutePort for NginxRouteDriver {
             ),
         }
         self.validate_candidate_in_private_mount(&rendered)?;
-        let after = self.current_and_loaded()?;
+        let after = self.current_configuration()?;
         ensure!(
-            after.0 == current && after.1 == current,
+            after == current,
             "nginx route baseline changed during candidate validation"
         );
-        Ok(RoutePreflightReceipt {
+        let receipt = RoutePreflightReceipt {
             route_id: self.binding.route_id.clone(),
             candidate_runtime_instance_id: runtime_instance_id.to_owned(),
             candidate_membership_sha256: sha256_id(&rendered),
             incumbent_runtime_instance_id: incumbent
                 .map(|observation| observation.runtime_instance_id.clone()),
             incumbent_membership_sha256,
-        })
+            incumbent_configuration: current,
+        };
+        receipt.validate()?;
+        Ok(receipt)
     }
 
-    fn promote(
+    /// Install the candidate route membership and require nginx to accept the
+    /// complete configuration. Success is not route admission: callers must
+    /// still obtain a fresh signed runtime observation through the stable
+    /// listener.
+    pub fn install(
         &self,
         expected: &IdunnExpectedIncarnationRecord,
         runtime_instance_id: &str,
         preflight: &RoutePreflightReceipt,
-    ) -> Result<RouteObservation> {
-        let rendered = self.render(expected, runtime_instance_id)?;
+        rollback_allowed: bool,
+    ) -> Result<String> {
+        preflight.validate()?;
+        let rendered = self.render(expected)?;
         ensure!(
             preflight.route_id == self.binding.route_id
                 && preflight.candidate_runtime_instance_id == runtime_instance_id
                 && preflight.candidate_membership_sha256 == sha256_id(&rendered),
             "route preflight does not authorize this candidate membership"
         );
-        let (prior, loaded) = self.current_and_loaded()?;
+        let prior = self.current_configuration()?;
         let prior_sha256 = prior.as_ref().map(|bytes| sha256_id(bytes));
+        let candidate_already_written = prior.as_deref() == Some(rendered.as_slice());
         ensure!(
-            prior == loaded && prior_sha256 == preflight.incumbent_membership_sha256,
+            candidate_already_written
+                || (prior == preflight.incumbent_configuration
+                    && prior_sha256 == preflight.incumbent_membership_sha256),
             "route baseline changed after preflight"
         );
-        atomic_replace(&self.binding.config_path, &rendered)?;
+        if !candidate_already_written {
+            atomic_replace(&self.binding.config_path, &rendered)?;
+        }
         if let Err(error) = self.reload() {
-            self.fail_after_rollback(
-                prior.as_deref(),
-                error,
-                "candidate route validation or reload failed",
-            )?;
+            if rollback_allowed {
+                return self.fail_after_rollback(
+                    preflight.incumbent_configuration.as_deref(),
+                    error,
+                    "candidate route validation or reload failed",
+                );
+            }
+            return Err(error).context(
+                "candidate route reload failed after incumbent route authority was fenced; candidate fragment retained for retry",
+            );
         }
-        match self.loaded_matches(&rendered) {
-            Ok(true) => {}
-            Ok(false) => self.fail_after_rollback(
-                prior.as_deref(),
-                anyhow::anyhow!("nginx loaded configuration omitted the admitted membership"),
-                "candidate route observation failed",
-            )?,
-            Err(error) => self.fail_after_rollback(
-                prior.as_deref(),
-                error,
-                "candidate route observation failed",
-            )?,
-        }
-        Ok(RouteObservation {
-            route_id: self.binding.route_id.clone(),
-            runtime_instance_id: runtime_instance_id.to_owned(),
-            membership_sha256: sha256_id(&rendered),
-        })
+        ensure!(
+            self.current_configuration()?.as_deref() == Some(rendered.as_slice()),
+            "candidate route fragment changed during reload"
+        );
+        Ok(sha256_id(&rendered))
     }
 
-    fn observe(
+    pub fn observe_membership(
         &self,
         expected: &IdunnExpectedIncarnationRecord,
-        observation: &RouteObservation,
+        membership_sha256: &str,
     ) -> Result<bool> {
-        let rendered = self.render(expected, &observation.runtime_instance_id)?;
+        let rendered = self.render(expected)?;
         ensure!(
-            observation.route_id == self.binding.route_id
-                && observation.membership_sha256 == sha256_id(&rendered),
+            membership_sha256 == sha256_id(&rendered),
             "route observation does not describe the expected membership"
         );
-        let current = match fs::read(&self.binding.config_path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
-            Err(error) => return Err(error).context("reading route observation"),
-        };
-        Ok(current == rendered && self.loaded_matches(&rendered)?)
+        Ok(self.current_configuration()?.as_deref() == Some(rendered.as_slice()))
     }
+
+    /// Restore the exact membership owned by an admitted generation. Any
+    /// different fragment is drift, not a rollback baseline, so it is never
+    /// restored after a failed reload. A failed reload removes the newly
+    /// written fragment so the next continuity pass cannot mistake disk bytes
+    /// for an adopted route. The caller must still challenge the stable
+    /// listener to prove that nginx workers adopted this membership.
+    pub fn restore_admitted_membership(
+        &self,
+        expected: &IdunnExpectedIncarnationRecord,
+        membership_sha256: &str,
+    ) -> Result<()> {
+        let rendered = self.render(expected)?;
+        ensure!(
+            membership_sha256 == sha256_id(&rendered),
+            "admitted route receipt does not describe the expected membership"
+        );
+        self.validate_candidate_in_private_mount(&rendered)?;
+        if self.current_configuration()?.as_deref() != Some(rendered.as_slice()) {
+            atomic_replace(&self.binding.config_path, &rendered)?;
+        }
+        if let Err(reload) = self.reload() {
+            return match self.write_fragment(None) {
+                Ok(()) => Err(reload).context("reloading the exact admitted route membership"),
+                Err(cleanup) => Err(reload).context(format!(
+                    "reloading the exact admitted route membership; removing its unproved fragment also failed: {cleanup:#}"
+                )),
+            };
+        }
+        ensure!(
+            self.current_configuration()?.as_deref() == Some(rendered.as_slice()),
+            "admitted route fragment changed during restoration"
+        );
+        Ok(())
+    }
+
+    /// Ask the stable listener for one freshly minted provider-owned presence
+    /// statement. This method validates the CultNet wire exchange and exact
+    /// document selection only; Idunn's control plane authenticates and
+    /// correlates the signed payload against current authority.
+    pub fn request_runtime_presence(
+        &self,
+        expected: &IdunnExpectedIncarnationRecord,
+        message_id: &str,
+    ) -> Result<RouteSnapshotResponse> {
+        let route = expected
+            .route
+            .as_ref()
+            .context("route challenge has no Expected route")?;
+        ensure!(
+            route.route_id == self.binding.route_id
+                && route.stable_endpoint == self.binding.stable_endpoint,
+            "route challenge binding differs from Expected"
+        );
+        self.request_runtime_presence_at(expected, message_id, &route.stable_endpoint)
+    }
+
+    /// The bootstrap exception for the first managed Odin observes Warming on
+    /// the exact candidate endpoint. It does not install or admit a route.
+    pub fn request_candidate_runtime_presence(
+        &self,
+        expected: &IdunnExpectedIncarnationRecord,
+        message_id: &str,
+    ) -> Result<RouteSnapshotResponse> {
+        let route = expected
+            .route
+            .as_ref()
+            .context("candidate challenge has no Expected route")?;
+        ensure!(
+            route.route_id == self.binding.route_id,
+            "candidate challenge binding differs from Expected"
+        );
+        self.render(expected)?;
+        self.request_runtime_presence_at(expected, message_id, &route.candidate_endpoint)
+    }
+
+    fn request_runtime_presence_at(
+        &self,
+        expected: &IdunnExpectedIncarnationRecord,
+        message_id: &str,
+        endpoint: &str,
+    ) -> Result<RouteSnapshotResponse> {
+        expected.validate()?;
+        require_driver_id(message_id, "route challenge message")?;
+        let route = expected
+            .route
+            .as_ref()
+            .context("route challenge has no Expected route")?;
+        let request = CultNetMessage::SnapshotRequest {
+            message_id: message_id.to_owned(),
+            schema_ids: Some(vec![GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA.into()]),
+            record_keys: Some(vec![expected.target.clone()]),
+        };
+        let endpoint_prefix = match route.transport.as_str() {
+            "http" => "http://",
+            "tcp" => "tcp://",
+            "rudp" => "rudp://",
+            _ => bail!("route challenge transport is unsupported"),
+        };
+        let (host, port) = endpoint_host_port(endpoint, endpoint_prefix)?;
+        let target = SocketAddr::new(
+            host.parse()
+                .context("route challenge endpoint host is not an IP address")?,
+            port,
+        );
+        let response = match route.transport.as_str() {
+            "http" => {
+                let payload =
+                    encode_cultnet_message_to_vec(&request, CultNetWireContract::CultNetSchemaV0)?;
+                let response = request_http_snapshot(target, &payload)?;
+                decode_cultnet_message_from_slice(&response, CultNetWireContract::CultNetSchemaV0)?
+            }
+            "tcp" => {
+                let payload =
+                    encode_cultnet_message_to_vec(&request, CultNetWireContract::CultNetSchemaV0)?;
+                let response = request_tcp_snapshot(target, &payload)?;
+                decode_cultnet_message_from_slice(&response, CultNetWireContract::CultNetSchemaV0)?
+            }
+            "rudp" => request_raw_snapshot_from_rudp_catalog(CultMeshRudpSnapshotOptions {
+                target,
+                runtime_id: "idunn-route-observer".into(),
+                message_id: message_id.to_owned(),
+                schema_ids: Some(vec![GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA.into()]),
+                record_keys: Some(vec![expected.target.clone()]),
+                ..CultMeshRudpSnapshotOptions::default()
+            })?,
+            _ => bail!("route challenge transport is unsupported"),
+        };
+        exact_route_snapshot_response(response, message_id, &expected.target)
+    }
+
+    /// Restore the exact preflight baseline. This may only replace the exact
+    /// candidate authorized by the receipt; an unrelated writer is never
+    /// overwritten as a side effect of rollback.
+    pub fn rollback(
+        &self,
+        expected: &IdunnExpectedIncarnationRecord,
+        runtime_instance_id: &str,
+        preflight: &RoutePreflightReceipt,
+    ) -> Result<()> {
+        preflight.validate()?;
+        let rendered = self.render(expected)?;
+        ensure!(
+            preflight.route_id == self.binding.route_id
+                && preflight.candidate_runtime_instance_id == runtime_instance_id
+                && preflight.candidate_membership_sha256 == sha256_id(&rendered),
+            "route preflight does not authorize rollback of this candidate membership"
+        );
+        ensure!(
+            self.current_configuration()?.as_deref() == Some(rendered.as_slice()),
+            "candidate route changed before rollback"
+        );
+        self.restore(preflight.incumbent_configuration.as_deref())
+    }
+}
+
+fn request_tcp_snapshot(target: SocketAddr, payload: &[u8]) -> Result<Vec<u8>> {
+    let mut stream = TcpStream::connect_timeout(&target, ROUTE_SNAPSHOT_TIMEOUT)
+        .with_context(|| format!("connecting stable CultNet TCP route {target}"))?;
+    stream.set_read_timeout(Some(ROUTE_SNAPSHOT_TIMEOUT))?;
+    stream.set_write_timeout(Some(ROUTE_SNAPSHOT_TIMEOUT))?;
+    stream.write_all(&encode_frame(payload)?)?;
+    stream.flush()?;
+
+    let mut header = [0_u8; 4];
+    stream
+        .read_exact(&mut header)
+        .context("reading stable CultNet TCP response frame")?;
+    let length = u32::from_be_bytes(header) as usize;
+    ensure!(
+        (1..=ROUTE_SNAPSHOT_MAX_BYTES).contains(&length),
+        "stable CultNet TCP response exceeds the route observation bound"
+    );
+    let mut response = vec![0_u8; length];
+    stream
+        .read_exact(&mut response)
+        .context("reading stable CultNet TCP response payload")?;
+    Ok(response)
+}
+
+fn request_http_snapshot(target: SocketAddr, payload: &[u8]) -> Result<Vec<u8>> {
+    let mut stream = TcpStream::connect_timeout(&target, ROUTE_SNAPSHOT_TIMEOUT)
+        .with_context(|| format!("connecting stable CultNet HTTP route {target}"))?;
+    stream.set_read_timeout(Some(ROUTE_SNAPSHOT_TIMEOUT))?;
+    stream.set_write_timeout(Some(ROUTE_SNAPSHOT_TIMEOUT))?;
+    let head = format!(
+        "POST {ROUTE_HTTP_SNAPSHOT_PATH} HTTP/1.1\r\nHost: {target}\r\nContent-Type: application/msgpack\r\nAccept: application/msgpack\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        payload.len()
+    );
+    stream.write_all(head.as_bytes())?;
+    stream.write_all(payload)?;
+    stream.flush()?;
+
+    let maximum = ROUTE_HTTP_MAX_HEADER_BYTES
+        .checked_add(ROUTE_SNAPSHOT_MAX_BYTES)
+        .context("route HTTP response bound overflow")?;
+    let mut response = Vec::new();
+    (&mut stream)
+        .take((maximum + 1) as u64)
+        .read_to_end(&mut response)
+        .context("reading stable CultNet HTTP response")?;
+    ensure!(
+        response.len() <= maximum,
+        "stable CultNet HTTP response exceeds the route observation bound"
+    );
+    let header_end = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|index| index + 4)
+        .context("stable CultNet HTTP response has no header boundary")?;
+    ensure!(
+        header_end <= ROUTE_HTTP_MAX_HEADER_BYTES,
+        "stable CultNet HTTP response headers exceed their bound"
+    );
+    let headers = std::str::from_utf8(&response[..header_end])
+        .context("stable CultNet HTTP response headers are not UTF-8")?;
+    let mut lines = headers.split("\r\n");
+    let status = lines
+        .next()
+        .context("stable CultNet HTTP response has no status")?;
+    ensure!(
+        matches!(status, "HTTP/1.1 200 OK" | "HTTP/1.0 200 OK"),
+        "stable CultNet HTTP route rejected the snapshot challenge: {status}"
+    );
+    let mut content_length = None;
+    for line in lines.filter(|line| !line.is_empty()) {
+        let (name, value) = line
+            .split_once(':')
+            .context("stable CultNet HTTP response contains a malformed header")?;
+        if name.eq_ignore_ascii_case("transfer-encoding") {
+            bail!("stable CultNet HTTP response uses unsupported transfer encoding");
+        }
+        if name.eq_ignore_ascii_case("content-length") {
+            ensure!(
+                content_length.is_none(),
+                "stable CultNet HTTP response repeats Content-Length"
+            );
+            content_length = Some(
+                value
+                    .trim()
+                    .parse::<usize>()
+                    .context("stable CultNet HTTP Content-Length is invalid")?,
+            );
+        }
+    }
+    let content_length =
+        content_length.context("stable CultNet HTTP response has no Content-Length")?;
+    ensure!(
+        content_length <= ROUTE_SNAPSHOT_MAX_BYTES
+            && response.len().saturating_sub(header_end) == content_length,
+        "stable CultNet HTTP response body differs from its bounded Content-Length"
+    );
+    Ok(response[header_end..].to_vec())
+}
+
+fn exact_route_snapshot_response(
+    response: CultNetMessage,
+    message_id: &str,
+    target: &str,
+) -> Result<RouteSnapshotResponse> {
+    let CultNetMessage::SnapshotResponseRaw {
+        message_id: response_id,
+        documents,
+    } = response
+    else {
+        bail!("stable route returned a non-raw snapshot response")
+    };
+    ensure!(
+        response_id == message_id,
+        "stable route snapshot response belongs to another challenge"
+    );
+    ensure!(
+        documents.len() == 1,
+        "stable route snapshot response is not the exact singleton presence document"
+    );
+    let document = documents
+        .into_iter()
+        .next()
+        .expect("singleton response length was checked");
+    ensure!(
+        document.schema_id == GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA
+            && document.record_key == target
+            && document.payload_encoding == CultNetRawPayloadEncoding::Messagepack,
+        "stable route substituted the runtime presence document"
+    );
+    ensure!(
+        !document.payload.is_empty() && document.payload.len() <= ROUTE_SNAPSHOT_MAX_BYTES,
+        "stable route presence payload is empty or exceeds its bound"
+    );
+    Ok(RouteSnapshotResponse {
+        message_id: response_id,
+        canonical_presence: document.payload,
+    })
 }
 
 fn release_artifact<'a>(
@@ -4654,24 +5627,6 @@ fn nginx_identifier(route_id: &str) -> Result<String> {
     Ok(identifier)
 }
 
-fn nginx_config_section<'a>(dump: &'a str, config_path: &Path) -> Result<Option<&'a str>> {
-    let marker = format!("# configuration file {}:\n", config_path.display());
-    let matches = dump.match_indices(&marker).collect::<Vec<_>>();
-    ensure!(
-        matches.len() <= 1,
-        "nginx loaded configuration contains duplicate sections for {}",
-        config_path.display()
-    );
-    let Some((start, _)) = matches.first().copied() else {
-        return Ok(None);
-    };
-    let content = &dump[start + marker.len()..];
-    let end = content
-        .find("\n# configuration file ")
-        .map_or(content.len(), |index| index + 1);
-    Ok(Some(&content[..end]))
-}
-
 fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<()> {
     #[cfg(unix)]
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -5539,6 +6494,7 @@ mod tests {
         IdunnExpectedIncarnationRecord,
         IdunnRuntimeActivationRecord,
         SequenceAdmittedWarming,
+        ServiceIdentityTrustAnchor,
     )> {
         let provider = enroll_service_identity_at::<GameCultProviderHealthIdentity>(
             &root.join("provider.cc"),
@@ -5594,7 +6550,7 @@ mod tests {
             },
         )?;
         let warming = SequenceAdmittedWarming::for_test("test-transaction", warming, 120)?;
-        Ok((expected, activation, warming))
+        Ok((expected, activation, warming, provider.trust_anchor()?))
     }
 
     fn lease(
@@ -5614,52 +6570,81 @@ mod tests {
             state_contract_sha256: expected.state_contract_sha256.clone().unwrap(),
             runtime_id: expected.runtime_id.clone(),
             runtime_instance_id: activation.runtime_instance_id.clone(),
-            warming_presence_sha256: warming
-                .authenticated()
-                .record()
-                .signed_presence_sha256
-                .clone()
-                .unwrap(),
+            warming_presence_sha256: warming.signed_presence_sha256().to_owned(),
             lease_epoch: 1,
             issued_at_unix_millis: 200,
         }
     }
 
+    fn topology_driver(root: &Path, name: &str) -> CultCacheTopologyDriver {
+        CultCacheTopologyDriver {
+            projection_store: root.join(format!("{name}.cc")),
+            correlation_store: root.join(format!("{name}-correlation.cc")),
+        }
+    }
+
+    fn project_activation(
+        driver: &CultCacheTopologyDriver,
+        expected: &IdunnExpectedIncarnationRecord,
+        activation: &IdunnRuntimeActivationRecord,
+    ) -> Result<()> {
+        ensure!(
+            activation.expected_projection_sha256 == expected.canonical_sha256()?,
+            "test activation belongs to another Expected"
+        );
+        upsert_record(
+            &driver.projection_store,
+            CultCacheEnvelope {
+                key: expected.target.clone(),
+                r#type: IdunnRuntimeActivationRecord::TYPE.into(),
+                payload: activation.canonical_bytes()?,
+                stored_at: rfc3339_millis(activation.issued_at_unix_millis)?,
+                schema_id: Some(IDUNN_RUNTIME_ACTIVATION_SCHEMA.into()),
+            },
+        )
+    }
+
     #[test]
-    fn nginx_loaded_observation_is_bound_to_the_exact_file_section() -> Result<()> {
-        let path = Path::new("/etc/nginx/idunn-routes/service.conf");
-        let rendered = "upstream idunn_service {\n    server 127.0.0.1:4104;\n}\n";
-        let dump = format!(
-            "# configuration file /etc/nginx/nginx.conf:\nevents {{}}\n# configuration file {}:\n{rendered}# configuration file /etc/nginx/other.conf:\n{rendered}",
-            path.display()
-        );
-        assert_eq!(nginx_config_section(&dump, path)?, Some(rendered));
-        assert_eq!(
-            nginx_config_section(&dump, Path::new("/etc/nginx/missing.conf"))?,
-            None
-        );
-        let duplicate = format!("{dump}# configuration file {}:\n{rendered}", path.display());
-        assert!(nginx_config_section(&duplicate, path).is_err());
+    fn nginx_rudp_route_is_rendered_as_a_udp_stream_proxy() -> Result<()> {
+        let driver = NginxRouteDriver::new(RouteBinding {
+            driver: RouteDriver::NginxStreamUdp,
+            route_id: "odin-rudp".into(),
+            stable_endpoint: "rudp://127.0.0.1:17872".into(),
+            private_host: "127.0.0.1".into(),
+            private_port_start: 27872,
+            private_port_end: 27879,
+            config_path: "/etc/nginx/idunn-stream-routes/odin-rudp.conf".into(),
+            reload_unit: "nginx.service".into(),
+        });
+        let mut candidate = expected();
+        candidate.route = Some(cultnet_rs::IdunnExpectedRoute {
+            route_id: "odin-rudp".into(),
+            transport: "rudp".into(),
+            stable_endpoint: "rudp://127.0.0.1:17872".into(),
+            candidate_endpoint: "rudp://127.0.0.1:27872".into(),
+        });
+        let rendered = String::from_utf8(driver.render(&candidate)?)?;
+        assert!(rendered.contains("listen 127.0.0.1:17872 udp reuseport;"));
+        assert!(rendered.contains("server 127.0.0.1:27872;"));
         Ok(())
     }
 
     #[cfg(unix)]
     #[test]
-    fn nginx_preflight_validates_candidate_and_binds_the_loaded_incumbent() -> Result<()> {
+    fn nginx_preflight_binds_exact_incumbent_configuration_without_claiming_live_route()
+    -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
 
         let temp = tempfile::tempdir()?;
         let config = temp.path().join("route.conf");
-        let loaded = temp.path().join("loaded.conf");
         let nginx = temp.path().join("nginx");
         let systemd_run = temp.path().join("systemd-run");
         let systemctl = temp.path().join("systemctl");
         fs::write(
             &nginx,
             format!(
-                "#!/bin/sh\nconfig='{}'\nloaded='{}'\nif [ \"$1\" = \"-T\" ]; then\n  if [ -f \"$loaded\" ]; then\n    printf '# configuration file %s:\\n' \"$config\"\n    /bin/cat \"$loaded\"\n  fi\n  exit 0\nfi\nif [ \"$1\" = \"-t\" ]; then\n  candidate=${{IDUNN_TEST_SHADOW:-$config}}\n  /bin/grep -q 'server 127.0.0.1:4104' \"$candidate\"\n  exit $?\nfi\nexit 64\n",
+                "#!/bin/sh\nconfig='{}'\nif [ \"$1\" = \"-t\" ]; then\n  candidate=${{IDUNN_TEST_SHADOW:-$config}}\n  /bin/grep -q 'server 127.0.0.1:4104' \"$candidate\"\n  exit $?\nfi\nexit 64\n",
                 config.display(),
-                loaded.display(),
             ),
         )?;
         fs::write(
@@ -5670,18 +6655,14 @@ mod tests {
         )?;
         fs::write(
             &systemctl,
-            format!(
-                "#!/bin/sh\nif [ \"$1\" = \"reload\" ]; then\n  /bin/cp '{}' '{}'\n  exit 0\nfi\nexit 64\n",
-                config.display(),
-                loaded.display(),
-            ),
+            "#!/bin/sh\nif [ -e \"$0.fail\" ]; then exit 65; fi\nif [ \"$1\" = \"reload\" ]; then echo reload >> \"$0.calls\"; exit 0; fi\nexit 64\n",
         )?;
         fs::set_permissions(&nginx, fs::Permissions::from_mode(0o755))?;
         fs::set_permissions(&systemd_run, fs::Permissions::from_mode(0o755))?;
         fs::set_permissions(&systemctl, fs::Permissions::from_mode(0o755))?;
 
         let binding = RouteBinding {
-            driver: RouteDriver::NginxHttp,
+            driver: RouteDriver::NginxStreamTcp,
             route_id: "service-route".into(),
             stable_endpoint: "http://127.0.0.1:4103".into(),
             private_host: "127.0.0.1".into(),
@@ -5694,7 +6675,7 @@ mod tests {
             binding,
             nginx_program: nginx,
             systemd_run_program: systemd_run,
-            systemctl_program: systemctl,
+            systemctl_program: systemctl.clone(),
             preflight_root: temp.path().join("preflight"),
         };
         let mut candidate = expected();
@@ -5706,23 +6687,58 @@ mod tests {
         });
         let preflight = driver.preflight(&candidate, &digest('a'), None)?;
         assert!(!config.exists());
-        assert!(!loaded.exists());
         assert_eq!(fs::read_dir(&driver.preflight_root)?.count(), 0);
 
-        let admitted = driver.promote(&candidate, &digest('a'), &preflight)?;
-        assert!(driver.observe(&candidate, &admitted)?);
+        let candidate_bytes = driver.render(&candidate)?;
+        fs::write(&config, &candidate_bytes)?;
+        let membership_sha256 = driver.install(&candidate, &digest('a'), &preflight, true)?;
+        assert_eq!(
+            fs::read_to_string(systemctl.with_extension("calls"))?,
+            "reload\n"
+        );
+        assert!(driver.observe_membership(&candidate, &membership_sha256)?);
         let admitted_bytes = fs::read(&config)?;
-        assert_eq!(fs::read(&loaded)?, admitted_bytes);
+        assert!(std::str::from_utf8(&admitted_bytes)?.contains("listen 127.0.0.1:4103;"));
+        let admitted = RouteObservation {
+            route_id: "service-route".into(),
+            runtime_instance_id: digest('a'),
+            membership_sha256,
+            signed_presence_sha256: digest('c'),
+            observed_at_unix_millis: 1,
+        };
 
         let next_preflight = driver.preflight(&candidate, &digest('b'), Some(&admitted))?;
         assert_eq!(fs::read(&config)?, admitted_bytes);
+        fs::write(systemctl.with_extension("fail"), b"fail\n")?;
+        assert!(
+            driver
+                .install(&candidate, &digest('b'), &next_preflight, false)
+                .is_err()
+        );
+        assert_eq!(fs::read(&config)?, admitted_bytes);
+        fs::remove_file(systemctl.with_extension("fail"))?;
+        driver.install(&candidate, &digest('b'), &next_preflight, false)?;
         fs::write(&config, b"foreign route\n")?;
         assert!(
             driver
-                .promote(&candidate, &digest('b'), &next_preflight)
+                .install(&candidate, &digest('b'), &next_preflight, true)
                 .is_err()
         );
-        assert_eq!(fs::read(&loaded)?, admitted_bytes);
+        driver.restore_admitted_membership(&candidate, &admitted.membership_sha256)?;
+        assert_eq!(fs::read(&config)?, admitted_bytes);
+        assert!(driver.observe_membership(&candidate, &admitted.membership_sha256)?);
+
+        fs::write(&config, b"foreign route after admission\n")?;
+        fs::write(systemctl.with_extension("fail"), b"fail\n")?;
+        assert!(
+            driver
+                .restore_admitted_membership(&candidate, &admitted.membership_sha256)
+                .is_err()
+        );
+        assert!(!config.exists());
+        fs::remove_file(systemctl.with_extension("fail"))?;
+        driver.restore_admitted_membership(&candidate, &admitted.membership_sha256)?;
+        assert_eq!(fs::read(&config)?, admitted_bytes);
         Ok(())
     }
 
@@ -5773,65 +6789,70 @@ mod tests {
     #[test]
     fn expected_withdrawal_is_exact_atomic_and_idempotent() -> Result<()> {
         let temp = tempfile::tempdir()?;
-        let (expected, activation, _) = authenticated_warming(temp.path())?;
-        let projection_store = temp.path().join("projection.cc");
-        let driver = CultCacheTopologyDriver {
-            projection_store: projection_store.clone(),
-            correlation_store: temp.path().join("correlation.cc"),
-        };
-        driver.publish_expected(&expected)?;
-        upsert_record(
-            &projection_store,
-            CultCacheEnvelope {
-                key: expected.target.clone(),
-                r#type: IdunnRuntimeActivationRecord::TYPE.into(),
-                payload: activation.canonical_bytes()?,
-                stored_at: "2026-09-03T00:00:00Z".into(),
-                schema_id: Some(IDUNN_RUNTIME_ACTIVATION_SCHEMA.into()),
-            },
-        )?;
-        upsert_record(
-            &projection_store,
-            CultCacheEnvelope {
-                key: "unrelated".into(),
-                r#type: "test.unrelated".into(),
-                payload: vec![0x90],
-                stored_at: "2026-09-03T00:00:00Z".into(),
-                schema_id: Some("test.unrelated.v1".into()),
-            },
-        )?;
-
-        driver.withdraw_expected(&expected)?;
-        let remaining = SingleFileMessagePackBackingStore::new(&projection_store)
+        let (expected, activation, warming, provider_anchor) = authenticated_warming(temp.path())?;
+        let lease = lease(&expected, &activation, &warming);
+        let driver = topology_driver(temp.path(), "projection");
+        driver.publish_expected(&expected, &provider_anchor)?;
+        let published = SingleFileMessagePackBackingStore::new(&driver.projection_store)
             .pull_all_read_only_snapshot()?;
-        assert_eq!(remaining.len(), 1);
-        assert_eq!(remaining[0].key, "unrelated");
-        driver.withdraw_expected(&expected)?;
+        assert_eq!(published.len(), 2);
+        assert!(published.iter().any(|entry| {
+            entry.key == expected.target && entry.r#type == IdunnExpectedIncarnationRecord::TYPE
+        }));
+        let published_anchor = published
+            .iter()
+            .find(|entry| entry.r#type == GameCultServiceTrustAnchorRecord::TYPE)
+            .context("atomic Expected set has no provider trust anchor")?;
+        assert_eq!(
+            service_trust_anchor_from_envelope(published_anchor)?,
+            runtime_presence_trust_anchor(&expected, &provider_anchor)?
+        );
+        project_activation(&driver, &expected, &activation)?;
+        driver.publish_process_write_lease(&expected, &activation, &lease)?;
 
-        let substituted_store = temp.path().join("substituted-expected.cc");
-        let substituted_driver = CultCacheTopologyDriver {
-            projection_store: substituted_store.clone(),
-            correlation_store: temp.path().join("substituted-correlation.cc"),
-        };
-        substituted_driver.publish_expected(&expected)?;
         let mut substituted_expected = expected.clone();
         substituted_expected.incarnation_id = "another-incarnation".into();
+        upsert_record(
+            &driver.projection_store,
+            CultCacheEnvelope {
+                key: expected.target.clone(),
+                r#type: IdunnExpectedIncarnationRecord::TYPE.into(),
+                payload: substituted_expected.canonical_bytes()?,
+                stored_at: "2026-09-03T00:00:00Z".into(),
+                schema_id: Some(IDUNN_EXPECTED_INCARNATION_SCHEMA.into()),
+            },
+        )?;
         assert!(
-            substituted_driver
-                .withdraw_expected(&substituted_expected)
+            driver
+                .withdraw_expected(&expected, &provider_anchor, Some(&activation), Some(&lease))
                 .is_err()
         );
+        driver.publish_expected(&expected, &provider_anchor)?;
 
-        let substituted_activation_store = temp.path().join("substituted-activation.cc");
-        let substituted_activation_driver = CultCacheTopologyDriver {
-            projection_store: substituted_activation_store.clone(),
-            correlation_store: temp.path().join("substituted-activation-correlation.cc"),
-        };
-        substituted_activation_driver.publish_expected(&expected)?;
-        let mut substituted_activation = activation;
+        let mut substituted_anchor = runtime_presence_trust_anchor(&expected, &provider_anchor)?;
+        substituted_anchor.runtime_id = "another-runtime".into();
+        substituted_anchor.validate()?;
+        upsert_record(
+            &driver.projection_store,
+            CultCacheEnvelope {
+                key: substituted_anchor.trust_anchor_id.clone(),
+                r#type: GameCultServiceTrustAnchorRecord::TYPE.into(),
+                payload: rmp_serde::to_vec(&substituted_anchor)?,
+                stored_at: "2026-09-03T00:00:00Z".into(),
+                schema_id: Some(GAMECULT_SERVICE_TRUST_ANCHOR_SCHEMA.into()),
+            },
+        )?;
+        assert!(
+            driver
+                .withdraw_expected(&expected, &provider_anchor, Some(&activation), Some(&lease))
+                .is_err()
+        );
+        driver.publish_expected(&expected, &provider_anchor)?;
+
+        let mut substituted_activation = activation.clone();
         substituted_activation.expected_projection_sha256 = digest('a');
         upsert_record(
-            &substituted_activation_store,
+            &driver.projection_store,
             CultCacheEnvelope {
                 key: expected.target.clone(),
                 r#type: IdunnRuntimeActivationRecord::TYPE.into(),
@@ -5841,10 +6862,199 @@ mod tests {
             },
         )?;
         assert!(
-            substituted_activation_driver
-                .withdraw_expected(&expected)
+            driver
+                .withdraw_expected(&expected, &provider_anchor, Some(&activation), None)
                 .is_err()
         );
+        project_activation(&driver, &expected, &activation)?;
+
+        let mut substituted_lease = lease.clone();
+        substituted_lease.lease_epoch += 1;
+        assert!(
+            driver
+                .publish_process_write_lease(&expected, &activation, &substituted_lease)
+                .is_err()
+        );
+        assert!(
+            driver
+                .withdraw_expected(
+                    &expected,
+                    &provider_anchor,
+                    Some(&activation),
+                    Some(&substituted_lease),
+                )
+                .is_err()
+        );
+
+        upsert_record(
+            &driver.projection_store,
+            CultCacheEnvelope {
+                key: "unrelated".into(),
+                r#type: "test.unrelated".into(),
+                payload: vec![0x90],
+                stored_at: "2026-09-03T00:00:00Z".into(),
+                schema_id: Some("test.unrelated.v1".into()),
+            },
+        )?;
+        driver.withdraw_expected(&expected, &provider_anchor, Some(&activation), Some(&lease))?;
+        let remaining = SingleFileMessagePackBackingStore::new(&driver.projection_store)
+            .pull_all_read_only_snapshot()?;
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].key, "unrelated");
+        driver.withdraw_expected(&expected, &provider_anchor, Some(&activation), Some(&lease))?;
+        Ok(())
+    }
+
+    #[test]
+    fn incumbent_projection_restoration_demotes_to_expected_only_and_rejects_unknown_authority()
+    -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let (incumbent, activation, warming, provider_anchor) = authenticated_warming(temp.path())?;
+        let lease = lease(&incumbent, &activation, &warming);
+        let driver = topology_driver(temp.path(), "restoration");
+        driver.publish_expected(&incumbent, &provider_anchor)?;
+        project_activation(&driver, &incumbent, &activation)?;
+        driver.publish_process_write_lease(&incumbent, &activation, &lease)?;
+
+        let mut candidate = incumbent.clone();
+        candidate.plan_id = digest('a');
+        candidate.incarnation_id = "candidate-incarnation".into();
+        candidate.sealed_release_id = digest('b');
+        candidate.artifact_sha256 = digest('c');
+        let mut candidate_activation = activation.clone();
+        candidate_activation.expected_projection_sha256 = candidate.canonical_sha256()?;
+        candidate_activation.runtime_instance_id = digest('d');
+        driver.publish_expected(&candidate, &provider_anchor)?;
+        project_activation(&driver, &candidate, &candidate_activation)?;
+
+        upsert_record(
+            &driver.projection_store,
+            CultCacheEnvelope {
+                key: "unrelated".into(),
+                r#type: "test.unrelated".into(),
+                payload: vec![0x90],
+                stored_at: "2026-09-03T00:00:00Z".into(),
+                schema_id: Some("test.unrelated.v1".into()),
+            },
+        )?;
+
+        assert_eq!(
+            driver.restore_admitted_expected_only(
+                &candidate,
+                &provider_anchor,
+                Some(&candidate_activation),
+                &incumbent,
+                &provider_anchor,
+                &activation,
+                Some(&lease),
+            )?,
+            incumbent.canonical_sha256()?
+        );
+
+        let restored = SingleFileMessagePackBackingStore::new(&driver.projection_store)
+            .pull_all_read_only_snapshot()?;
+        assert_eq!(restored.len(), 3);
+        assert_eq!(
+            IdunnExpectedIncarnationRecord::decode_canonical(
+                &restored
+                    .iter()
+                    .find(|entry| entry.r#type == IdunnExpectedIncarnationRecord::TYPE)
+                    .unwrap()
+                    .payload,
+            )?,
+            incumbent
+        );
+        assert_eq!(
+            service_trust_anchor_from_envelope(
+                restored
+                    .iter()
+                    .find(|entry| entry.r#type == GameCultServiceTrustAnchorRecord::TYPE)
+                    .unwrap(),
+            )?,
+            runtime_presence_trust_anchor(&incumbent, &provider_anchor)?
+        );
+        assert!(
+            restored
+                .iter()
+                .all(|entry| entry.r#type != IdunnRuntimeActivationRecord::TYPE
+                    && entry.r#type != IdunnProcessWriteLeaseRecord::TYPE)
+        );
+        assert!(
+            restored
+                .iter()
+                .any(|entry| entry.key == "unrelated" && entry.r#type == "test.unrelated")
+        );
+        let idempotent_bytes = fs::read(&driver.projection_store)?;
+        driver.restore_admitted_expected_only(
+            &candidate,
+            &provider_anchor,
+            Some(&candidate_activation),
+            &incumbent,
+            &provider_anchor,
+            &activation,
+            Some(&lease),
+        )?;
+        assert_eq!(fs::read(&driver.projection_store)?, idempotent_bytes);
+
+        let admitted_anchor = runtime_presence_trust_anchor(&incumbent, &provider_anchor)?;
+        let mut unknown_expected = incumbent.clone();
+        unknown_expected.incarnation_id = "unknown-incarnation".into();
+        let mut unknown_anchor = admitted_anchor.clone();
+        unknown_anchor.runtime_id = "unknown-runtime".into();
+        unknown_anchor.validate()?;
+        let mut unknown_activation = activation.clone();
+        unknown_activation.runtime_instance_id = digest('e');
+        let mut unknown_lease = lease.clone();
+        unknown_lease.lease_epoch += 1;
+        let substitutions = [
+            CultCacheEnvelope {
+                key: incumbent.target.clone(),
+                r#type: IdunnExpectedIncarnationRecord::TYPE.into(),
+                payload: unknown_expected.canonical_bytes()?,
+                stored_at: "2026-09-03T00:00:00Z".into(),
+                schema_id: Some(IDUNN_EXPECTED_INCARNATION_SCHEMA.into()),
+            },
+            CultCacheEnvelope {
+                key: admitted_anchor.trust_anchor_id.clone(),
+                r#type: GameCultServiceTrustAnchorRecord::TYPE.into(),
+                payload: rmp_serde::to_vec(&unknown_anchor)?,
+                stored_at: "2026-09-03T00:00:00Z".into(),
+                schema_id: Some(GAMECULT_SERVICE_TRUST_ANCHOR_SCHEMA.into()),
+            },
+            CultCacheEnvelope {
+                key: incumbent.target.clone(),
+                r#type: IdunnRuntimeActivationRecord::TYPE.into(),
+                payload: unknown_activation.canonical_bytes()?,
+                stored_at: "2026-09-03T00:00:00Z".into(),
+                schema_id: Some(IDUNN_RUNTIME_ACTIVATION_SCHEMA.into()),
+            },
+            CultCacheEnvelope {
+                key: incumbent.target.clone(),
+                r#type: IdunnProcessWriteLeaseRecord::TYPE.into(),
+                payload: unknown_lease.canonical_bytes()?,
+                stored_at: "2026-09-03T00:00:00Z".into(),
+                schema_id: Some(IDUNN_PROCESS_WRITE_LEASE_SCHEMA.into()),
+            },
+        ];
+        for substitution in substitutions {
+            fs::write(&driver.projection_store, &idempotent_bytes)?;
+            upsert_record(&driver.projection_store, substitution)?;
+            let before = fs::read(&driver.projection_store)?;
+            assert!(
+                driver
+                    .restore_admitted_expected_only(
+                        &candidate,
+                        &provider_anchor,
+                        Some(&candidate_activation),
+                        &incumbent,
+                        &provider_anchor,
+                        &activation,
+                        Some(&lease),
+                    )
+                    .is_err()
+            );
+            assert_eq!(fs::read(&driver.projection_store)?, before);
+        }
         Ok(())
     }
 
@@ -5886,19 +7096,75 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let path = temp.path().join("lease.cc");
         let driver = CultCacheWriteLeaseDriver::new("service", &path);
-        let (expected, activation, warming) = authenticated_warming(temp.path())?;
+        let (expected, activation, warming, provider_anchor) = authenticated_warming(temp.path())?;
         let lease = lease(&expected, &activation, &warming);
+        let topology = topology_driver(temp.path(), "lease-projection");
+        topology.publish_expected(&expected, &provider_anchor)?;
+        project_activation(&topology, &expected, &activation)?;
+
         let lease_sha256 = driver.grant(&expected, &activation, &warming, &lease)?;
         assert_eq!(lease_sha256, lease.canonical_sha256()?);
         assert!(driver.observe(&expected, &activation, &warming, &lease)?);
+        assert!(
+            !SingleFileMessagePackBackingStore::new(&topology.projection_store)
+                .pull_all_read_only_snapshot()?
+                .iter()
+                .any(|entry| entry.r#type == IdunnProcessWriteLeaseRecord::TYPE)
+        );
+        assert_eq!(
+            topology.publish_process_write_lease(&expected, &activation, &lease)?,
+            lease_sha256
+        );
 
         let mut surprise = lease.clone();
         surprise.lease_epoch = 2;
         assert!(driver.revoke_exact(Some(&surprise)).is_err());
         assert!(driver.observe(&expected, &activation, &warming, &lease)?);
 
+        SingleFileMessagePackBackingStore::new(&path).with_read_only_shared_snapshot(|_| {
+            let denial = driver
+                .revoke_exact(Some(&lease))
+                .expect_err("shared lifetime holder must deny without blocking");
+            assert!(
+                denial
+                    .to_string()
+                    .contains("held by a shared-lock consumer")
+            );
+            Ok(())
+        })?;
+        assert!(driver.observe(&expected, &activation, &warming, &lease)?);
+
         driver.revoke_exact(Some(&lease))?;
         assert!(driver.observe_empty()?);
+        topology.withdraw_process_write_lease(&expected, &activation, Some(&lease))?;
+        assert!(
+            !SingleFileMessagePackBackingStore::new(&topology.projection_store)
+                .pull_all_read_only_snapshot()?
+                .iter()
+                .any(|entry| entry.r#type == IdunnProcessWriteLeaseRecord::TYPE)
+        );
+        topology.withdraw_process_write_lease(&expected, &activation, Some(&lease))?;
+        driver.revoke_exact(Some(&lease))?;
+
+        SingleFileMessagePackBackingStore::new(&path).with_read_only_shared_snapshot(
+            |snapshot| {
+                assert!(snapshot.is_empty());
+                let denial = driver
+                    .grant(&expected, &activation, &warming, &lease)
+                    .expect_err("shared lifetime holder must deny grant without blocking");
+                assert!(
+                    denial
+                        .to_string()
+                        .contains("held by a shared-lock consumer")
+                );
+                Ok(())
+            },
+        )?;
+        assert!(driver.observe_empty()?);
+        assert_eq!(
+            driver.grant(&expected, &activation, &warming, &lease)?,
+            lease.canonical_sha256()?
+        );
         driver.revoke_exact(Some(&lease))?;
         Ok(())
     }
