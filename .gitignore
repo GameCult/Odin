@@ -7,3 +7,6 @@ target/
 *.pid
 artifacts/
 **/artifacts/
+
+# Agent scratch. Reached 50MB of tarballs and lockfile snapshots once.
+.codex-tmp/
