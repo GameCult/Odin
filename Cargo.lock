@@ -175,22 +175,25 @@ dependencies = [
 [[package]]
 name = "cultcache-rs"
 version = "0.1.0"
+source = "git+https://github.com/GameCult/CultLib.git?rev=cbde940df2f5ee0ccac50e8dbfe9f36ffbebb585#cbde940df2f5ee0ccac50e8dbfe9f36ffbebb585"
 dependencies = [
  "anyhow",
  "chrono",
  "cultcache-rs-derive",
  "fs2",
+ "redb",
  "rmp-serde",
  "serde",
  "serde_bytes",
  "serde_json",
  "uuid",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
 name = "cultcache-rs-derive"
 version = "0.1.0"
+source = "git+https://github.com/GameCult/CultLib.git?rev=cbde940df2f5ee0ccac50e8dbfe9f36ffbebb585#cbde940df2f5ee0ccac50e8dbfe9f36ffbebb585"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -210,6 +213,7 @@ dependencies = [
 [[package]]
 name = "cultnet-rs"
 version = "0.1.0"
+source = "git+https://github.com/GameCult/CultLib.git?rev=cbde940df2f5ee0ccac50e8dbfe9f36ffbebb585#cbde940df2f5ee0ccac50e8dbfe9f36ffbebb585"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -639,6 +643,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "odin-daemon"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "cultcache-rs",
+ "cultmesh-rs",
+ "cultnet-rs",
+ "fs2",
+ "rmp-serde",
+ "serde",
+ "tempfile",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -773,6 +792,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "76afc826de14238e6e8c374ddcc1fa19e374fd8dd986b0d2af0d02377261d83c"
 dependencies = [
  "getrandom 0.3.4",
+]
+
+[[package]]
+name = "redb"
+version = "4.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "de6c3b63e007e90ce536ec2ae4690826136a20ec8dbbbb400daef1bb999d2e36"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

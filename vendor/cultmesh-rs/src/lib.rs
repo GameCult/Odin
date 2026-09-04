@@ -12,13 +12,19 @@ use cultnet_rs::decode_cultnet_message_from_slice;
 use cultnet_rs::encode_cultnet_message_to_vec;
 use serde::Serialize;
 use std::collections::BTreeMap;
+use std::collections::hash_map::RandomState;
 use std::env;
+use std::hash::{BuildHasher, Hasher};
 use std::net::SocketAddr;
 use std::net::UdpSocket;
 use std::path::Path;
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
+
+mod rudp_document_server;
+
+pub use rudp_document_server::*;
 
 pub const CULTMESH_RUDP_DOCUMENT_CATALOG_CONNECTION_ID: u32 = 0x0d1d_0002;
 
@@ -72,7 +78,6 @@ pub struct CultMeshNodeOptions {
 pub struct CultMeshRudpDocumentPublishOptions {
     pub target: SocketAddr,
     pub runtime_id: String,
-    pub connection_id: u32,
     pub connect_timeout: Duration,
     pub flush_timeout: Duration,
     pub poll_interval: Duration,
@@ -86,7 +91,10 @@ pub struct CultMeshRudpDocumentPublishOptions {
 pub struct CultMeshRudpSnapshotOptions {
     pub target: SocketAddr,
     pub runtime_id: String,
-    pub connection_id: u32,
+    /// Exact correlation id for the SnapshotRequest. Raw callers must supply
+    /// this; `CultMeshNode::pull_rudp_catalog_snapshot` generates one when it
+    /// owns the request.
+    pub message_id: String,
     pub connect_timeout: Duration,
     pub response_timeout: Duration,
     pub poll_interval: Duration,
@@ -110,7 +118,7 @@ impl Default for CultMeshRudpSnapshotOptions {
         Self {
             target: SocketAddr::from(([0, 0, 0, 0], 0)),
             runtime_id: "cultmesh-rudp-snapshot-client".to_string(),
-            connection_id: CULTMESH_RUDP_DOCUMENT_CATALOG_CONNECTION_ID,
+            message_id: String::new(),
             connect_timeout: Duration::from_secs(3),
             response_timeout: Duration::from_secs(3),
             poll_interval: Duration::from_millis(10),
@@ -136,7 +144,6 @@ impl Default for CultMeshRudpDocumentPublishOptions {
         Self {
             target: SocketAddr::from(([0, 0, 0, 0], 0)),
             runtime_id: "cultmesh-rudp-document-publisher".to_string(),
-            connection_id: CULTMESH_RUDP_DOCUMENT_CATALOG_CONNECTION_ID,
             connect_timeout: Duration::from_secs(3),
             flush_timeout: Duration::from_millis(300),
             poll_interval: Duration::from_millis(10),
@@ -294,7 +301,10 @@ impl CultMeshStreamDescriptor {
     }
 
     pub fn metadata_schema_id(mut self, metadata_schema_id: impl Into<String>) -> Result<Self> {
-        self.metadata_schema_id = Some(require_non_empty(metadata_schema_id.into(), "metadata_schema_id")?);
+        self.metadata_schema_id = Some(require_non_empty(
+            metadata_schema_id.into(),
+            "metadata_schema_id",
+        )?);
         Ok(self)
     }
 }
@@ -388,7 +398,11 @@ pub struct CultMeshSharedMemoryFrameRing {
 }
 
 impl CultMeshSharedMemoryFrameRing {
-    pub fn new(stream_id: impl Into<String>, slot_count: usize, slot_byte_length: usize) -> Result<Self> {
+    pub fn new(
+        stream_id: impl Into<String>,
+        slot_count: usize,
+        slot_byte_length: usize,
+    ) -> Result<Self> {
         let stream_id = require_non_empty(stream_id.into(), "stream_id")?;
         if slot_count == 0 {
             anyhow::bail!("slot_count must be greater than zero");
@@ -494,7 +508,11 @@ impl CultMeshStreamCatalog {
         self.streams.values().collect()
     }
 
-    pub fn find(&self, verse_id: &str, kind: Option<CultMeshStreamKind>) -> Vec<&CultMeshStreamDescriptor> {
+    pub fn find(
+        &self,
+        verse_id: &str,
+        kind: Option<CultMeshStreamKind>,
+    ) -> Vec<&CultMeshStreamDescriptor> {
         self.streams
             .values()
             .filter(|stream| stream.verse_id == verse_id && kind.is_none_or(|k| stream.kind == k))
@@ -521,7 +539,9 @@ impl CultMeshStreamCatalog {
             .iter()
             .copied()
             .find(|candidate| consumer.supported_transports.contains(candidate))
-            .ok_or_else(|| anyhow::anyhow!("stream and consumer have no compatible body transport"))?;
+            .ok_or_else(|| {
+                anyhow::anyhow!("stream and consumer have no compatible body transport")
+            })?;
         let producer_max = if stream.max_in_flight_frames == 0 {
             u32::MAX
         } else {
@@ -671,8 +691,16 @@ impl CultMeshNode {
 
     pub fn pull_rudp_catalog_snapshot(
         &mut self,
-        options: CultMeshRudpSnapshotOptions,
+        mut options: CultMeshRudpSnapshotOptions,
     ) -> Result<usize> {
+        if options.message_id.trim().is_empty() {
+            options.message_id = format!(
+                "{}:snapshot:{}:{}",
+                options.runtime_id,
+                unix_millis(),
+                fresh_rudp_connection_epoch()
+            );
+        }
         let response = request_raw_snapshot_from_rudp_catalog(options)?;
         let cultnet_rs::CultNetMessage::SnapshotResponseRaw { documents, .. } = response else {
             anyhow::bail!("expected cultnet.snapshot_response_raw.v0");
@@ -722,58 +750,38 @@ fn strip_schema_version_suffix(value: &str) -> &str {
     }
 }
 
-fn request_raw_snapshot_from_rudp_catalog(
+/// Request a raw CultNet snapshot without importing it into a local cache.
+///
+/// The returned value is the exact validated `SnapshotResponseRaw`, including
+/// its correlation `message_id`. Each call binds a fresh source port, chooses a
+/// fresh connection epoch, and succeeds only after the reliable request is
+/// acknowledged.
+pub fn request_raw_snapshot_from_rudp_catalog(
     options: CultMeshRudpSnapshotOptions,
 ) -> Result<cultnet_rs::CultNetMessage> {
     if options.runtime_id.trim().is_empty() {
         anyhow::bail!("runtime_id must be non-empty");
     }
-    let bind_addr = if options.target.is_ipv4() {
-        SocketAddr::from(([0, 0, 0, 0], 0))
-    } else {
-        SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 0], 0))
-    };
-    let socket = UdpSocket::bind(bind_addr)?;
-    socket.set_read_timeout(Some(options.poll_interval))?;
-    let mut client = CultNetRudpSocketTransportConnection::new(
-        CultNetRudpSocketTransportOptions {
-            runtime_id: options.runtime_id.clone(),
-            socket,
-            mode: cultnet_rs::CultNetRudpSocketMode::Client,
-            remote_addr: Some(options.target),
-            connection_id: options.connection_id,
-            initial_sequence: 1,
-            resend_delay_ms: options.resend_delay_ms,
-            transport_id: Some("cultmesh-rudp-snapshot-client".to_string()),
-            max_payload_bytes: None,
-            max_fragment_bytes: Some(1200),
-            max_pending_reliable_packets: None,
-            media_reliable_expire_after_ms: None,
-        },
+    if options.message_id.trim().is_empty() {
+        anyhow::bail!("raw CultMesh RUDP snapshot requires a message_id");
+    }
+    let message_id = options.message_id.clone();
+    let mut client = connect_rudp_client(
+        options.target,
+        &options.runtime_id,
+        options.connect_timeout,
+        options.poll_interval,
+        options.resend_delay_ms,
+        "cultmesh-rudp-snapshot-client",
     )?;
-    client.connect(Vec::new())?;
-    let connect_deadline = Instant::now() + options.connect_timeout;
-    while !client.connected() && Instant::now() < connect_deadline {
-        let _ = client.receive_once()?;
-        client.poll_resends()?;
-        thread::sleep(options.poll_interval);
-    }
-    if !client.connected() {
-        anyhow::bail!(
-            "timed out connecting CultMesh RUDP snapshot client {} to {}",
-            options.runtime_id,
-            options.target
-        );
-    }
 
-    let message_id = format!("{}:snapshot:{}", options.runtime_id, unix_millis());
     let request = cultnet_rs::CultNetMessage::SnapshotRequest {
         message_id: message_id.clone(),
         schema_ids: options.schema_ids,
         record_keys: options.record_keys,
     };
     let payload = encode_cultnet_message_to_vec(&request, CultNetWireContract::CultNetSchemaV0)?;
-    client.send("schema", payload)?;
+    let receipt = client.send_reliable("schema", payload)?;
     let response_deadline = Instant::now() + options.response_timeout;
     let mut snapshot_response = None;
     while Instant::now() < response_deadline {
@@ -789,7 +797,6 @@ fn request_raw_snapshot_from_rudp_catalog(
                         ..
                     } if received == &message_id => {
                         snapshot_response = Some(message);
-                        break;
                     }
                     cultnet_rs::CultNetMessage::Error { error } => {
                         let _ = client.disconnect(b"snapshot-error".to_vec());
@@ -799,15 +806,32 @@ fn request_raw_snapshot_from_rudp_catalog(
                 }
             }
         }
+        match client.reliable_send_status(&receipt) {
+            cultnet_rs::CultNetRudpReliableSendStatus::Acknowledged
+                if snapshot_response.is_some() =>
+            {
+                let _ = client.disconnect(b"snapshot-complete".to_vec());
+                return Ok(snapshot_response.expect("response was checked as present"));
+            }
+            cultnet_rs::CultNetRudpReliableSendStatus::Invalidated => {
+                anyhow::bail!("CultMesh RUDP snapshot request receipt was invalidated")
+            }
+            _ => {}
+        }
         client.poll_resends()?;
         thread::sleep(options.poll_interval);
     }
-    if let Some(message) = snapshot_response {
-        let _ = client.disconnect(b"snapshot-complete".to_vec());
-        return Ok(message);
-    }
     let _ = client.disconnect(b"snapshot-timeout".to_vec());
-    anyhow::bail!("timed out waiting for CultMesh RUDP snapshot from {}", options.target)
+    if snapshot_response.is_some() {
+        anyhow::bail!(
+            "timed out waiting for reliable acknowledgement of CultMesh RUDP snapshot request to {}",
+            options.target
+        );
+    }
+    anyhow::bail!(
+        "timed out waiting for CultMesh RUDP snapshot from {}",
+        options.target
+    )
 }
 
 fn unix_millis() -> u128 {
@@ -817,56 +841,100 @@ fn unix_millis() -> u128 {
         .as_millis()
 }
 
-fn publish_cultnet_message_to_rudp_catalog(
+/// Publish one raw CultNet schema message to a RUDP catalog.
+///
+/// Each call owns a fresh connection epoch and returns only after the catalog
+/// acknowledges reliable application admission.
+pub fn publish_cultnet_message_to_rudp_catalog(
     message: &cultnet_rs::CultNetMessage,
     options: CultMeshRudpDocumentPublishOptions,
 ) -> Result<()> {
     if options.runtime_id.trim().is_empty() {
         anyhow::bail!("runtime_id must be non-empty");
     }
-    let bind_addr = if options.target.is_ipv4() {
+    let mut client = connect_rudp_client(
+        options.target,
+        &options.runtime_id,
+        options.connect_timeout,
+        options.poll_interval,
+        options.resend_delay_ms,
+        "cultmesh-rudp-document-publisher",
+    )?;
+
+    let payload = encode_cultnet_message_to_vec(message, CultNetWireContract::CultNetSchemaV0)?;
+    let receipt = client.send_reliable("schema", payload)?;
+    let flush_deadline = Instant::now() + options.flush_timeout;
+    while Instant::now() < flush_deadline {
+        let _ = client.receive_once()?;
+        match client.reliable_send_status(&receipt) {
+            cultnet_rs::CultNetRudpReliableSendStatus::Acknowledged => {
+                let _ = client.disconnect(b"document-acknowledged".to_vec());
+                return Ok(());
+            }
+            cultnet_rs::CultNetRudpReliableSendStatus::Invalidated => {
+                anyhow::bail!("CultMesh RUDP document receipt was invalidated")
+            }
+            cultnet_rs::CultNetRudpReliableSendStatus::Pending => {}
+        }
+        client.poll_resends()?;
+        thread::sleep(options.poll_interval);
+    }
+    let _ = client.disconnect(b"document-unacknowledged".to_vec());
+    anyhow::bail!(
+        "timed out waiting for reliable acknowledgement from CultMesh RUDP catalog {}",
+        options.target
+    )
+}
+
+fn connect_rudp_client(
+    target: SocketAddr,
+    runtime_id: &str,
+    connect_timeout: Duration,
+    poll_interval: Duration,
+    resend_delay_ms: u64,
+    transport_id: &str,
+) -> Result<CultNetRudpSocketTransportConnection> {
+    let bind_addr = if target.is_ipv4() {
         SocketAddr::from(([0, 0, 0, 0], 0))
     } else {
         SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 0], 0))
     };
     let socket = UdpSocket::bind(bind_addr)?;
-    socket.set_read_timeout(Some(options.poll_interval))?;
-    let mut client = CultNetRudpSocketTransportConnection::new(
-        CultNetRudpSocketTransportOptions {
-            runtime_id: options.runtime_id.clone(),
+    socket.set_read_timeout(Some(poll_interval))?;
+    let mut client =
+        CultNetRudpSocketTransportConnection::new(CultNetRudpSocketTransportOptions {
+            runtime_id: runtime_id.to_string(),
             socket,
             mode: cultnet_rs::CultNetRudpSocketMode::Client,
-            remote_addr: Some(options.target),
-            connection_id: options.connection_id,
+            remote_addr: Some(target),
+            connection_id: fresh_rudp_connection_epoch(),
             initial_sequence: 1,
-            resend_delay_ms: options.resend_delay_ms,
-            transport_id: Some("cultmesh-rudp-document-publisher".to_string()),
+            resend_delay_ms,
+            transport_id: Some(transport_id.to_string()),
             max_payload_bytes: None,
             max_fragment_bytes: Some(1200),
-            max_pending_reliable_packets: None,
+            max_pending_reliable_packets: Some(1024),
             media_reliable_expire_after_ms: None,
-        },
-    )?;
+            reconnect_policy: None,
+        })?;
     client.connect(Vec::new())?;
-    let connect_deadline = Instant::now() + options.connect_timeout;
+    let connect_deadline = Instant::now() + connect_timeout;
     while !client.connected() && Instant::now() < connect_deadline {
         let _ = client.receive_once()?;
         client.poll_resends()?;
-        thread::sleep(options.poll_interval);
+        thread::sleep(poll_interval);
     }
     if !client.connected() {
-        client.assume_connected();
+        anyhow::bail!("timed out connecting CultMesh RUDP client {runtime_id} to {target}");
     }
+    Ok(client)
+}
 
-    let payload = encode_cultnet_message_to_vec(message, CultNetWireContract::CultNetSchemaV0)?;
-    client.send("schema", payload)?;
-    let flush_deadline = Instant::now() + options.flush_timeout;
-    while Instant::now() < flush_deadline {
-        let _ = client.receive_once()?;
-        client.poll_resends()?;
-        thread::sleep(options.poll_interval);
-    }
-    Ok(())
+fn fresh_rudp_connection_epoch() -> u32 {
+    let mut hasher = RandomState::new().build_hasher();
+    hasher.write_u128(unix_millis());
+    let epoch = hasher.finish() as u32;
+    if epoch == 0 { 1 } else { epoch }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -879,8 +947,9 @@ impl CultMesh {
             return parse_rudp_socket_addr(&text);
         }
         if text.starts_with("cultmesh://") {
-            let resolved = default_cultmesh_rudp_endpoint_resolver(&text)?
-                .ok_or_else(|| anyhow::anyhow!("CultMesh URI {text} did not resolve to a RUDP endpoint"))?;
+            let resolved = default_cultmesh_rudp_endpoint_resolver(&text)?.ok_or_else(|| {
+                anyhow::anyhow!("CultMesh URI {text} did not resolve to a RUDP endpoint")
+            })?;
             return parse_rudp_socket_addr(&resolved);
         }
         parse_socket_addr(&text)
@@ -959,10 +1028,7 @@ pub fn resolve_rudp_endpoint(endpoint: &str) -> Result<SocketAddr> {
 }
 
 fn parse_rudp_socket_addr(value: &str) -> Result<SocketAddr> {
-    let text = value
-        .trim()
-        .strip_prefix("rudp://")
-        .unwrap_or(value.trim());
+    let text = value.trim().strip_prefix("rudp://").unwrap_or(value.trim());
     parse_socket_addr(text)
 }
 
@@ -976,7 +1042,13 @@ fn default_cultmesh_rudp_endpoint_resolver(uri: &str) -> Result<Option<String>> 
     let authority = cultmesh_uri_authority(uri)?;
     let slug = authority
         .chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() { ch.to_ascii_uppercase() } else { '_' })
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
         .collect::<String>()
         .trim_matches('_')
         .to_string();
@@ -1006,11 +1078,7 @@ fn cultmesh_uri_authority(uri: &str) -> Result<String> {
     let rest = uri
         .strip_prefix("cultmesh://")
         .ok_or_else(|| anyhow::anyhow!("CultMesh URI must start with cultmesh://"))?;
-    let authority = rest
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or("")
-        .trim();
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("").trim();
     if authority.is_empty() {
         anyhow::bail!("CultMesh URI must include an authority");
     }
@@ -1084,33 +1152,33 @@ mod tests {
         socket.set_read_timeout(Some(Duration::from_millis(10)))?;
         let target = socket.local_addr()?;
         let (sender, receiver) = std::sync::mpsc::channel();
+        let delivered = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let delivered_by_sink = delivered.clone();
         let server = thread::spawn(move || -> Result<()> {
-            let mut server = CultNetRudpSocketTransportConnection::new(
-                CultNetRudpSocketTransportOptions::server(
-                    "odin-test-catalog",
-                    socket,
-                    CULTMESH_RUDP_DOCUMENT_CATALOG_CONNECTION_ID,
-                ),
+            let mut server = CultMeshRudpDocumentServer::new(
+                socket,
+                move |receipt: CultMeshRudpRawDocumentReceipt| {
+                    sender
+                        .send((
+                            receipt.document.schema_id,
+                            receipt.document.record_key,
+                            receipt.document.source_runtime_id,
+                        ))
+                        .ok();
+                    delivered_by_sink.store(true, std::sync::atomic::Ordering::SeqCst);
+                    Ok(())
+                },
+                |_query: &CultMeshRudpSnapshotQuery| Ok(Vec::new()),
+                CultMeshSystemClock::default(),
+                CultMeshRudpDocumentServerOptions::default(),
             )?;
             let deadline = Instant::now() + Duration::from_secs(2);
             while Instant::now() < deadline {
-                if let Some(frame) = server.receive_once()? {
-                    let message = cultnet_rs::decode_cultnet_message_from_slice(
-                        &frame.payload,
-                        CultNetWireContract::CultNetSchemaV0,
-                    )?;
-                    if let cultnet_rs::CultNetMessage::DocumentPutRaw { document, .. } = message {
-                        sender
-                            .send((
-                                document.schema_id,
-                                document.record_key,
-                                document.source_runtime_id,
-                            ))
-                            .ok();
-                        return Ok(());
-                    }
+                server.poll_once()?;
+                if delivered.load(std::sync::atomic::Ordering::SeqCst) {
+                    return Ok(());
                 }
-                server.poll_resends()?;
+                thread::sleep(Duration::from_millis(1));
             }
             anyhow::bail!("timed out waiting for RUDP document put")
         });
@@ -1126,6 +1194,232 @@ mod tests {
         assert_eq!(received.0, "cultmesh.test.note.v0");
         assert_eq!(received.1, "note");
         assert_eq!(received.2.as_deref(), Some("muninn-test"));
+        Ok(())
+    }
+
+    #[test]
+    fn document_publish_fails_when_catalog_is_unreachable() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let node = CultMesh::create_node(
+            temp.path().join("cultmesh.cc"),
+            TestDocuments,
+            Default::default(),
+        )?;
+        let unused = UdpSocket::bind("127.0.0.1:0")?;
+        let target = unused.local_addr()?;
+        drop(unused);
+
+        let error = node
+            .publish_document_to_rudp_catalog(
+                "note",
+                &Note {
+                    body: "no false success".into(),
+                },
+                CultMeshRudpDocumentPublishOptions {
+                    target,
+                    connect_timeout: Duration::from_millis(30),
+                    poll_interval: Duration::from_millis(2),
+                    ..CultMeshRudpDocumentPublishOptions::default()
+                },
+            )
+            .expect_err("unreachable catalog must fail closed");
+        assert!(error.to_string().contains("timed out connecting"));
+        Ok(())
+    }
+
+    #[test]
+    fn document_publish_requires_application_acknowledgement() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let node = CultMesh::create_node(
+            temp.path().join("cultmesh.cc"),
+            TestDocuments,
+            Default::default(),
+        )?;
+        let socket = UdpSocket::bind("127.0.0.1:0")?;
+        let target = socket.local_addr()?;
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let server_stop = stop.clone();
+        let server = thread::spawn(move || -> Result<()> {
+            let mut server = CultMeshRudpDocumentServer::new(
+                socket,
+                |_receipt: CultMeshRudpRawDocumentReceipt| {
+                    anyhow::bail!("injected durable sink failure")
+                },
+                |_query: &CultMeshRudpSnapshotQuery| Ok(Vec::new()),
+                CultMeshSystemClock::default(),
+                CultMeshRudpDocumentServerOptions::default(),
+            )?;
+            while !server_stop.load(std::sync::atomic::Ordering::SeqCst) {
+                let _ = server.poll_once();
+                thread::sleep(Duration::from_millis(1));
+            }
+            Ok(())
+        });
+
+        let error = node
+            .publish_document_to_rudp_catalog(
+                "note",
+                &Note {
+                    body: "still not accepted".into(),
+                },
+                CultMeshRudpDocumentPublishOptions {
+                    target,
+                    connect_timeout: Duration::from_millis(100),
+                    flush_timeout: Duration::from_millis(50),
+                    poll_interval: Duration::from_millis(2),
+                    resend_delay_ms: 5,
+                    ..CultMeshRudpDocumentPublishOptions::default()
+                },
+            )
+            .expect_err("unacknowledged document must fail closed");
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        server.join().expect("server thread should not panic")?;
+        assert!(error.to_string().contains("reliable acknowledgement"));
+        Ok(())
+    }
+
+    #[test]
+    fn raw_snapshot_preserves_caller_challenge_and_raw_response() -> Result<()> {
+        let expected = cultnet_rs::CultNetRawDocumentRecord {
+            schema_id: "cultmesh.test.raw.v0".into(),
+            record_key: "route-proof".into(),
+            stored_at: "2026-09-03T00:00:00Z".into(),
+            payload_encoding: cultnet_rs::CultNetRawPayloadEncoding::Messagepack,
+            payload: vec![0xc4, 0x03, 0, 0xff, 1],
+            source_runtime_id: Some("odin-test".into()),
+            source_agent_id: None,
+            source_role: None,
+            tags: None,
+        };
+        let socket = UdpSocket::bind("127.0.0.1:0")?;
+        let target = socket.local_addr()?;
+        let challenge = "9aa63ad8-83b5-4cc4-ae4a-91d361d5f845".to_string();
+        let server_document = expected.clone();
+        let server_challenge = challenge.clone();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let server_stop = stop.clone();
+        let server = thread::spawn(move || -> Result<()> {
+            let mut server = CultMeshRudpDocumentServer::new(
+                socket,
+                |_receipt: CultMeshRudpRawDocumentReceipt| Ok(()),
+                move |query: &CultMeshRudpSnapshotQuery| {
+                    if query.message_id != server_challenge {
+                        anyhow::bail!("snapshot challenge changed")
+                    }
+                    Ok(vec![server_document.clone()])
+                },
+                CultMeshSystemClock::default(),
+                CultMeshRudpDocumentServerOptions::default(),
+            )?;
+            while !server_stop.load(std::sync::atomic::Ordering::SeqCst) {
+                server.poll_once()?;
+                thread::sleep(Duration::from_millis(1));
+            }
+            Ok(())
+        });
+
+        let response = request_raw_snapshot_from_rudp_catalog(CultMeshRudpSnapshotOptions {
+            target,
+            runtime_id: "route-proof-test".into(),
+            message_id: challenge.clone(),
+            connect_timeout: Duration::from_millis(100),
+            response_timeout: Duration::from_millis(500),
+            poll_interval: Duration::from_millis(2),
+            resend_delay_ms: 5,
+            schema_ids: Some(vec!["cultmesh.test.raw.v0".into()]),
+            record_keys: Some(vec!["route-proof".into()]),
+        });
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        server.join().expect("server thread should not panic")?;
+        let response = response?;
+        assert_eq!(
+            response,
+            cultnet_rs::CultNetMessage::SnapshotResponseRaw {
+                message_id: challenge,
+                documents: vec![expected],
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn raw_snapshot_rejects_response_without_request_acknowledgement() -> Result<()> {
+        let socket = UdpSocket::bind("127.0.0.1:0")?;
+        socket.set_read_timeout(Some(Duration::from_millis(200)))?;
+        let target = socket.local_addr()?;
+        let server = thread::spawn(move || -> Result<()> {
+            let mut wire = vec![0_u8; 65_535];
+            let (received, peer) = socket.recv_from(&mut wire)?;
+            let connect = cultnet_rs::decode_rudp_packet(&wire[..received])?;
+            let mut session =
+                cultnet_rs::CultNetRudpSession::new(cultnet_rs::CultNetRudpSessionOptions {
+                    connection_id: connect.connection_id,
+                    initial_sequence: 1,
+                    resend_delay_ms: 5,
+                    max_pending_reliable_packets: Some(64),
+                });
+            let accept = session.accept_connect(&connect, 1, Vec::new())?;
+            socket.send_to(&cultnet_rs::encode_rudp_packet(&accept)?, peer)?;
+
+            loop {
+                let (received, received_peer) = socket.recv_from(&mut wire)?;
+                if received_peer != peer {
+                    continue;
+                }
+                let packet = cultnet_rs::decode_rudp_packet(&wire[..received])?;
+                let result = session.receive(&packet, 2)?;
+                let Some(frame) = result.delivered.into_iter().next() else {
+                    continue;
+                };
+                let request = decode_cultnet_message_from_slice(
+                    &frame.payload,
+                    CultNetWireContract::CultNetSchemaV0,
+                )?;
+                let cultnet_rs::CultNetMessage::SnapshotRequest { message_id, .. } = request else {
+                    anyhow::bail!("expected snapshot request")
+                };
+                let payload = encode_cultnet_message_to_vec(
+                    &cultnet_rs::CultNetMessage::SnapshotResponseRaw {
+                        message_id,
+                        documents: Vec::new(),
+                    },
+                    CultNetWireContract::CultNetSchemaV0,
+                )?;
+                let mut packets = session.send_many(
+                    "schema",
+                    payload,
+                    cultnet_rs::CultNetRudpSendOptions {
+                        reliable: true,
+                        ordered: true,
+                        sequenced: false,
+                        now_ms: 2,
+                        reliable_expire_after_ms: None,
+                    },
+                    Some(1200),
+                )?;
+                for packet in &mut packets {
+                    packet.ack = 0;
+                    packet.ack_mask = 0;
+                    socket.send_to(&cultnet_rs::encode_rudp_packet(packet)?, peer)?;
+                }
+                return Ok(());
+            }
+        });
+
+        let error = request_raw_snapshot_from_rudp_catalog(CultMeshRudpSnapshotOptions {
+            target,
+            runtime_id: "unacknowledged-snapshot-test".into(),
+            message_id: "b7987efb-69c5-4c42-9355-b6e09535ad21".into(),
+            connect_timeout: Duration::from_millis(100),
+            response_timeout: Duration::from_millis(50),
+            poll_interval: Duration::from_millis(2),
+            resend_delay_ms: 5,
+            schema_ids: None,
+            record_keys: None,
+        })
+        .expect_err("response without request ACK must fail closed");
+        server.join().expect("server thread should not panic")?;
+        assert!(error.to_string().contains("reliable acknowledgement"));
         Ok(())
     }
 
@@ -1154,8 +1448,9 @@ mod tests {
         unsafe {
             env::remove_var("CULTMESH_URI_MISSING_ODIN_RUDP");
         }
-        let error = CultMesh::resolve_rudp_endpoint("cultmesh://missing-odin/rendezvous/provider-catalog")
-            .expect_err("unresolved CultMesh URI should fail");
+        let error =
+            CultMesh::resolve_rudp_endpoint("cultmesh://missing-odin/rendezvous/provider-catalog")
+                .expect_err("unresolved CultMesh URI should fail");
         unsafe {
             if let Some(value) = previous {
                 env::set_var("CULTMESH_URI_MISSING_ODIN_RUDP", value);
@@ -1180,25 +1475,23 @@ mod tests {
             body: "catalog truth".to_string(),
         })?;
 
-        node.cache.put_raw_envelope(cultcache_rs::CultCacheEnvelope {
-            key: "note".to_string(),
-            r#type: node
-                .documents
-                .binding_by_schema_id("cultmesh.test.note.v0")
-                .expect("test binding")
-                .document_type
-                .clone(),
-            payload,
-            stored_at: "2026-07-03T00:00:00Z".to_string(),
-            schema_id: Some("cultmesh.test.note.v0".to_string()),
-        })?;
+        node.cache
+            .put_raw_envelope(cultcache_rs::CultCacheEnvelope {
+                key: "note".to_string(),
+                r#type: node
+                    .documents
+                    .binding_by_schema_id("cultmesh.test.note.v0")
+                    .expect("test binding")
+                    .document_type
+                    .clone(),
+                payload,
+                stored_at: "2026-07-03T00:00:00Z".to_string(),
+                schema_id: Some("cultmesh.test.note.v0".to_string()),
+            })?;
         node.flush()?;
 
         let reloaded = CultMesh::create_node(&store_path, TestDocuments, Default::default())?;
-        assert_eq!(
-            reloaded.get_required::<Note>("note")?.body,
-            "catalog truth"
-        );
+        assert_eq!(reloaded.get_required::<Note>("note")?.body, "catalog truth");
         assert_eq!(reloaded.cache().snapshot()[0].r#type, Note::TYPE);
         Ok(())
     }
@@ -1232,15 +1525,18 @@ mod tests {
         )?;
         let negotiation = catalog.negotiate("muninn:nightwing:move-evidence", &consumer)?;
 
-        assert_eq!(negotiation.transport, CultMeshStreamBodyTransport::SharedMemory);
-        assert_eq!(negotiation.copy_budget, CultMeshStreamCopyBudget::ZeroCopyTarget);
+        assert_eq!(
+            negotiation.transport,
+            CultMeshStreamBodyTransport::SharedMemory
+        );
+        assert_eq!(
+            negotiation.copy_budget,
+            CultMeshStreamCopyBudget::ZeroCopyTarget
+        );
 
         let handle = {
-            let ring = catalog.create_shared_memory_ring(
-                "muninn:nightwing:move-evidence",
-                4,
-                128,
-            )?;
+            let ring =
+                catalog.create_shared_memory_ring("muninn:nightwing:move-evidence", 4, 128)?;
             ring.try_publish_copy(&[1, 2, 3], 42, 0)?
                 .expect("frame should publish")
         };

@@ -299,7 +299,7 @@ From here on out, the work is not "teach another daemon to speak." It is
 "delete the witness masks and keep ownership where it belongs."
 
 Rust no longer gets to claim the transport is imaginary:
-`vendor/cultnet-rs` includes the canonical CNR0 `cultnet.transport.rudp.v0`
+CultLib's `cultnet-rs` carries the canonical CNR0 `cultnet.transport.rudp.v0`
 session path for acknowledged CultNet messages over UDP. That is substrate
 only. Idunn still marks daemon profiles as
 `migration-required` until each daemon actually publishes health and command

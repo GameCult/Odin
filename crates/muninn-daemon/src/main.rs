@@ -7,7 +7,7 @@ use crate::media_packetizer::{
 };
 use anyhow::{Context, Result, anyhow};
 use cultmesh_rs::{
-    CULTMESH_RUDP_DOCUMENT_CATALOG_CONNECTION_ID, CultMesh, CultMeshNodeOptions,
+    CultMesh, CultMeshNodeOptions,
     CultMeshRudpDocumentPublishOptions, CultMeshRudpSnapshotOptions, CultMeshSharedMemoryFrameRing,
     CultMeshStreamBodyTransport, CultMeshStreamCatalog, CultMeshStreamClock,
     CultMeshStreamDescriptor, CultMeshStreamKind,
@@ -688,6 +688,7 @@ fn run_provider_command_ingress(
             max_fragment_bytes: Some(1200),
             max_pending_reliable_packets: Some(64),
             media_reliable_expire_after_ms: None,
+                    reconnect_policy: None,
         },
     )?;
     loop {
@@ -832,7 +833,6 @@ fn pull_odin_obs_catalog_snapshot(node: &mut cultmesh_rs::CultMeshNode, options:
         connect_timeout: Duration::from_millis(2000),
         response_timeout: Duration::from_millis(5000),
         resend_delay_ms: 15,
-        connection_id: CULTMESH_RUDP_DOCUMENT_CATALOG_CONNECTION_ID,
         ..CultMeshRudpSnapshotOptions::default()
     }) {
         eprintln!("Muninn could not pull OBS catalog from Odin: {error:#}");
@@ -5475,6 +5475,7 @@ fn run_hid_controller_rudp_ingress(
             max_fragment_bytes: Some(HID_CONTROLLER_RUDP_MAX_FRAGMENT_BYTES),
             max_pending_reliable_packets: Some(256),
             media_reliable_expire_after_ms: Some(25),
+                    reconnect_policy: None,
         })?;
     let mut sources = live_move_state_sources(&options)
         .into_iter()
@@ -6019,6 +6020,7 @@ fn create_hid_controller_stream(options: &Options) -> Result<Option<ActiveHidCon
         max_fragment_bytes: Some(HID_CONTROLLER_RUDP_MAX_FRAGMENT_BYTES),
         max_pending_reliable_packets: Some(256),
         media_reliable_expire_after_ms: Some(25),
+            reconnect_policy: None,
     })?;
     Ok(Some(ActiveHidControllerStream {
         target,
@@ -8948,7 +8950,6 @@ fn publish_obs_media_receiver_to_odin(options: &Options) -> Result<()> {
                 "odin-media-receiver-route".to_string(),
                 "muninn.media-rudp".to_string(),
             ],
-            connection_id: CULTMESH_RUDP_DOCUMENT_CATALOG_CONNECTION_ID,
             ..CultMeshRudpDocumentPublishOptions::default()
         },
     )
@@ -8975,7 +8976,6 @@ fn publish_capture_command_to_odin(
                 "odin-cultmesh-command-route".to_string(),
                 "muninn.capture-stream".to_string(),
             ],
-            connection_id: CULTMESH_RUDP_DOCUMENT_CATALOG_CONNECTION_ID,
             ..CultMeshRudpDocumentPublishOptions::default()
         },
     )
@@ -12002,6 +12002,7 @@ mod tests {
                 max_fragment_bytes: Some(1200),
                 max_pending_reliable_packets: Some(64),
                 media_reliable_expire_after_ms: None,
+                            reconnect_policy: None,
             },
         )
         .unwrap();
