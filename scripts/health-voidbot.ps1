@@ -1,5 +1,5 @@
 param(
-  [string] $VoidBotRoot = "E:\Projects\VoidBot",
+  [string] $VoidBotRoot = (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) "VoidBot"),
   [int] $MaxOrchestratorAgeSeconds = 180,
   [int] $MaxCultMeshStoreAgeSeconds = 180
 )

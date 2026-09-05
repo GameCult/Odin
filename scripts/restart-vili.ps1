@@ -1,7 +1,7 @@
 param(
   [string] $RavenHost = "raven",
-  [string] $LocalViliRoot = "E:\Projects\Vili",
-  [string] $LocalCultLibRoot = "E:\Projects\CultLib",
+  [string] $LocalViliRoot = (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) "Vili"),
+  [string] $LocalCultLibRoot = (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) "CultLib"),
   [string] $RemoteViliRoot = "E:\Projects\Vili",
   [int] $Port = 8824,
   [string] $HostName = "0.0.0.0",

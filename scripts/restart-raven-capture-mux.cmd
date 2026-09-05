@@ -1,2 +1,2 @@
 @echo off
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File E:\Projects\Odin\scripts\restart-muninn.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File %~dp0restart-muninn.ps1

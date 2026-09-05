@@ -410,12 +410,9 @@ async function readOdinSurfaceProviderCatalog(options) {
     "hermodr-browser-lowering-odin-surface",
     odinRudpConnectionId,
     resolveHermodrRudpEndpoint(options.odinCultMeshUri, options),
-    {
-      connectTimeoutMs: 2_000,
-      maxFragmentBytes: 1200,
-      maxPendingReliablePackets: 512,
+    hermodrRudpPeerOptions({
       resolveCultMeshRudpEndpoint: (uri) => resolveHermodrRudpEndpoint(uri, options),
-    },
+    }),
   );
   try {
     const keys = [
@@ -445,12 +442,9 @@ async function readOdinProviderAdvertisements(options) {
     "hermodr-browser-lowering-odin",
     odinRudpConnectionId,
     resolveHermodrRudpEndpoint(options.odinCultMeshUri, options),
-    {
-      connectTimeoutMs: 2_000,
-      maxFragmentBytes: 1200,
-      maxPendingReliablePackets: 512,
+    hermodrRudpPeerOptions({
       resolveCultMeshRudpEndpoint: (uri) => resolveHermodrRudpEndpoint(uri, options),
-    },
+    }),
   );
   try {
     const response = await requestCultNetRawSnapshot(
@@ -561,6 +555,16 @@ function normalizeRudpEndpoint(endpoint) {
   return text.startsWith("rudp://") ? text : `rudp://${text}`;
 }
 
+function hermodrRudpPeerOptions(overrides = {}) {
+  return {
+    bindHost: "0.0.0.0",
+    connectTimeoutMs: 2_000,
+    maxFragmentBytes: 1200,
+    maxPendingReliablePackets: 512,
+    ...overrides,
+  };
+}
+
 async function readProviderSurface(options, catalog, providerId, surfaceId = "") {
   const selectedSurfaceId = surfaceId || providerId;
   const recordKeys = surfaceRecordKeys(catalog, providerId, selectedSurfaceId);
@@ -608,12 +612,9 @@ async function readOdinProviderSurface(options, providerId, surfaceId = provider
     "hermodr-browser-lowering-odin-provider-surface",
     odinRudpConnectionId,
     resolveHermodrRudpEndpoint(options.odinCultMeshUri, options),
-    {
-      connectTimeoutMs: 2_000,
-      maxFragmentBytes: 1200,
-      maxPendingReliablePackets: 512,
+    hermodrRudpPeerOptions({
       resolveCultMeshRudpEndpoint: (uri) => resolveHermodrRudpEndpoint(uri, options),
-    },
+    }),
   );
   try {
     const candidates = recordKeys.length ? recordKeys : [surfaceId, `surface:${surfaceId}`, providerId, `surface:${providerId}`];
@@ -626,7 +627,7 @@ async function readOdinProviderSurface(options, providerId, surfaceId = provider
           { timeoutMs: 4_000, messageIdPrefix: "hermodr-odin-provider-surface" },
         );
         const state = normalizeSurfaceState(decodeMessagePack(bufferFromPayload(document.payload)), document.recordKey);
-        if (!state?.surface?.root || state.surface.id !== surfaceId) continue;
+        if (!state?.surface?.root) continue;
         return {
           providerId,
           documentProviderId: state.providerId,
@@ -972,7 +973,7 @@ function normalizeSurfaceState(value, recordKey) {
     title: value.title || String(providerId),
     version: value.version || 0,
     updatedAt: value.updatedAt || value.updated_at || null,
-    surface: value.surface || null,
+    surface: value.surface ? normalizeEveSurfaceTree(value.surface) : null,
   };
 }
 
@@ -1173,11 +1174,7 @@ async function getProviderRudpPeer(endpoint) {
     "hermodr-browser-lowering-provider",
     providerRudpConnectionId,
     key,
-    {
-      connectTimeoutMs: 2_000,
-      maxFragmentBytes: 1200,
-      maxPendingReliablePackets: 512,
-    },
+    hermodrRudpPeerOptions(),
   ).catch((error) => {
     providerRudpPeers.delete(key);
     throw error;
@@ -1457,7 +1454,9 @@ module.exports = {
   createBrowserCatalog,
   createHermodrBridge,
   findProviderCdnRoute,
+  hermodrRudpPeerOptions,
   normalizeStateBindingSource,
   normalizeProviderAdvertisement,
+  normalizeSurfaceState,
   surfaceRecordKeys,
 };

@@ -1,5 +1,19 @@
 use cultcache_rs::DatabaseEntry;
+pub use cultnet_rs::{
+    GAMECULT_SERVICE_TRUST_ANCHOR_SCHEMA, GameCultServiceTrustAnchorRecord,
+    IDUNN_AUTHENTICATED_PROVIDER_HEALTH_PROJECTION_SCHEMA,
+    IDUNN_AUTHENTICATED_PROVIDER_HEALTH_PROJECTION_SIGNING_PURPOSE,
+    IDUNN_DAEMON_HEALTH_TRUST_BINDING_SCHEMA, IDUNN_PROVIDER_ACTIVE_REASON,
+    IDUNN_PROVIDER_DEGRADED_REASON, IDUNN_PROVIDER_FAILED_REASON, IDUNN_PROVIDER_WARMING_REASON,
+    IDUNN_SIGNED_DAEMON_HEALTH_SCHEMA, IdunnAuthenticatedProviderHealthProjectionRecord,
+    IdunnDaemonHealthTrustBindingRecord, IdunnSignedDaemonHealthRecord,
+    authenticated_provider_health_reason_code,
+};
+#[cfg(test)]
+use cultnet_rs::{GameCultProviderHealthIdentity, derive_service_identity_id};
 use serde_json::Value;
+
+use anyhow::{Result, bail};
 
 pub const ODIN_SNAPSHOT_SCHEMA: &str = "odin.snapshot.v1";
 pub const ODIN_VERSE_SCHEMA: &str = "odin.verse.v1";
@@ -13,13 +27,15 @@ pub const EVE_PROVIDER_ADVERTISEMENT_SCHEMA: &str = "gamecult.eve.provider_adver
 pub const VOIDBOT_SWARM_STATE_SNAPSHOT_SCHEMA: &str = "voidbot.swarm_state_snapshot.v1";
 pub const IDUNN_DESIRED_DAEMON_SCHEMA: &str = "idunn.desired_daemon.v1";
 pub const IDUNN_DAEMON_HEALTH_SCHEMA: &str = "idunn.daemon_health.v1";
+pub const IDUNN_SIGNED_HEALTH_ADMISSION_SCHEMA: &str = "idunn.signed_health_admission.v1";
 pub const IDUNN_KEEPALIVE_DECISION_SCHEMA: &str = "idunn.keepalive_decision.v1";
 pub const IDUNN_RESTART_REQUEST_SCHEMA: &str = "idunn.restart_request.v1";
 pub const IDUNN_RESTART_RESULT_SCHEMA: &str = "idunn.restart_result.v1";
 pub const IDUNN_DEPLOYMENT_REQUEST_SCHEMA: &str = "idunn.deployment_request.v2";
+pub const IDUNN_CURRENT_DEPLOYMENT_REQUEST_SCHEMA: &str = "idunn.current_deployment_request.v1";
 pub const IDUNN_DEPLOYMENT_RESULT_SCHEMA: &str = "idunn.deployment_result.v1";
 pub const IDUNN_LIFECYCLE_COMMAND_SCHEMA: &str = "idunn.lifecycle_command.v1";
-pub const IDUNN_RELEASE_TARGET_SCHEMA: &str = "idunn.release_target.v2";
+pub const IDUNN_RELEASE_TARGET_SCHEMA: &str = "idunn.release_target.v3";
 pub const IDUNN_DEPLOYMENT_ARTIFACT_SCHEMA: &str = "idunn.deployment_artifact.v2";
 pub const BIFROST_REPOSITORY_RELEASE_AUTHORITY_SCHEMA: &str =
     "bifrost.repository_release_authority.v1";
@@ -34,6 +50,14 @@ pub const IDUNN_DAEMON_TRANSPORT_PROFILE_SCHEMA: &str = "idunn.daemon_transport_
 pub const IDUNN_COMMAND_BOUNDARY_SCHEMA: &str = "idunn.command_boundary.v1";
 pub const IDUNN_RUNTIME_TRANSPORT_CHECK_SCHEMA: &str = "idunn.runtime_transport_check.v1";
 pub const IDUNN_RUDP_HEALTH_INGRESS_SCHEMA: &str = "idunn.rudp_health_ingress.v1";
+pub const IDUNN_AUTHENTICATED_DAEMON_HEALTH_ADMISSION_SCHEMA: &str =
+    "idunn.authenticated_daemon_health_admission.v1";
+pub const IDUNN_RUNTIME_TRAFFIC_ADMISSION_SCHEMA: &str = "idunn.runtime_traffic_admission.v2";
+pub const IDUNN_CODEX_CONNECTOR_RUNTIME_TRAFFIC_ADMISSION_RECORD_KEY: &str =
+    "yggdrasil-codex-connector";
+pub const IDUNN_GHOSTLIGHT_RUNTIME_TRAFFIC_ADMISSION_RECORD_KEY: &str = "yggdrasil-ghostlight";
+pub const IDUNN_UNSIGNED_DAEMON_HEALTH_DIAGNOSTIC_SCHEMA: &str =
+    "idunn.unsigned_daemon_health_diagnostic.v1";
 pub const MUNINN_TELEMETRY_SURFACE_SCHEMA: &str = "muninn.telemetry_surface.v1";
 pub const MUNINN_CAPTURE_STREAM_SCHEMA: &str = "muninn.capture_stream.v1";
 pub const MUNINN_CAPTURE_STREAM_COMMAND_SCHEMA: &str = "muninn.capture_stream_command.v1";
@@ -49,7 +73,8 @@ pub const MUNINN_MOVE_IDENTITY_SCHEMA: &str = "muninn.move_identity.v1";
 pub const MUNINN_MOVE_LIGHT_COMMAND_SCHEMA: &str = "muninn.move_light_command.v1";
 pub const MUNINN_MOVE_HUE_PROGRAM_SCHEMA: &str = "muninn.move_hue_program.v1";
 pub const MUNINN_MOVE_TRACKER_HEALTH_SCHEMA: &str = "muninn.move_tracker_health.v1";
-pub const MUNINN_MOVE_EVIDENCE_TRANSPORT_HEALTH_SCHEMA: &str = "muninn.move_evidence_transport_health.v1";
+pub const MUNINN_MOVE_EVIDENCE_TRANSPORT_HEALTH_SCHEMA: &str =
+    "muninn.move_evidence_transport_health.v1";
 pub const MUNINN_QUEST_ACCESS_SCHEMA: &str = "muninn.quest_access.v1";
 pub const MUNINN_COMMAND_BOUNDARY_SCHEMA: &str = "muninn.command_boundary.v1";
 pub const MUNINN_TRANSPORT_PROFILE_SCHEMA: &str = "muninn.transport_profile.v1";
@@ -272,6 +297,305 @@ pub struct IdunnDaemonHealthRecord {
 
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
 #[cultcache(
+    type = "idunn.signed_health_admission",
+    schema = "idunn.signed_health_admission.v1"
+)]
+pub struct IdunnSignedHealthAdmissionRecord {
+    #[cultcache(key = 0)]
+    pub daemon_id: String,
+    #[cultcache(key = 1)]
+    pub state: String,
+    #[cultcache(key = 2)]
+    pub observed_at: String,
+    #[cultcache(key = 3)]
+    pub admitted_at: String,
+    #[cultcache(key = 4)]
+    pub health_contract: String,
+    #[cultcache(key = 5)]
+    pub deployment_request_id: String,
+    #[cultcache(key = 6)]
+    pub release_id: String,
+    #[cultcache(key = 7)]
+    pub release_witness_sha256: String,
+    #[cultcache(key = 8)]
+    pub source_commit: String,
+    #[cultcache(key = 9)]
+    pub publisher_incarnation_id: String,
+    #[cultcache(key = 10)]
+    pub publisher_sequence: u64,
+    #[cultcache(key = 11)]
+    pub publisher_process_created_at: String,
+    #[cultcache(key = 12)]
+    pub signer_identity_id: String,
+    #[cultcache(key = 13)]
+    pub signed_health_sha256: String,
+}
+
+/// Idunn-owned judgment joining one verified provider statement to the exact
+/// root trust binding used to admit it. Managed-health reads must rejoin this
+/// record with both current objects; a health row by itself is not authority.
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(
+    type = "idunn.authenticated_daemon_health_admission",
+    schema = "idunn.authenticated_daemon_health_admission.v1"
+)]
+pub struct IdunnAuthenticatedDaemonHealthAdmissionRecord {
+    #[cultcache(key = 0)]
+    pub schema_version: String,
+    #[cultcache(key = 1)]
+    pub daemon_id: String,
+    #[cultcache(key = 2)]
+    pub health_contract: String,
+    #[cultcache(key = 3)]
+    pub source_runtime_id: String,
+    #[cultcache(key = 4)]
+    pub state: String,
+    #[cultcache(key = 5)]
+    pub observed_at_unix_millis: u64,
+    #[cultcache(key = 6)]
+    pub admitted_at_unix_millis: u64,
+    #[cultcache(key = 7)]
+    pub trust_binding_id: String,
+    #[cultcache(key = 8)]
+    pub trust_binding_sha256: String,
+    #[cultcache(key = 9)]
+    pub signer_identity_id: String,
+    #[cultcache(key = 10)]
+    pub publisher_incarnation_id: String,
+    #[cultcache(key = 11)]
+    pub publisher_sequence: u64,
+    #[cultcache(key = 12)]
+    pub signed_health_sha256: String,
+    #[cultcache(key = 13)]
+    pub release_id: Option<String>,
+    #[cultcache(key = 14)]
+    pub release_witness_sha256: Option<String>,
+    #[cultcache(key = 15)]
+    pub source_commit: Option<String>,
+    #[cultcache(key = 16)]
+    pub deployment_id: Option<String>,
+    #[cultcache(key = 17)]
+    pub private_state_exposed: bool,
+    #[cultcache(key = 18, default)]
+    pub activation_witness_sha256: Option<String>,
+}
+
+impl IdunnAuthenticatedDaemonHealthAdmissionRecord {
+    pub fn validate(&self) -> Result<()> {
+        if self.schema_version != IDUNN_AUTHENTICATED_DAEMON_HEALTH_ADMISSION_SCHEMA {
+            bail!("authenticated daemon health admission schema is unsupported");
+        }
+        validate_identifier(&self.daemon_id, "daemon id")?;
+        validate_identifier(&self.health_contract, "health contract")?;
+        validate_identifier(&self.source_runtime_id, "source runtime id")?;
+        validate_identifier(&self.trust_binding_id, "trust binding id")?;
+        validate_identifier(&self.signer_identity_id, "signer identity id")?;
+        validate_identifier(&self.publisher_incarnation_id, "publisher incarnation id")?;
+        if !matches!(
+            self.state.as_str(),
+            "active" | "warming" | "degraded" | "failed"
+        ) || self.observed_at_unix_millis == 0
+            || self.admitted_at_unix_millis < self.observed_at_unix_millis
+            || self.publisher_sequence == 0
+            || !is_sha256(&self.trust_binding_sha256)
+            || !is_sha256(&self.signed_health_sha256)
+        {
+            bail!("authenticated daemon health admission shape is invalid");
+        }
+        validate_optional_release_binding(
+            &self.release_id,
+            &self.release_witness_sha256,
+            &self.source_commit,
+        )?;
+        validate_optional_identifier(&self.deployment_id, "deployment id")?;
+        if self
+            .activation_witness_sha256
+            .as_deref()
+            .is_some_and(|value| !is_sha256(value))
+        {
+            bail!("authenticated daemon health activation witness is malformed");
+        }
+        if self.private_state_exposed {
+            bail!("authenticated daemon health admission exposes private state");
+        }
+        Ok(())
+    }
+}
+
+/// Idunn-issued traffic authority for a release that has proved its exact
+/// deployment, activation, and authenticated provider-health lineage.
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(
+    type = "idunn.runtime_traffic_admission",
+    schema = "idunn.runtime_traffic_admission.v2"
+)]
+pub struct IdunnRuntimeTrafficAdmissionRecord {
+    #[cultcache(key = 0)]
+    pub schema_version: String,
+    #[cultcache(key = 1)]
+    pub daemon_id: String,
+    #[cultcache(key = 2)]
+    pub release_id: String,
+    #[cultcache(key = 3)]
+    pub release_witness_sha256: String,
+    #[cultcache(key = 4)]
+    pub source_commit: String,
+    #[cultcache(key = 5)]
+    pub deployment_id: String,
+    #[cultcache(key = 6)]
+    pub activation_witness_sha256: String,
+    #[cultcache(key = 7)]
+    pub signed_health_sha256: String,
+    #[cultcache(key = 8)]
+    pub publisher_incarnation_id: String,
+    #[cultcache(key = 9)]
+    pub publisher_sequence: u64,
+    #[cultcache(key = 10)]
+    pub signer_identity_id: String,
+    #[cultcache(key = 11)]
+    pub runtime_process_id: u32,
+    #[cultcache(key = 12)]
+    pub runtime_process_starttime_ticks: u64,
+}
+
+impl IdunnRuntimeTrafficAdmissionRecord {
+    pub fn validate(&self) -> Result<()> {
+        if self.schema_version != IDUNN_RUNTIME_TRAFFIC_ADMISSION_SCHEMA {
+            bail!("runtime traffic admission schema is unsupported");
+        }
+        if self.daemon_id != IDUNN_CODEX_CONNECTOR_RUNTIME_TRAFFIC_ADMISSION_RECORD_KEY
+            && self.daemon_id != IDUNN_GHOSTLIGHT_RUNTIME_TRAFFIC_ADMISSION_RECORD_KEY
+        {
+            bail!("runtime traffic admission daemon is unsupported");
+        }
+        validate_identifier(&self.daemon_id, "daemon id")?;
+        validate_identifier(&self.release_id, "release id")?;
+        validate_identifier(&self.deployment_id, "deployment id")?;
+        validate_identifier(&self.publisher_incarnation_id, "publisher incarnation id")?;
+        validate_identifier(&self.signer_identity_id, "signer identity id")?;
+        if !is_sha256(&self.release_witness_sha256)
+            || !is_lower_hex(&self.source_commit, 40)
+            || !is_sha256(&self.activation_witness_sha256)
+            || !is_sha256(&self.signed_health_sha256)
+            || self.publisher_sequence == 0
+            || self.runtime_process_id == 0
+            || self.runtime_process_starttime_ticks == 0
+        {
+            bail!("runtime traffic admission lineage is malformed");
+        }
+        Ok(())
+    }
+}
+
+/// Quarantined observation of the retired unsigned wire contract. This may
+/// explain missing authenticated health but can never satisfy managed health.
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(
+    type = "idunn.unsigned_daemon_health_diagnostic",
+    schema = "idunn.unsigned_daemon_health_diagnostic.v1"
+)]
+pub struct IdunnUnsignedDaemonHealthDiagnosticRecord {
+    #[cultcache(key = 0)]
+    pub schema_version: String,
+    #[cultcache(key = 1)]
+    pub diagnostic_id: String,
+    #[cultcache(key = 2)]
+    pub daemon_id: String,
+    #[cultcache(key = 3)]
+    pub claimed_state: String,
+    #[cultcache(key = 4)]
+    pub claimed_detail: String,
+    #[cultcache(key = 5)]
+    pub claimed_observed_at: String,
+    #[cultcache(key = 6)]
+    pub claimed_health_contract: String,
+    #[cultcache(key = 7)]
+    pub transport_source_runtime_id: Option<String>,
+    #[cultcache(key = 8)]
+    pub transport_source_role: Option<String>,
+    #[cultcache(key = 9)]
+    pub received_at_unix_millis: u64,
+    #[cultcache(key = 10)]
+    pub authority: String,
+    #[cultcache(key = 11)]
+    pub private_state_exposed: bool,
+}
+
+impl IdunnUnsignedDaemonHealthDiagnosticRecord {
+    pub fn validate(&self) -> Result<()> {
+        if self.schema_version != IDUNN_UNSIGNED_DAEMON_HEALTH_DIAGNOSTIC_SCHEMA {
+            bail!("unsigned daemon health diagnostic schema is unsupported");
+        }
+        validate_identifier(&self.diagnostic_id, "diagnostic id")?;
+        validate_identifier(&self.daemon_id, "daemon id")?;
+        validate_identifier(&self.claimed_state, "claimed state")?;
+        validate_identifier(&self.claimed_health_contract, "claimed health contract")?;
+        validate_optional_identifier(
+            &self.transport_source_runtime_id,
+            "transport source runtime id",
+        )?;
+        validate_optional_identifier(&self.transport_source_role, "transport source role")?;
+        if self.claimed_detail.len() > 512
+            || self.claimed_observed_at.trim().is_empty()
+            || self.received_at_unix_millis == 0
+            || self.authority != "diagnostic-only"
+            || self.private_state_exposed
+        {
+            bail!("unsigned daemon health diagnostic shape is invalid");
+        }
+        Ok(())
+    }
+}
+
+fn validate_identifier(value: &str, label: &str) -> Result<()> {
+    if value.trim().is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
+        bail!("{label} is empty, oversized, or contains control characters");
+    }
+    Ok(())
+}
+
+fn validate_optional_identifier(value: &Option<String>, label: &str) -> Result<()> {
+    if let Some(value) = value {
+        validate_identifier(value, label)?;
+    }
+    Ok(())
+}
+
+fn validate_optional_release_binding(
+    release_id: &Option<String>,
+    witness: &Option<String>,
+    source_commit: &Option<String>,
+) -> Result<()> {
+    if release_id.is_some() || witness.is_some() || source_commit.is_some() {
+        validate_optional_identifier(release_id, "release id")?;
+        let witness = witness
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("release witness is absent"))?;
+        let commit = source_commit
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("source commit is absent"))?;
+        if release_id.is_none() || !is_sha256(witness) || !is_lower_hex(commit, 40) {
+            bail!("release binding is incomplete or malformed");
+        }
+    }
+    Ok(())
+}
+
+fn is_sha256(value: &str) -> bool {
+    value
+        .strip_prefix("sha256-")
+        .is_some_and(|digest| is_lower_hex(digest, 64))
+}
+
+fn is_lower_hex(value: &str, length: usize) -> bool {
+    value.len() == length
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(
     type = "idunn.keepalive_decision",
     schema = "idunn.keepalive_decision.v1"
 )]
@@ -354,6 +678,22 @@ pub struct IdunnDeploymentRequestRecord {
 
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
 #[cultcache(
+    type = "idunn.current_deployment_request",
+    schema = "idunn.current_deployment_request.v1"
+)]
+pub struct IdunnCurrentDeploymentRequestRecord {
+    #[cultcache(key = 0)]
+    pub daemon_id: String,
+    #[cultcache(key = 1)]
+    pub request_id: String,
+    #[cultcache(key = 2)]
+    pub sequence: u64,
+    #[cultcache(key = 3)]
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(
     type = "idunn.deployment_result",
     schema = "idunn.deployment_result.v1"
 )]
@@ -399,7 +739,7 @@ pub struct IdunnLifecycleCommandRecord {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
-#[cultcache(type = "idunn.release_target", schema = "idunn.release_target.v2")]
+#[cultcache(type = "idunn.release_target", schema = "idunn.release_target.v3")]
 pub struct IdunnReleaseTargetRecord {
     #[cultcache(key = 0)]
     pub target_id: String,
@@ -443,6 +783,8 @@ pub struct IdunnReleaseTargetRecord {
     pub requires_bifrost_authority: bool,
     #[cultcache(key = 20, default)]
     pub observed_upstream_revision: String,
+    #[cultcache(key = 21)]
+    pub minimum_source_revision: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
@@ -1286,46 +1628,85 @@ pub struct MuninnMoveHueProgramRecord {
 }
 
 #[derive(Clone, Debug, PartialEq, DatabaseEntry)]
-#[cultcache(type = "muninn.move_tracker_health", schema = "muninn.move_tracker_health.v1")]
+#[cultcache(
+    type = "muninn.move_tracker_health",
+    schema = "muninn.move_tracker_health.v1"
+)]
 pub struct MuninnMoveTrackerHealthRecord {
-    #[cultcache(key = 0)] pub health_id: String,
-    #[cultcache(key = 1)] pub host_id: String,
-    #[cultcache(key = 2)] pub camera_id: String,
-    #[cultcache(key = 3)] pub camera_index: i32,
-    #[cultcache(key = 4)] pub state: String,
-    #[cultcache(key = 5)] pub camera_name: String,
-    #[cultcache(key = 6)] pub camera_api: String,
-    #[cultcache(key = 7)] pub width: u32,
-    #[cultcache(key = 8)] pub height: u32,
-    #[cultcache(key = 9)] pub exposure: f32,
-    #[cultcache(key = 10)] pub calibrated_controller_count: u32,
-    #[cultcache(key = 11)] pub update_count: u64,
-    #[cultcache(key = 12)] pub observation_count: u64,
-    #[cultcache(key = 13)] pub latest_observation_count: u32,
-    #[cultcache(key = 14)] pub last_observation_at: String,
-    #[cultcache(key = 15)] pub detail: String,
-    #[cultcache(key = 16)] pub updated_at: String,
-    #[cultcache(key = 17, default)] pub image_mean_rgb: Vec<u32>,
-    #[cultcache(key = 18, default)] pub image_peak_rgb: Vec<u32>,
-    #[cultcache(key = 19, default)] pub color_evidence_move_ids: Vec<String>,
-    #[cultcache(key = 20, default)] pub color_evidence_pixel_counts: Vec<u32>,
-    #[cultcache(key = 21, default)] pub rejected_stale_count: u64,
-    #[cultcache(key = 22, default)] pub rejected_radius_count: u64,
-    #[cultcache(key = 23, default)] pub rejected_bounds_count: u64,
-    #[cultcache(key = 24, default)] pub rejected_continuity_count: u64,
+    #[cultcache(key = 0)]
+    pub health_id: String,
+    #[cultcache(key = 1)]
+    pub host_id: String,
+    #[cultcache(key = 2)]
+    pub camera_id: String,
+    #[cultcache(key = 3)]
+    pub camera_index: i32,
+    #[cultcache(key = 4)]
+    pub state: String,
+    #[cultcache(key = 5)]
+    pub camera_name: String,
+    #[cultcache(key = 6)]
+    pub camera_api: String,
+    #[cultcache(key = 7)]
+    pub width: u32,
+    #[cultcache(key = 8)]
+    pub height: u32,
+    #[cultcache(key = 9)]
+    pub exposure: f32,
+    #[cultcache(key = 10)]
+    pub calibrated_controller_count: u32,
+    #[cultcache(key = 11)]
+    pub update_count: u64,
+    #[cultcache(key = 12)]
+    pub observation_count: u64,
+    #[cultcache(key = 13)]
+    pub latest_observation_count: u32,
+    #[cultcache(key = 14)]
+    pub last_observation_at: String,
+    #[cultcache(key = 15)]
+    pub detail: String,
+    #[cultcache(key = 16)]
+    pub updated_at: String,
+    #[cultcache(key = 17, default)]
+    pub image_mean_rgb: Vec<u32>,
+    #[cultcache(key = 18, default)]
+    pub image_peak_rgb: Vec<u32>,
+    #[cultcache(key = 19, default)]
+    pub color_evidence_move_ids: Vec<String>,
+    #[cultcache(key = 20, default)]
+    pub color_evidence_pixel_counts: Vec<u32>,
+    #[cultcache(key = 21, default)]
+    pub rejected_stale_count: u64,
+    #[cultcache(key = 22, default)]
+    pub rejected_radius_count: u64,
+    #[cultcache(key = 23, default)]
+    pub rejected_bounds_count: u64,
+    #[cultcache(key = 24, default)]
+    pub rejected_continuity_count: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
-#[cultcache(type = "muninn.move_evidence_transport_health", schema = "muninn.move_evidence_transport_health.v1")]
+#[cultcache(
+    type = "muninn.move_evidence_transport_health",
+    schema = "muninn.move_evidence_transport_health.v1"
+)]
 pub struct MuninnMoveEvidenceTransportHealthRecord {
-    #[cultcache(key = 0)] pub health_id: String,
-    #[cultcache(key = 1)] pub host_id: String,
-    #[cultcache(key = 2)] pub stream_id: String,
-    #[cultcache(key = 3)] pub produced_frames: u64,
-    #[cultcache(key = 4)] pub local_ring_admissions: u64,
-    #[cultcache(key = 5)] pub remote_handoffs: u64,
-    #[cultcache(key = 6)] pub remote_sends: u64,
-    #[cultcache(key = 7)] pub updated_at: String,
+    #[cultcache(key = 0)]
+    pub health_id: String,
+    #[cultcache(key = 1)]
+    pub host_id: String,
+    #[cultcache(key = 2)]
+    pub stream_id: String,
+    #[cultcache(key = 3)]
+    pub produced_frames: u64,
+    #[cultcache(key = 4)]
+    pub local_ring_admissions: u64,
+    #[cultcache(key = 5)]
+    pub remote_handoffs: u64,
+    #[cultcache(key = 6)]
+    pub remote_sends: u64,
+    #[cultcache(key = 7)]
+    pub updated_at: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
@@ -1421,10 +1802,19 @@ cultmesh_rs::cultmesh_documents!(OdinDocuments {
     VoidBotSwarmStateSnapshotCompatRecord => VOIDBOT_SWARM_STATE_SNAPSHOT_SCHEMA,
     IdunnDesiredDaemonRecord => IDUNN_DESIRED_DAEMON_SCHEMA,
     IdunnDaemonHealthRecord => IDUNN_DAEMON_HEALTH_SCHEMA,
+    IdunnSignedHealthAdmissionRecord => IDUNN_SIGNED_HEALTH_ADMISSION_SCHEMA,
+    IdunnSignedDaemonHealthRecord => IDUNN_SIGNED_DAEMON_HEALTH_SCHEMA,
+    IdunnDaemonHealthTrustBindingRecord => IDUNN_DAEMON_HEALTH_TRUST_BINDING_SCHEMA,
+    IdunnAuthenticatedDaemonHealthAdmissionRecord => IDUNN_AUTHENTICATED_DAEMON_HEALTH_ADMISSION_SCHEMA,
+    IdunnRuntimeTrafficAdmissionRecord => IDUNN_RUNTIME_TRAFFIC_ADMISSION_SCHEMA,
+    IdunnUnsignedDaemonHealthDiagnosticRecord => IDUNN_UNSIGNED_DAEMON_HEALTH_DIAGNOSTIC_SCHEMA,
+    GameCultServiceTrustAnchorRecord => GAMECULT_SERVICE_TRUST_ANCHOR_SCHEMA,
+    IdunnAuthenticatedProviderHealthProjectionRecord => IDUNN_AUTHENTICATED_PROVIDER_HEALTH_PROJECTION_SCHEMA,
     IdunnKeepaliveDecisionRecord => IDUNN_KEEPALIVE_DECISION_SCHEMA,
     IdunnRestartRequestRecord => IDUNN_RESTART_REQUEST_SCHEMA,
     IdunnRestartResultRecord => IDUNN_RESTART_RESULT_SCHEMA,
     IdunnDeploymentRequestRecord => IDUNN_DEPLOYMENT_REQUEST_SCHEMA,
+    IdunnCurrentDeploymentRequestRecord => IDUNN_CURRENT_DEPLOYMENT_REQUEST_SCHEMA,
     IdunnDeploymentResultRecord => IDUNN_DEPLOYMENT_RESULT_SCHEMA,
     IdunnLifecycleCommandRecord => IDUNN_LIFECYCLE_COMMAND_SCHEMA,
     IdunnReleaseTargetRecord => IDUNN_RELEASE_TARGET_SCHEMA,
@@ -1478,6 +1868,421 @@ mod tests {
     use super::*;
     use anyhow::Result;
     use cultmesh_rs::{CultMesh, CultMeshNodeOptions};
+
+    fn signed_health_fixture() -> IdunnSignedDaemonHealthRecord {
+        IdunnSignedDaemonHealthRecord {
+            schema_version: IDUNN_SIGNED_DAEMON_HEALTH_SCHEMA.into(),
+            daemon_id: "yggdrasil-epiphany".into(),
+            health_contract: "epiphany.cultnet-rudp-runtime-health".into(),
+            source_runtime_id: "epiphany-yggdrasil".into(),
+            state: "active".into(),
+            detail: "provider-authenticated resident readiness".into(),
+            signer_identity_id: "epiphany-host-identity".into(),
+            publisher_incarnation_id: "epiphany-yggdrasil/boot-7/process-11".into(),
+            publisher_sequence: 42,
+            observed_at_unix_millis: 1_784_483_200_000,
+            release_id: Some("release-42".into()),
+            release_witness_sha256: Some(format!("sha256-{}", "a".repeat(64))),
+            source_commit: Some("b".repeat(40)),
+            deployment_id: Some("deploy:yggdrasil-epiphany:42".into()),
+            signature_algorithm: "ed25519".into(),
+            signature: vec![9; 64],
+            private_state_exposed: false,
+            activation_witness_sha256: Some(format!("sha256-{}", "f".repeat(64))),
+        }
+    }
+
+    fn trust_binding_fixture() -> IdunnDaemonHealthTrustBindingRecord {
+        let health = signed_health_fixture();
+        let signer_public_key = vec![7; 32];
+        IdunnDaemonHealthTrustBindingRecord {
+            schema_version: IDUNN_DAEMON_HEALTH_TRUST_BINDING_SCHEMA.into(),
+            binding_id: "root/yggdrasil-epiphany/health".into(),
+            daemon_id: health.daemon_id,
+            health_contract: health.health_contract,
+            source_runtime_id: health.source_runtime_id,
+            signer_identity_id: derive_service_identity_id::<GameCultProviderHealthIdentity>(
+                &signer_public_key,
+            )
+            .unwrap(),
+            signer_public_key,
+            binding_authority: "root".into(),
+            bound_at_unix_millis: 1_784_483_100_000,
+            release_binding_required: true,
+            private_state_exposed: false,
+        }
+    }
+
+    fn authenticated_admission_fixture() -> IdunnAuthenticatedDaemonHealthAdmissionRecord {
+        let health = signed_health_fixture();
+        let binding = trust_binding_fixture();
+        IdunnAuthenticatedDaemonHealthAdmissionRecord {
+            schema_version: IDUNN_AUTHENTICATED_DAEMON_HEALTH_ADMISSION_SCHEMA.into(),
+            daemon_id: health.daemon_id,
+            health_contract: health.health_contract,
+            source_runtime_id: health.source_runtime_id,
+            state: health.state,
+            observed_at_unix_millis: health.observed_at_unix_millis,
+            admitted_at_unix_millis: health.observed_at_unix_millis + 1,
+            trust_binding_id: binding.binding_id,
+            trust_binding_sha256: format!("sha256-{}", "c".repeat(64)),
+            signer_identity_id: health.signer_identity_id,
+            publisher_incarnation_id: health.publisher_incarnation_id,
+            publisher_sequence: health.publisher_sequence,
+            signed_health_sha256: format!("sha256-{}", "d".repeat(64)),
+            release_id: health.release_id,
+            release_witness_sha256: health.release_witness_sha256,
+            source_commit: health.source_commit,
+            deployment_id: health.deployment_id,
+            private_state_exposed: false,
+            activation_witness_sha256: health.activation_witness_sha256,
+        }
+    }
+
+    fn runtime_traffic_admission_fixture() -> IdunnRuntimeTrafficAdmissionRecord {
+        let admission = authenticated_admission_fixture();
+        IdunnRuntimeTrafficAdmissionRecord {
+            schema_version: IDUNN_RUNTIME_TRAFFIC_ADMISSION_SCHEMA.into(),
+            daemon_id: IDUNN_CODEX_CONNECTOR_RUNTIME_TRAFFIC_ADMISSION_RECORD_KEY.into(),
+            release_id: admission.release_id.unwrap(),
+            release_witness_sha256: admission.release_witness_sha256.unwrap(),
+            source_commit: admission.source_commit.unwrap(),
+            deployment_id: admission.deployment_id.unwrap(),
+            activation_witness_sha256: admission.activation_witness_sha256.unwrap(),
+            signed_health_sha256: admission.signed_health_sha256,
+            publisher_incarnation_id: admission.publisher_incarnation_id,
+            publisher_sequence: admission.publisher_sequence,
+            signer_identity_id: admission.signer_identity_id,
+            runtime_process_id: 41,
+            runtime_process_starttime_ticks: 987_654,
+        }
+    }
+
+    fn service_trust_anchor_fixture() -> GameCultServiceTrustAnchorRecord {
+        let signer_public_key = vec![5; 32];
+        GameCultServiceTrustAnchorRecord {
+            schema_version: GAMECULT_SERVICE_TRUST_ANCHOR_SCHEMA.into(),
+            trust_anchor_id: "root/idunn/authenticated-provider-health-projection".into(),
+            service_id: "idunn".into(),
+            runtime_id: "idunn-yggdrasil".into(),
+            signer_identity_id: derive_service_identity_id::<cultnet_rs::IdunnServiceIdentity>(
+                &signer_public_key,
+            )
+            .unwrap(),
+            signer_public_key,
+            signature_algorithm: "ed25519".into(),
+            signing_purpose: IDUNN_AUTHENTICATED_PROVIDER_HEALTH_PROJECTION_SIGNING_PURPOSE.into(),
+            signed_schema: IDUNN_AUTHENTICATED_PROVIDER_HEALTH_PROJECTION_SCHEMA.into(),
+            binding_authority: "root".into(),
+            bound_at_unix_millis: 1_784_483_100_000,
+            expires_at_unix_millis: Some(1_815_000_000_000),
+            private_state_exposed: false,
+        }
+    }
+
+    fn authenticated_provider_health_projection_fixture()
+    -> IdunnAuthenticatedProviderHealthProjectionRecord {
+        let health = signed_health_fixture();
+        let binding = trust_binding_fixture();
+        IdunnAuthenticatedProviderHealthProjectionRecord {
+            schema_version: IDUNN_AUTHENTICATED_PROVIDER_HEALTH_PROJECTION_SCHEMA.into(),
+            projection_id: format!("authenticated-provider-health:{}", health.daemon_id),
+            daemon_id: health.daemon_id,
+            health_contract: health.health_contract,
+            provider_state: health.state,
+            reason_code: IDUNN_PROVIDER_ACTIVE_REASON.into(),
+            provider_observed_at_unix_millis: health.observed_at_unix_millis,
+            admitted_at_unix_millis: health.observed_at_unix_millis + 1,
+            evaluated_at_unix_millis: health.observed_at_unix_millis + 2,
+            trust_binding_id: binding.binding_id,
+            trust_binding_sha256: format!("sha256-{}", "c".repeat(64)),
+            signed_health_sha256: format!("sha256-{}", "d".repeat(64)),
+            authenticated_admission_sha256: format!("sha256-{}", "e".repeat(64)),
+            provider_signer_identity_id: health.signer_identity_id,
+            provider_incarnation_id: health.publisher_incarnation_id,
+            provider_sequence: health.publisher_sequence,
+            release_id: health.release_id,
+            release_witness_sha256: health.release_witness_sha256,
+            source_commit: health.source_commit,
+            deployment_id: health.deployment_id,
+            idunn_runtime_id: "idunn-yggdrasil".into(),
+            idunn_signer_identity_id: "idunn-yggdrasil-service-identity".into(),
+            projection_incarnation_id: "idunn-yggdrasil/boot-3/process-8".into(),
+            projection_sequence: 7,
+            signature_algorithm: "ed25519".into(),
+            signature: vec![6; 64],
+            private_state_exposed: false,
+            expires_at_unix_millis: health.observed_at_unix_millis + 60_002,
+        }
+    }
+
+    #[test]
+    fn outward_authenticated_provider_health_contracts_validate_and_round_trip() -> Result<()> {
+        let anchor = service_trust_anchor_fixture();
+        let projection = authenticated_provider_health_projection_fixture();
+        anchor.validate()?;
+        projection.validate()?;
+
+        let temp = tempfile::tempdir()?;
+        let store_path = temp
+            .path()
+            .join("authenticated-provider-health-projection.cc");
+        let mut node = CultMesh::create_node(
+            &store_path,
+            OdinDocuments,
+            CultMeshNodeOptions {
+                runtime_id: "authenticated-provider-health-contract-test".into(),
+                pull_on_start: true,
+            },
+        )?;
+        node.put(&anchor.trust_anchor_id, &anchor)?;
+        node.put(&projection.projection_id, &projection)?;
+        assert_eq!(
+            node.get_required::<GameCultServiceTrustAnchorRecord>(&anchor.trust_anchor_id)?,
+            anchor
+        );
+        assert_eq!(
+            node.get_required::<IdunnAuthenticatedProviderHealthProjectionRecord>(
+                &projection.projection_id
+            )?,
+            projection
+        );
+        assert_eq!(
+            authenticated_provider_health_reason_code("warming"),
+            Some(IDUNN_PROVIDER_WARMING_REASON)
+        );
+        assert_eq!(
+            authenticated_provider_health_reason_code("degraded"),
+            Some(IDUNN_PROVIDER_DEGRADED_REASON)
+        );
+        assert_eq!(
+            authenticated_provider_health_reason_code("failed"),
+            Some(IDUNN_PROVIDER_FAILED_REASON)
+        );
+        assert_eq!(authenticated_provider_health_reason_code("missing"), None);
+        Ok(())
+    }
+
+    #[test]
+    fn outward_authenticated_provider_health_contracts_refuse_substitution_and_weak_lineage() {
+        let mut anchor = service_trust_anchor_fixture();
+        anchor.binding_authority = "idunn".into();
+        assert!(anchor.validate().is_err());
+        anchor = service_trust_anchor_fixture();
+        anchor.signer_public_key = vec![5; 31];
+        assert!(anchor.validate().is_err());
+        anchor = service_trust_anchor_fixture();
+        anchor.expires_at_unix_millis = Some(anchor.bound_at_unix_millis);
+        assert!(anchor.validate().is_err());
+        anchor = service_trust_anchor_fixture();
+        anchor.private_state_exposed = true;
+        assert!(anchor.validate().is_err());
+        anchor = service_trust_anchor_fixture();
+        anchor.signing_purpose = "caller.chosen-purpose".into();
+        assert!(anchor.validate().is_err());
+        anchor = service_trust_anchor_fixture();
+        anchor.signer_identity_id = "caller-chosen-identity".into();
+        assert!(anchor.validate().is_err());
+
+        let mut projection = authenticated_provider_health_projection_fixture();
+        projection.evaluated_at_unix_millis = projection.admitted_at_unix_millis - 1;
+        assert!(projection.validate().is_err());
+        projection = authenticated_provider_health_projection_fixture();
+        projection.expires_at_unix_millis = projection.evaluated_at_unix_millis;
+        assert!(projection.validate().is_err());
+        projection = authenticated_provider_health_projection_fixture();
+        projection.authenticated_admission_sha256 = "admitted".into();
+        assert!(projection.validate().is_err());
+        projection = authenticated_provider_health_projection_fixture();
+        projection.projection_sequence = 0;
+        assert!(projection.validate().is_err());
+        projection = authenticated_provider_health_projection_fixture();
+        projection.signature.clear();
+        assert!(projection.validate().is_err());
+        projection = authenticated_provider_health_projection_fixture();
+        projection.release_witness_sha256 = None;
+        assert!(projection.validate().is_err());
+        projection = authenticated_provider_health_projection_fixture();
+        projection.deployment_id = None;
+        assert!(projection.validate().is_err());
+        projection = authenticated_provider_health_projection_fixture();
+        projection.private_state_exposed = true;
+        assert!(projection.validate().is_err());
+        projection = authenticated_provider_health_projection_fixture();
+        projection.reason_code = "release_drift".into();
+        assert!(projection.validate().is_err());
+        projection = authenticated_provider_health_projection_fixture();
+        projection.provider_state = "missing".into();
+        projection.reason_code = "authenticated_provider_failed".into();
+        assert!(projection.validate().is_err());
+    }
+
+    #[test]
+    fn generic_signed_health_contracts_validate_and_round_trip() -> Result<()> {
+        let health = signed_health_fixture();
+        let binding = trust_binding_fixture();
+        let admission = authenticated_admission_fixture();
+        health.validate()?;
+        binding.validate()?;
+        admission.validate()?;
+
+        let temp = tempfile::tempdir()?;
+        let store_path = temp.path().join("signed-health.cc");
+        let mut node = CultMesh::create_node(
+            &store_path,
+            OdinDocuments,
+            CultMeshNodeOptions {
+                runtime_id: "idunn-test".into(),
+                pull_on_start: true,
+            },
+        )?;
+        node.put(&health.daemon_id, &health)?;
+        node.put(&binding.binding_id, &binding)?;
+        node.put(&admission.daemon_id, &admission)?;
+        assert_eq!(
+            node.get_required::<IdunnSignedDaemonHealthRecord>(&health.daemon_id)?,
+            health
+        );
+        assert_eq!(
+            node.get_required::<IdunnDaemonHealthTrustBindingRecord>(&binding.binding_id)?,
+            binding
+        );
+        assert_eq!(
+            node.get_required::<IdunnAuthenticatedDaemonHealthAdmissionRecord>(
+                &admission.daemon_id
+            )?,
+            admission
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_traffic_admission_is_a_closed_positional_document() -> Result<()> {
+        let admission = runtime_traffic_admission_fixture();
+        admission.validate()?;
+        assert_eq!(
+            IdunnRuntimeTrafficAdmissionRecord::TYPE,
+            "idunn.runtime_traffic_admission"
+        );
+        assert_eq!(
+            IdunnRuntimeTrafficAdmissionRecord::SCHEMA_NAME,
+            IDUNN_RUNTIME_TRAFFIC_ADMISSION_SCHEMA
+        );
+        let payload = rmp_serde::to_vec(&admission)?;
+        assert_eq!(payload.first(), Some(&0x9d));
+        assert_eq!(
+            rmp_serde::from_slice::<IdunnRuntimeTrafficAdmissionRecord>(&payload)?,
+            admission
+        );
+        let pre_process_binding = rmp_serde::to_vec(&(
+            admission.schema_version.clone(),
+            admission.daemon_id.clone(),
+            admission.release_id.clone(),
+            admission.release_witness_sha256.clone(),
+            admission.source_commit.clone(),
+            admission.deployment_id.clone(),
+            admission.activation_witness_sha256.clone(),
+            admission.signed_health_sha256.clone(),
+            admission.publisher_incarnation_id.clone(),
+            admission.publisher_sequence,
+            admission.signer_identity_id.clone(),
+        ))?;
+        assert_eq!(pre_process_binding.first(), Some(&0x9b));
+        assert!(
+            rmp_serde::from_slice::<IdunnRuntimeTrafficAdmissionRecord>(&pre_process_binding)
+                .is_err(),
+            "runtime admission v2 must not decode a pre-process-binding body"
+        );
+        let mut ghostlight = admission.clone();
+        ghostlight.daemon_id = IDUNN_GHOSTLIGHT_RUNTIME_TRAFFIC_ADMISSION_RECORD_KEY.into();
+        ghostlight.validate()?;
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_traffic_admission_refuses_weak_or_partial_lineage() {
+        let mut admission = runtime_traffic_admission_fixture();
+        admission.publisher_sequence = 0;
+        assert!(admission.validate().is_err());
+
+        admission = runtime_traffic_admission_fixture();
+        admission.source_commit = "F".repeat(40);
+        assert!(admission.validate().is_err());
+
+        admission = runtime_traffic_admission_fixture();
+        admission.activation_witness_sha256 = "missing".into();
+        assert!(admission.validate().is_err());
+
+        admission = runtime_traffic_admission_fixture();
+        admission.schema_version = "idunn.runtime_traffic_admission.v0".into();
+        assert!(admission.validate().is_err());
+
+        admission = runtime_traffic_admission_fixture();
+        admission.daemon_id = "caller-selected-daemon".into();
+        assert!(admission.validate().is_err());
+
+        admission = runtime_traffic_admission_fixture();
+        admission.runtime_process_id = 0;
+        assert!(admission.validate().is_err());
+
+        admission = runtime_traffic_admission_fixture();
+        admission.runtime_process_starttime_ticks = 0;
+        assert!(admission.validate().is_err());
+    }
+
+    #[test]
+    fn activation_binding_is_additive_for_existing_authenticated_admissions() -> Result<()> {
+        let mut admission = authenticated_admission_fixture();
+        admission.activation_witness_sha256 = None;
+        let mut legacy = rmp_serde::to_vec(&admission)?;
+        assert_eq!(&legacy[..3], &[0xdc, 0, 19]);
+        assert_eq!(legacy.pop(), Some(0xc0));
+        legacy[2] = 18;
+        let decoded: IdunnAuthenticatedDaemonHealthAdmissionRecord =
+            rmp_serde::from_slice(&legacy)?;
+        assert_eq!(decoded.activation_witness_sha256, None);
+        decoded.validate()?;
+        Ok(())
+    }
+
+    #[test]
+    fn generic_signed_health_contracts_refuse_weak_or_partial_authority() {
+        let mut health = signed_health_fixture();
+        health.private_state_exposed = true;
+        assert!(health.validate().is_err());
+        health = signed_health_fixture();
+        health.signature.clear();
+        assert!(health.validate().is_err());
+        health = signed_health_fixture();
+        health.release_witness_sha256 = None;
+        assert!(health.validate().is_err());
+        health = signed_health_fixture();
+        health.publisher_sequence = 0;
+        assert!(health.validate().is_err());
+        health = signed_health_fixture();
+        health.activation_witness_sha256 = Some(format!("sha256-{}", "F".repeat(64)));
+        assert!(health.validate().is_err());
+
+        let mut binding = trust_binding_fixture();
+        binding.binding_authority = "daemon".into();
+        assert!(binding.validate().is_err());
+        binding = trust_binding_fixture();
+        binding.signer_public_key = vec![1; 31];
+        assert!(binding.validate().is_err());
+        binding = trust_binding_fixture();
+        binding.private_state_exposed = true;
+        assert!(binding.validate().is_err());
+
+        let mut admission = authenticated_admission_fixture();
+        admission.trust_binding_sha256 = "ready".into();
+        assert!(admission.validate().is_err());
+        admission = authenticated_admission_fixture();
+        admission.admitted_at_unix_millis = admission.observed_at_unix_millis - 1;
+        assert!(admission.validate().is_err());
+        admission = authenticated_admission_fixture();
+        admission.activation_witness_sha256 = Some("caller-selected".into());
+        assert!(admission.validate().is_err());
+    }
 
     #[test]
     fn muninn_media_documents_round_trip_through_cultmesh() -> Result<()> {

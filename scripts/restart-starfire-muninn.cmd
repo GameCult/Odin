@@ -7,4 +7,4 @@ if /I not "%IDUNN_COMMAND_AUTHORITY%"=="idunn-daemon" (
   echo restart-starfire-muninn.cmd is an Idunn actuator wrapper. Redeploy by poking Idunn; direct service restart is not an owned path. 1>&2
   exit /b 1
 )
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File E:\Projects\Odin\scripts\restart-starfire-muninn.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File %~dp0restart-starfire-muninn.ps1

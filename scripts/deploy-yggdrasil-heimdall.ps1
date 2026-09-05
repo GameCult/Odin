@@ -1,13 +1,13 @@
 param(
   [string] $SshTarget = "yggdrasil",
-  [string] $RepoRoot = "E:\Projects\Heimdall",
-  [string] $CultLibRoot = "E:\Projects\CultLib",
+  [string] $RepoRoot = (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) "Heimdall"),
+  [string] $CultLibRoot = (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) "CultLib"),
   [string] $AppUser = "heimdall",
   [string] $RemoteAppHome = "/srv/heimdall",
   [string] $RemoteTarballName = "heimdall-source.tar",
   [string] $RemoteCultLibTarballName = "heimdall-cultlib.tar",
-  [string] $DeployScript = "E:\Projects\gamecult-ops\scripts\deploy-heimdall.sh",
-  [string] $CheckScript = "E:\Projects\gamecult-ops\scripts\check-heimdall.sh",
+  [string] $DeployScript = (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) "gamecult-ops\scripts\deploy-heimdall.sh"),
+  [string] $CheckScript = (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) "gamecult-ops\scripts\check-heimdall.sh"),
   [string] $UpstreamRemote = "origin",
   [string] $UpstreamBranch = "main",
   [string] $CultLibUpstreamRemote = "origin",
@@ -42,7 +42,7 @@ if ([string]::IsNullOrWhiteSpace($cultLibCommit)) {
   throw "Could not determine CultLib git revision."
 }
 
-$scratch = Join-Path "E:\Projects\Odin\scratch\idunn-deploy" "yggdrasil-heimdall"
+$scratch = Join-Path (Join-Path (Split-Path -Parent $PSScriptRoot) "scratch\idunn-deploy") "yggdrasil-heimdall"
 $sourceTarPath = Join-Path $scratch $RemoteTarballName
 $cultLibTarPath = Join-Path $scratch $RemoteCultLibTarballName
 $manifestPath = Join-Path $scratch "deployment-manifest.txt"

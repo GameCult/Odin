@@ -1,0 +1,72 @@
+schema = "gamecult.idunn.target_declaration.v1"
+target = "odin"
+source_stamp_environment = "ODIN_BUILD_COMMIT"
+required_gitlinks = []
+
+[[steps]]
+id = "test-odin-daemon"
+phase = "test"
+runner = "rust-build"
+argv = ["cargo", "test", "--locked", "-p", "odin-daemon"]
+
+[[steps]]
+id = "build-odin-daemon"
+phase = "build"
+runner = "rust-build"
+argv = [
+  "cargo",
+  "build",
+  "--locked",
+  "--release",
+  "-p",
+  "odin-daemon",
+  "--bin",
+  "odin-daemon",
+]
+
+[[artifacts]]
+id = "odin-daemon"
+source_kind = "runner-output"
+runner = "rust-build"
+source = "target/release/odin-daemon"
+destination = "odin-daemon"
+executable = true
+
+[service]
+executable_artifact = "odin-daemon"
+arguments = [
+  { kind = "literal", value = "--store" },
+  { kind = "binding", name = "store_path" },
+  { kind = "literal", value = "--idunn-projection" },
+  { kind = "binding", name = "idunn_projection_path" },
+  { kind = "literal", value = "--idunn-anchor" },
+  { kind = "binding", name = "idunn_anchor_path" },
+]
+transport = "rudp"
+route_required = true
+required_environment = [
+  "GAMECULT_IDUNN_CANDIDATE_BIND",
+  "GAMECULT_IDUNN_PROCESS_WRITE_LEASE",
+  "GAMECULT_IDUNN_RUNTIME_BUNDLE",
+  "ODIN_TOPOLOGY_IDENTITY",
+]
+
+[service.health]
+contract = "odin.runtime-health.v1"
+
+[state]
+schema_generation = "odin-v2"
+
+[[state.slots]]
+id = "topology"
+relative_path = "topology.cc"
+kind = "cultcache-file"
+schema = "odin.runtime_topology_correlation.v2"
+writer = "process-bound-single-writer"
+recovery = "preserve"
+startup = "create-or-open-after-write-lease"
+
+[[provides]]
+capability = "odin.verse-rendezvous"
+schema = "odin.verse-topology.v1"
+compatibility = "v1"

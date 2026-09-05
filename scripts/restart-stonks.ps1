@@ -1,6 +1,6 @@
 $ErrorActionPreference = "Stop"
 
-$stonksRoot = "E:\Projects\Stonks"
+$stonksRoot = (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) "Stonks")
 $stateDir = Join-Path $stonksRoot "scratch\stonks"
 $pidPath = Join-Path $stateDir "stonks.pid"
 $startScript = Join-Path $stonksRoot "scripts\start-stonks.ps1"

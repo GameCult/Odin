@@ -76,7 +76,7 @@ async function main() {
         }
         return (await meshNodePromise).cache;
       },
-      onDocumentPutRaw: (document) => {
+      onDocumentPutRaw: async (document) => {
         if (observedRudpDocuments < 40) {
           observedRudpDocuments += 1;
           console.error(
@@ -84,9 +84,7 @@ async function main() {
           );
         }
         liveProviderRegistry.ingestDocument(document, document.remote);
-        persistRudpDocumentPut(document).catch((error) => {
-          console.error("CultMesh/RUDP document persist failed:", error.message);
-        });
+        await persistRudpDocumentPut(document);
       },
     });
     await cultMeshRudpDocumentServer.start();

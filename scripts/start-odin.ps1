@@ -1,5 +1,5 @@
 param(
-  [string] $StateDir = "E:\Projects\Odin\scratch\odin",
+  [string] $StateDir = (Join-Path (Split-Path -Parent $PSScriptRoot) "scratch\odin"),
   [string] $CultNetRudpBind = "0.0.0.0:17871",
   [string] $IdunnRudpHealth = $(if ($env:ODIN_IDUNN_RUDP_HEALTH) { $env:ODIN_IDUNN_RUDP_HEALTH } else { $env:IDUNN_RUDP_HEALTH }),
   [string] $IdunnDaemon = "odin",
@@ -39,7 +39,7 @@ if (Test-Path $pidPath) {
   Remove-Item -LiteralPath $pidPath -Force
 }
 
-$env:NODE_PATH = "E:\Projects\CultLib\packages"
+$env:NODE_PATH = (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) "CultLib\packages")
 $args = @(
   $scriptPath,
   "--stateDir", $StateDir,

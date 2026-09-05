@@ -15,8 +15,8 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
-cultmesh-rs = { path = "../../vendor/cultmesh-rs" }
-cultnet-rs = { path = "../../vendor/cultnet-rs" }
+cultmesh-rs = { git = "https://github.com/GameCult/CultLib.git", rev = "c13b6ba07e99f2535b455da74d07d88c308731f5", package = "cultmesh-rs" }
+cultnet-rs = { git = "https://github.com/GameCult/CultLib.git", rev = "c13b6ba07e99f2535b455da74d07d88c308731f5", package = "cultnet-rs" }
 libc = "0.2"
 muninn-move-tracker = { path = "../muninn-move-tracker" }
 muninn-psmoveapi-tracker = { path = "../muninn-psmoveapi-tracker", optional = true }

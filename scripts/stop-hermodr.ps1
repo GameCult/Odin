@@ -1,5 +1,5 @@
 param(
-  [string] $StateDir = "E:\Projects\Odin\scratch\Hermodr"
+  [string] $StateDir = (Join-Path (Split-Path -Parent $PSScriptRoot) "scratch\Hermodr")
 )
 
 $ErrorActionPreference = "Stop"

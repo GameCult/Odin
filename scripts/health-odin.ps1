@@ -1,5 +1,5 @@
 param(
-  [string] $StateDir = "E:\Projects\Odin\scratch\odin",
+  [string] $StateDir = (Join-Path (Split-Path -Parent $PSScriptRoot) "scratch\odin"),
   [int] $MaxSilenceSeconds = 120,
   [string] $CultNetRudpBind = "0.0.0.0:17871"
 )

@@ -20,9 +20,27 @@ The first Rust core lives in `crates/odin-core` and already separates typed
 documents, ingest ports, normalization, and repository persistence so unit tests
 can use mocked inputs and pipeline smokes can prove typed handoff without
 booting the whole daemon. Gjallar is not part of that Rust record spine: it is
-the Nightwing-resident terminal compositor in `E:\Projects\Gjallar` that
-consumes Odin's accepted `gamecult.eve.surface_state` snapshot over CultNet/RUDP
-and renders the live display.
+the Yggdrasil-resident C# composition daemon in `F:\Projects\Gjallar`. It
+consumes Odin's accepted provider snapshot and publishes one tiled
+`gjallar.overview` Eve surface for GUI, TUI, and agent lowerers.
+
+## Typed access discovery
+
+Odin persists only document schemas it has registered. That is a deliberate
+typed-store boundary, not a license to accept anonymous blobs and hope later
+code understands them. The live Yggdrasil body at
+`ba76a7239a7bb40aa1774df7d93b9388dc27b222`, using CultLib
+`75c180782aeba7cfd22d6412877397708a4ed28f`, registers Heimdall's provider,
+command-boundary, Eve-plugin, and transport-profile documents plus
+Ghostlight's public catalog envelope. Provider daemons own those documents;
+Odin owns typed catalog acceptance, ordered durable persistence, and exact
+retrieval. Sensitive auth commands and claims travel directly between the
+consuming app and Heimdall, never through Odin.
+
+Ghostlight publishes a `ghostlight.schema_catalog.v1` envelope containing only
+the state contracts named by its public provider surface. Odin registers that
+envelope so it can persist and return the provider-owned catalog; it does not
+register every private Ghostlight receipt, transition, or simulation schema.
 
 ## Typed access discovery
 
@@ -37,18 +55,16 @@ Heimdall, never through Odin.
 
 ## Gjallar
 
-Gjallar is the herald display daemon that runs on Nightwing. Odin sees the
-Verses, accepts provider surfaces, and publishes the `odin.providers` catalog.
-Gjallar consumes Odin's accepted surface snapshot over CultNet/RUDP, composes
-the multi-scale tiled dashboard from that typed state, lowers Odin's canonical
-marquee tape into continuous gutter text, owns dense character-level update
-behavior, and writes the visible framebuffer.
+Gjallar is the herald composition daemon that runs beside Odin and Idunn on
+Yggdrasil. Odin sees the Verses and accepts provider surfaces. Gjallar consumes
+that accepted snapshot and publishes one multi-scale tiled Eve surface. Eve
+clients—including EveCanvas—own graphical and TUI lowering.
 
 Local package surfaces:
 
 - Organ contract: `docs/gjallar.md`
 - Branding Persona state: `personas/gjallar.persona_state.cc`
-- Runtime source: `E:\Projects\Gjallar`
+- Runtime source: `F:\Projects\Gjallar`
 - Avatar asset: `assets/personas/gjallar-avatar.png`
 - Pixel avatar: `assets/personas/gjallar-avatar-pixel-256.png`
 
@@ -65,6 +81,22 @@ Agents do not deploy daemons directly. They configure Idunn's target catalog,
 release targets, migration commands, and command boundaries so Idunn can run
 the shared rollout primitive and leave typed witnesses behind.
 
+Deployment consequence has one final owner: immediately before every migration,
+deploy, or restart process spawn, Idunn re-opens the root-owned deployment-brake
+CultCache and the dedicated operator public anchor. A released record must bind
+the canonical runtime (`yggdrasil` for `yggdrasil-local`), exact source revision
+(or `restart:<daemon>`), exact request id, operator, signature, and short expiry.
+Missing, corrupt, engaged, expired, foreign, wrong-scope, substituted, or
+badly-signed state fails closed. Planning and lifecycle-command publication do
+not bypass or cache this decision. The store and its sibling `.lock` live in
+`/var/lib/gamecult/idunn-authority`, a root-owned `root:idunn` `0750` directory;
+both files are `root:idunn` `0640`, and the daemon's systemd sandbox exposes the
+directory read-only. Idunn holds the lock shared from its final snapshot read
+through process spawn, so an engage cannot be defeated by previously captured
+released bytes. A release is not one-shot: its exact request/revision grant
+covers each migration and deploy spawn in that rollout until its short expiry;
+every spawn independently reopens and validates the same grant.
+
 Local package surfaces:
 
 - Organ contract: `docs/idunn.md`
@@ -75,6 +107,11 @@ Local package surfaces:
 - Hosted VoidBot release: upstream `main` -> Yggdrasil-local Idunn -> the
   root-owned `/srv/odin/deploy-manifests/voidbot` actuator. Local checkouts are
   development and diagnostics only; do not create a local deployment.
+- Hosted Odin release: branch `codex/ygg-idunn-independent-bootstrap` plus the
+  exact CultLib commit in `deploy/cultlib.commit` -> one immutable
+  `/srv/odin/releases/<commit>` body -> `/srv/odin/current`. Odin signs its own
+  liveness to Idunn, while Idunn starts independently and owns later restart or
+  deployment actuation.
 - Operator escalation: Bifrost-owned CultMesh crossing; current compatibility
   delivery calls `scripts\notify-idunn-operator-alarm.ps1`, which asks Bifrost
   to publish a typed `gamecult.operator_dm_request.v1` CultMesh command document
@@ -89,7 +126,7 @@ Local package surfaces:
 - Outputs: CultCache-backed Odin state, CultMesh documents, and CultNet
   schema/catalog messages. Browser, GUI, TUI, and framebuffer renderers lower
   those documents outside Odin instead of asking Odin to host web surfaces.
-- Derived state: Gjallar's attached Nightwing display, browser dashboards, and future Eve clients are projections of Odin state and provider-owned Eve/CultUI surfaces.
+- Derived state: Gjallar's aggregate surface is derived from Odin/provider state; Eve clients derive pixels from that aggregate.
 - Forbidden writers: renderers do not probe the network or decide Verse truth; individual projects do not maintain private incompatible discovery ledgers once Odin can see them.
 - Shared paths: human dashboards, worker schedulers, Verse bootstrap code, and compact TUI views consume the same registry and schema catalog.
 - Deletion line: old per-host coordinator scripts should be deleted or reduced to deployment wrappers that start Odin.

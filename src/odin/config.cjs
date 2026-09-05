@@ -29,6 +29,10 @@ function buildConfig(argv) {
     endpoint: String(args["idunn-rudp-health"]),
     daemonId: String(args["idunn-daemon"] || "odin"),
     healthContract: String(args["idunn-health-contract"] || "odin.cultnet-rudp-provider-health"),
+    privateKeyPath: args["idunn-health-private-key"]
+      ? String(args["idunn-health-private-key"])
+      : "",
+    sourceRuntimeId: String(args["idunn-source-runtime"] || "odin-coordinator"),
   } : null;
   const interfaceBindingStores = String(
     args.interfaceBindingStore ||

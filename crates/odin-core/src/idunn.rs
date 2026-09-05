@@ -37,6 +37,21 @@ pub fn plan_keepalive(
         };
     }
 
+    if health.state == "warming" {
+        return IdunnPlan {
+            decision: decision(
+                &decision_id,
+                desired,
+                "observe",
+                "daemon is warming under provider-owned progress authority",
+                &now,
+            ),
+            deployment_request: None,
+            restart_request: None,
+            operator_alarm: None,
+        };
+    }
+
     if health.state == "degraded" || health.state == "dependency-unavailable" {
         let alarm_id = format!("alarm:{}:{}", desired.daemon_id, now);
         let reason = format!(
@@ -239,6 +254,19 @@ mod tests {
     }
 
     #[test]
+    fn warming_daemon_is_observed_without_actuation_or_promotion() {
+        let mut desired = desired(Some("systemctl restart epiphany"));
+        desired.deploy_command = Some("deploy epiphany".to_string());
+        let plan = plan_keepalive(&desired, &health("warming"), "2026-07-17T00:00:02Z");
+
+        assert_eq!(plan.decision.action, "observe");
+        assert!(plan.decision.reason.contains("provider-owned progress"));
+        assert!(plan.deployment_request.is_none());
+        assert!(plan.restart_request.is_none());
+        assert!(plan.operator_alarm.is_none());
+    }
+
+    #[test]
     fn unhealthy_daemon_with_restart_authority_requests_restart() {
         let plan = plan_keepalive(
             &desired(Some("npm start")),
@@ -429,6 +457,7 @@ mod tests {
             release_authority_status: "authorized".to_string(),
             requires_bifrost_authority: true,
             observed_upstream_revision: "abc123".to_string(),
+            minimum_source_revision: None,
         };
         let artifact = IdunnDeploymentArtifactRecord {
             artifact_id: "artifact:voidbot:main".to_string(),
@@ -473,6 +502,15 @@ mod tests {
             status: "planned".to_string(),
             planned_at: "2026-06-04T00:00:02Z".to_string(),
         };
+        let release_payload = rmp_serde::to_vec(&release_target)?;
+        assert_eq!(&release_payload[..3], &[0xdc, 0, 22]);
+        let mut pre_floor_payload = release_payload.clone();
+        assert_eq!(pre_floor_payload.pop(), Some(0xc0));
+        pre_floor_payload[2] = 21;
+        assert!(
+            rmp_serde::from_slice::<IdunnReleaseTargetRecord>(&pre_floor_payload).is_err(),
+            "release-target v3 must not decode a pre-floor positional body"
+        );
         node.put(&release_target.target_id, &release_target)?;
         node.put(&artifact.artifact_id, &artifact)?;
         node.put(&migration_plan.plan_id, &migration_plan)?;

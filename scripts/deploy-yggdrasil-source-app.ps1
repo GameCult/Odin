@@ -42,7 +42,7 @@ if ([string]::IsNullOrWhiteSpace($commit)) {
   throw "Could not determine git revision for $RepoRoot $sourceRef"
 }
 
-$scratch = Join-Path "E:\Projects\Odin\scratch\idunn-deploy" $AppId
+$scratch = Join-Path (Join-Path (Split-Path -Parent $PSScriptRoot) "scratch\idunn-deploy") $AppId
 $tarPath = Join-Path $scratch $RemoteTarballName
 $manifestPath = Join-Path $scratch "deployment-manifest.txt"
 New-Item -ItemType Directory -Force -Path $scratch | Out-Null

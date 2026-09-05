@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use cultmesh_rs::{CultMesh, CultMeshNodeOptions};
-use odin_core::{MuninnMoveEvidenceTransportHealthRecord, MuninnMoveTrackerHealthRecord, OdinDocuments};
+use odin_core::{
+    MuninnMoveEvidenceTransportHealthRecord, MuninnMoveTrackerHealthRecord, OdinDocuments,
+};
 use std::{env, path::PathBuf};
 
 fn main() -> Result<()> {
@@ -42,16 +44,29 @@ fn main() -> Result<()> {
             record.last_observation_at,
             record.image_mean_rgb,
             record.image_peak_rgb,
-            record.color_evidence_move_ids.iter().cloned().zip(record.color_evidence_pixel_counts.iter().copied()).collect::<Vec<_>>(),
+            record
+                .color_evidence_move_ids
+                .iter()
+                .cloned()
+                .zip(record.color_evidence_pixel_counts.iter().copied())
+                .collect::<Vec<_>>(),
             record.updated_at,
             record.detail,
         );
     }
-    for record in node.cache().get_all::<MuninnMoveEvidenceTransportHealthRecord>().unwrap_or_default() {
+    for record in node
+        .cache()
+        .get_all::<MuninnMoveEvidenceTransportHealthRecord>()
+        .unwrap_or_default()
+    {
         println!(
             "stream={} produced={} local_admitted={} remote_handoffs={} remote_sends={} updated={}",
-            record.stream_id, record.produced_frames, record.local_ring_admissions,
-            record.remote_handoffs, record.remote_sends, record.updated_at,
+            record.stream_id,
+            record.produced_frames,
+            record.local_ring_admissions,
+            record.remote_handoffs,
+            record.remote_sends,
+            record.updated_at,
         );
     }
     Ok(())

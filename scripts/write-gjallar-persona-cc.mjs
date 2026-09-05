@@ -6,15 +6,16 @@ import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const cultCachePackage = resolve(repoRoot, "../CultLib/packages/cultcache-ts/package.json");
 const {
   CultCache,
   SingleFileMessagePackBackingStore,
   defineDocumentType,
   inspectCultCacheBytes,
-} = createRequire("E:/Projects/CultLib/packages/cultcache-ts/package.json")("cultcache-ts");
+} = createRequire(cultCachePackage)("cultcache-ts");
 
-const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const schemaPath = "E:/Projects/EpiphanyAgent/schemas/cultnet/gamecult.persona_state.v0.schema.json";
+const schemaPath = resolve(repoRoot, "../Epiphany/schemas/cultnet/gamecult.persona_state.v0.schema.json");
 const storePath = resolve(repoRoot, "personas/gjallar.persona_state.cc");
 const recordKey = "persona:gjallar";
 const schemaVersion = "gamecult.persona_state.v0";
@@ -205,12 +206,12 @@ function buildPersonaState() {
         }),
       ],
       incubation: [
-        thought("csharp-cultmesh-body", "Gjallar has an executable C# Nightwing body that consumes Odin's accepted provider-state snapshot over CultNet/RUDP and renders the live multi-scale terminal dashboard.", {
+        thought("csharp-cultmesh-body", "Gjallar has an executable headless C# body on Yggdrasil that consumes Odin's accepted provider-state snapshot and publishes one typed aggregate Eve surface.", {
           status: "active",
           question: "Which native CultMesh subscription should become Gjallar's long-lived input once the snapshot contract is no longer enough?",
           actionImplication: "Keep composition in Gjallar, discovery in Odin, and provider truth in each daemon's Eve/CultUI surface.",
           intensity: 0.76,
-          tags: ["csharp", "nightwing", "runtime"],
+          tags: ["csharp", "yggdrasil", "runtime"],
         }),
       ],
     },
@@ -240,7 +241,7 @@ function buildPersonaState() {
           riskLevel: "medium",
           target: target("runtime", "gjallar-native-cultmesh", "Gjallar native CultMesh input path"),
           summary: "Promote Gjallar's Odin input from CultNet/RUDP snapshots to a native CultMesh subscription when the subscription contract is ready.",
-          rationale: "Gjallar's C# Nightwing body exists; the remaining work is subscription ergonomics, not a web bridge migration.",
+          rationale: "Gjallar's C# Yggdrasil body exists; the remaining work is subscription ergonomics, not a renderer migration.",
           urgency: 0.62,
           confidence: 0.74,
           constraints: [
