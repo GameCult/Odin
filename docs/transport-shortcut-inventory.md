@@ -1,5 +1,12 @@
 # Transport Shortcut Inventory
 
+> **Path note, 2026-09-05.** Idunn was extracted to
+> https://github.com/GameCult/Idunn. Entries below citing `scripts/idunn-*.ps1`,
+> `scripts/health-idunn-*`, `scripts/notify-idunn-*` or `scripts/start-idunn-local.ps1`
+> refer to paths that moved to `gamecult-ops/scripts/idunn/`; unit files and Idunn
+> documentation moved to the Idunn repository. This is a dated ledger and the
+> entries are left as written.
+
 Status date: 2026-07-03
 
 ## Authority Map
