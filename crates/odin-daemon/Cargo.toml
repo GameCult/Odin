@@ -13,7 +13,7 @@ path = "src/lib.rs"
 anyhow = "1"
 chrono = "0.4"
 cultcache-rs = { git = "https://github.com/GameCult/CultLib.git", rev = "c13b6ba07e99f2535b455da74d07d88c308731f5", package = "cultcache-rs" }
-cultmesh-rs = { path = "../../vendor/cultmesh-rs" }
+cultmesh-rs = { git = "https://github.com/GameCult/CultLib.git", rev = "c13b6ba07e99f2535b455da74d07d88c308731f5", package = "cultmesh-rs" }
 cultnet-rs = { git = "https://github.com/GameCult/CultLib.git", rev = "c13b6ba07e99f2535b455da74d07d88c308731f5", package = "cultnet-rs" }
 fs2 = "0.4"
 rmp-serde = "1.3"

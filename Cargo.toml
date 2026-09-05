@@ -1,7 +1,6 @@
 [workspace]
 members = [
     "crates/sleipnir-daemon",
-    "crates/idunn-daemon",
     "crates/muninn-daemon",
     "crates/muninn-move-tracker",
     "crates/muninn-psmoveapi-tracker",
@@ -11,7 +10,6 @@ members = [
 resolver = "3"
 exclude = [
     "vendor/cultcache-rs",
-    "vendor/cultmesh-rs",
     "vendor/cultnet-rs",
 ]
 
