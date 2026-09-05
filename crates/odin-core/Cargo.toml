@@ -11,10 +11,10 @@ path = "src/lib.rs"
 
 [dependencies]
 anyhow = "1"
-cultcache-rs = { git = "https://github.com/GameCult/CultLib.git", rev = "ae0ac0d3c92ccaee1a7eee2bbe033740c9ea2e55", package = "cultcache-rs" }
+cultcache-rs = { git = "https://github.com/GameCult/CultLib.git", rev = "c13b6ba07e99f2535b455da74d07d88c308731f5", package = "cultcache-rs" }
 cultmesh-rs = { path = "../../vendor/cultmesh-rs" }
 serde_json = "1"
-cultnet-rs = { git = "https://github.com/GameCult/CultLib.git", rev = "ae0ac0d3c92ccaee1a7eee2bbe033740c9ea2e55", package = "cultnet-rs" }
+cultnet-rs = { git = "https://github.com/GameCult/CultLib.git", rev = "c13b6ba07e99f2535b455da74d07d88c308731f5", package = "cultnet-rs" }
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]

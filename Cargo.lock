@@ -175,7 +175,7 @@ dependencies = [
 [[package]]
 name = "cultcache-rs"
 version = "0.1.0"
-source = "git+https://github.com/GameCult/CultLib.git?rev=ae0ac0d3c92ccaee1a7eee2bbe033740c9ea2e55#ae0ac0d3c92ccaee1a7eee2bbe033740c9ea2e55"
+source = "git+https://github.com/GameCult/CultLib.git?rev=c13b6ba07e99f2535b455da74d07d88c308731f5#c13b6ba07e99f2535b455da74d07d88c308731f5"
 dependencies = [
  "anyhow",
  "chrono",
@@ -193,7 +193,7 @@ dependencies = [
 [[package]]
 name = "cultcache-rs-derive"
 version = "0.1.0"
-source = "git+https://github.com/GameCult/CultLib.git?rev=ae0ac0d3c92ccaee1a7eee2bbe033740c9ea2e55#ae0ac0d3c92ccaee1a7eee2bbe033740c9ea2e55"
+source = "git+https://github.com/GameCult/CultLib.git?rev=c13b6ba07e99f2535b455da74d07d88c308731f5#c13b6ba07e99f2535b455da74d07d88c308731f5"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -213,7 +213,7 @@ dependencies = [
 [[package]]
 name = "cultnet-rs"
 version = "0.1.0"
-source = "git+https://github.com/GameCult/CultLib.git?rev=ae0ac0d3c92ccaee1a7eee2bbe033740c9ea2e55#ae0ac0d3c92ccaee1a7eee2bbe033740c9ea2e55"
+source = "git+https://github.com/GameCult/CultLib.git?rev=c13b6ba07e99f2535b455da74d07d88c308731f5#c13b6ba07e99f2535b455da74d07d88c308731f5"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -514,7 +514,6 @@ dependencies = [
  "cultnet-rs",
  "ed25519-dalek",
  "libc",
- "odin-core",
  "rmp-serde",
  "serde",
  "sha2",
