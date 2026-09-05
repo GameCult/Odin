@@ -8,10 +8,6 @@ members = [
     "crates/odin-daemon",
 ]
 resolver = "3"
-exclude = [
-    "vendor/cultcache-rs",
-    "vendor/cultnet-rs",
-]
 
 [workspace.package]
 edition = "2024"
