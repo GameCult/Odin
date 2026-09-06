@@ -189,14 +189,13 @@ entry to that same package rather than a second package.
 
 ## Phases
 
-**Phase 1 — Idunn RUDP client.** Move `src/odin/idunn-rudp.cjs` to the Idunn
-repository and consume it from there. Independent of everything else, correct
-regardless of whether Hermodr ever moves.
+**Phase 1 — Idunn RUDP client. Blocked on a decision; see below.** The move as
+originally specified is wrong and was not carried out.
 
-**Phase 2 — Delete the ingress, in place.** Before any file moves. Replace the
-private store with a provider subscription behind the existing port, delete the
-ingress and its options. Hermodr still lives in Odin here and must still serve
-browsers correctly. If this cannot pass its checks, the extraction is not ready.
+**Phase 2 — Delete the ingress, in place. Done.** `ProviderSubscriptionSource`
+replaces the private store behind the existing port, the ingress and its options
+are gone, and `src/odin/` is down to twelve modules. Verified by unit tests;
+behaviour against a live provider over RUDP remains an operator step.
 
 **Phase 3 — Publish the document contract.** `documents.cjs` becomes a package
 consumed by both Odin and Hermodr.
@@ -235,6 +234,40 @@ Negative, and these are the ones that prove the authority moved:
 - Two Hermodr instances against the same provider show the same state.
 - Static output contains no command controls that appear operable. A dead button
   in a static page is a lie about a back-channel that does not exist.
+
+## Why Phase 1 did not happen as written
+
+Reading `idunn-rudp.cjs` before moving it changed the answer. Of its 324 lines,
+13 mention Idunn, and most of those are error message strings. The genuinely
+Idunn-owned content is two constants: the connection ID `0x1d0d0001` and the
+schema name `idunn.signed_daemon_health.v1`. Everything else — Ed25519 signing,
+RUDP session management, packet receipt, endpoint parsing, msgpack framing — is
+generic CultNet client plumbing.
+
+Moving the file to Idunn would put 311 lines of transport code into a Rust
+repository with no Node packaging, and would give Odin a cross-repo filesystem
+dependency on a sibling checkout. The file already resolves CultLib by walking
+`__dirname/../../../CultLib`, which works only while Odin sits beside CultLib;
+Erycina had the identical bug and it broke the moment that repository moved.
+Repeating it deliberately, in the plan whose purpose is removing misplaced
+ownership, would be a poor trade.
+
+It also buys nothing yet. The duplication it prevents does not exist until
+Hermodr leaves in Phase 4, because both consumers still live in this repository.
+
+Three options, in the order I would rank them:
+
+1. **Generic to CultLib, constants to Idunn.** The transport belongs beside
+   `cultnet-ts`, which Odin already resolves into and Hermodr will too. Idunn
+   owns the connection ID and the schema name. This is the real fix, and it
+   removes the sibling-path bug rather than relocating it.
+2. **Defer to Phase 4.** Correct and free. Move it when the duplication actually
+   threatens, and decide the shape then.
+3. **Move it whole to Idunn.** As originally written. Cheapest to type, and it
+   puts transport code where it does not belong while adding a fragile path.
+
+Option 1 is a larger job than this phase assumed and touches CultLib, so it
+wants an explicit decision rather than being folded in quietly.
 
 ## Open questions for the operator
 

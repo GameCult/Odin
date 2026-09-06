@@ -9,8 +9,6 @@
     "gjallar:persona:write": "node scripts/write-gjallar-persona-cc.mjs write",
     "gjallar:build": "cargo build -p gjallar-daemon",
     "gjallar:start": "cargo run -p gjallar-daemon --",
-    "idunn:build": "cargo build -p idunn-daemon",
-    "idunn:start": "cargo run -p idunn-daemon --",
     "sleipnir:build": "cargo build -p sleipnir-daemon",
     "sleipnir:start": "cargo run -p sleipnir-daemon --",
     "muninn:build": "cargo build -p muninn-daemon",
