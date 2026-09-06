@@ -13,7 +13,6 @@
     "sleipnir:start": "cargo run -p sleipnir-daemon --",
     "muninn:build": "cargo build -p muninn-daemon",
     "muninn:start": "cargo run -p muninn-daemon --",
-    "hermodr:start": "node src/hermodr-daemon.cjs",
     "rust:test": "cargo test --workspace",
     "check": "node scripts/check-syntax.cjs",
     "test": "node --test test/*.test.cjs",

@@ -200,16 +200,26 @@ replaces the private store behind the existing port, the ingress and its options
 are gone, and `src/odin/` is down to twelve modules. Verified by unit tests;
 behaviour against a live provider over RUDP remains an operator step.
 
-**Phase 3 — Publish the document contract.** `documents.cjs` becomes a package
-consumed by both Odin and Hermodr.
+**Phase 3 — Publish the document contract. Done.** The 45 definitions are
+`cultcache-ts`'s `defineSwarmDocuments`, verified byte-identical to what
+`documents.cjs` produced. Odin keeps a 26-line adapter under the name its
+consumers already call. `utils.cjs` left with Hermodr, which used one of its six
+functions.
 
-**Phase 4 — Extract.** Move the daemon, state stream, tests, lifecycle scripts,
-and the Hermodr-only modules to `GameCult/Hermodr`. MIT, matching the rest of the
-chain, so a self-hosting creator may actually run it.
+**Phase 4 — Extract. Done.** `GameCult/Hermodr`, MIT, sixteen files. The three
+dependencies on Odin were resolved rather than carried: the catalog comes from
+CultLib, Idunn's health contract is declared locally over the CultLib transport
+with `sourceRuntimeId` `hermodr`, and `parseArgs` is seventeen lines of
+`args.cjs`. `src/odin/` is down from fourteen modules to eleven, and Odin's
+CommonJS surface from sixteen files to twelve.
 
-**Phase 5 — Static lowering.** Library plus CLI in the new repository, runnable
-without starting the daemon. Requiring the daemon reintroduces the dependency
-static lowering exists to remove.
+**Phase 5 — Static lowering. Not started, and no longer this repository's
+business.** Library plus CLI in `GameCult/Hermodr`, runnable without starting
+the daemon. Requiring the daemon reintroduces the dependency static lowering
+exists to remove.
+
+This document stays here as the record of what left Odin and why. The work it
+describes now happens in Hermodr.
 
 ## Verification
 
