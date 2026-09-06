@@ -150,9 +150,25 @@ impl RuntimeState {
             .current_projection(TARGET)?
             .context("Idunn projection has no Expected Odin incarnation")?;
         ensure!(
-            projection.expected == authority_material.expected
-                && projection.activation.as_ref() == Some(&authority_material.activation),
+            projection.expected == authority_material.expected,
             "Idunn live projection differs from Odin's immutable runtime bundle"
+        );
+        // The activation cannot be required here. Idunn publishes it only after
+        // it has observed the started process -- it carries that process's
+        // executable digest -- so at the moment this runs it does not yet
+        // exist, and demanding it made every first start fail. What is required
+        // is that a projected activation, once present, is *this* one; a stale
+        // or foreign activation is still refused.
+        //
+        // The bundle's own activation is not taken on trust either: it is
+        // verified against the Idunn anchor below, and the write lease is
+        // checked against the live projection before Odin writes anything.
+        ensure!(
+            projection
+                .activation
+                .as_ref()
+                .is_none_or(|activation| activation == &authority_material.activation),
+            "Idunn live projection names another Odin activation"
         );
         let provider_anchor = projection
             .provider_anchor
