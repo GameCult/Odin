@@ -9,8 +9,7 @@ const path = require("path");
 const { defineOdinDocuments } = require("./odin/documents.cjs");
 const { createIdunnRudpHealthPublisher, publishIdunnRudpHealth } = require("./odin/idunn-rudp.cjs");
 const { parseArgs } = require("./odin/utils.cjs");
-const { OdinLivePublicationSource } = require("./odin/live-publication-source.cjs");
-const { createProviderSessionIngress } = require("./odin/provider-session-ingress.cjs");
+const { ProviderSubscriptionSource } = require("./hermodr-provider-subscription.cjs");
 const { HermodrStateStreamRegistry } = require("./hermodr-state-stream.cjs");
 
 const repoRoot = path.resolve(__dirname, "..");
@@ -28,9 +27,8 @@ const cultCacheRequire = createRequire(resolveCultCachePackagePath());
 const cultMeshRequire = createRequire(resolveCultMeshPackagePath());
 const { defineDocumentType } = cultCacheRequire(resolveCultCacheRuntimePath());
 const cultMeshRuntime = cultMeshRequire(resolveCultMeshRuntimePath());
-const { CultMesh, CultMeshProviderSessionBroker, decodeProviderConnectEvidence } = cultMeshRuntime;
+const { CultMesh } = cultMeshRuntime;
 const { decode: decodeMessagePack } = cultMeshRequire("@msgpack/msgpack");
-const { CultNetDocumentRegistry } = cultMeshRequire("cultnet-ts");
 
 const documents = defineOdinDocuments(defineDocumentType);
 const odinDocumentDefinitions = Object.values(documents).filter(Boolean);
@@ -61,18 +59,19 @@ async function main() {
     return;
   }
 
-  const livePublicationSource = new OdinLivePublicationSource(payload => decodeMessagePack(bufferFromPayload(payload)));
-  const providerIngress = options.providerSessionBind ? createProviderSessionIngress({
-    runtime: { CultMesh, CultMeshProviderSessionBroker, decodeProviderConnectEvidence },
-    CultNetDocumentRegistry,
-    source: livePublicationSource,
-    runtimeId: "hermodr-provider-session-ingress",
-    ...parseBind(options.providerSessionBind),
-    sessionToken: options.providerSessionToken,
-    onError: error => console.error(`Hermodr provider-session ingress failed: ${error.message}`),
-  }) : null;
-  if (providerIngress) await providerIngress.start();
-  const bridge = createHermodrBridge(options, providerIngress ? livePublicationSource : null);
+  // Providers own their state. Odin says where it lives. Hermodr resolves the
+  // provider through the catalog and reads that provider directly, the same way
+  // the command path already routes intent to a provider-advertised endpoint.
+  const livePublicationSource = new ProviderSubscriptionSource(
+    (providerId, schemaId, recordKey) => readProviderStateDocument(options, providerId, schemaId, recordKey),
+    {
+      pollIntervalMs: options.providerPollIntervalMs,
+      onError: (error, selection) => console.error(
+        `Hermodr provider read failed for ${selection.providerId} ${selection.schemaId}:${selection.recordKey}: ${error.message}`,
+      ),
+    },
+  );
+  const bridge = createHermodrBridge(options, livePublicationSource);
   const server = http.createServer((request, response) => {
     bridge.handle(request, response).catch((error) => {
       writeJson(response, error?.statusCode || 500, {
@@ -112,7 +111,6 @@ async function main() {
   const shutdown = () => {
     if (healthTimer) clearInterval(healthTimer);
     server.close(() => {});
-    providerIngress?.close();
     closeProviderRudpPeers();
   };
   process.once("SIGINT", shutdown);
@@ -141,8 +139,10 @@ function parseOptions(argv) {
       process.env.HERMODR_PROVIDER_CATALOG_KEYS,
       defaultProviderCatalogKeys,
     ),
-    providerSessionBind: stringOption(parsed.providerSessionBind || parsed["provider-session-bind"], process.env.HERMODR_PROVIDER_SESSION_BIND || ""),
-    providerSessionToken: stringOption(parsed.providerSessionToken || parsed["provider-session-token"], process.env.HERMODR_PROVIDER_SESSION_TOKEN || ""),
+    providerPollIntervalMs: Math.max(250, numberOption(
+      parsed.providerPollIntervalMs || parsed["provider-poll-interval-ms"],
+      process.env.HERMODR_PROVIDER_POLL_INTERVAL_MS || 2_000,
+    )),
     sleipnirProviderId: stringOption(parsed.sleipnirProviderId, process.env.HERMODR_SLEIPNIR_PROVIDER_ID || "sleipnir.input-mirror.starfire"),
     idunnRudpHealth: idunnRudpHealthOptions(parsed),
     idunnHealthIntervalMs: Math.max(1_000, numberOption(
@@ -182,6 +182,13 @@ function rejectRemovedOptions(options) {
     "aetheriaCommandRudp",
     "hermodrCommandStorePath",
     "odinCachePath",
+    // parseArgs keys options exactly as typed, so both spellings are reachable
+    // and both must fail. Hermodr no longer accepts provider publications; it
+    // reads providers through the routes Odin advertises.
+    "providerSessionBind",
+    "provider-session-bind",
+    "providerSessionToken",
+    "provider-session-token",
   ];
   for (const option of removed) {
     if (Object.hasOwn(options.raw, option)) {
@@ -201,6 +208,8 @@ function rejectRemovedOptions(options) {
     "HERMODR_AETHERIA_COMMAND_RUDP",
     "HERMODR_ODIN_CULTMESH_STORE",
     "ODIN_CULTMESH_STORE",
+    "HERMODR_PROVIDER_SESSION_BIND",
+    "HERMODR_PROVIDER_SESSION_TOKEN",
   ];
   for (const name of removedEnv) {
     if (process.env[name]) {
@@ -352,11 +361,6 @@ function openStateEventStream(request, response, registry, selection) {
   });
   request.once("close", release);
   response.once("close", release);
-}
-
-function parseBind(value) {
-  const parsed = new URL(String(value).includes("://") ? value : `rudp://${value}`);
-  return { bindHost: parsed.hostname, bindPort: Number(parsed.port) };
 }
 
 async function readCatalog(options) {
@@ -933,6 +937,70 @@ function findProviderCommandRoute(catalog, providerId) {
   return "";
 }
 
+// Provider state routes change far more slowly than state does, and resolving
+// one costs a round of Odin catalog reads. Cache the route, not the state.
+const providerStateRoutes = new Map();
+const PROVIDER_ROUTE_TTL_MS = 30_000;
+
+async function resolveProviderStateEndpoint(options, providerId) {
+  const cached = providerStateRoutes.get(providerId);
+  if (cached && cached.expiresAt > Date.now()) return cached.endpoint;
+
+  const catalog = await readCatalog(options);
+  const endpoint = findProviderStateEndpoint(catalog, providerId);
+  if (!endpoint) {
+    throw new Error(`Odin advertises no reachable state route for provider ${providerId}.`);
+  }
+  providerStateRoutes.set(providerId, { endpoint, expiresAt: Date.now() + PROVIDER_ROUTE_TTL_MS });
+  return endpoint;
+}
+
+function findProviderStateEndpoint(catalog, providerId) {
+  const normalized = String(providerId || "").trim();
+  const provider = (catalog.providers || []).find((candidate) => candidate.id === normalized)
+    || (catalog.providers || []).find((candidate) => candidate.id.includes(normalized) || normalized.includes(candidate.id));
+  if (!provider) return "";
+
+  const endpoints = [...(provider.endpoints || []), ...(provider.routes || [])];
+  const stateEndpoint = endpoints.find((endpoint) => {
+    const role = [endpoint.id, endpoint.role, ...(endpoint.tags || [])].join(" ").toLowerCase();
+    return Boolean(endpoint.address) && /state|document|surface/.test(role);
+  });
+  const anyEndpoint = endpoints.find((endpoint) => Boolean(endpoint.address));
+  const address = stateEndpoint?.address || anyEndpoint?.address || provider.cultMeshAddress;
+  if (!address) return "";
+  return String(address).startsWith("rudp://") ? String(address) : `rudp://${address}`;
+}
+
+// The read behind the provider subscription. Odin says where; the provider
+// answers with what. Hermodr does not cache the answer as truth: the
+// subscription source owns lifecycle, and this returns null for absence rather
+// than throwing, so a missing document reads as withdrawal while a transport
+// failure propagates as an error and is not mistaken for one.
+async function readProviderStateDocument(options, providerId, schemaId, recordKey) {
+  const endpoint = await resolveProviderStateEndpoint(options, providerId);
+  const peer = await getProviderRudpPeer(endpoint);
+  try {
+    const document = await requestCultNetRawSnapshotDocument(peer, schemaId, recordKey, {
+      timeoutMs: 4_000,
+      messageIdPrefix: "hermodr-provider-state",
+    });
+    if (!document) return null;
+    return decodeMessagePack(bufferFromPayload(document.payload));
+  } catch (error) {
+    if (/did not return/.test(String(error?.message || ""))) {
+      // The provider answered and does not hold this document. That is absence,
+      // not failure.
+      return null;
+    }
+    // The peer may be wedged. Drop it so the next poll reconnects, and let the
+    // subscription source treat this as a failed read rather than a withdrawal.
+    await dropProviderRudpPeer(endpoint);
+    providerStateRoutes.delete(providerId);
+    throw error;
+  }
+}
+
 function normalizeProviderAdvertisement(value, recordKey) {
   const providerId = value?.providerId || value?.provider?.id || value?.id || recordKey;
   if (!providerId) {
@@ -1435,10 +1503,14 @@ function printUsage() {
   console.log(`Usage:
   node src/hermodr-daemon.cjs [--host 127.0.0.1] [--port 8798] [--odin-cultmesh-uri cultmesh://odin/rendezvous/provider-catalog]
 
-Hermodr is a browser lowering adapter over Odin/CultMesh state. It does not own
-provider discovery or daemon state. Live Eve state requires
---provider-session-bind plus HERMODR_PROVIDER_SESSION_TOKEN and a CULTLIB_ROOT
-pointing at the CultLib reliability branch.
+Hermodr is a browser lowering adapter. It owns no provider discovery and no
+daemon state. Odin advertises where a provider's state lives; Hermodr resolves
+that route and reads the provider directly, then lowers the surface to browsers
+and relays operator intent back as typed CultMesh command documents.
+
+Live Eve state needs a reachable Odin catalog and a CULTLIB_ROOT pointing at the
+CultLib reliability branch. Poll cadence is --provider-poll-interval-ms
+(default 2000).
 `);
 }
 
