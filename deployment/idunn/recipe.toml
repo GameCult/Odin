@@ -7,12 +7,14 @@ required_gitlinks = []
 id = "test-odin-daemon"
 phase = "test"
 runner = "rust-build"
+required_environment = ["CARGO_HOME", "HOME"]
 argv = ["cargo", "test", "--locked", "-p", "odin-daemon"]
 
 [[steps]]
 id = "build-odin-daemon"
 phase = "build"
 runner = "rust-build"
+required_environment = ["CARGO_HOME", "HOME"]
 argv = [
   "cargo",
   "build",
