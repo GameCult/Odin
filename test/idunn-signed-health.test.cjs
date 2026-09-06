@@ -5,6 +5,7 @@ const crypto = require("node:crypto");
 const test = require("node:test");
 
 const {
+  IDUNN_HEALTH_CONTRACT,
   signedHealthPayload,
   signingMessage,
 } = require("../src/odin/idunn-rudp.cjs");
@@ -26,6 +27,7 @@ test("Odin signs the complete canonical provider-health statement", () => {
     publisherSequence: 0,
     signerIdentityId,
     sourceRuntimeId: "odin-yggdrasil",
+    contract: IDUNN_HEALTH_CONTRACT,
   };
 
   const signed = signedHealthPayload(
