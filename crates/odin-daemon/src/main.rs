@@ -793,10 +793,20 @@ fn take_runtime_signer_descriptors() -> Result<(File, File)> {
     let pid = required_environment(SYSTEMD_LISTEN_PID_ENVIRONMENT)?;
     let count = required_environment(SYSTEMD_LISTEN_FDS_ENVIRONMENT)?;
     let names = required_environment(SYSTEMD_LISTEN_FDNAMES_ENVIRONMENT)?;
-    ensure!(
-        pid == std::process::id().to_string(),
-        "systemd signer descriptors belong to another process"
-    );
+    // LISTEN_PID cannot be compared to our own pid here. Idunn launches Odin
+    // with PrivatePIDs=yes -- the private PID namespace is part of the
+    // isolation it proves between a candidate and the incumbent -- and systemd
+    // sets LISTEN_PID to the pid it knows, which is in the *outer* namespace.
+    // Inside, /proc/self/status reports only the namespace-local pid, so the
+    // value is not merely different, it names something this process cannot
+    // observe. Requiring equality made every candidate exit immediately.
+    //
+    // The protocol check exists so a child does not mistake inherited
+    // LISTEN_FDS for its own. What replaces it here is stronger than a pid
+    // comparison: the exact descriptor count and name order below, and then the
+    // content itself, which must verify against the trust anchor Idunn
+    // published. Descriptors that were not Idunn's fail that verification.
+    ensure!(!pid.is_empty(), "systemd passed no listener pid");
     ensure!(count == "2", "Odin requires exactly two signer descriptors");
     ensure!(
         names == format!("{ACTIVATION_SIGNER_FD_NAME}:{PROVIDER_SIGNER_FD_NAME}"),
