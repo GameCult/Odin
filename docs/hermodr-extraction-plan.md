@@ -189,8 +189,11 @@ entry to that same package rather than a second package.
 
 ## Phases
 
-**Phase 1 — Idunn RUDP client. Blocked on a decision; see below.** The move as
-originally specified is wrong and was not carried out.
+**Phase 1 — Idunn RUDP client. Done, as a split.** The transport moved to
+CultLib as `cultnet-ts`'s `signed-daemon-health`; Idunn now documents its
+connection id and schema names; Odin keeps a 65-line adapter that declares that
+contract. The whole-file move originally specified was not carried out, for the
+reasons below.
 
 **Phase 2 — Delete the ingress, in place. Done.** `ProviderSubscriptionSource`
 replaces the private store behind the existing port, the ingress and its options
@@ -235,7 +238,7 @@ Negative, and these are the ones that prove the authority moved:
 - Static output contains no command controls that appear operable. A dead button
   in a static page is a lie about a back-channel that does not exist.
 
-## Why Phase 1 did not happen as written
+## Why Phase 1 was split rather than moved
 
 Reading `idunn-rudp.cjs` before moving it changed the answer. Of its 324 lines,
 13 mention Idunn, and most of those are error message strings. The genuinely
@@ -266,8 +269,19 @@ Three options, in the order I would rank them:
 3. **Move it whole to Idunn.** As originally written. Cheapest to type, and it
    puts transport code where it does not belong while adding a fragile path.
 
-Option 1 is a larger job than this phase assumed and touches CultLib, so it
-wants an explicit decision rather than being folded in quietly.
+Option 1 was chosen and carried out. `idunn-rudp.cjs` fell from 324 lines to 65:
+Idunn's three constants and the call shapes Odin's consumers already use.
+`packages/cultnet-ts/src/signed-daemon-health.ts` holds the transport, taking
+the contract as a parameter. Idunn's
+`docs/signed-daemon-health-authority.md` gained the wire-contract table it was
+missing — the connection id had existed only in this consumer's code.
+
+Both the moved module and the adapter dropped the sibling-path assumption on the
+way, honouring `CULTLIB_ROOT` instead of walking up three directories from
+wherever the file happens to sit.
+
+Phase 3's remaining decision is unchanged: `documents.cjs` is now the only
+genuinely shared dependency left between Odin and a future Hermodr.
 
 ## Open questions for the operator
 
