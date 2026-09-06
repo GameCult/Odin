@@ -213,13 +213,13 @@ with `sourceRuntimeId` `hermodr`, and `parseArgs` is seventeen lines of
 `args.cjs`. `src/odin/` is down from fourteen modules to eleven, and Odin's
 CommonJS surface from sixteen files to twelve.
 
-**Phase 5 — Static lowering. Not started, and no longer this repository's
-business.** Library plus CLI in `GameCult/Hermodr`, runnable without starting
-the daemon. Requiring the daemon reintroduces the dependency static lowering
-exists to remove.
+**Phase 5 — Static lowering. Done, in `GameCult/Hermodr`.** A library and CLI
+rendering a surface graph to standalone HTML through the same renderEveSurface
+the browser uses, under jsdom, with command controls disabled and labelled
+because a static page has no back-channel. Runnable without the daemon.
 
-This document stays here as the record of what left Odin and why. The work it
-describes now happens in Hermodr.
+All five phases are complete. This document stays here as the record of what
+left Odin and why; the work now happens in Hermodr.
 
 ## Verification
 
