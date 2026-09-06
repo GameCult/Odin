@@ -75,6 +75,12 @@ type TopologyAuthority = OdinTopologyAuthority<
     SystemClock,
 >;
 
+/// Relative path of Odin's durable store inside the state root. The recipe's
+/// `topology` state slot in `deployment/idunn/recipe.toml` is the authority for
+/// this name; Idunn owns where the root itself lives and hardens it, so the
+/// daemon is told the root and never the file.
+const TOPOLOGY_SLOT: &str = "topology.cc";
+
 #[derive(Clone, Debug)]
 struct Options {
     store: PathBuf,
@@ -639,7 +645,7 @@ fn parse_options(args: impl Iterator<Item = String>) -> Result<Options> {
             .strip_prefix("--")
             .with_context(|| format!("expected --option, got {name:?}"))?;
         ensure!(
-            matches!(name, "store" | "idunn-projection" | "idunn-anchor"),
+            matches!(name, "state-root" | "idunn-projection" | "idunn-anchor"),
             "unsupported Odin option --{name}"
         );
         let value = args
@@ -661,7 +667,7 @@ fn parse_options(args: impl Iterator<Item = String>) -> Result<Options> {
         Ok(path)
     };
     let options = Options {
-        store: take("store")?,
+        store: take("state-root")?.join(TOPOLOGY_SLOT),
         idunn_projection: take("idunn-projection")?,
         idunn_anchor: take("idunn-anchor")?,
     };
@@ -669,7 +675,7 @@ fn parse_options(args: impl Iterator<Item = String>) -> Result<Options> {
         options.store != options.idunn_projection
             && options.store != options.idunn_anchor
             && options.idunn_projection != options.idunn_anchor,
-        "Odin store, Idunn projection, and Idunn anchor paths must be distinct"
+        "Odin state root, Idunn projection, and Idunn anchor paths must be distinct"
     );
     Ok(options)
 }
@@ -1161,8 +1167,8 @@ mod tests {
     fn options_are_exact_and_absolute() {
         let parsed = parse_options(
             [
-                "--store",
-                "/var/lib/gamecult/odin-v2/topology.cc",
+                "--state-root",
+                "/var/lib/gamecult/odin-v2",
                 "--idunn-projection",
                 "/var/lib/gamecult/idunn-projection/topology.cc",
                 "--idunn-anchor",
@@ -1176,10 +1182,28 @@ mod tests {
             parsed.store,
             Path::new("/var/lib/gamecult/odin-v2/topology.cc")
         );
+        // The store path is derived from the slot, never supplied: naming it
+        // directly would let a binding place Odin's state outside the root
+        // Idunn hardened.
         assert!(
             parse_options(
                 [
                     "--store",
+                    "/var/lib/gamecult/odin-v2/topology.cc",
+                    "--idunn-projection",
+                    "/p",
+                    "--idunn-anchor",
+                    "/a"
+                ]
+                .into_iter()
+                .map(str::to_owned)
+            )
+            .is_err()
+        );
+        assert!(
+            parse_options(
+                [
+                    "--state-root",
                     "relative",
                     "--idunn-projection",
                     "/p",

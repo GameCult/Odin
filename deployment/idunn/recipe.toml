@@ -35,8 +35,8 @@ executable = true
 [service]
 executable_artifact = "odin-daemon"
 arguments = [
-  { kind = "literal", value = "--store" },
-  { kind = "binding", name = "store_path" },
+  { kind = "literal", value = "--state-root" },
+  { kind = "binding", name = "state_root" },
   { kind = "literal", value = "--idunn-projection" },
   { kind = "binding", name = "idunn_projection_path" },
   { kind = "literal", value = "--idunn-anchor" },
