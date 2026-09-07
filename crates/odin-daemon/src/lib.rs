@@ -31,6 +31,27 @@ use cultnet_rs::{
 
 const CAS_ATTEMPTS: usize = 8;
 
+/// Odin's durable high-water mark for one target's correlation sequence.
+///
+/// The correlation's `publisher_sequence` must strictly increase for as long as
+/// Idunn remembers this target, because Idunn refuses a sequence it has already
+/// seen -- that refusal is what stops an old signed correlation being replayed
+/// at it.
+///
+/// Deriving the next value from the stored correlation alone cannot uphold
+/// that: withdrawing a correlation takes the counter with it, and the next one
+/// starts at 1 again. Idunn then refuses every correlation until the count
+/// climbs past the old mark, and since the refusal is what withdraws the
+/// correlation, it never gets the chance -- a deadlock that tightens with every
+/// attempt. Worse, while the count is low, a replayed correlation from before
+/// the withdrawal outranks the genuine one, which is precisely the attack the
+/// check exists to prevent.
+///
+/// So the mark lives in its own record, which withdrawal does not remove.
+const TOPOLOGY_PUBLISHER_WATERMARK_TYPE: &str = "odin.topology_publisher_watermark";
+const TOPOLOGY_PUBLISHER_WATERMARK_SCHEMA: &str = "odin.topology_publisher_watermark.v1";
+
+
 #[derive(Clone, Copy, Debug)]
 pub struct AuthenticationPolicy {
     pub presence_maximum_age_millis: u64,
@@ -265,6 +286,15 @@ pub trait OdinTopologyStore {
     ) -> Result<bool>;
 
     fn withdraw_correlation(&self, target: &str) -> Result<()>;
+
+    /// Claim the next correlation sequence for this target, never returning a
+    /// value already used. `prior` is the sequence of the currently stored
+    /// correlation, or 0 when there is none.
+    ///
+    /// The mark is advanced before the correlation that uses it is published,
+    /// so a crash in between leaves it ahead. That is the safe direction:
+    /// sequences may skip, they may never repeat.
+    fn reserve_publisher_sequence(&self, target: &str, prior: u64) -> Result<u64>;
 }
 
 /// Odin's durable replay and correlation store. It persists existing CultNet
@@ -410,7 +440,72 @@ impl OdinTopologyStore for CultCacheOdinTopologyStore {
         }
         bail!("Odin topology store changed repeatedly while withdrawing correlation")
     }
+
+    fn reserve_publisher_sequence(&self, target: &str, prior: u64) -> Result<u64> {
+        for _ in 0..CAS_ATTEMPTS {
+            let entries = if self.path.is_file() {
+                SingleFileMessagePackBackingStore::new(&self.path).pull_all_read_only_snapshot()?
+            } else {
+                Vec::new()
+            };
+            let current = unique_envelope(&entries, TOPOLOGY_PUBLISHER_WATERMARK_TYPE, target)?;
+            let stored = current
+                .map(|envelope| decode_publisher_watermark(target, &envelope.payload))
+                .transpose()?
+                .unwrap_or(0);
+            // The stored correlation can be ahead of the mark on the first pass
+            // after this record was introduced, so take whichever is higher.
+            let next = stored
+                .max(prior)
+                .checked_add(1)
+                .context("Odin topology publisher sequence exhausted")?;
+            let replacement = publisher_watermark_envelope(target, next, &Utc::now().to_rfc3339())?;
+            if let Some(parent) = self.path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            if SingleFileMessagePackBackingStore::new(&self.path).compare_exchange(
+                &[CultCacheExpectedEnvelope {
+                    key: target.into(),
+                    r#type: TOPOLOGY_PUBLISHER_WATERMARK_TYPE.into(),
+                    current: current.cloned(),
+                }],
+                &[replacement],
+            )? {
+                return Ok(next);
+            }
+        }
+        bail!("Odin topology store changed repeatedly while reserving a publisher sequence")
+    }
 }
+
+fn publisher_watermark_envelope(
+    target: &str,
+    sequence: u64,
+    stored_at: &str,
+) -> Result<CultCacheEnvelope> {
+    Ok(CultCacheEnvelope {
+        key: target.into(),
+        r#type: TOPOLOGY_PUBLISHER_WATERMARK_TYPE.into(),
+        payload: rmp_serde::to_vec(&(
+            TOPOLOGY_PUBLISHER_WATERMARK_SCHEMA,
+            target,
+            sequence,
+        ))?,
+        stored_at: stored_at.to_owned(),
+        schema_id: Some(TOPOLOGY_PUBLISHER_WATERMARK_SCHEMA.into()),
+    })
+}
+
+fn decode_publisher_watermark(target: &str, payload: &[u8]) -> Result<u64> {
+    let (schema, stored_target, sequence): (String, String, u64) =
+        rmp_serde::from_slice(payload).context("decoding Odin topology publisher watermark")?;
+    ensure!(
+        schema == TOPOLOGY_PUBLISHER_WATERMARK_SCHEMA && stored_target == target,
+        "Odin topology publisher watermark names another target or schema"
+    );
+    Ok(sequence)
+}
+
 
 pub struct OdinTopologyAuthority<P, S, K, C> {
     projections: P,
@@ -566,12 +661,13 @@ where
                 .as_ref()
                 .map(|stored| decode_correlation(&stored.canonical_bytes))
                 .transpose()?;
-            let publisher_sequence = prior.as_ref().map_or(Ok(1), |record| {
-                record
-                    .publisher_sequence
-                    .checked_add(1)
-                    .context("Odin topology publisher sequence exhausted")
-            })?;
+            // Reserved from a mark that survives withdrawal, not derived from
+            // the stored correlation: a withdrawn correlation must not take the
+            // count with it. See TOPOLOGY_PUBLISHER_WATERMARK_SCHEMA.
+            let publisher_sequence = self.store.reserve_publisher_sequence(
+                &observed.query.target,
+                prior.as_ref().map_or(0, |record| record.publisher_sequence),
+            )?;
             let presence_record = presence.as_ref().map(|value| value.claim().record());
             let ready = presence_record.is_some_and(|record| record.state == "active")
                 && disagreements.is_empty()
@@ -1274,6 +1370,33 @@ mod tests {
     use super::*;
 
     const NOW: u64 = 1_000_000;
+
+    #[test]
+    fn withdrawing_a_correlation_does_not_reset_its_publisher_sequence() -> Result<()> {
+        let temp = TempDir::new()?;
+        let store = CultCacheOdinTopologyStore::new(temp.path().join("topology.cc"));
+
+        assert_eq!(store.reserve_publisher_sequence("heimdall", 0)?, 1);
+        assert_eq!(store.reserve_publisher_sequence("heimdall", 1)?, 2);
+
+        // Idunn remembers the highest sequence it has admitted for a target and
+        // refuses anything at or below it. If withdrawal took the count with
+        // it, the next correlation would start at 1, be refused as a replay,
+        // and be withdrawn again -- a deadlock that also lets a genuine replay
+        // of the old sequence 2 outrank the fresh one.
+        store.withdraw_correlation("heimdall")?;
+        assert_eq!(store.reserve_publisher_sequence("heimdall", 0)?, 3);
+
+        // Each target counts on its own.
+        assert_eq!(store.reserve_publisher_sequence("repixelizer", 0)?, 1);
+        assert_eq!(store.reserve_publisher_sequence("heimdall", 0)?, 4);
+
+        // A stored correlation ahead of the mark wins, which is what carries a
+        // store written before the mark existed onto the new scheme.
+        assert_eq!(store.reserve_publisher_sequence("heimdall", 99)?, 100);
+        Ok(())
+    }
+
 
     #[derive(Clone, Copy)]
     struct FixedClock(u64);
