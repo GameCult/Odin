@@ -153,23 +153,20 @@ impl RuntimeState {
             projection.expected == authority_material.expected,
             "Idunn live projection differs from Odin's immutable runtime bundle"
         );
-        // The activation cannot be required here. Idunn publishes it only after
-        // it has observed the started process -- it carries that process's
-        // executable digest -- so at the moment this runs it does not yet
-        // exist, and demanding it made every first start fail. What is required
-        // is that a projected activation, once present, is *this* one; a stale
-        // or foreign activation is still refused.
+        // The projected activation is deliberately not compared here.
         //
-        // The bundle's own activation is not taken on trust either: it is
-        // verified against the Idunn anchor below, and the write lease is
+        // Idunn publishes an activation only after it has observed the process
+        // that owns it, and every launch -- deployment or continuity restart --
+        // is issued a fresh one. So at this moment the projection either has no
+        // activation yet or still names the incarnation being replaced. Neither
+        // is this process's, and both are normal: requiring absence broke the
+        // first start of a target, and requiring a match broke every start
+        // after it, which between them is every start there is.
+        //
+        // Nothing is taken on trust for skipping it. The bundle's own
+        // activation is verified against the Idunn anchor below, and the write
+        // lease -- the thing that actually authorises writing state -- is
         // checked against the live projection before Odin writes anything.
-        ensure!(
-            projection
-                .activation
-                .as_ref()
-                .is_none_or(|activation| activation == &authority_material.activation),
-            "Idunn live projection names another Odin activation"
-        );
         let provider_anchor = projection
             .provider_anchor
             .as_ref()
