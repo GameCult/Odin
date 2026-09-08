@@ -661,13 +661,6 @@ where
                 .as_ref()
                 .map(|stored| decode_correlation(&stored.canonical_bytes))
                 .transpose()?;
-            // Reserved from a mark that survives withdrawal, not derived from
-            // the stored correlation: a withdrawn correlation must not take the
-            // count with it. See TOPOLOGY_PUBLISHER_WATERMARK_SCHEMA.
-            let publisher_sequence = self.store.reserve_publisher_sequence(
-                &observed.query.target,
-                prior.as_ref().map_or(0, |record| record.publisher_sequence),
-            )?;
             let presence_record = presence.as_ref().map(|value| value.claim().record());
             let ready = presence_record.is_some_and(|record| record.state == "active")
                 && disagreements.is_empty()
@@ -703,7 +696,10 @@ where
                 dependencies,
                 disagreements,
                 signer_identity_id: self.signer.identity_id().into(),
-                publisher_sequence,
+                // Placeholder. A sequence is only reserved once the facts are
+                // known to have changed, below; same_correlation_facts compares
+                // against the prior's sequence regardless of what sits here.
+                publisher_sequence: prior.as_ref().map_or(0, |record| record.publisher_sequence),
                 observed_at_unix_millis: now,
                 signature_algorithm: "ed25519".into(),
                 signature: Vec::new(),
@@ -716,6 +712,15 @@ where
                     .context("decoded prior correlation disappeared")?
                     .canonical_bytes);
             }
+            // Reserved only after the dedupe: a refresh that observes nothing
+            // new must not burn a sequence or fsync the store. Reserved from a
+            // mark that survives withdrawal, not derived from the stored
+            // correlation, so a withdrawn correlation does not take the count
+            // with it. See TOPOLOGY_PUBLISHER_WATERMARK_SCHEMA.
+            correlation.publisher_sequence = self.store.reserve_publisher_sequence(
+                &observed.query.target,
+                prior.as_ref().map_or(0, |record| record.publisher_sequence),
+            )?;
             correlation.signature = self
                 .signer
                 .sign_correlation(&correlation.unsigned_signature_payload()?)?;
@@ -1862,6 +1867,37 @@ mod tests {
         .unwrap();
         assert_eq!(stored.payload, sequence_two);
         assert_eq!(parse_rfc3339_millis(&stored.stored_at)?, NOW);
+        Ok(())
+    }
+
+    #[test]
+    fn a_refresh_that_observes_nothing_new_does_not_burn_a_publisher_sequence() -> Result<()> {
+        let world = TestWorld::new()?;
+        let service = world.service("ghostlight", Vec::new(), false)?;
+        let engine = world.engine(NOW);
+
+        let first = decode_signed(&engine.admit_presence(
+            "ghostlight",
+            &service.signed_presence(1, |_| {})?,
+            NOW,
+        )?)?;
+        assert_eq!(first.publisher_sequence, 1);
+
+        // Odin refreshes on a timer. Reserving before the dedupe made every
+        // idle tick advance the mark and fsync the store, so the sequence Idunn
+        // sees would jump by however long Odin had been idle rather than by the
+        // number of observations that actually changed.
+        for _ in 0..3 {
+            let idle = decode_signed(&engine.refresh("ghostlight")?.unwrap())?;
+            assert_eq!(idle.publisher_sequence, 1);
+        }
+
+        let second = decode_signed(&engine.admit_presence(
+            "ghostlight",
+            &service.signed_presence(2, |_| {})?,
+            NOW + 1,
+        )?)?;
+        assert_eq!(second.publisher_sequence, 2);
         Ok(())
     }
 
