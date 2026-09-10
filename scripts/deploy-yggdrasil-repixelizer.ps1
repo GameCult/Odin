@@ -57,7 +57,11 @@ if ($LASTEXITCODE -ne 0) {
 if (Test-Path -LiteralPath $cultLibTarPath) {
   Remove-Item -LiteralPath $cultLibTarPath -Force
 }
-git -C $CultLibRoot archive --format=tar --output=$cultLibTarPath $cultLibSourceRef packages/cultcache-py
+# All three Python packages. CultLib split packages/cultcache-py into
+# cultcache-py / cultnet-py / cultmesh-py; module names did not change, so
+# archiving only the first still succeeds and ships an incomplete library
+# that fails later as an ImportError, far from this line.
+git -C $CultLibRoot archive --format=tar --output=$cultLibTarPath $cultLibSourceRef packages/cultcache-py packages/cultnet-py packages/cultmesh-py
 if ($LASTEXITCODE -ne 0) {
   throw "CultLib tar build failed for $CultLibRoot $cultLibSourceRef"
 }

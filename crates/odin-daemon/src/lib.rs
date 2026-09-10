@@ -1376,6 +1376,76 @@ mod tests {
 
     const NOW: u64 = 1_000_000;
 
+    /// Dev-only probe: decode a captured Idunn projection file and print what
+    /// Odin's authority classifier sees for one target. Run against a snapshot
+    /// taken from the host when Odin rejects its own presence:
+    ///
+    /// ```text
+    /// ODIN_PROBE_PROJECTION=/path/topology.cc \
+    /// ODIN_PROBE_IDUNN_ANCHOR=/path/idunn-anchor.cc \
+    /// cargo test -p odin-daemon projection_authority_probe -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "reads host files named by ODIN_PROBE_* environment variables"]
+    fn projection_authority_probe() -> Result<()> {
+        let projection_path = std::env::var("ODIN_PROBE_PROJECTION")?;
+        let anchor_path = std::env::var("ODIN_PROBE_IDUNN_ANCHOR")?;
+        let target = std::env::var("ODIN_PROBE_TARGET").unwrap_or_else(|_| "odin".into());
+        let entries = SingleFileMessagePackBackingStore::new(&anchor_path)
+            .pull_all_read_only_snapshot()?;
+        let [envelope] = entries.as_slice() else {
+            bail!("anchor store must contain exactly one document");
+        };
+        let idunn_anchor: ServiceIdentityTrustAnchor = rmp_serde::from_slice(&envelope.payload)?;
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
+        let all = SingleFileMessagePackBackingStore::new(&projection_path)
+            .pull_all_read_only_snapshot()?;
+        println!("== envelopes in {projection_path}");
+        for envelope in &all {
+            println!(
+                "  type={} key={} schema={:?} stored_at={}",
+                envelope.r#type, envelope.key, envelope.schema_id, envelope.stored_at
+            );
+        }
+        let Some(projection) =
+            CultCacheIdunnProjectionSource::new(&projection_path).current_projection(&target)?
+        else {
+            println!("== no projection for {target}");
+            return Ok(());
+        };
+        println!("== projection for {target}");
+        println!("  expected sha        {}", projection.expected.canonical_sha256()?);
+        println!("  expected incarnation {}", projection.expected.incarnation_id);
+        println!(
+            "  activation          {:?} instance={:?} expected_sha={:?}",
+            projection.activation.as_ref().map(|a| a.canonical_sha256()).transpose()?,
+            projection.activation.as_ref().map(|a| a.runtime_instance_id.clone()),
+            projection.activation.as_ref().map(|a| a.expected_projection_sha256.clone()),
+        );
+        println!(
+            "  lease               {:?}",
+            projection.current_lease.as_ref().map(|l| l.canonical_sha256()).transpose()?
+        );
+        println!(
+            "  provider anchor     {:?} bound={:?} expires={:?}",
+            projection.provider_anchor.as_ref().map(|a| a.trust_anchor_id.clone()),
+            projection.provider_anchor.as_ref().map(|a| a.bound_at_unix_millis),
+            projection.provider_anchor.as_ref().map(|a| a.expires_at_unix_millis),
+        );
+        let (authority, disagreements) =
+            classify_runtime_authority(&projection, &idunn_anchor, now)?;
+        println!("== authority present: {}", authority.is_some());
+        for disagreement in &disagreements {
+            println!(
+                "  DISAGREEMENT {} expected={:?} observed={:?}",
+                disagreement.code, disagreement.expected, disagreement.observed
+            );
+        }
+        let (lease_sha256, lease_disagreement) = classify_current_lease(&projection)?;
+        println!("== lease binds: {:?} disagreement={:?}", lease_sha256, lease_disagreement.map(|d| d.code));
+        Ok(())
+    }
+
     #[test]
     fn withdrawing_a_correlation_does_not_reset_its_publisher_sequence() -> Result<()> {
         let temp = TempDir::new()?;
