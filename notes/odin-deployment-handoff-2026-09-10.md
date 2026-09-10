@@ -5,6 +5,13 @@
 > Cycle rate holds at ~10 starts/hour. Count starts with `sudo journalctl -q`;
 > an unprivileged `journalctl` sees only your own messages and returns zero.
 > `up-fc005d83` still queued; lifecycle brake still released (19:03:12Z).
+>
+> **Correction 2026-09-10 19:45Z.** The "starved by design" section below is
+> wrong: the queued deployment freezes every time the target frees. Its Sealing
+> phase replaces the projected Expected with the candidate's, the incumbent
+> fails `activation-expected-projection` on its next heartbeat and exits, and
+> the deployment is aborted for having killed its incumbent. Full timeline and
+> authority map in `odin-cycle-mechanism-2026-09-10.md`.
 
 Written 2026-09-10 after an incident caused by an optional dependency bump.
 Read this before running `idunn up odin`.

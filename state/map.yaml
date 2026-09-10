@@ -31,7 +31,7 @@ runtime:
   # timeout, not the unit lifetime; do not wait two minutes and call it stable.
   # See notes/odin-deployment-handoff-2026-09-10.md before acting.
   healthy: false
-  condition: cycling
+  condition: cycling   # each cycle = continuity restart, then the queued deployment seals and kills it
 
 # A unit named odin.service exists in /etc/systemd/system and is `active` with
 # MainPID 0. It owns no process and is not the running Odin. It has misled two
@@ -58,6 +58,8 @@ brakes:
 known_defects:
   - lifecycle brake parks an in-flight continuity transaction on the target and
     thereby blocks deployment, which estate doctrine forbids
-  - freeze_one_queued_command runs only when continuity made no progress, so a
-    queued deployment is starved on an unstable target
+  - the queued deployment is not starved: it freezes each time the target
+    frees, and its Sealing publish_expected replaces the projected Expected
+    with the candidate's; the incumbent then fails activation-expected-projection
+    and exits (verified 2026-09-10T19:37Z, notes/odin-cycle-mechanism-2026-09-10.md)
   - redeploying Odin destroys the observer Idunn needs to admit the replacement (R17)
