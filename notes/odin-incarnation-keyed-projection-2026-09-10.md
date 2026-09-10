@@ -139,3 +139,14 @@ that UDP port, `--obs-target-host`/`--obs-port` are refused, and
 `GameCult/Muninn/scripts/restart-muninn.ps1` already does all of it. Muninn
 pins CultLib `c84cb2e`; Odin's pin is separate. Either half alone breaks the
 next Muninn redeploy, which is why it is not done here.
+- **21:13Z** Operator released the brake for `tx-0f15abe4`. The candidate
+  exited at start: `Odin correlation key is substituted`. Odin's own store
+  still held correlations under the old target key and the incarnation-keyed
+  reader refused them. Fixed in Odin `27ca3b3`: legacy-keyed correlations are
+  skipped by the reader and retired at activation; presence history is kept.
+  The abort finished clean. Muninn's workspace copy was removed by another
+  session in `d41c744` on operator order.
+- **21:43Z** `up-838e26d8` sealed Odin `main` `27ca3b3` as release
+  `sha256-067ab605c82828cd2b1b1feac0d431cc217e076007c28a5dbd2902ae294878e3`
+  in `tx-dde64dc5-18a0-435b-8afb-077b6452a388`; waiting on a brake release
+  naming that pair.
