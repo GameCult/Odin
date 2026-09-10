@@ -35,7 +35,7 @@ use cultnet_rs::{
 use fs2::FileExt;
 use odin_daemon::{
     AuthenticationPolicy, CultCacheIdunnProjectionSource, CultCacheOdinTopologyStore,
-    IdunnProjectionSource, OdinTopologyAuthority, SystemClock,
+    IdunnProjectionSource, IncarnationRef, OdinTopologyAuthority, SystemClock,
 };
 
 const TARGET: &str = "odin";
@@ -146,27 +146,22 @@ impl RuntimeState {
 
         let idunn_anchor = read_trust_anchor::<IdunnServiceIdentity>(&options.idunn_anchor)?;
         let projection_source = CultCacheIdunnProjectionSource::new(&options.idunn_projection);
+        // This process is one exact incarnation, named by the Expected digest
+        // in its immutable runtime bundle. The projection may carry other
+        // incarnations of `odin` at the same time -- the one being replaced,
+        // or the candidate replacing this one -- and none of them is this
+        // process's business here. Only its own incarnation is looked up.
+        //
+        // The projected activation is deliberately not compared. Idunn
+        // publishes an activation only after it has observed the process that
+        // owns it, so at this moment the projection has none for this launch
+        // yet. The bundle's own activation is verified against the Idunn anchor
+        // below, and the write lease -- the thing that actually authorises
+        // writing state -- is checked against the live projection before Odin
+        // writes anything.
         let projection = projection_source
-            .current_projection(TARGET)?
-            .context("Idunn projection has no Expected Odin incarnation")?;
-        ensure!(
-            projection.expected == authority_material.expected,
-            "Idunn live projection differs from Odin's immutable runtime bundle"
-        );
-        // The projected activation is deliberately not compared here.
-        //
-        // Idunn publishes an activation only after it has observed the process
-        // that owns it, and every launch -- deployment or continuity restart --
-        // is issued a fresh one. So at this moment the projection either has no
-        // activation yet or still names the incarnation being replaced. Neither
-        // is this process's, and both are normal: requiring absence broke the
-        // first start of a target, and requiring a match broke every start
-        // after it, which between them is every start there is.
-        //
-        // Nothing is taken on trust for skipping it. The bundle's own
-        // activation is verified against the Idunn anchor below, and the write
-        // lease -- the thing that actually authorises writing state -- is
-        // checked against the live projection before Odin writes anything.
+            .projection(&self_incarnation(&authority_material))?
+            .context("Idunn projection has no Expected for this Odin incarnation")?;
         let provider_anchor = projection
             .provider_anchor
             .as_ref()
@@ -235,7 +230,7 @@ impl RuntimeState {
             return Ok(false);
         };
         let Some(projected) = CultCacheIdunnProjectionSource::new(&self.options.idunn_projection)
-            .current_projection(TARGET)?
+            .projection(&self_incarnation(&self.authority_material))?
         else {
             return Ok(false);
         };
@@ -437,10 +432,10 @@ impl RuntimeState {
             .topology
             .as_ref()
             .context("Odin topology authority is absent")?;
-        let mut targets = projection_targets(&self.options.idunn_projection)?;
-        targets.extend(correlation_targets(&self.options.store)?);
-        for target in targets {
-            topology.refresh(&target)?;
+        let mut incarnations = projection_incarnations(&self.options.idunn_projection)?;
+        incarnations.extend(correlation_incarnations(&self.options.store)?);
+        for incarnation in incarnations {
+            topology.refresh(&incarnation)?;
         }
         Ok(())
     }
@@ -463,12 +458,14 @@ impl RuntimeState {
             };
             let document = if envelope.r#type == GameCultRuntimePresenceHealthRecord::TYPE {
                 let presence = decode_presence(&envelope.payload)?;
-                let Some(projection) = projections.current_projection(&presence.target)? else {
+                let Some(projection) = projections.projection(&IncarnationRef::new(
+                    presence.target.clone(),
+                    presence.expected_projection_sha256.clone(),
+                ))?
+                else {
                     continue;
                 };
                 if projection.expected.expected_signer_identity_id != presence.signer_identity_id
-                    || projection.expected.canonical_sha256()?
-                        != presence.expected_projection_sha256
                     || projection
                         .activation
                         .as_ref()
@@ -854,6 +851,11 @@ fn read_trust_anchor<P: ServiceIdentityProfile>(path: &Path) -> Result<ServiceId
     Ok(anchor)
 }
 
+/// The one incarnation this process is: its bundle's Expected digest.
+fn self_incarnation(authority: &RuntimeAuthority) -> IncarnationRef {
+    IncarnationRef::new(TARGET, authority.expected_sha256.clone())
+}
+
 fn acquire_process_write_lease(
     path: &Path,
     authority: &RuntimeAuthority,
@@ -1062,27 +1064,37 @@ fn decode_presence(payload: &[u8]) -> Result<GameCultRuntimePresenceHealthRecord
     Ok(presence)
 }
 
-fn projection_targets(path: &Path) -> Result<BTreeSet<String>> {
+/// Every incarnation Idunn currently projects, of every target.
+///
+/// Records keyed by anything but an incarnation key are not this contract's
+/// and are skipped, not refused: a projection written by an older Idunn
+/// projects nothing this daemon acts on.
+fn projection_incarnations(path: &Path) -> Result<BTreeSet<IncarnationRef>> {
     let entries = SingleFileMessagePackBackingStore::new(path).pull_all_read_only_snapshot()?;
     entries
         .into_iter()
         .filter(|entry| entry.r#type == IdunnExpectedIncarnationRecord::TYPE)
-        .map(|entry| {
-            ensure!(
-                entry.schema_id.as_deref() == Some(IDUNN_EXPECTED_INCARNATION_SCHEMA),
-                "Idunn projection contains an Expected record under the wrong schema"
-            );
-            let expected = IdunnExpectedIncarnationRecord::decode_canonical(&entry.payload)?;
-            ensure!(
-                entry.key == expected.target,
-                "Idunn Expected key is substituted"
-            );
-            Ok(expected.target)
+        .filter_map(|entry| {
+            let incarnation = IncarnationRef::parse_key(&entry.key)?;
+            Some((|| -> Result<IncarnationRef> {
+                ensure!(
+                    entry.schema_id.as_deref() == Some(IDUNN_EXPECTED_INCARNATION_SCHEMA),
+                    "Idunn projection contains an Expected record under the wrong schema"
+                );
+                let expected = IdunnExpectedIncarnationRecord::decode_canonical(&entry.payload)?;
+                ensure!(
+                    IncarnationRef::of(&expected)? == incarnation,
+                    "Idunn Expected key is substituted"
+                );
+                Ok(incarnation)
+            })())
         })
         .collect()
 }
 
-fn correlation_targets(path: &Path) -> Result<BTreeSet<String>> {
+/// Every incarnation Odin holds a correlation for, projected by Idunn or not;
+/// the latter are refreshed so their correlations are withdrawn.
+fn correlation_incarnations(path: &Path) -> Result<BTreeSet<IncarnationRef>> {
     if !path.is_file() {
         return Ok(BTreeSet::new());
     }
@@ -1099,11 +1111,12 @@ fn correlation_targets(path: &Path) -> Result<BTreeSet<String>> {
                 OdinRuntimeTopologyCorrelationRecord::decode_canonical_signed_payload(
                     &entry.payload,
                 )?;
+            let incarnation = IncarnationRef::new(record.target, record.expected_projection_sha256);
             ensure!(
-                entry.key == record.target,
+                entry.key == incarnation.key(),
                 "Odin correlation key is substituted"
             );
-            Ok(record.target)
+            Ok(incarnation)
         })
         .collect()
 }

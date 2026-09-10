@@ -51,7 +51,6 @@ const CAS_ATTEMPTS: usize = 8;
 const TOPOLOGY_PUBLISHER_WATERMARK_TYPE: &str = "odin.topology_publisher_watermark";
 const TOPOLOGY_PUBLISHER_WATERMARK_SCHEMA: &str = "odin.topology_publisher_watermark.v1";
 
-
 #[derive(Clone, Copy, Debug)]
 pub struct AuthenticationPolicy {
     pub presence_maximum_age_millis: u64,
@@ -115,8 +114,68 @@ impl IdunnRuntimeProjection {
     }
 }
 
+/// One incarnation of one target: the unit every projection, presence, and
+/// correlation record is keyed by.
+///
+/// A target has more than one incarnation while it is being replaced: the
+/// admitted incumbent and the sealed candidate coexist, and both are real.
+/// Keying by target alone made the projection a single slot the two fought
+/// over, and whichever Idunn wrote last decided who the other one was. The
+/// Expected digest is the identity; the target is a namespace.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct IncarnationRef {
+    pub target: String,
+    pub expected_sha256: String,
+}
+
+impl IncarnationRef {
+    pub fn new(target: impl Into<String>, expected_sha256: impl Into<String>) -> Self {
+        Self {
+            target: target.into(),
+            expected_sha256: expected_sha256.into(),
+        }
+    }
+
+    pub fn of(expected: &IdunnExpectedIncarnationRecord) -> Result<Self> {
+        Ok(Self::new(
+            expected.target.clone(),
+            expected.canonical_sha256()?,
+        ))
+    }
+
+    /// The CultCache key under which this incarnation's records are stored, in
+    /// Idunn's projection and in Odin's own store alike.
+    pub fn key(&self) -> String {
+        incarnation_key(&self.target, &self.expected_sha256)
+    }
+
+    /// Inverse of [`IncarnationRef::key`]; `None` for a key of another shape.
+    pub fn parse_key(key: &str) -> Option<Self> {
+        let (target, expected_sha256) = key.split_once('@')?;
+        if target.is_empty() || !expected_sha256.starts_with("sha256-") {
+            return None;
+        }
+        Some(Self::new(target, expected_sha256))
+    }
+}
+
+pub fn incarnation_key(target: &str, expected_sha256: &str) -> String {
+    format!("{target}@{expected_sha256}")
+}
+
 pub trait IdunnProjectionSource {
-    fn current_projection(&self, target: &str) -> Result<Option<IdunnRuntimeProjection>>;
+    /// Every incarnation Idunn currently projects for one target.
+    fn projections(&self, target: &str) -> Result<Vec<IdunnRuntimeProjection>>;
+
+    /// One exact incarnation, or `None` when Idunn projects nothing for it.
+    fn projection(&self, incarnation: &IncarnationRef) -> Result<Option<IdunnRuntimeProjection>> {
+        for projection in self.projections(&incarnation.target)? {
+            if projection.expected.canonical_sha256()? == incarnation.expected_sha256 {
+                return Ok(Some(projection));
+            }
+        }
+        Ok(None)
+    }
 }
 
 /// Read-only adapter for the atomic projection file published by Idunn.
@@ -135,69 +194,70 @@ impl CultCacheIdunnProjectionSource {
 }
 
 impl IdunnProjectionSource for CultCacheIdunnProjectionSource {
-    fn current_projection(&self, target: &str) -> Result<Option<IdunnRuntimeProjection>> {
+    fn projections(&self, target: &str) -> Result<Vec<IdunnRuntimeProjection>> {
         if !self.path.is_file() {
-            return Ok(None);
+            return Ok(Vec::new());
         }
         let entries =
             SingleFileMessagePackBackingStore::new(&self.path).pull_all_read_only_snapshot()?;
-        let expected_envelope =
-            unique_envelope(&entries, IdunnExpectedIncarnationRecord::TYPE, target)?;
-        let anchor_key = runtime_presence_anchor_id(target);
         let anchor_envelope = unique_envelope(
             &entries,
             GameCultServiceTrustAnchorRecord::TYPE,
-            &anchor_key,
+            &runtime_presence_anchor_id(target),
         )?;
-        let activation_envelope =
-            unique_envelope(&entries, IdunnRuntimeActivationRecord::TYPE, target)?;
-        let lease_envelope = unique_envelope(&entries, IdunnProcessWriteLeaseRecord::TYPE, target)?;
-
-        let Some(expected_envelope) = expected_envelope else {
-            ensure!(
-                anchor_envelope.is_none()
-                    && activation_envelope.is_none()
-                    && lease_envelope.is_none(),
-                "Idunn projection has runtime authority without Expected"
-            );
-            return Ok(None);
-        };
-        ensure_schema(expected_envelope, IDUNN_EXPECTED_INCARNATION_SCHEMA)?;
-        let expected =
-            IdunnExpectedIncarnationRecord::decode_canonical(&expected_envelope.payload)?;
-        ensure!(
-            expected.target == target,
-            "Expected projection key is substituted"
-        );
-
-        let provider_anchor = anchor_envelope
+        let provider_anchor: Option<GameCultServiceTrustAnchorRecord> = anchor_envelope
             .map(|envelope| {
                 ensure_schema(envelope, GAMECULT_SERVICE_TRUST_ANCHOR_SCHEMA)?;
                 decode_canonical(&envelope.payload, "provider trust anchor")
             })
             .transpose()?;
 
-        let activation = activation_envelope
-            .map(|envelope| {
-                ensure_schema(envelope, IDUNN_RUNTIME_ACTIVATION_SCHEMA)?;
-                IdunnRuntimeActivationRecord::decode_canonical(&envelope.payload)
-            })
-            .transpose()?;
-
-        let current_lease = lease_envelope
-            .map(|envelope| {
-                ensure_schema(envelope, IDUNN_PROCESS_WRITE_LEASE_SCHEMA)?;
-                IdunnProcessWriteLeaseRecord::decode_canonical(&envelope.payload)
-            })
-            .transpose()?;
-        let projection = IdunnRuntimeProjection {
-            expected,
-            provider_anchor,
-            activation,
-            current_lease,
-        };
-        projection.validate()?;
-        Ok(Some(projection))
+        // A record keyed by anything but its own incarnation key is not this
+        // contract's. That includes the target-keyed single slot the previous
+        // projection used; an Idunn still writing that shape projects nothing
+        // this reader will act on, rather than something it will misread.
+        let mut projections = Vec::new();
+        for envelope in &entries {
+            if envelope.r#type != IdunnExpectedIncarnationRecord::TYPE {
+                continue;
+            }
+            let Some(incarnation) = IncarnationRef::parse_key(&envelope.key) else {
+                continue;
+            };
+            if incarnation.target != target {
+                continue;
+            }
+            ensure_schema(envelope, IDUNN_EXPECTED_INCARNATION_SCHEMA)?;
+            let expected = IdunnExpectedIncarnationRecord::decode_canonical(&envelope.payload)?;
+            ensure!(
+                IncarnationRef::of(&expected)? == incarnation,
+                "Expected projection key is substituted"
+            );
+            let key = incarnation.key();
+            let activation = unique_envelope(&entries, IdunnRuntimeActivationRecord::TYPE, &key)?
+                .map(|envelope| {
+                    ensure_schema(envelope, IDUNN_RUNTIME_ACTIVATION_SCHEMA)?;
+                    IdunnRuntimeActivationRecord::decode_canonical(&envelope.payload)
+                })
+                .transpose()?;
+            let current_lease =
+                unique_envelope(&entries, IdunnProcessWriteLeaseRecord::TYPE, &key)?
+                    .map(|envelope| {
+                        ensure_schema(envelope, IDUNN_PROCESS_WRITE_LEASE_SCHEMA)?;
+                        IdunnProcessWriteLeaseRecord::decode_canonical(&envelope.payload)
+                    })
+                    .transpose()?;
+            let projection = IdunnRuntimeProjection {
+                expected,
+                provider_anchor: provider_anchor.clone(),
+                activation,
+                current_lease,
+            };
+            projection.validate()?;
+            projections.push(projection);
+        }
+        projections.sort_by_key(|projection| projection.expected.incarnation_id.clone());
+        Ok(projections)
     }
 }
 
@@ -262,9 +322,9 @@ pub struct StoredCorrelation {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OdinStoreQuery {
-    pub target: String,
+    pub incarnation: IncarnationRef,
     pub provider_signer_identity_id: String,
-    pub dependency_targets: Vec<String>,
+    pub dependencies: Vec<IncarnationRef>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -272,7 +332,7 @@ pub struct OdinStoreSnapshot {
     pub query: OdinStoreQuery,
     pub presence: Option<AdmittedPresence>,
     pub correlation: Option<StoredCorrelation>,
-    pub dependency_correlations: BTreeMap<String, Option<StoredCorrelation>>,
+    pub dependency_correlations: BTreeMap<IncarnationRef, Option<StoredCorrelation>>,
 }
 
 pub trait OdinTopologyStore {
@@ -285,7 +345,7 @@ pub trait OdinTopologyStore {
         replacement_correlation: &StoredCorrelation,
     ) -> Result<bool>;
 
-    fn withdraw_correlation(&self, target: &str) -> Result<()>;
+    fn withdraw_correlation(&self, incarnation: &IncarnationRef) -> Result<()>;
 
     /// Claim the next correlation sequence for this target, never returning a
     /// value already used. `prior` is the sequence of the currently stored
@@ -315,14 +375,15 @@ impl CultCacheOdinTopologyStore {
 
 impl OdinTopologyStore for CultCacheOdinTopologyStore {
     fn read(&self, mut query: OdinStoreQuery) -> Result<OdinStoreSnapshot> {
-        query.dependency_targets.sort();
-        query.dependency_targets.dedup();
+        query.dependencies.sort();
+        query.dependencies.dedup();
         let entries = if self.path.is_file() {
             SingleFileMessagePackBackingStore::new(&self.path).pull_all_read_only_snapshot()?
         } else {
             Vec::new()
         };
-        let presence_key = presence_store_key(&query.target, &query.provider_signer_identity_id);
+        let presence_key =
+            presence_store_key(&query.incarnation, &query.provider_signer_identity_id);
         let presence = unique_envelope(
             &entries,
             GameCultRuntimePresenceHealthRecord::TYPE,
@@ -333,20 +394,20 @@ impl OdinTopologyStore for CultCacheOdinTopologyStore {
         let correlation = unique_envelope(
             &entries,
             OdinRuntimeTopologyCorrelationRecord::TYPE,
-            &query.target,
+            &query.incarnation.key(),
         )?
         .map(decode_correlation_envelope)
         .transpose()?;
         let mut dependency_correlations = BTreeMap::new();
-        for dependency_target in &query.dependency_targets {
+        for dependency in &query.dependencies {
             let current = unique_envelope(
                 &entries,
                 OdinRuntimeTopologyCorrelationRecord::TYPE,
-                dependency_target,
+                &dependency.key(),
             )?
             .map(decode_correlation_envelope)
             .transpose()?;
-            dependency_correlations.insert(dependency_target.clone(), current);
+            dependency_correlations.insert(dependency.clone(), current);
         }
         Ok(OdinStoreSnapshot {
             query,
@@ -363,9 +424,10 @@ impl OdinTopologyStore for CultCacheOdinTopologyStore {
         replacement_correlation: &StoredCorrelation,
     ) -> Result<bool> {
         let presence_key = presence_store_key(
-            &observed.query.target,
+            &observed.query.incarnation,
             &observed.query.provider_signer_identity_id,
         );
+        let correlation_key = observed.query.incarnation.key();
         let mut conditions = BTreeMap::new();
         insert_condition(
             &mut conditions,
@@ -381,28 +443,29 @@ impl OdinTopologyStore for CultCacheOdinTopologyStore {
         insert_condition(
             &mut conditions,
             CultCacheExpectedEnvelope {
-                key: observed.query.target.clone(),
+                key: correlation_key.clone(),
                 r#type: OdinRuntimeTopologyCorrelationRecord::TYPE.into(),
                 current: observed
                     .correlation
                     .as_ref()
-                    .map(|correlation| correlation_envelope(&observed.query.target, correlation)),
+                    .map(|correlation| correlation_envelope(&correlation_key, correlation)),
             },
         )?;
-        for (target, correlation) in &observed.dependency_correlations {
+        for (dependency, correlation) in &observed.dependency_correlations {
+            let key = dependency.key();
             insert_condition(
                 &mut conditions,
                 CultCacheExpectedEnvelope {
-                    key: target.clone(),
+                    key: key.clone(),
                     r#type: OdinRuntimeTopologyCorrelationRecord::TYPE.into(),
                     current: correlation
                         .as_ref()
-                        .map(|correlation| correlation_envelope(target, correlation)),
+                        .map(|correlation| correlation_envelope(&key, correlation)),
                 },
             )?;
         }
         let mut replacements = vec![correlation_envelope(
-            &observed.query.target,
+            &correlation_key,
             replacement_correlation,
         )];
         if let Some(presence) = replacement_presence {
@@ -415,7 +478,8 @@ impl OdinTopologyStore for CultCacheOdinTopologyStore {
             .compare_exchange(&conditions.into_values().collect::<Vec<_>>(), &replacements)
     }
 
-    fn withdraw_correlation(&self, target: &str) -> Result<()> {
+    fn withdraw_correlation(&self, incarnation: &IncarnationRef) -> Result<()> {
+        let key = incarnation.key();
         for _ in 0..CAS_ATTEMPTS {
             if !self.path.is_file() {
                 return Ok(());
@@ -423,7 +487,7 @@ impl OdinTopologyStore for CultCacheOdinTopologyStore {
             let entries =
                 SingleFileMessagePackBackingStore::new(&self.path).pull_all_read_only_snapshot()?;
             let current =
-                unique_envelope(&entries, OdinRuntimeTopologyCorrelationRecord::TYPE, target)?;
+                unique_envelope(&entries, OdinRuntimeTopologyCorrelationRecord::TYPE, &key)?;
             let Some(current) = current else {
                 return Ok(());
             };
@@ -486,11 +550,7 @@ fn publisher_watermark_envelope(
     Ok(CultCacheEnvelope {
         key: target.into(),
         r#type: TOPOLOGY_PUBLISHER_WATERMARK_TYPE.into(),
-        payload: rmp_serde::to_vec(&(
-            TOPOLOGY_PUBLISHER_WATERMARK_SCHEMA,
-            target,
-            sequence,
-        ))?,
+        payload: rmp_serde::to_vec(&(TOPOLOGY_PUBLISHER_WATERMARK_SCHEMA, target, sequence))?,
         stored_at: stored_at.to_owned(),
         schema_id: Some(TOPOLOGY_PUBLISHER_WATERMARK_SCHEMA.into()),
     })
@@ -505,7 +565,6 @@ fn decode_publisher_watermark(target: &str, payload: &[u8]) -> Result<u64> {
     );
     Ok(sequence)
 }
-
 
 pub struct OdinTopologyAuthority<P, S, K, C> {
     projections: P,
@@ -541,27 +600,40 @@ where
         }
     }
 
-    /// Correlate current Expected with any previously admitted raw observation.
-    /// With no admitted observation this can only produce Expected, never Present.
-    pub fn refresh(&self, target: &str) -> Result<Option<Vec<u8>>> {
-        let Some(projection) = self.projections.current_projection(target)? else {
-            self.store.withdraw_correlation(target)?;
+    /// Correlate one incarnation's Expected with any previously admitted raw
+    /// observation. With no admitted observation this can only produce
+    /// Expected, never Present. An incarnation Idunn no longer projects has its
+    /// correlation withdrawn; its presence history stays.
+    pub fn refresh(&self, incarnation: &IncarnationRef) -> Result<Option<Vec<u8>>> {
+        let Some(projection) = self.projections.projection(incarnation)? else {
+            self.store.withdraw_correlation(incarnation)?;
             return Ok(None);
         };
         self.reconcile(projection, None).map(Some)
     }
 
     /// Authenticate and monotonically admit one exact provider-owned presence.
+    ///
+    /// The presence names the Expected it was issued under, and that selects
+    /// the incarnation it is evidence about. A presence for an incarnation
+    /// Idunn does not project is refused; it is never matched against another
+    /// incarnation of the same target.
     pub fn admit_presence(
         &self,
         target: &str,
         canonical_presence: &[u8],
         trusted_received_at_unix_millis: u64,
     ) -> Result<Vec<u8>> {
+        let claimed = decode_presence(canonical_presence)?;
+        ensure!(
+            claimed.target == target,
+            "runtime presence names another target than its document key"
+        );
+        let incarnation = IncarnationRef::new(target, claimed.expected_projection_sha256.clone());
         let projection = self
             .projections
-            .current_projection(target)?
-            .context("runtime presence has no current Expected projection")?;
+            .projection(&incarnation)?
+            .context("runtime presence has no current Expected projection for its incarnation")?;
         self.reconcile(
             projection,
             Some((canonical_presence, trusted_received_at_unix_millis)),
@@ -569,8 +641,11 @@ where
     }
 
     /// Return the exact signed bytes admitted by Odin for transport.
-    pub fn current_signed_correlation(&self, target: &str) -> Result<Option<Vec<u8>>> {
-        self.refresh(target)
+    pub fn current_signed_correlation(
+        &self,
+        incarnation: &IncarnationRef,
+    ) -> Result<Option<Vec<u8>>> {
+        self.refresh(incarnation)
     }
 
     fn reconcile(
@@ -584,9 +659,9 @@ where
             classify_runtime_authority(&projection, &self.idunn_anchor, now)?;
         let (lease_sha256, lease_disagreement) = classify_current_lease(&projection)?;
         let query = OdinStoreQuery {
-            target: projection.expected.target.clone(),
+            incarnation: IncarnationRef::of(&projection.expected)?,
             provider_signer_identity_id: projection.expected.expected_signer_identity_id.clone(),
-            dependency_targets: managed_dependency_targets(&projection.expected.dependencies),
+            dependencies: managed_dependency_incarnations(&projection.expected.dependencies),
         };
 
         for _ in 0..CAS_ATTEMPTS {
@@ -718,7 +793,7 @@ where
             // correlation, so a withdrawn correlation does not take the count
             // with it. See TOPOLOGY_PUBLISHER_WATERMARK_SCHEMA.
             correlation.publisher_sequence = self.store.reserve_publisher_sequence(
-                &observed.query.target,
+                &observed.query.incarnation.target,
                 prior.as_ref().map_or(0, |record| record.publisher_sequence),
             )?;
             correlation.signature = self
@@ -887,19 +962,19 @@ where
                 if requirement.provider_authority.as_deref() != Some("managed-incarnation") {
                     return Ok(evidence);
                 }
-                let Some(provider_projection) = self.projections.current_projection(provider_id)?
+                let Some(provider_expected_sha256) =
+                    requirement.provider_expected_projection_sha256.as_deref()
+                else {
+                    return Ok(evidence);
+                };
+                let provider_incarnation =
+                    IncarnationRef::new(provider_id, provider_expected_sha256);
+                let Some(provider_projection) =
+                    self.projections.projection(&provider_incarnation)?
                 else {
                     return Ok(evidence);
                 };
                 provider_projection.validate()?;
-                if provider_projection.expected.canonical_sha256()?
-                    != requirement
-                        .provider_expected_projection_sha256
-                        .as_deref()
-                        .unwrap_or_default()
-                {
-                    return Ok(evidence);
-                }
                 if let Some(endpoint) = requirement.provider_endpoint.as_deref()
                     && provider_projection
                         .expected
@@ -920,7 +995,7 @@ where
                 }
                 let Some(stored) = observed
                     .dependency_correlations
-                    .get(provider_id)
+                    .get(&provider_incarnation)
                     .and_then(Option::as_ref)
                 else {
                     return Ok(evidence);
@@ -1025,13 +1100,20 @@ fn same_correlation_facts(
     &normalized == prior
 }
 
-fn managed_dependency_targets(requirements: &[IdunnExpectedDependency]) -> Vec<String> {
+fn managed_dependency_incarnations(
+    requirements: &[IdunnExpectedDependency],
+) -> Vec<IncarnationRef> {
     requirements
         .iter()
         .filter(|dependency| {
             dependency.provider_authority.as_deref() == Some("managed-incarnation")
         })
-        .filter_map(|dependency| dependency.provider_id.clone())
+        .filter_map(|dependency| {
+            Some(IncarnationRef::new(
+                dependency.provider_id.clone()?,
+                dependency.provider_expected_projection_sha256.clone()?,
+            ))
+        })
         .collect()
 }
 
@@ -1234,8 +1316,8 @@ fn runtime_presence_anchor_id(target: &str) -> String {
     format!("root/{target}/runtime-presence")
 }
 
-fn presence_store_key(target: &str, signer_identity_id: &str) -> String {
-    format!("{target}/{signer_identity_id}")
+fn presence_store_key(incarnation: &IncarnationRef, signer_identity_id: &str) -> String {
+    format!("{}/{signer_identity_id}", incarnation.key())
 }
 
 fn unique_envelope<'a>(
@@ -1295,8 +1377,8 @@ fn decode_correlation_envelope(envelope: &CultCacheEnvelope) -> Result<StoredCor
     ensure_schema(envelope, ODIN_RUNTIME_TOPOLOGY_CORRELATION_SCHEMA)?;
     let record = decode_correlation(&envelope.payload)?;
     ensure!(
-        record.target == envelope.key,
-        "stored correlation target is substituted"
+        incarnation_key(&record.target, &record.expected_projection_sha256) == envelope.key,
+        "stored correlation incarnation is substituted"
     );
     ensure!(
         parse_rfc3339_millis(&envelope.stored_at)? == record.observed_at_unix_millis,
@@ -1391,8 +1473,8 @@ mod tests {
         let projection_path = std::env::var("ODIN_PROBE_PROJECTION")?;
         let anchor_path = std::env::var("ODIN_PROBE_IDUNN_ANCHOR")?;
         let target = std::env::var("ODIN_PROBE_TARGET").unwrap_or_else(|_| "odin".into());
-        let entries = SingleFileMessagePackBackingStore::new(&anchor_path)
-            .pull_all_read_only_snapshot()?;
+        let entries =
+            SingleFileMessagePackBackingStore::new(&anchor_path).pull_all_read_only_snapshot()?;
         let [envelope] = entries.as_slice() else {
             bail!("anchor store must contain exactly one document");
         };
@@ -1407,42 +1489,167 @@ mod tests {
                 envelope.r#type, envelope.key, envelope.schema_id, envelope.stored_at
             );
         }
-        let Some(projection) =
-            CultCacheIdunnProjectionSource::new(&projection_path).current_projection(&target)?
-        else {
-            println!("== no projection for {target}");
+        let projections =
+            CultCacheIdunnProjectionSource::new(&projection_path).projections(&target)?;
+        if projections.is_empty() {
+            println!("== no incarnation-keyed projection for {target}");
             return Ok(());
-        };
-        println!("== projection for {target}");
-        println!("  expected sha        {}", projection.expected.canonical_sha256()?);
-        println!("  expected incarnation {}", projection.expected.incarnation_id);
-        println!(
-            "  activation          {:?} instance={:?} expected_sha={:?}",
-            projection.activation.as_ref().map(|a| a.canonical_sha256()).transpose()?,
-            projection.activation.as_ref().map(|a| a.runtime_instance_id.clone()),
-            projection.activation.as_ref().map(|a| a.expected_projection_sha256.clone()),
-        );
-        println!(
-            "  lease               {:?}",
-            projection.current_lease.as_ref().map(|l| l.canonical_sha256()).transpose()?
-        );
-        println!(
-            "  provider anchor     {:?} bound={:?} expires={:?}",
-            projection.provider_anchor.as_ref().map(|a| a.trust_anchor_id.clone()),
-            projection.provider_anchor.as_ref().map(|a| a.bound_at_unix_millis),
-            projection.provider_anchor.as_ref().map(|a| a.expires_at_unix_millis),
-        );
-        let (authority, disagreements) =
-            classify_runtime_authority(&projection, &idunn_anchor, now)?;
-        println!("== authority present: {}", authority.is_some());
-        for disagreement in &disagreements {
+        }
+        for projection in projections {
             println!(
-                "  DISAGREEMENT {} expected={:?} observed={:?}",
-                disagreement.code, disagreement.expected, disagreement.observed
+                "== projection for {target} incarnation {}",
+                IncarnationRef::of(&projection.expected)?.key()
+            );
+            println!(
+                "  expected sha        {}",
+                projection.expected.canonical_sha256()?
+            );
+            println!(
+                "  expected incarnation {}",
+                projection.expected.incarnation_id
+            );
+            println!(
+                "  activation          {:?} instance={:?} expected_sha={:?}",
+                projection
+                    .activation
+                    .as_ref()
+                    .map(|a| a.canonical_sha256())
+                    .transpose()?,
+                projection
+                    .activation
+                    .as_ref()
+                    .map(|a| a.runtime_instance_id.clone()),
+                projection
+                    .activation
+                    .as_ref()
+                    .map(|a| a.expected_projection_sha256.clone()),
+            );
+            println!(
+                "  lease               {:?}",
+                projection
+                    .current_lease
+                    .as_ref()
+                    .map(|l| l.canonical_sha256())
+                    .transpose()?
+            );
+            println!(
+                "  provider anchor     {:?} bound={:?} expires={:?}",
+                projection
+                    .provider_anchor
+                    .as_ref()
+                    .map(|a| a.trust_anchor_id.clone()),
+                projection
+                    .provider_anchor
+                    .as_ref()
+                    .map(|a| a.bound_at_unix_millis),
+                projection
+                    .provider_anchor
+                    .as_ref()
+                    .map(|a| a.expires_at_unix_millis),
+            );
+            let (authority, disagreements) =
+                classify_runtime_authority(&projection, &idunn_anchor, now)?;
+            println!("== authority present: {}", authority.is_some());
+            for disagreement in &disagreements {
+                println!(
+                    "  DISAGREEMENT {} expected={:?} observed={:?}",
+                    disagreement.code, disagreement.expected, disagreement.observed
+                );
+            }
+            let (lease_sha256, lease_disagreement) = classify_current_lease(&projection)?;
+            println!(
+                "== lease binds: {:?} disagreement={:?}",
+                lease_sha256,
+                lease_disagreement.map(|d| d.code)
             );
         }
-        let (lease_sha256, lease_disagreement) = classify_current_lease(&projection)?;
-        println!("== lease binds: {:?} disagreement={:?}", lease_sha256, lease_disagreement.map(|d| d.code));
+        Ok(())
+    }
+
+    /// The rebuild's negative check. A target being replaced has two live
+    /// incarnations, and Idunn publishes the candidate's Expected beside the
+    /// incumbent's. That publication must be unable to touch what the incumbent
+    /// is: its presence stays admitted under its own incarnation, the
+    /// candidate's presence is admitted under the candidate's, and neither
+    /// correlation describes the other.
+    #[test]
+    fn a_candidate_expected_beside_the_incumbent_cannot_reject_its_presence() -> Result<()> {
+        let world = TestWorld::new()?;
+        let incumbent = world.service("odin", Vec::new(), true)?;
+        let engine = world.engine(NOW);
+        let incumbent_presence = incumbent.signed_presence(1, |_| {})?;
+        let ready = decode_signed(&engine.admit_presence("odin", &incumbent_presence, NOW)?)?;
+        assert!(ready.present && ready.ready);
+
+        // Idunn seals a candidate: same target, new incarnation, no activation
+        // or lease yet. This is exactly the write that used to kill the
+        // incumbent.
+        let mut candidate = incumbent.projection.clone();
+        candidate.expected.plan_id = digest('9');
+        candidate.expected.incarnation_id = "odin/generation-2".into();
+        candidate.expected.validate()?;
+        candidate.activation = None;
+        candidate.current_lease = None;
+        world.publish_projection(&candidate)?;
+        let candidate_incarnation = IncarnationRef::of(&candidate.expected)?;
+        assert_ne!(incumbent.incarnation()?, candidate_incarnation);
+        assert_eq!(
+            CultCacheIdunnProjectionSource::new(&world.projection_path)
+                .projections("odin")?
+                .len(),
+            2
+        );
+
+        // The incumbent's next heartbeat is admitted exactly as before.
+        let heartbeat = incumbent.signed_presence(2, |_| {})?;
+        let still_ready =
+            decode_signed(&engine.admit_presence("odin", &heartbeat, NOW + 5_000)?)?;
+        assert!(still_ready.present && still_ready.ready);
+        assert_eq!(
+            still_ready.expected_projection_sha256,
+            incumbent.incarnation()?.expected_sha256
+        );
+
+        // The candidate is Expected-only under its own key, and a refresh of
+        // it does not disturb the incumbent's correlation.
+        let candidate_only = decode_signed(&engine.refresh(&candidate_incarnation)?.unwrap())?;
+        assert!(candidate_only.expected && !candidate_only.present);
+        assert_eq!(
+            candidate_only.expected_projection_sha256,
+            candidate_incarnation.expected_sha256
+        );
+        let incumbent_again = decode_signed(
+            &engine
+                .current_signed_correlation(&incumbent.incarnation()?)?
+                .unwrap(),
+        )?;
+        assert!(incumbent_again.present && incumbent_again.ready);
+        Ok(())
+    }
+
+    /// A projection written by an Idunn that still keys records by target is
+    /// not this contract, and must project nothing rather than something the
+    /// reader half-understands.
+    #[test]
+    fn target_keyed_legacy_records_project_nothing() -> Result<()> {
+        let world = TestWorld::new()?;
+        let service = world.service("ghostlight", Vec::new(), false)?;
+        let store = SingleFileMessagePackBackingStore::new(&world.projection_path);
+        let current = store.pull_all_read_only_snapshot()?;
+        let legacy: Vec<_> = current
+            .iter()
+            .map(|envelope| {
+                let mut envelope = envelope.clone();
+                if IncarnationRef::parse_key(&envelope.key).is_some() {
+                    envelope.key = "ghostlight".into();
+                }
+                envelope
+            })
+            .collect();
+        ensure!(store.compare_exchange_snapshot(&current, &legacy)?);
+        let source = CultCacheIdunnProjectionSource::new(&world.projection_path);
+        assert!(source.projections("ghostlight")?.is_empty());
+        assert!(source.projection(&service.incarnation()?)?.is_none());
         Ok(())
     }
 
@@ -1459,7 +1666,7 @@ mod tests {
         // it, the next correlation would start at 1, be refused as a replay,
         // and be withdrawn again -- a deadlock that also lets a genuine replay
         // of the old sequence 2 outrank the fresh one.
-        store.withdraw_correlation("heimdall")?;
+        store.withdraw_correlation(&IncarnationRef::new("heimdall", digest('1')))?;
         assert_eq!(store.reserve_publisher_sequence("heimdall", 0)?, 3);
 
         // Each target counts on its own.
@@ -1471,7 +1678,6 @@ mod tests {
         assert_eq!(store.reserve_publisher_sequence("heimdall", 99)?, 100);
         Ok(())
     }
-
 
     #[derive(Clone, Copy)]
     struct FixedClock(u64);
@@ -1489,6 +1695,10 @@ mod tests {
     }
 
     impl TestService {
+        fn incarnation(&self) -> Result<IncarnationRef> {
+            IncarnationRef::of(&self.projection.expected)
+        }
+
         fn signed_presence<F>(&self, sequence: u64, edit: F) -> Result<Vec<u8>>
         where
             F: FnOnce(&mut GameCultRuntimePresenceHealthRecord),
@@ -1686,6 +1896,24 @@ mod tests {
             })
         }
 
+        /// Remove one incarnation's records, leaving every other incarnation
+        /// of the same target and the target's anchor in place.
+        fn withdraw_projection(&self, incarnation: &IncarnationRef) -> Result<()> {
+            let store = SingleFileMessagePackBackingStore::new(&self.projection_path);
+            let current = store.pull_all_read_only_snapshot()?;
+            let key = incarnation.key();
+            let next: Vec<_> = current
+                .iter()
+                .filter(|envelope| envelope.key != key)
+                .cloned()
+                .collect();
+            ensure!(
+                store.compare_exchange_snapshot(&current, &next)?,
+                "test projection CAS failed"
+            );
+            Ok(())
+        }
+
         fn publish_projection(&self, projection: &IdunnRuntimeProjection) -> Result<()> {
             let store = SingleFileMessagePackBackingStore::new(&self.projection_path);
             let current = if self.projection_path.is_file() {
@@ -1694,20 +1922,18 @@ mod tests {
                 Vec::new()
             };
             let anchor_key = runtime_presence_anchor_id(&projection.expected.target);
+            let incarnation_key = IncarnationRef::of(&projection.expected)?.key();
             let mut next: Vec<_> = current
                 .iter()
                 .filter(|envelope| {
-                    !((envelope.r#type == IdunnExpectedIncarnationRecord::TYPE
-                        || envelope.r#type == IdunnRuntimeActivationRecord::TYPE
-                        || envelope.r#type == IdunnProcessWriteLeaseRecord::TYPE)
-                        && envelope.key == projection.expected.target)
+                    envelope.key != incarnation_key
                         && !(envelope.r#type == GameCultServiceTrustAnchorRecord::TYPE
                             && envelope.key == anchor_key)
                 })
                 .cloned()
                 .collect();
             next.push(CultCacheEnvelope {
-                key: projection.expected.target.clone(),
+                key: incarnation_key.clone(),
                 r#type: IdunnExpectedIncarnationRecord::TYPE.into(),
                 payload: projection.expected.canonical_bytes()?,
                 stored_at: rfc3339_millis(NOW - 30)?,
@@ -1724,7 +1950,7 @@ mod tests {
             }
             if let Some(activation) = &projection.activation {
                 next.push(CultCacheEnvelope {
-                    key: projection.expected.target.clone(),
+                    key: incarnation_key.clone(),
                     r#type: IdunnRuntimeActivationRecord::TYPE.into(),
                     payload: activation.canonical_bytes()?,
                     stored_at: rfc3339_millis(activation.issued_at_unix_millis)?,
@@ -1733,7 +1959,7 @@ mod tests {
             }
             if let Some(lease) = &projection.current_lease {
                 next.push(CultCacheEnvelope {
-                    key: projection.expected.target.clone(),
+                    key: incarnation_key.clone(),
                     r#type: IdunnProcessWriteLeaseRecord::TYPE.into(),
                     payload: lease.canonical_bytes()?,
                     stored_at: rfc3339_millis(lease.issued_at_unix_millis)?,
@@ -1767,6 +1993,7 @@ mod tests {
         }
 
         fn replace_provider_generation(&self, service: &mut TestService) -> Result<()> {
+            self.withdraw_projection(&service.incarnation()?)?;
             service.projection.expected.plan_id = digest('9');
             service.projection.expected.incarnation_id =
                 format!("{}/generation-2", service.projection.expected.target);
@@ -1801,7 +2028,7 @@ mod tests {
         anchor.service_id = "other".into();
         world.publish_projection(&service.projection)?;
 
-        let bytes = world.engine(NOW).refresh("ghostlight")?.unwrap();
+        let bytes = world.engine(NOW).refresh(&service.incarnation()?)?.unwrap();
         let record = decode_signed(&bytes)?;
         assert!(record.expected);
         assert!(!record.present);
@@ -1915,7 +2142,7 @@ mod tests {
         let duplicate = engine.admit_presence("ghostlight", &sequence_two, NOW + 60_000)?;
         assert_eq!(duplicate, first);
         assert_eq!(
-            engine.current_signed_correlation("ghostlight")?,
+            engine.current_signed_correlation(&service.incarnation()?)?,
             Some(first)
         );
 
@@ -1930,7 +2157,7 @@ mod tests {
             &entries,
             GameCultRuntimePresenceHealthRecord::TYPE,
             &presence_store_key(
-                "ghostlight",
+                &service.incarnation()?,
                 &service.projection.expected.expected_signer_identity_id,
             ),
         )?
@@ -1958,7 +2185,7 @@ mod tests {
         // sees would jump by however long Odin had been idle rather than by the
         // number of observations that actually changed.
         for _ in 0..3 {
-            let idle = decode_signed(&engine.refresh("ghostlight")?.unwrap())?;
+            let idle = decode_signed(&engine.refresh(&service.incarnation()?)?.unwrap())?;
             assert_eq!(idle.publisher_sequence, 1);
         }
 
@@ -1980,7 +2207,10 @@ mod tests {
             .engine(NOW)
             .admit_presence("ghostlight", &presence, NOW)?;
 
-        let after_restart = world.engine(NOW + 100).refresh("ghostlight")?.unwrap();
+        let after_restart = world
+            .engine(NOW + 100)
+            .refresh(&service.incarnation()?)?
+            .unwrap();
         assert_eq!(after_restart, first);
         assert_eq!(decode_signed(&after_restart)?.observed_at_unix_millis, NOW);
         Ok(())
@@ -1994,10 +2224,18 @@ mod tests {
         let presence = service.signed_presence(1, |_| {})?;
         let engine = world.engine(NOW);
         engine.admit_presence("ghostlight", &presence, NOW)?;
-        assert!(engine.current_signed_correlation("ghostlight")?.is_some());
+        assert!(
+            engine
+                .current_signed_correlation(&service.incarnation()?)?
+                .is_some()
+        );
 
         std::fs::remove_file(&world.projection_path)?;
-        assert!(engine.current_signed_correlation("ghostlight")?.is_none());
+        assert!(
+            engine
+                .current_signed_correlation(&service.incarnation()?)?
+                .is_none()
+        );
 
         let entries = SingleFileMessagePackBackingStore::new(&world.topology_path)
             .pull_all_read_only_snapshot()?;
@@ -2005,7 +2243,8 @@ mod tests {
             entry.r#type == GameCultRuntimePresenceHealthRecord::TYPE && entry.payload == presence
         }));
         assert!(!entries.iter().any(|entry| {
-            entry.r#type == OdinRuntimeTopologyCorrelationRecord::TYPE && entry.key == "ghostlight"
+            entry.r#type == OdinRuntimeTopologyCorrelationRecord::TYPE
+                && entry.key.starts_with("ghostlight@")
         }));
         Ok(())
     }
@@ -2047,7 +2286,7 @@ mod tests {
         assert!(ready.dependencies[0].provider_evidence_sha256.is_some());
 
         world.replace_provider_generation(&mut provider)?;
-        let no_longer_exact = decode_signed(&engine.refresh("consumer")?.unwrap())?;
+        let no_longer_exact = decode_signed(&engine.refresh(&consumer.incarnation()?)?.unwrap())?;
         assert!(no_longer_exact.present);
         assert!(!no_longer_exact.ready);
         assert!(!no_longer_exact.dependencies[0].ready);
