@@ -207,3 +207,11 @@ committed separately:
   more than about a minute.
 - Not Odin's: `10.77.0.4` is blocked sending UDP to `10.77.0.1:17870` (Idunn
   health). Handed to the Muninn session to name.
+- **22:50Z, verified end to end by the Muninn session.** A Ratatoskr catalog
+  pull from Starfire against `rudp://10.77.0.1:17871` returned one stream, zero
+  malformed: `muninn.raven.av.rudp` by Raven, advertised from `GameCult/Muninn`
+  `887efa7`, resolving Odin through `CULTMESH_URI_ODIN_RUDP=10.77.0.1:17871`.
+  First producer-agnostic advertisement admitted by the Rust Odin and read
+  back by a consumer. The `10.77.0.4 → 17870` blocks were Raven's Muninn
+  publishing daemon health to an Idunn that does not manage it; the Muninn
+  session is cutting that flag rather than opening the port.
