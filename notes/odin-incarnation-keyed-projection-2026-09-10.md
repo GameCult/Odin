@@ -103,3 +103,18 @@ Odin `faa53f3` and Idunn `903e1c8`, both on `main`.
   `sha256-809979ad…` and deployment `tx-0f15abe4-3d00-4c04-bf11-ebc27aa97a6c`,
   signed with `/etc/gamecult/idunn/deployment-brake-operator-identity.cc`.
   Odin is down until then; nothing else is broken.
+- **20:57:49Z / 21:00:41Z** Idunn `7bcd567` then `f659b9d` installed. The
+  resident commands were not queued after all: about sixty terminal
+  transactions from before history retirement were still resident and
+  consumed their commands correctly. They now leave one per tick (47 retired
+  in the first 45 s; `control.cc` shrinking). `up-78945539` /
+  `tx-0f15abe4` holds in Sealing at the deployment brake, reported as running.
+  Nothing else is queued.
+- **Next, operator-owned.** Release the odin deployment brake for release
+  `sha256-809979adc013040ab16aa8a56d8b1dfb232936887f6055ea313a67c854c0689a`
+  and deployment `tx-0f15abe4-3d00-4c04-bf11-ebc27aa97a6c` with
+  `idunn-provision deployment-brake-release` signed by
+  `/etc/gamecult/idunn/deployment-brake-operator-identity.cc`. The candidate
+  then starts, warms directly as first Odin (no admitted Odin can observe it),
+  fences the dead old generation, takes the lease and route, and is admitted.
+  Watch it with `idunn status --command up-78945539-0a9f-4e80-b432-cd97e7f4b861`.
