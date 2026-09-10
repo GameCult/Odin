@@ -5,6 +5,8 @@ use std::net::{SocketAddr, UdpSocket};
 use std::os::fd::{FromRawFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -59,7 +61,10 @@ const ACTIVATION_SIGNER_FD_NAME: &str = IDUNN_RUNTIME_ACTIVATION_CREDENTIAL_NAME
 const PROVIDER_SIGNER_FD_NAME: &str = "gamecult-runtime-presence-identity";
 const SYSTEMD_LISTEN_FDS_START: RawFd = 3;
 
-const BOOTSTRAP_LEASE_TIMEOUT: Duration = Duration::from_secs(60);
+// Long enough for Idunn to warm, fence the incumbent, and grant the lease. A
+// candidate that never hears back is cleaned up by Idunn's own abort; this
+// only bounds how long it sits idle first.
+const BOOTSTRAP_LEASE_TIMEOUT: Duration = Duration::from_secs(300);
 const SELF_PUBLISH_TIMEOUT: Duration = Duration::from_secs(6);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 const PROJECTION_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
@@ -554,8 +559,22 @@ fn main() -> Result<()> {
         CultMeshRudpDocumentServerOptions::default(),
     )?;
 
+    // Idunn runs this process as PID 1 of its own PID namespace, and a
+    // namespace init ignores every signal it has not caught. Without this,
+    // a stop is a ninety-second wait for SIGKILL, which is what fencing the
+    // incumbent during a deployment costs its candidate.
+    let stopping = Arc::new(AtomicBool::new(false));
+    for signal in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT] {
+        signal_hook::flag::register(signal, Arc::clone(&stopping))
+            .context("registering Odin's stop signal handler")?;
+    }
+
     let bootstrap_started = Instant::now();
     while !state.borrow_mut().try_activate()? {
+        if stopping.load(Ordering::Relaxed) {
+            eprintln!("Odin stopping before activation on request");
+            return Ok(());
+        }
         let progressed = poll_server(&mut server)?;
         ensure!(
             bootstrap_started.elapsed() < BOOTSTRAP_LEASE_TIMEOUT,
@@ -575,6 +594,10 @@ fn main() -> Result<()> {
     let mut last_heartbeat = Instant::now();
     let mut last_projection_refresh = Instant::now();
     loop {
+        if stopping.load(Ordering::Relaxed) {
+            eprintln!("Odin stopping on request");
+            return Ok(());
+        }
         let progressed = poll_server(&mut server)?;
         if last_projection_refresh.elapsed() >= PROJECTION_REFRESH_INTERVAL {
             state.borrow_mut().refresh_all_correlations()?;

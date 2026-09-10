@@ -10,6 +10,7 @@ name = "odin_daemon"
 path = "src/lib.rs"
 
 [dependencies]
+signal-hook = "0.3"
 anyhow = "1"
 chrono = "0.4"
 cultcache-rs = { git = "https://github.com/GameCult/CultLib.git", rev = "a8aeddacab7dd4b9e634b4420867ea3b402cb858", package = "cultcache-rs" }
