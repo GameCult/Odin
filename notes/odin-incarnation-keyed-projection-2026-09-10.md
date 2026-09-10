@@ -86,3 +86,20 @@ Odin `faa53f3` and Idunn `903e1c8`, both on `main`.
   the history retirement landed. Fixed in Idunn by counting history too. Third
   Idunn build in progress; the old release keeps restarting harmlessly until
   it lands.
+- **20:32:45Z** Idunn `6b68d65` installed. Continuity gave up ("failed to
+  start 12 times, the target is free"). At 20:33:39 freeze created
+  `tx-0f15abe4` for `up-78945539`, an old odin command from earlier today:
+  every resident command whose transactions had been retired to history read
+  as queued again, and freeze takes the oldest first. That one command has
+  hundreds of retired attempts behind it. It sealed Odin `main` `faa53f3` as
+  release `sha256-809979ad…` and is waiting on the deployment brake, which is
+  the operator gate working: Expected is now published only after the brake,
+  so nothing was killed. `up-fc005d83` was redundant and was cancelled with
+  the new verb. Fixed in Idunn: a command is consumed by any transaction, live
+  or retired; the resident backlog is retired on sight; a busy target no longer
+  blocks the commands behind it; `status` reports a live transaction as
+  running instead of an older attempt's failure.
+- **Pending** an operator release of the odin deployment brake naming release
+  `sha256-809979ad…` and deployment `tx-0f15abe4-3d00-4c04-bf11-ebc27aa97a6c`,
+  signed with `/etc/gamecult/idunn/deployment-brake-operator-identity.cc`.
+  Odin is down until then; nothing else is broken.

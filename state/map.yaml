@@ -5,7 +5,7 @@
 # commands that do so are in AGENTS.md. Where this disagrees with yggdrasil,
 # yggdrasil is right and this file is a bug.
 
-verified_at: 2026-09-10T19:15Z
+verified_at: 2026-09-10T20:48Z
 verified_against: yggdrasil (systemctl, idunn status)
 
 deployment_authority:
@@ -14,11 +14,12 @@ deployment_authority:
   recipe: deployment/idunn/recipe.toml
   source_selection: ref-head on refs/heads/main
   minimum_revision: 08965a44e135b393a130d62b075dc5036d2df901
+  idunn_minimum: 1a54db1   # incarnation-keyed projection (903e1c8) plus the queue and give-up fixes
 
 runtime:
-  admitted: true
-  admitted_by: up-07cb1979-855c-4f4b-b63e-b4f3052105ba   # 2026-09-09 22:17
-  release: sha256-61c32655577151a4ba389372abe67f313a86dfc09e9d1f34267238f66ff0fd67
+  admitted: false      # old generation 61c32655 cannot start under the incarnation-keyed projection; continuity gave up 20:32:45Z
+  admitted_by: none
+  release: none        # candidate sha256-809979adc013040ab16aa8a56d8b1dfb232936887f6055ea313a67c854c0689a (Odin main faa53f3) sealed in tx-0f15abe4, waiting on the deployment brake
   # The live unit is idunn-odin-<activation-hash>.service and that hash changes
   # on every restart. It is not this release hash. 318 failed unit residues
   # were loaded on 2026-09-10T19:23Z, all with distinct hashes.
@@ -31,7 +32,7 @@ runtime:
   # timeout, not the unit lifetime; do not wait two minutes and call it stable.
   # See notes/odin-deployment-handoff-2026-09-10.md before acting.
   healthy: false
-  condition: cycling   # each cycle = continuity restart, then the queued deployment seals and kills it
+  condition: down-awaiting-brake-release   # see notes/odin-incarnation-keyed-projection-2026-09-10.md
 
 # A unit named odin.service exists in /etc/systemd/system and is `active` with
 # MainPID 0. It owns no process and is not the running Odin. It has misled two
@@ -43,10 +44,11 @@ decoys:
     owns_process: false
 
 in_flight:
-  - command: up-fc005d83-79d4-418c-bc76-80d07dd6eff3
-    status: queued
-    armed: true      # no cancel verb exists (R16); it fires when the target frees
-    carries: CultLib bump to a8aedda (commits 0e540ca, f7e3fc3), undeployed
+  - command: up-78945539-0a9f-4e80-b432-cd97e7f4b861   # an old odin command freeze re-took; see the note
+    transaction: tx-0f15abe4-3d00-4c04-bf11-ebc27aa97a6c
+    status: Sealing, waiting on deployment brake release naming this transaction
+    carries: Odin main faa53f3 as release sha256-809979ad…
+  # up-fc005d83 was cancelled 2026-09-10T20:43Z with `idunn cancel`
 
 brakes:
   deployment_store: /var/lib/gamecult/idunn-authority/odin-deployment-brake.cc
@@ -56,10 +58,8 @@ brakes:
   # each attempt needs its own signature naming that exact transaction.
 
 known_defects:
-  - lifecycle brake parks an in-flight continuity transaction on the target and
-    thereby blocks deployment, which estate doctrine forbids
-  - the queued deployment is not starved: it freezes each time the target
-    frees, and its Sealing publish_expected replaces the projected Expected
-    with the candidate's; the incumbent then fails activation-expected-projection
-    and exits (verified 2026-09-10T19:37Z, notes/odin-cycle-mechanism-2026-09-10.md)
-  - redeploying Odin destroys the observer Idunn needs to admit the replacement (R17)
+  - an admitted Odin cannot observe a candidate Odin; Odin deployments succeed only
+    by bootstrap after the incumbent stops (see notes/odin-cycle-mechanism-2026-09-10.md,
+    "Not owned by this cut")
+  - incarnation_key is duplicated in odin-daemon lib.rs and Idunn drivers.rs; lifting it
+    into CultLib cultnet-rs is the open follow-up
