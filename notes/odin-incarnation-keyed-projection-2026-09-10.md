@@ -150,3 +150,11 @@ next Muninn redeploy, which is why it is not done here.
   `sha256-067ab605c82828cd2b1b1feac0d431cc217e076007c28a5dbd2902ae294878e3`
   in `tx-dde64dc5-18a0-435b-8afb-077b6452a388`; waiting on a brake release
   naming that pair.
+- **Correction, ~21:50Z, from the Muninn session.** The gamecult-ops rebind
+  of the Muninn targets (`80bbe39`) sits on the unmerged branch
+  `claude/repo-census-2026-09`, where `idunn-deployment-targets.ps1` was
+  introduced; `origin/main` has no Muninn target records at all. The live
+  yggdrasil Idunn binds only `heimdall` and `odin`, which matches
+  `/etc/gamecult/idunn/bindings/`. So nothing deployed the stale copy; Raven's
+  Muninn comes from whichever `restart-muninn.ps1` an operator runs, and Odin's
+  copy is gone (`d41c744`). Merging that branch is its owner's call.
