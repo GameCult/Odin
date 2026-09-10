@@ -172,3 +172,8 @@ next Muninn redeploy, which is why it is not done here.
   (replaced incumbent, skipped abort reconciliation, migration). It withdrew
   `incarnation-tx-08023033…` on its first tick. The admitted Odin process was
   untouched (same PID since 21:50:48Z), zero rejections since the release.
+- **22:06Z** Hold check: the admitted unit has run sixteen minutes on the same
+  PID (since 21:50:48Z), one active odin unit, zero CultMesh rejections and
+  zero odin-daemon errors since the release, and Idunn has logged nothing
+  since the 21:58:17Z sweep. The old kill window was 2.5–16 minutes. Odin is
+  up under the incarnation-keyed projection.

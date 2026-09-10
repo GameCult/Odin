@@ -5,7 +5,7 @@
 # commands that do so are in AGENTS.md. Where this disagrees with yggdrasil,
 # yggdrasil is right and this file is a bug.
 
-verified_at: 2026-09-10T21:52Z
+verified_at: 2026-09-10T22:06Z
 verified_against: yggdrasil (systemctl, idunn status)
 
 deployment_authority:
@@ -15,6 +15,7 @@ deployment_authority:
   source_selection: ref-head on refs/heads/main
   minimum_revision: 08965a44e135b393a130d62b075dc5036d2df901
   idunn_minimum: 1a54db1   # incarnation-keyed projection (903e1c8) plus the queue and give-up fixes
+  idunn_live: 1899df2      # 2026-09-10T21:58:17Z; supervise withdraws one stale projected incarnation per tick
 
 runtime:
   admitted: true
@@ -28,11 +29,10 @@ runtime:
   projection: /var/lib/gamecult/idunn-projection/topology.cc
   route: /etc/nginx/idunn-stream-routes/odin.conf   # rudp://10.77.0.1:17971
 
-  # Odin serves between restarts and exits 1 after 2.5-16 min per unit (14
-  # starts 18:03-19:23Z on 2026-09-10). The ~96 s figure is the RUDP ack
-  # timeout, not the unit lifetime; do not wait two minutes and call it stable.
-  # See notes/odin-deployment-handoff-2026-09-10.md before acting.
-  healthy: true        # hold check pending at write time; see the note
+  # Before Odin 27ca3b3 and Idunn 1899df2, Odin exited 1 after 2.5-16 min per
+  # unit because the queued deployment overwrote the target-keyed Expected slot.
+  # That path no longer exists; see notes/odin-incarnation-keyed-projection-2026-09-10.md.
+  healthy: true        # sixteen-minute hold passed 22:06Z: same PID since 21:50:48Z, zero rejections, zero daemon errors
   condition: admitted
 
 # A unit named odin.service exists in /etc/systemd/system and is `active` with
