@@ -81,6 +81,9 @@ ssh ygg 'sudo /usr/local/bin/idunn status --state-store /var/lib/gamecult/idunn/
   `/etc/systemd/system/` is exactly that: active, `MainPID 0`, owning nothing.
   It has misled at least two separate readings. Check `-p MainPID` before
   believing a status line.
+- **Read the journal with `sudo journalctl -q`.** Unprivileged `journalctl` shows
+  only your own messages and returns a false zero on `Started idunn-odin`
+  counts.
 - Verify changing facts against the host or source, never against a document —
   including the documents in this repository.
 - Redeploying Odin is not routine. Read `notes/` first; the failure mode is

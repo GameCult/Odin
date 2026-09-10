@@ -19,11 +19,16 @@ runtime:
   admitted: true
   admitted_by: up-07cb1979-855c-4f4b-b63e-b4f3052105ba   # 2026-09-09 22:17
   release: sha256-61c32655577151a4ba389372abe67f313a86dfc09e9d1f34267238f66ff0fd67
+  # The live unit is idunn-odin-<activation-hash>.service and that hash changes
+  # on every restart. It is not this release hash. 318 failed unit residues
+  # were loaded on 2026-09-10T19:23Z, all with distinct hashes.
   state_root: /var/lib/gamecult/odin
   projection: /var/lib/gamecult/idunn-projection/topology.cc
   route: /etc/nginx/idunn-stream-routes/odin.conf   # rudp://10.77.0.1:17971
 
-  # Odin serves between restarts and self-terminates roughly every 96s.
+  # Odin serves between restarts and exits 1 after 2.5-16 min per unit (14
+  # starts 18:03-19:23Z on 2026-09-10). The ~96 s figure is the RUDP ack
+  # timeout, not the unit lifetime; do not wait two minutes and call it stable.
   # See notes/odin-deployment-handoff-2026-09-10.md before acting.
   healthy: false
   condition: cycling
@@ -46,7 +51,7 @@ in_flight:
 brakes:
   deployment_store: /var/lib/gamecult/idunn-authority/odin-deployment-brake.cc
   lifecycle_store: /var/lib/gamecult/idunn-authority/odin-lifecycle-brake.cc
-  lifecycle_state: released
+  lifecycle_state: released   # verified 2026-09-10T19:03:12Z from the brake file: released by idunn.root, reason continuity-restart
   # A deployment brake release is release-specific and expires after 15 minutes;
   # each attempt needs its own signature naming that exact transaction.
 

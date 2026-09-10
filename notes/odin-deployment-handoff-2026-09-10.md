@@ -1,5 +1,11 @@
 # Odin cannot currently be redeployed, and it cycles
 
+> **Correction 2026-09-10 19:23Z.** Per-unit lifetime is 2.5-16 minutes, not
+> ~96 s; 96 s is the runtime-presence publisher timeout that precedes the exit.
+> Cycle rate holds at ~10 starts/hour. Count starts with `sudo journalctl -q`;
+> an unprivileged `journalctl` sees only your own messages and returns zero.
+> `up-fc005d83` still queued; lifecycle brake still released (19:03:12Z).
+
 Written 2026-09-10 after an incident caused by an optional dependency bump.
 Read this before running `idunn up odin`.
 
