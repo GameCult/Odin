@@ -110,10 +110,3 @@ ignored test that decodes a captured projection file and prints what the
 classifier sees. Usage is in its doc comment. Capture on the host with a
 copy-on-change loop over `/var/lib/gamecult/idunn-projection/topology.cc`;
 the version that kills is the one written seconds before the rejection line.
-
-> **Correction 2026-09-10 20:35Z.** The fork was resolved as both sides in one
-> pass: Idunn `903e1c8` keys the projection by `{target}@{expected sha}` and
-> Odin `faa53f3` keys its reader and store the same way. See
-> `odin-incarnation-keyed-projection-2026-09-10.md`. "Not owned by this cut"
-> (an admitted Odin observing a candidate Odin) is still unbuilt. "R17" is not
-> defined by any active ledger.
