@@ -167,3 +167,8 @@ next Muninn redeploy, which is why it is not done here.
   activation and lease, authority present, lease binding. That is the
   contract working. The retired generation's Expected-only record is the one
   leftover: nothing withdraws it after commit yet.
+- **21:58:17Z** Idunn `1899df2` installed: supervise withdraws one stale
+  projected incarnation per tick for each admitted target, whatever left it
+  (replaced incumbent, skipped abort reconciliation, migration). It withdrew
+  `incarnation-tx-08023033…` on its first tick. The admitted Odin process was
+  untouched (same PID since 21:50:48Z), zero rejections since the release.
