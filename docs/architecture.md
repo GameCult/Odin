@@ -109,8 +109,8 @@ delivery, or renderer layout. Keepalive loops belong in Idunn, not Odin's
 coordinator or individual daemons.
 
 Muninn is the portable local telemetry Verse assembler. Its Rust body lives in
-`crates/muninn-daemon` and publishes `muninn.telemetry_surface.v1` through
-CultMesh/CultCache. Muninn may run on Raven, Nightwing, Starfire, or any future
+the `GameCult/Muninn` repository and publishes `muninn.telemetry_surface.v1`
+through CultMesh/CultCache. Muninn may run on Raven, Nightwing, Starfire, or any future
 device body. It names locally accessible telemetry affordances: screen capture,
 loopback audio, microphones, cameras, and future sensors. Muninn does not start
 expensive capture streams merely because the daemon is alive. The default

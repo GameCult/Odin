@@ -51,9 +51,8 @@ ssh ygg 'sudo docker run --rm -v /srv/build/odin:/w -v /etc/machine-id:/etc/mach
 with `Linux machine-id is unavailable` — a wall of failures that looks like
 broken code and is a missing mount.
 
-`muninn-psmoveapi-tracker` fails to link in that image for want of
-`libpsmoveapi`. It declares no CultLib dependency; scope test runs to the crates
-you are changing.
+Scope test runs to the crates you are changing. Muninn's crates live in
+`GameCult/Muninn` now, not in this workspace.
 
 ## Session Bootstrap And Re-entry Protocol
 

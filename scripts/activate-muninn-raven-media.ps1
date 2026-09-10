@@ -1,1 +1,0 @@
-throw "activate-muninn-raven-media.ps1 archived: Muninn media activation is daemon-owned and target resolution is through Odin/CultMesh. Redeploy Muninn through Idunn and publish a typed muninn.capture_stream_command with a cultmesh:// media target URI."
