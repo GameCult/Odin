@@ -118,3 +118,24 @@ Odin `faa53f3` and Idunn `903e1c8`, both on `main`.
   then starts, warms directly as first Odin (no admitted Odin can observe it),
   fences the dead old generation, takes the lease and route, and is admitted.
   Watch it with `idunn status --command up-78945539-0a9f-4e80-b432-cd97e7f4b861`.
+
+## Pending decision, not part of this rebuild: Muninn has two bodies
+
+Verified 2026-09-10 ~21:15Z from a Muninn-session finding. Odin's workspace
+still carries `crates/muninn-daemon`, `muninn-move-tracker`,
+`muninn-psmoveapi-tracker`; they have no reference to the media stream
+contract that `GameCult/Muninn` (b679fc2 and later) implements, and
+gamecult-ops `scripts/idunn/idunn-deployment-targets.ps1` binds
+`starfire-muninn` and `raven-muninn` to `Repo = "Odin"`. A Muninn redeploy
+today ships the stale copy.
+
+The cut, once the operator says so, is one pass across three repos: delete
+the three crates from Odin's workspace, rebind both targets to
+`GameCult/Muninn`, and carry the launch changes Muninn `07c70ac` made: the
+activation child listens on `--media-rudp-bind` (default `0.0.0.0:5220`),
+the target must supply `--media-rudp-advertise` (env
+`MUNINN_MEDIA_RUDP_ADVERTISE`, Raven's LAN host:port, no default) and open
+that UDP port, `--obs-target-host`/`--obs-port` are refused, and
+`GameCult/Muninn/scripts/restart-muninn.ps1` already does all of it. Muninn
+pins CultLib `c84cb2e`; Odin's pin is separate. Either half alone breaks the
+next Muninn redeploy, which is why it is not done here.
