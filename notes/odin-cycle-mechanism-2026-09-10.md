@@ -1,5 +1,12 @@
 # Why Odin cycles: the queued deployment kills the incumbent every time it seals
 
+> **Correction 2026-09-10 20:35Z.** The fork was resolved as both sides in one
+> pass: Idunn `903e1c8` keys the projection by `{target}@{expected sha}` and
+> Odin `faa53f3` keys its reader and store the same way. See
+> `odin-incarnation-keyed-projection-2026-09-10.md`. "Not owned by this cut"
+> (an admitted Odin observing a candidate Odin) is still unbuilt. "R17" is not
+> defined by any active ledger.
+
 Written 2026-09-10 ~19:45Z from a live probe on yggdrasil. Supersedes the
 mechanism section of `odin-deployment-handoff-2026-09-10.md`; that note's
 timeline and "what not to do" still hold.
