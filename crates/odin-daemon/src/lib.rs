@@ -371,6 +371,39 @@ impl CultCacheOdinTopologyStore {
     pub fn path(&self) -> &Path {
         &self.path
     }
+
+    /// Remove every correlation not keyed by an incarnation. Those were written
+    /// by the previous, target-keyed Odin; nothing reads them under this
+    /// contract, and left in place `stored_snapshot` would serve them to the
+    /// Verse as current. Presence records are kept whatever their key: the
+    /// self publisher sequence is continued from them.
+    pub fn retire_legacy_correlations(&self) -> Result<usize> {
+        for _ in 0..CAS_ATTEMPTS {
+            if !self.path.is_file() {
+                return Ok(0);
+            }
+            let entries =
+                SingleFileMessagePackBackingStore::new(&self.path).pull_all_read_only_snapshot()?;
+            let retained = entries
+                .iter()
+                .filter(|entry| {
+                    !(entry.r#type == OdinRuntimeTopologyCorrelationRecord::TYPE
+                        && IncarnationRef::parse_key(&entry.key).is_none())
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            let removed = entries.len() - retained.len();
+            if removed == 0 {
+                return Ok(0);
+            }
+            if SingleFileMessagePackBackingStore::new(&self.path)
+                .compare_exchange_snapshot(&entries, &retained)?
+            {
+                return Ok(removed);
+            }
+        }
+        bail!("Odin topology store changed repeatedly while retiring legacy correlations")
+    }
 }
 
 impl OdinTopologyStore for CultCacheOdinTopologyStore {
@@ -1650,6 +1683,55 @@ mod tests {
         let source = CultCacheIdunnProjectionSource::new(&world.projection_path);
         assert!(source.projections("ghostlight")?.is_empty());
         assert!(source.projection(&service.incarnation()?)?.is_none());
+        Ok(())
+    }
+
+    /// A store the target-keyed Odin wrote holds correlations under bare
+    /// target keys. They are retired; presence history under any key stays.
+    #[test]
+    fn legacy_target_keyed_correlations_are_retired_and_presence_is_kept() -> Result<()> {
+        let world = TestWorld::new()?;
+        let service = world.service("ghostlight", Vec::new(), false)?;
+        let presence = service.signed_presence(1, |_| {})?;
+        let engine = world.engine(NOW);
+        let correlation = engine.admit_presence("ghostlight", &presence, NOW)?;
+        let store = SingleFileMessagePackBackingStore::new(&world.topology_path);
+        let current = store.pull_all_read_only_snapshot()?;
+        let mut with_legacy = current.clone();
+        with_legacy.push(CultCacheEnvelope {
+            key: "ghostlight".into(),
+            r#type: OdinRuntimeTopologyCorrelationRecord::TYPE.into(),
+            payload: correlation,
+            stored_at: rfc3339_millis(NOW - 1_000)?,
+            schema_id: Some(ODIN_RUNTIME_TOPOLOGY_CORRELATION_SCHEMA.into()),
+        });
+        with_legacy.push(CultCacheEnvelope {
+            key: "ghostlight/legacy-signer".into(),
+            r#type: GameCultRuntimePresenceHealthRecord::TYPE.into(),
+            payload: presence.clone(),
+            stored_at: rfc3339_millis(NOW - 1_000)?,
+            schema_id: Some(GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA.into()),
+        });
+        ensure!(store.compare_exchange_snapshot(&current, &with_legacy)?);
+
+        let odin_store = CultCacheOdinTopologyStore::new(&world.topology_path);
+        assert_eq!(odin_store.retire_legacy_correlations()?, 1);
+        assert_eq!(odin_store.retire_legacy_correlations()?, 0);
+        let after = store.pull_all_read_only_snapshot()?;
+        assert!(after.iter().all(|entry| {
+            entry.r#type != OdinRuntimeTopologyCorrelationRecord::TYPE
+                || IncarnationRef::parse_key(&entry.key).is_some()
+        }));
+        assert!(
+            after
+                .iter()
+                .any(|entry| entry.key == "ghostlight/legacy-signer")
+        );
+        assert!(
+            engine
+                .current_signed_correlation(&service.incarnation()?)?
+                .is_some()
+        );
         Ok(())
     }
 

@@ -566,6 +566,10 @@ fn main() -> Result<()> {
         }
     }
 
+    // Correlations the previous, target-keyed Odin left in this store are not
+    // this contract's and would otherwise be served to the Verse as current.
+    // Presence history is kept: the self publisher sequence continues from it.
+    CultCacheOdinTopologyStore::new(&state.borrow().options.store).retire_legacy_correlations()?;
     publish_self_presence(&state, &mut server, "ready")?;
     state.borrow_mut().refresh_all_correlations()?;
     let mut last_heartbeat = Instant::now();
@@ -1102,6 +1106,11 @@ fn correlation_incarnations(path: &Path) -> Result<BTreeSet<IncarnationRef>> {
         .pull_all_read_only_snapshot()?
         .into_iter()
         .filter(|entry| entry.r#type == OdinRuntimeTopologyCorrelationRecord::TYPE)
+        // A correlation keyed by anything but an incarnation key was written
+        // by the previous, target-keyed Odin. It is retired at activation
+        // (`retire_legacy_correlations`), never refreshed, and never a reason
+        // to refuse to start.
+        .filter(|entry| IncarnationRef::parse_key(&entry.key).is_some())
         .map(|entry| {
             ensure!(
                 entry.schema_id.as_deref() == Some(ODIN_RUNTIME_TOPOLOGY_CORRELATION_SCHEMA),
