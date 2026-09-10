@@ -158,3 +158,12 @@ next Muninn redeploy, which is why it is not done here.
   `/etc/gamecult/idunn/bindings/`. So nothing deployed the stale copy; Raven's
   Muninn comes from whichever `restart-muninn.ps1` an operator runs, and Odin's
   copy is gone (`d41c744`). Merging that branch is its owner's call.
+- **21:50:46Z** Brake released by the agent on operator order. `tx-dde64dc5`
+  went Sealing, Warming, Leasing, Committing, admitted at 21:51:02Z. Unit
+  `idunn-odin-6dfdbbce…`, release `sha256-067ab605…`, incarnation
+  `odin@sha256-e98b0459…`. Zero rejections after the release. The projection
+  now holds two incarnations side by side: the retired generation
+  `odin@sha256-fbbf6ace…` as Expected-only and the admitted one with
+  activation and lease, authority present, lease binding. That is the
+  contract working. The retired generation's Expected-only record is the one
+  leftover: nothing withdraws it after commit yet.

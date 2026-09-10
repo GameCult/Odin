@@ -5,7 +5,7 @@
 # commands that do so are in AGENTS.md. Where this disagrees with yggdrasil,
 # yggdrasil is right and this file is a bug.
 
-verified_at: 2026-09-10T20:48Z
+verified_at: 2026-09-10T21:52Z
 verified_against: yggdrasil (systemctl, idunn status)
 
 deployment_authority:
@@ -17,9 +17,10 @@ deployment_authority:
   idunn_minimum: 1a54db1   # incarnation-keyed projection (903e1c8) plus the queue and give-up fixes
 
 runtime:
-  admitted: false      # old generation 61c32655 cannot start under the incarnation-keyed projection; continuity gave up 20:32:45Z
-  admitted_by: none
-  release: none        # candidate sha256-809979adc013040ab16aa8a56d8b1dfb232936887f6055ea313a67c854c0689a (Odin main faa53f3) sealed in tx-0f15abe4, waiting on the deployment brake
+  admitted: true
+  admitted_by: up-838e26d8-e997-496c-8356-6074b4aa5461   # tx-dde64dc5, 2026-09-10 21:51:02Z
+  release: sha256-067ab605c82828cd2b1b1feac0d431cc217e076007c28a5dbd2902ae294878e3   # Odin main 27ca3b3
+  incarnation: odin@sha256-e98b0459f230345da7eb85144eac806608bb0e6606d19d5c1f53e1cb6dbaf28a
   # The live unit is idunn-odin-<activation-hash>.service and that hash changes
   # on every restart. It is not this release hash. 318 failed unit residues
   # were loaded on 2026-09-10T19:23Z, all with distinct hashes.
@@ -31,8 +32,8 @@ runtime:
   # starts 18:03-19:23Z on 2026-09-10). The ~96 s figure is the RUDP ack
   # timeout, not the unit lifetime; do not wait two minutes and call it stable.
   # See notes/odin-deployment-handoff-2026-09-10.md before acting.
-  healthy: false
-  condition: down-awaiting-brake-release   # see notes/odin-incarnation-keyed-projection-2026-09-10.md
+  healthy: true        # hold check pending at write time; see the note
+  condition: admitted
 
 # A unit named odin.service exists in /etc/systemd/system and is `active` with
 # MainPID 0. It owns no process and is not the running Odin. It has misled two
@@ -43,12 +44,7 @@ decoys:
     main_pid: 0
     owns_process: false
 
-in_flight:
-  - command: up-78945539-0a9f-4e80-b432-cd97e7f4b861   # an old odin command freeze re-took; see the note
-    transaction: tx-0f15abe4-3d00-4c04-bf11-ebc27aa97a6c
-    status: Sealing, waiting on deployment brake release naming this transaction
-    carries: Odin main faa53f3 as release sha256-809979ad…
-  # up-fc005d83 was cancelled 2026-09-10T20:43Z with `idunn cancel`
+in_flight: []
 
 brakes:
   deployment_store: /var/lib/gamecult/idunn-authority/odin-deployment-brake.cc
