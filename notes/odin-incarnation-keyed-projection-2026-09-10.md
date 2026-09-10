@@ -177,3 +177,33 @@ next Muninn redeploy, which is why it is not done here.
   zero odin-daemon errors since the release, and Idunn has logged nothing
   since the 21:58:17Z sweep. The old kill window was 2.5–16 minutes. Odin is
   up under the incarnation-keyed projection.
+
+## Fold-back to 17871, 2026-09-10 22:06–22:45Z
+
+Odin was admitted but unreachable: its stable endpoint was `10.77.0.1:17971`,
+a staging port chosen while the old Node coordinator held `17871`, and every
+consumer, runbook and firewall rule still named `17871`. Operator ruled: fold
+back. Done end to end, with four defects found and fixed on the way, each
+committed separately:
+
+- The coordinator container `odin-coordinator-1` is stopped with
+  `restart=no`; `odin.service` now starts only `hermodr`. Binding
+  `stable_endpoint` is `rudp://10.77.0.1:17871`; backups of the binding and
+  the unit are under `/tmp/projsnap/` on the host.
+- Idunn `f16fb46`: the route driver owns one ufw allow per routed stable
+  endpoint (needs `/etc/ufw` in the unit's `ReadWritePaths`, `103c557`).
+- Idunn `e81c73e`: Warming admitted the candidate's correlation twice with one
+  stale record and failed the second time. Once now.
+- Idunn `692ba1f`: an aged-out Odin correlation is absence to wait on, not a
+  fault. This is what had failed every Heimdall deployment.
+- Odin `b8ef6c6`: the daemon is PID 1 of its private PID namespace and ignored
+  SIGTERM, so every stop was a 90 s SIGKILL and the candidate's 60 s bootstrap
+  wait expired during fencing. Odin catches SIGTERM now; the wait is 300 s.
+- Admitted at 22:44:21Z as `up-e728909f` / `tx-0e8fa81e`, release
+  `sha256-4d6e959a…`, listening on `10.77.0.1:17871` → `127.0.0.1:17972`. The
+  driver's stale `17971` allow was deleted by hand; the operator's original
+  `17871` rule remains beside the driver's. Continuity restored the previous
+  generation within 11 s after each failed attempt; Odin was never down for
+  more than about a minute.
+- Not Odin's: `10.77.0.4` is blocked sending UDP to `10.77.0.1:17870` (Idunn
+  health). Handed to the Muninn session to name.

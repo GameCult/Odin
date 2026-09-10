@@ -5,7 +5,7 @@
 # commands that do so are in AGENTS.md. Where this disagrees with yggdrasil,
 # yggdrasil is right and this file is a bug.
 
-verified_at: 2026-09-10T22:06Z
+verified_at: 2026-09-10T22:45Z
 verified_against: yggdrasil (systemctl, idunn status)
 
 deployment_authority:
@@ -15,24 +15,24 @@ deployment_authority:
   source_selection: ref-head on refs/heads/main
   minimum_revision: 08965a44e135b393a130d62b075dc5036d2df901
   idunn_minimum: 1a54db1   # incarnation-keyed projection (903e1c8) plus the queue and give-up fixes
-  idunn_live: 1899df2      # 2026-09-10T21:58:17Z; supervise withdraws one stale projected incarnation per tick
+  idunn_live: 692ba1f      # route driver owns the stable endpoint allow (f16fb46); warming fixes (e81c73e, 692ba1f)
 
 runtime:
   admitted: true
-  admitted_by: up-838e26d8-e997-496c-8356-6074b4aa5461   # tx-dde64dc5, 2026-09-10 21:51:02Z
-  release: sha256-067ab605c82828cd2b1b1feac0d431cc217e076007c28a5dbd2902ae294878e3   # Odin main 27ca3b3
-  incarnation: odin@sha256-e98b0459f230345da7eb85144eac806608bb0e6606d19d5c1f53e1cb6dbaf28a
+  admitted_by: up-e728909f-abee-49e4-9cf3-0f88b24cdea5   # tx-0e8fa81e, 2026-09-10 22:44:21Z
+  release: sha256-4d6e959a655f0e7158d8a520587be10f10dbf7782abdc6092edd4c32fc18e701   # Odin main b8ef6c6
+  incarnation: odin@sha256-903af5f8691a…   # full digest in the projection
   # The live unit is idunn-odin-<activation-hash>.service and that hash changes
   # on every restart. It is not this release hash. 318 failed unit residues
   # were loaded on 2026-09-10T19:23Z, all with distinct hashes.
   state_root: /var/lib/gamecult/odin
   projection: /var/lib/gamecult/idunn-projection/topology.cc
-  route: /etc/nginx/idunn-stream-routes/odin.conf   # rudp://10.77.0.1:17971
+  route: /etc/nginx/idunn-stream-routes/odin.conf   # rudp://10.77.0.1:17871 -> 127.0.0.1:17972; the Node coordinator that held 17871 is retired
 
   # Before Odin 27ca3b3 and Idunn 1899df2, Odin exited 1 after 2.5-16 min per
   # unit because the queued deployment overwrote the target-keyed Expected slot.
   # That path no longer exists; see notes/odin-incarnation-keyed-projection-2026-09-10.md.
-  healthy: true        # sixteen-minute hold passed 22:06Z: same PID since 21:50:48Z, zero rejections, zero daemon errors
+  healthy: true        # admitted 22:44:21Z, zero rejections, mesh reachable on 17871
   condition: admitted
 
 # A unit named odin.service exists in /etc/systemd/system and is `active` with
