@@ -12,6 +12,18 @@
 > fails `activation-expected-projection` on its next heartbeat and exits, and
 > the deployment is aborted for having killed its incumbent. Full timeline and
 > authority map in `odin-cycle-mechanism-2026-09-10.md`.
+>
+> **Correction 2026-09-10 20:35Z.** Superseded by
+> `odin-incarnation-keyed-projection-2026-09-10.md`. "What to try, in order" is
+> done or wrong: (1) the starvation diagnosis was wrong (see 19:45Z above);
+> (2)-(3) are fixed in Idunn `903e1c8` (Expected published after the brake,
+> lifecycle brake stops continuity minting instead of parking a transaction,
+> commands consumed once). `idunn cancel <command-id>` now exists; "no cancel
+> verb (R16)" is false. "Continuity gives up after 3" was false from Idunn
+> `222bfcc` (failed restarts retire to history.cc before the counter reads
+> them) until `6b68d65`, which counts history too. R16 and R17 are cited here
+> as recorded but no active ledger in Odin, Idunn, or gamecult-ops defines
+> them; treat the numbers as unresolved references.
 
 Written 2026-09-10 after an incident caused by an optional dependency bump.
 Read this before running `idunn up odin`.
