@@ -939,6 +939,12 @@ where
             ) {
                 Ok(claim) => Some((claim, None)),
                 Err(error) => {
+                    // A stored presence that no longer authenticates is a
+                    // disagreement about that one incarnation, never a reason
+                    // for the rendezvous to stop. On 2026-09-11 a provider's
+                    // continuity restart left its previous presence in this
+                    // store; treating that as tampering took Odin down, and
+                    // every restart read the same record and died again.
                     let prior_matches_current =
                         observed.correlation.as_ref().is_some_and(|value| {
                             decode_correlation(&value.canonical_bytes).is_ok_and(|record| {
@@ -948,7 +954,10 @@ where
                             })
                         });
                     if prior_matches_current {
-                        return Err(error).context("stored current presence failed authentication");
+                        eprintln!(
+                            "Odin holds a presence for Expected {} that no longer authenticates under the authority its correlation named; recorded as stale: {error:#}",
+                            authority.expected_sha256()
+                        );
                     }
                     return Ok(SelectedPresence::Stale(stored.clone()));
                 }
