@@ -56,7 +56,7 @@ if ($LASTEXITCODE -ne 0) {
 if (Test-Path -LiteralPath $cultLibTarPath) {
   Remove-Item -LiteralPath $cultLibTarPath -Force
 }
-git -C $CultLibRoot archive --format=tar --output=$cultLibTarPath $cultLibSourceRef package.json package-lock.json scripts/run-typescript-workspaces.mjs packages/cultcache-ts packages/cultnet-ts packages/cultmesh-ts packages/cultmesh-browser
+git -C $CultLibRoot archive --format=tar --output=$cultLibTarPath $cultLibSourceRef package.json package-lock.json scripts/run-typescript-workspaces.mjs contracts/cultnet packages/cultcache-ts packages/cultnet-ts packages/cultmesh-ts packages/cultmesh-browser
 if ($LASTEXITCODE -ne 0) {
   throw "CultLib tar build failed for $CultLibRoot $cultLibSourceRef"
 }
