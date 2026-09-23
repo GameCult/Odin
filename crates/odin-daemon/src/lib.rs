@@ -774,7 +774,7 @@ where
                 && disagreements.is_empty()
                 && dependencies
                     .iter()
-                    .all(|dependency| dependency.kind == "optional" || dependency.ready);
+                    .all(|dependency| dependency_permits_ready(&dependency.kind, dependency.ready));
             let mut correlation = OdinRuntimeTopologyCorrelationRecord {
                 schema_version: ODIN_RUNTIME_TOPOLOGY_CORRELATION_SCHEMA.into(),
                 target: projection.expected.target.clone(),
@@ -1157,6 +1157,15 @@ fn managed_dependency_incarnations(
             ))
         })
         .collect()
+}
+
+/// Whether one dependency lets its dependent be Ready. An optional dependency
+/// never blocks. An external-operator-binding provider is one Idunn admitted
+/// from the operator's binding: Odin has no incarnation to observe and so can
+/// never sign evidence for it, and its own evidence stays `ready: false`. The
+/// dependent checks that provider itself at use, so Odin does not gate on it.
+fn dependency_permits_ready(kind: &str, ready: bool) -> bool {
+    matches!(kind, "optional" | "external-operator-binding") || ready
 }
 
 fn classify_runtime_authority(
@@ -2387,5 +2396,15 @@ mod tests {
                 .is_none()
         );
         Ok(())
+    }
+
+    #[test]
+    fn only_managed_dependencies_without_evidence_block_readiness() {
+        assert!(!dependency_permits_ready("required", false));
+        assert!(!dependency_permits_ready("shared-infrastructure", false));
+        assert!(!dependency_permits_ready("private", false));
+        assert!(dependency_permits_ready("required", true));
+        assert!(dependency_permits_ready("optional", false));
+        assert!(dependency_permits_ready("external-operator-binding", false));
     }
 }
