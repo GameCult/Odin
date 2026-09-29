@@ -1664,6 +1664,20 @@ mod tests {
             Ok(())
         }
 
+        /// The whole catalog, as a Verse peer reading it would get it.
+        fn catalog(&self) -> Result<Vec<CultNetRawDocumentRecord>> {
+            self.state.borrow_mut().raw_snapshot(&CultMeshRudpSnapshotQuery {
+                session: cultmesh_rs::CultMeshRudpSessionKey {
+                    remote_addr: "127.0.0.1:1".parse()?,
+                    connection_id: 7,
+                },
+                message_id: "catalog".into(),
+                requested_at_unix_millis: 1,
+                schema_ids: None,
+                record_keys: None,
+            })
+        }
+
         fn stored_keys(&self, record_type: &str) -> Result<Vec<String>> {
             Ok(SingleFileMessagePackBackingStore::new(&self.store)
                 .pull_all_read_only_snapshot()?
@@ -1888,6 +1902,15 @@ mod tests {
                 .contains(&candidate_key)
         );
 
+        // A catalog read serves what is stored; refreshing is the timer's.
+        odin.catalog()?;
+        assert!(
+            !odin
+                .stored_keys(OdinRuntimeTopologyCorrelationRecord::TYPE)?
+                .contains(&candidate_key),
+            "a read does not refresh"
+        );
+
         odin.pass()?;
         assert!(
             odin.stored_keys(OdinRuntimeTopologyCorrelationRecord::TYPE)?
@@ -1895,16 +1918,7 @@ mod tests {
             "the good incarnation was refreshed past the ghost"
         );
 
-        let catalog = odin.state.borrow_mut().raw_snapshot(&CultMeshRudpSnapshotQuery {
-            session: cultmesh_rs::CultMeshRudpSessionKey {
-                remote_addr: "127.0.0.1:1".parse()?,
-                connection_id: 7,
-            },
-            message_id: "catalog".into(),
-            requested_at_unix_millis: 1,
-            schema_ids: None,
-            record_keys: None,
-        })?;
+        let catalog = odin.catalog()?;
         assert!(
             catalog
                 .iter()
