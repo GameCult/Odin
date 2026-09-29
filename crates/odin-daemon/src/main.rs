@@ -2038,6 +2038,112 @@ mod tests {
         Ok(())
     }
 
+    fn soul_show<T: std::fmt::Debug>(label: &str, result: &Result<T>) {
+        match result {
+            Ok(value) => eprintln!("SOULPROBE {label}: Ok({value:?})"),
+            Err(error) => eprintln!(
+                "SOULPROBE {label}: Err(refused_marker={}, lease_lost={}) {error:#}",
+                error.downcast_ref::<PresenceAuthorityRefused>().is_some(),
+                error.downcast_ref::<WriteLeaseLost>().is_some()
+            ),
+        }
+    }
+
+    /// Soul P1: a candidate incarnation of the same target, as Idunn projects
+    /// it during every deployment of that target.
+    #[test]
+    fn soul_p1_two_incarnations_of_one_target() -> Result<()> {
+        let mut odin = activated_odin()?;
+        odin.pass()?;
+        let mut candidate = odin.state.borrow().authority_material.expected.clone();
+        candidate.incarnation_id = "odin/generation-2".into();
+        candidate.sealed_release_id = digest('9');
+        candidate.validate()?;
+        odin.append_projection(vec![CultCacheEnvelope {
+            key: IncarnationRef::of(&candidate)?.key(),
+            r#type: IdunnExpectedIncarnationRecord::TYPE.into(),
+            payload: candidate.canonical_bytes()?,
+            stored_at: rfc3339_millis(unix_millis()?)?,
+            schema_id: Some(IDUNN_EXPECTED_INCARNATION_SCHEMA.into()),
+        }])?;
+        odin.timers = ServingTimers::default();
+        let pass = odin.pass();
+        soul_show("P1 pass", &pass);
+        eprintln!("SOULPROBE P1 correlation keys {:?}", odin.stored_keys(OdinRuntimeTopologyCorrelationRecord::TYPE)?);
+        let catalog = odin.catalog().map(|documents| documents.len());
+        soul_show("P1 whole catalog", &catalog);
+        let filtered = odin.state.borrow_mut().raw_snapshot(&CultMeshRudpSnapshotQuery {
+            session: cultmesh_rs::CultMeshRudpSessionKey { remote_addr: "127.0.0.1:1".parse()?, connection_id: 7 },
+            message_id: "presence-only".into(),
+            requested_at_unix_millis: 1,
+            schema_ids: Some(vec![GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA.into()]),
+            record_keys: None,
+        }).map(|documents| documents.len());
+        soul_show("P1 presence-only catalog", &filtered);
+        assert!(catalog.is_ok(), "SOUL P1: whole catalog refused");
+        Ok(())
+    }
+
+    /// Soul P2: one presence in Odin's store that does not decode.
+    #[test]
+    fn soul_p2_one_undecodable_presence() -> Result<()> {
+        let mut odin = activated_odin()?;
+        odin.pass()?;
+        let stamp = rfc3339_millis(unix_millis()?)?;
+        odin.tamper_store(|mut entries| {
+            entries.push(CultCacheEnvelope {
+                key: "ghost".into(),
+                r#type: GameCultRuntimePresenceHealthRecord::TYPE.into(),
+                payload: vec![0xc1],
+                stored_at: stamp.clone(),
+                schema_id: Some(GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA.into()),
+            });
+            entries
+        })?;
+        let catalog = odin.catalog().map(|documents| documents.len());
+        soul_show("P2 catalog", &catalog);
+        let startup = prior_self_publisher_sequence(&odin.store, &odin.provider_identity_id);
+        soul_show("P2 startup sequence read (RuntimeState::open)", &startup);
+        odin.timers = ServingTimers::default();
+        let before = odin.stored_sequence();
+        soul_show("P2 stored_sequence", &before);
+        let pass = odin.pass();
+        soul_show("P2 pass", &pass);
+        assert!(catalog.is_ok() && startup.is_ok(), "SOUL P2: one record broke the catalog or startup");
+        Ok(())
+    }
+
+    /// Soul P3: Odin's own projected provider anchor does not decode.
+    #[test]
+    fn soul_p3_undecodable_own_anchor() -> Result<()> {
+        let mut odin = activated_odin()?;
+        odin.pass()?;
+        let before = odin.stored_sequence()?;
+        odin.tamper_projection(|entries| {
+            entries
+                .into_iter()
+                .map(|mut entry| {
+                    if entry.r#type == GameCultServiceTrustAnchorRecord::TYPE {
+                        entry.payload = vec![0xc1];
+                    }
+                    entry
+                })
+                .collect()
+        })?;
+        let catalog = odin.catalog().map(|documents| documents.len());
+        soul_show("P3 catalog", &catalog);
+        let mut outcomes = Vec::new();
+        for _ in 0..3 {
+            odin.timers = ServingTimers::default();
+            let pass = odin.pass();
+            soul_show("P3 pass", &pass);
+            outcomes.push(pass.is_ok());
+        }
+        eprintln!("SOULPROBE P3 self sequence before {before} after {}", odin.stored_sequence()?);
+        assert!(outcomes.iter().all(|ok| !ok), "SOUL P3: Odin survives an authority it cannot read, presence frozen");
+        Ok(())
+    }
+
     /// An application rejection ends only the offending peer's session, and a
     /// stray datagram is dropped; neither ends Odin's serving loop.
     #[test]
