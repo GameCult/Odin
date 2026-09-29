@@ -749,9 +749,7 @@ where
         projection: IdunnRuntimeProjection,
         incoming: Option<(&[u8], u64)>,
     ) -> Result<Vec<u8>> {
-        projection
-            .validate()
-            .context(PresenceAuthorityRefused("Idunn's projection is invalid"))?;
+        projection.validate()?;
         let now = self.clock.now_unix_millis()?;
         let (authority, projection_disagreements) =
             classify_runtime_authority(&projection, &self.idunn_anchor, now)
