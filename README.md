@@ -107,8 +107,8 @@ Local package surfaces:
 - Hosted VoidBot release: upstream `main` -> Yggdrasil-local Idunn -> the
   root-owned `/srv/odin/deploy-manifests/voidbot` actuator. Local checkouts are
   development and diagnostics only; do not create a local deployment.
-- Hosted Odin release: branch `codex/ygg-idunn-independent-bootstrap` plus the
-  exact CultLib commit in `deploy/cultlib.commit` -> one immutable
+- Hosted Odin release: branch `codex/ygg-idunn-independent-bootstrap`, built
+  `cargo --locked` so `Cargo.lock` is the CultLib pin -> one immutable
   `/srv/odin/releases/<commit>` body -> `/srv/odin/current`. Odin signs its own
   liveness to Idunn, while Idunn starts independently and owns later restart or
   deployment actuation.
