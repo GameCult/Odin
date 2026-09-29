@@ -46,35 +46,24 @@ The first Rust core lives in `crates/odin-core`:
 - `repository.rs`: `OdinRepository` abstraction, in-memory mock repository, and
   CultMesh-backed repository.
 
-The Rust spine owns the future architecture. The CommonJS daemon remains the
-legacy operational body until each organ crosses this typed boundary.
+The deployed body is `crates/odin-daemon`, built and run by Idunn from
+`deployment/idunn/recipe.toml`. `crates/odin-core` holds the typed record spine
+that the rest of the machine grows into.
 
 ## Runtime Body
 
 Odin's executable body is split by ownership:
 
-- `crates/odin-core`: Rust target core. Owns typed Odin documents, ingest
-  ports, normalization, and CultMesh/CultCache repository boundaries. This is
-  the replacement spine; JavaScript remains legacy runtime scaffolding until
-  each organ has crossed the typed boundary.
-- `src/odin-coordinator.cjs`: process lifecycle, serialized refresh loop,
-  persistence, health, and transport wiring. Refreshes must not overlap because
-  a refresh publishes Odin's daemon health.
-- `src/odin/config.cjs`: runtime paths, refresh intervals, and CultLib module path setup.
-- `src/odin/documents.cjs`: CultCache/CultMesh document definitions accepted by Odin.
-- `src/odin/idunn-rudp.cjs`: daemon-owned Odin provider health publication to
-  Idunn over the canonical CultNet RUDP `schema` channel.
-- `src/odin/probes.cjs`: local Docker/ADB debug lowerings for Starfire and
-  Android edge visibility. Remote Verse health is not probed here; it comes
-  from provider-owned CultMesh/CultNet records.
-- `src/odin/interfaces.cjs`: provider advertisements, CultMesh interface
-  bindings, accepted interface projection, and renderer-lowering metadata.
-  Renderer routes are lowerings outside Odin, not Odin-hosted transport.
-- `src/odin/layout.cjs`: `odin.interface_layout.v1` read/write and merge policy.
-- `src/odin/marquee.cjs`: canonical marquee tape assembly from Stonks securities and ordered VoidBot poem lines.
-- `src/odin/surface.cjs`: `gamecult.eve.surface.v1` tree projection.
-- `src/odin/state.cjs`: one refresh's input records into Odin's provider catalog/proxy state.
-The entrypoint is not allowed to grow new probe, surface, provider, layout, or renderer policy. If a new owner is needed, name the owner and its invariant before adding code.
+- `crates/odin-daemon`: the deployed process. Reads Idunn's read-only topology
+  projection, admits provider presences over RUDP for the incarnations Idunn
+  projects, persists them through CultMesh/CultCache, publishes signed
+  runtime-topology correlation records, and answers CultNet/RUDP snapshot and
+  document requests. Deployment, restart, and survival of this process are
+  Idunn's.
+- `crates/odin-core`: typed Odin documents, ingest ports, normalization, and
+  CultMesh/CultCache repository boundaries.
+
+If a new owner is needed, name the owner and its invariant before adding code.
 
 The accepted document registry is also the persistence admission boundary.
 Unknown schemas may be observed for diagnostics but are not silently persisted
@@ -94,19 +83,15 @@ the typed `gjallar.overview` Eve surface. Eve clients own graphical, terminal,
 and framebuffer lowering. Gjallar must not own the underlying registry, probe,
 provider truth, client pixels, or translation decisions.
 
-Idunn is the named keepalive organ for daemon continuity. Its current Rust
-body lives in `crates/idunn-daemon` and `crates/odin-core/src/idunn.rs`. Idunn may read
-Odin-owned service records and provider advertisements, then bring daemons up
-after reboots or crashes, watch health, emit keepalive observations, restart
-requests, denied-action records, and operator alarms. When human action is
-needed, Idunn uses CultMesh to request a Bifrost-owned operator
-notification crossing. VoidBot's `voidbot.operator-dm` command `owner.dm.send`
-is a demoted compatibility delivery actuator, not the owner. The target command
-lives in Bifrost's Verse; any still-VoidBot delivery path must be invoked by
-Bifrost or documented as migration debt. Idunn must not own Verse discovery,
-schema truth, provider dashboards, identity grants, Discord delivery, owner-DM
-delivery, or renderer layout. Keepalive loops belong in Idunn, not Odin's
-coordinator or individual daemons.
+Idunn (`GameCult/Idunn`) owns deployment and daemon survival, including Odin's.
+It builds from each target's recipe, activates and restarts the admitted
+incarnation, and holds the deployment and lifecycle brakes. Odin publishes what
+it can see and reads Idunn's topology projection; it does not start, restart,
+deploy, or health-probe any daemon, and no Odin code path keeps a process alive.
+When human action is needed, Idunn uses CultMesh to request a Bifrost-owned
+operator notification crossing. Idunn must not own Verse discovery, schema
+truth, provider dashboards, identity grants, Discord delivery, owner-DM
+delivery, or renderer layout.
 
 Muninn is the portable local telemetry Verse assembler. Its Rust body lives in
 the `GameCult/Muninn` repository and publishes `muninn.telemetry_surface.v1`
@@ -213,19 +198,10 @@ This is not a reporting nicety. It is how Odin prevents services from becoming
 private little islands with separate websites, dashboards, state formats, and
 separate command languages.
 
-## Current Service Surface
+## Service Surface
 
-Odin currently publishes service squares for:
-
-- Starfire: Odin, Docker, ADB, Odin CultCache, and running Docker containers.
-- Nightwing: SSH, Eve broker, Eve browser reference, visible TUI, Docker unit state, and NVIDIA GPU state.
-- EVE: SSH/native Eve reachability.
-- Periwinkle: ADB reachability.
-- Periwinkle: local ADB edge status plus any provider-owned surface or advertisement Odin receives through CultMesh/Odin discovery.
-- Raven: SSH reachability.
-- Yggdrasil: compatibility host reachability plus nginx,
-  StreamPixels, Heimdall, Repixelizer, and Bifrost systemd state until those
-  daemon surfaces publish health and command boundaries over CultNet RUDP.
+Odin's service records come from provider-owned presences and advertisements
+received through CultMesh/RUDP, not from host probes.
 
 Gjallar consumes Odin's accepted CultMesh/Eve state and composes every visible
 provider surface into one typed aggregate on Yggdrasil. EveCanvas, browser, and
@@ -250,8 +226,8 @@ interactive language; they are not separate dashboard products. Huginn's `.cc`
 inspection surface is the current clean example: Huginn inspects CultCache bytes
 and emits Eve DSL, while Eve or any other runtime owns presentation.
 
-Provider advertisements are the promotion path out of probing. Odin's CJS
-document set already accepts `gamecult.eve.provider_advertisement.v1` alongside
+Provider advertisements are the promotion path out of probing. Odin's document
+registry already accepts `gamecult.eve.provider_advertisement.v1` alongside
 `gamecult.eve.interface_binding.v1` and `gamecult.eve.surface_state.v1`.
 Daemons should publish advertisements that name service id, Verse id, schema
 catalog, `.cc` witnesses, Eve surface keys, command boundaries, nested Verses,
@@ -289,18 +265,6 @@ identity.
 
 The canonical contract lives in
 `E:\Projects\Eve\docs\provider-advertisement-contract.md`.
-
-Odin persists operator layout intent as `odin.interface_layout.v1` in the Odin CultMesh store under record key `odin.providers`. The ignored `scratch/odin/interface-layout.json` file is migration input only; Odin no longer writes layout truth back to that sidecar. Layout intents name the provider id and request focus, move, resize, or visibility changes; renderers are input devices for those intents, not local layout owners.
-
-Odin now derives dense top-level layout intent from each provider's retained
-`surface.root` tree: element count, leaf count, branch count, depth, text-cell
-pressure, and list-like branches. Provider explicit preferred sizes are capped
-at the Odin wrapper boundary unless the current intent is fullscreen, so stale
-layout files cannot keep empty panels huge. The renderer should use
-`props.tree`, `props.layout.signalWeight`, and `props.packing` to allocate space
-to nested signal, then recursively lower provider children. Flattening a
-provider surface into one log/list is a compatibility failure when the retained
-tree has children.
 
 ## Observation Surface
 
