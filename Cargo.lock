@@ -591,7 +591,6 @@ dependencies = [
  "cultmesh-rs",
  "cultnet-rs",
  "pretty_assertions",
- "rmp-serde",
  "serde",
  "serde_json",
  "tempfile",

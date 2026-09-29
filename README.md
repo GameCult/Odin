@@ -70,75 +70,47 @@ Local package surfaces:
 
 ## Idunn
 
-Idunn is Odin's keepalive organ: the daemon package that should keep the known
-swarm alive after Odin has accepted where each daemon lives and what authority
-path may touch it. Individual daemons publish health and command boundaries;
-Idunn brings them up after reboots or crashes, watches health, and escalates
-operator-needed failures through Bifrost's CultMesh bridge. VoidBot owner-DM
-delivery is a demoted compatibility actuator, not the owner; the command belongs
-in Bifrost's Verse. Odin sees the daemons; Idunn keeps the apples from rotting.
-Agents do not deploy daemons directly. They configure Idunn's target catalog,
-release targets, migration commands, and command boundaries so Idunn can run
-the shared rollout primitive and leave typed witnesses behind.
-
-Deployment consequence has one final owner: immediately before every migration,
-deploy, or restart process spawn, Idunn re-opens the root-owned deployment-brake
-CultCache and the dedicated operator public anchor. A released record must bind
-the canonical runtime (`yggdrasil` for `yggdrasil-local`), exact source revision
-(or `restart:<daemon>`), exact request id, operator, signature, and short expiry.
-Missing, corrupt, engaged, expired, foreign, wrong-scope, substituted, or
-badly-signed state fails closed. Planning and lifecycle-command publication do
-not bypass or cache this decision. The store and its sibling `.lock` live in
-`/var/lib/gamecult/idunn-authority`, a root-owned `root:idunn` `0750` directory;
-both files are `root:idunn` `0640`, and the daemon's systemd sandbox exposes the
-directory read-only. Idunn holds the lock shared from its final snapshot read
-through process spawn, so an engage cannot be defeated by previously captured
-released bytes. A release is not one-shot: its exact request/revision grant
-covers each migration and deploy spawn in that rollout until its short expiry;
-every spawn independently reopens and validates the same grant.
+Idunn (`GameCult/Idunn`) owns deployment and daemon survival for every GameCult
+target, Odin included: it builds from the target's recipe, activates and
+restarts the admitted incarnation, and holds the deployment and lifecycle
+brakes. Odin owns none of that. Odin does discovery, schema awareness,
+rendezvous, and interface aggregation, and it reads Idunn's topology projection
+to learn which incarnations exist. Agents do not deploy daemons directly: they
+configure the target's recipe and binding and let Idunn run the transaction.
 
 Local package surfaces:
 
-- Organ contract: `docs/idunn.md`
-- User README: `src/Idunn/README.md`
-- Rust daemon crate: `crates/idunn-daemon`
-- Rust lifecycle logic: `crates/odin-core/src/idunn.rs`
-- Runtime store: `scratch/idunn/idunn.keepalive.cc`
-- Hosted VoidBot release: upstream `main` -> Yggdrasil-local Idunn -> the
-  root-owned `/srv/odin/deploy-manifests/voidbot` actuator. Local checkouts are
-  development and diagnostics only; do not create a local deployment.
-- Hosted Odin release: branch `codex/ygg-idunn-independent-bootstrap` plus the
-  exact CultLib commit in `deploy/cultlib.commit` -> one immutable
-  `/srv/odin/releases/<commit>` body -> `/srv/odin/current`. Odin signs its own
-  liveness to Idunn, while Idunn starts independently and owns later restart or
-  deployment actuation.
-- Operator escalation: Bifrost-owned CultMesh crossing; current compatibility
-  delivery calls `scripts\notify-idunn-operator-alarm.ps1`, which asks Bifrost
-  to publish a typed `gamecult.operator_dm_request.v1` CultMesh command document
-  only after Idunn raises an alarm
+- Deployment recipe: `deployment/idunn/recipe.toml`
+- Operator binding: `/etc/gamecult/idunn/bindings/odin.toml` on the host, not in
+  this repository
+- Live deployment and admission map: `state/map.yaml`
+- Idunn's contract, brakes, and runbooks: the `GameCult/Idunn` repository
 
 ## Authority Map
 
 - Owner: Odin owns the network-wide Verse registry, schema catalog index, translation map, and accepted provider catalog/proxy surfaces.
 - Inputs: CultMesh/CultNet peer announcements, schema catalog responses, daemon
-  health/provider publications over `cultnet.transport.rudp.v0`, local
-  Docker/ADB debug facts, and provider-owned Eve/CultUI surfaces.
+  health/provider publications over `cultnet.transport.rudp.v0`, Idunn's
+  read-only topology projection, and provider-owned Eve/CultUI surfaces.
 - Outputs: CultCache-backed Odin state, CultMesh documents, and CultNet
   schema/catalog messages. Browser, GUI, TUI, and framebuffer renderers lower
   those documents outside Odin instead of asking Odin to host web surfaces.
 - Derived state: Gjallar's aggregate surface is derived from Odin/provider state; Eve clients derive pixels from that aggregate.
 - Forbidden writers: renderers do not probe the network or decide Verse truth; individual projects do not maintain private incompatible discovery ledgers once Odin can see them.
 - Shared paths: human dashboards, worker schedulers, Verse bootstrap code, and compact TUI views consume the same registry and schema catalog.
-- Deletion line: old per-host coordinator scripts should be deleted or reduced to deployment wrappers that start Odin.
+- Not Odin's: process lifecycle, restart, deployment, and daemon survival belong to Idunn.
 
-## Run Locally On Starfire
+## Runtime Body
 
-```powershell
-.\scripts\start-odin.ps1 -IdunnRudpHealth $env:IDUNN_RUDP_HEALTH
-```
+Odin runs as `odin-daemon` under Idunn on Yggdrasil, built from
+`deployment/idunn/recipe.toml`. There is no local start script. The daemon:
 
-`-IdunnRudpHealth`, `ODIN_IDUNN_RUDP_HEALTH`, or `IDUNN_RUDP_HEALTH` must name
-the Idunn RUDP health endpoint. Odin does not assume a localhost health target.
+- reads Idunn's read-only projection to learn which incarnations of which
+  targets exist;
+- admits provider presences over RUDP for those incarnations and persists them
+  through CultMesh/CultCache;
+- publishes signed runtime-topology correlation records;
+- answers CultNet/RUDP snapshot and document requests on its route.
 
 Odin's native document catalog is addressed by CultMesh URI. Concrete RUDP
 bootstrap is configured behind CultMesh URI resolution by the operator or by
@@ -152,28 +124,9 @@ That URI accepts typed document publication and schema/catalog requests through
 the shared CultMesh runtime. Consumers that need Odin's accepted surface can
 still request the current CultNet snapshot after CultMesh resolves the transport.
 
-Legacy browser/deck lowerers must consume Odin's CultMesh state through their
-own lowering process. Odin no longer hosts browser-deck surfaces or publishes
-deck URLs as discovery seed material.
-
-State and logs live under ignored `scratch/odin/`.
-
-## Current First Body
-
-The first executable is deliberately narrow:
-
-- publishes provider catalog `odin.providers`;
-- persists the latest surface through local CultMesh/CultCache when `CultLib` packages are available at `E:\Projects\CultLib\packages`;
-- writes `scratch/odin/latest-surface.json` only when `--write-debug-surface-json` or `ODIN_WRITE_DEBUG_SURFACE_JSON=1` is explicitly supplied;
-- observes Starfire Docker and Periwinkle ADB as local debug/edge facts;
-- derives remote Verse presence from provider-owned CultMesh/CultNet
-  advertisements and interface records, not TCP/SSH/systemd probes.
-- publishes explicit `verse` and `service` nodes for compact Eve/CultUI lowerers.
-- ingests provider-owned Eve/CultUI dashboards, including `mimir.live.stats` and `voidbot.swarm`, and embeds them as Odin `interface` nodes;
-- accepts live `gamecult.eve.provider_advertisement.v1` announcements through Odin's CultMesh/RUDP rendezvous path so daemons can announce schemas, surfaces, commands, nested Verses, and style capabilities without Odin scraping private dashboards;
-- accepts explicit local debug imports only when `--interfaceBindingStore` / `ODIN_INTERFACE_BINDING_STORES` entries are written as `cultmesh-store:file://...` URIs; raw filesystem paths are not discovery configuration;
-- preserves provider semantic addresses such as `asgard.starfire.bifrost/eve/tui` and `asgard.starfire.bifrost/eve/gui`, with CultNet routes carried as transport metadata rather than identity;
-- persists operator tiling intent as `odin.interface_layout.v1` in the Odin CultMesh store; ignored `scratch/odin/interface-layout.json` is migration input only.
+Browser and deck lowerers consume Odin's CultMesh state through their own
+lowering process. Odin does not host browser-deck surfaces or publish deck URLs
+as discovery seed material.
 
 Provider advertisements and CultNet/RUDP transport profiles are the discovery
 path. External host probes, product health checks, port probes, and renderer
