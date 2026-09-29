@@ -10,28 +10,26 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result, anyhow, bail, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use chrono::{DateTime, Utc};
 use cultcache_rs::{
     CultCacheEnvelope, CultCacheExpectedEnvelope, DatabaseEntry, SingleFileMessagePackBackingStore,
 };
 use cultmesh_rs::{
-    CultMeshRudpDocumentPublishOptions, CultMeshRudpDocumentServer,
-    CultMeshRudpDocumentServerOptions, CultMeshRudpPollOutcome, CultMeshRudpRawDocumentReceipt,
-    CultMeshRudpRawDocumentSink, CultMeshRudpSnapshotQuery, CultMeshRudpSnapshotSource,
-    CultMeshSystemClock, publish_cultnet_message_to_rudp_catalog,
+    CultMeshRudpDocumentServer, CultMeshRudpDocumentServerOptions, CultMeshRudpPollOutcome,
+    CultMeshRudpRawDocumentReceipt, CultMeshRudpRawDocumentSink, CultMeshRudpSnapshotQuery,
+    CultMeshRudpSnapshotSource, CultMeshSystemClock,
 };
 use cultnet_rs::{
-    CultNetMessage, CultNetRawDocumentRecord, CultNetRawPayloadEncoding,
-    GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA, GameCultProviderHealthIdentity,
-    GameCultRuntimeCapability, GameCultRuntimePresenceHealthPurpose,
-    GameCultRuntimePresenceHealthRecord, IDUNN_EXPECTED_INCARNATION_SCHEMA,
-    IDUNN_PROCESS_WRITE_LEASE_SCHEMA, IDUNN_RUNTIME_ACTIVATION_CREDENTIAL_NAME,
-    IDUNN_RUNTIME_ACTIVATION_SCHEMA, IdunnExpectedIncarnationRecord, IdunnProcessWriteLeaseRecord,
-    IdunnRuntimeActivationRecord, IdunnRuntimeActivationSigner, IdunnServiceIdentity,
-    ODIN_RUNTIME_TOPOLOGY_CORRELATION_SCHEMA, OdinRuntimeTopologyCorrelationRecord,
-    OdinTopologyIdentity, ServiceIdentityProfile, ServiceIdentitySigner,
-    ServiceIdentityTrustAnchor, derive_service_identity_id,
+    CultNetRawDocumentRecord, CultNetRawPayloadEncoding, GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA,
+    GameCultProviderHealthIdentity, GameCultRuntimeCapability,
+    GameCultRuntimePresenceHealthPurpose, GameCultRuntimePresenceHealthRecord,
+    IDUNN_EXPECTED_INCARNATION_SCHEMA, IDUNN_PROCESS_WRITE_LEASE_SCHEMA,
+    IDUNN_RUNTIME_ACTIVATION_CREDENTIAL_NAME, IDUNN_RUNTIME_ACTIVATION_SCHEMA,
+    IdunnExpectedIncarnationRecord, IdunnProcessWriteLeaseRecord, IdunnRuntimeActivationRecord,
+    IdunnRuntimeActivationSigner, IdunnServiceIdentity, ODIN_RUNTIME_TOPOLOGY_CORRELATION_SCHEMA,
+    OdinRuntimeTopologyCorrelationRecord, OdinTopologyIdentity, ServiceIdentityProfile,
+    ServiceIdentitySigner, ServiceIdentityTrustAnchor, derive_service_identity_id,
     open_service_identity_credential_reader, verify_runtime_authority,
 };
 use fs2::FileExt;
@@ -65,7 +63,10 @@ const SYSTEMD_LISTEN_FDS_START: RawFd = 3;
 // candidate that never hears back is cleaned up by Idunn's own abort; this
 // only bounds how long it sits idle first.
 const BOOTSTRAP_LEASE_TIMEOUT: Duration = Duration::from_secs(300);
-const SELF_PUBLISH_TIMEOUT: Duration = Duration::from_secs(6);
+// How long the UDP socket may fail every poll before that is a dead socket
+// rather than a hiccup. Odin then ends and Idunn restarts it.
+const POLL_FAILURE_LIMIT: Duration = Duration::from_secs(30);
+const POLL_FAILURE_BACKOFF: Duration = Duration::from_millis(100);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 const PROJECTION_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(2);
@@ -269,22 +270,29 @@ impl RuntimeState {
         );
         validate_raw_document_shape(&receipt.document)?;
         if receipt.document.schema_id == GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA {
-            let presence = decode_presence(&receipt.document.payload)?;
-            ensure!(
-                receipt.document.record_key == presence.target,
-                "runtime-presence document key differs from its signed target"
-            );
-            self.topology
-                .as_ref()
-                .context("Odin topology authority is absent")?
-                .admit_presence(
-                    &presence.target,
-                    &receipt.document.payload,
-                    receipt.received_at_unix_millis,
-                )?;
-            return Ok(());
+            return self
+                .admit_presence_document(&receipt.document, receipt.received_at_unix_millis);
         }
         persist_generic_document(&self.options.store, &receipt.document)
+    }
+
+    /// The one admission path for a runtime-presence document, whether a
+    /// provider delivered it over RUDP or Odin signed it for itself.
+    fn admit_presence_document(
+        &self,
+        document: &CultNetRawDocumentRecord,
+        received_at_unix_millis: u64,
+    ) -> Result<()> {
+        let presence = decode_presence(&document.payload)?;
+        ensure!(
+            document.record_key == presence.target,
+            "runtime-presence document key differs from its signed target"
+        );
+        self.topology
+            .as_ref()
+            .context("Odin topology authority is absent")?
+            .admit_presence(&presence.target, &document.payload, received_at_unix_millis)?;
+        Ok(())
     }
 
     fn raw_snapshot(
@@ -403,18 +411,15 @@ impl RuntimeState {
         })
     }
 
-    fn active_document_put(&mut self, detail: &str) -> Result<CultNetMessage> {
+    /// Odin is the store, so its own heartbeat is admitted into the store
+    /// directly. It never crosses RUDP to itself, and so never takes one of the
+    /// server's bounded session slots from the providers it serves: a table
+    /// full of lingering publisher sessions cannot make Odin miss its own
+    /// liveness.
+    fn publish_self_presence(&mut self, detail: &str) -> Result<()> {
         self.require_current_write_lease()?;
         let document = self.signed_presence_document("active", detail)?;
-        let sequence = self.publisher_sequence;
-        Ok(CultNetMessage::DocumentPutRaw {
-            message_id: format!(
-                "odin-presence:{}:{}:{sequence}",
-                self.authority_material.expected.runtime_id,
-                self.authority_material.activation.runtime_instance_id
-            ),
-            document,
-        })
+        self.admit_presence_document(&document, unix_millis()?)
     }
 
     fn require_current_write_lease(&self) -> Result<()> {
@@ -423,11 +428,12 @@ impl RuntimeState {
             .as_ref()
             .context("Odin has no process-write lease")?;
         let current = read_process_write_lease(&self.write_lease_path)?
-            .context("Odin process-write lease was withdrawn")?;
-        ensure!(
-            current == held.record && current.canonical_sha256()? == held.sha256,
-            "Odin process-write lease changed after admission"
-        );
+            .ok_or_else(|| WriteLeaseLost("Odin process-write lease was withdrawn".into()))?;
+        if current != held.record || current.canonical_sha256()? != held.sha256 {
+            return Err(
+                WriteLeaseLost("Odin process-write lease changed after admission".into()).into(),
+            );
+        }
         Ok(())
     }
 
@@ -570,12 +576,13 @@ fn main() -> Result<()> {
     }
 
     let bootstrap_started = Instant::now();
+    let mut poll_failing_since = None;
     while !state.borrow_mut().try_activate()? {
         if stopping.load(Ordering::Relaxed) {
             eprintln!("Odin stopping before activation on request");
             return Ok(());
         }
-        let progressed = poll_server(&mut server)?;
+        let progressed = poll_server(&mut server, &mut poll_failing_since)?;
         ensure!(
             bootstrap_started.elapsed() < BOOTSTRAP_LEASE_TIMEOUT,
             "timed out waiting for Idunn to admit Odin's exact Warming proof and grant its lease"
@@ -589,87 +596,131 @@ fn main() -> Result<()> {
     // this contract's and would otherwise be served to the Verse as current.
     // Presence history is kept: the self publisher sequence continues from it.
     CultCacheOdinTopologyStore::new(&state.borrow().options.store).retire_legacy_correlations()?;
-    publish_self_presence(&state, &mut server, "ready")?;
-    state.borrow_mut().refresh_all_correlations()?;
-    let mut last_heartbeat = Instant::now();
-    let mut last_projection_refresh = Instant::now();
+    // Once serving, only losing the write lease ends Odin (see `survive`).
+    let mut timers = ServingTimers::default();
     loop {
         if stopping.load(Ordering::Relaxed) {
             eprintln!("Odin stopping on request");
             return Ok(());
         }
-        let progressed = poll_server(&mut server)?;
-        if last_projection_refresh.elapsed() >= PROJECTION_REFRESH_INTERVAL {
-            state.borrow_mut().refresh_all_correlations()?;
-            last_projection_refresh = Instant::now();
-        }
-        if last_heartbeat.elapsed() >= HEARTBEAT_INTERVAL {
-            publish_self_presence(&state, &mut server, "ready")?;
-            last_heartbeat = Instant::now();
-        }
-        if !progressed {
+        if !serving_pass(&state, &mut server, &mut timers)? {
             thread::sleep(IDLE_POLL_INTERVAL);
         }
     }
 }
 
-fn publish_self_presence(
+/// A timer that has never fired is due, so the first pass refreshes and
+/// publishes.
+#[derive(Default)]
+struct ServingTimers {
+    last_heartbeat: Option<Instant>,
+    last_projection_refresh: Option<Instant>,
+    poll_failing_since: Option<Instant>,
+}
+
+type OdinServer = CultMeshRudpDocumentServer<SinkHandle, SnapshotHandle, CultMeshSystemClock>;
+
+/// One turn of the serving loop: serve a datagram, refresh the topology, and
+/// publish Odin's own presence when each is due. Returns whether the poll made
+/// progress. It fails only for `WriteLeaseLost` or a dead socket.
+fn serving_pass(
     state: &Rc<RefCell<RuntimeState>>,
-    server: &mut CultMeshRudpDocumentServer<SinkHandle, SnapshotHandle, CultMeshSystemClock>,
-    detail: &str,
-) -> Result<()> {
-    let (message, options) = {
-        let mut state = state.borrow_mut();
-        let message = state.active_document_put(detail)?;
-        let mut options = CultMeshRudpDocumentPublishOptions::odin(
-            state.candidate,
-            state.authority_material.expected.runtime_id.clone(),
-        );
-        options.connect_timeout = Duration::from_secs(2);
-        options.flush_timeout = Duration::from_secs(2);
-        options.source_agent_id = Some(
-            state
-                .authority_material
-                .provider_signer
-                .entry()
-                .identity_id
-                .clone(),
-        );
-        options.source_role = Some("runtime-presence-health-publisher".into());
-        options.tags = vec!["cultnet.transport.rudp.v0".into()];
-        (message, options)
-    };
-    let publisher =
-        thread::spawn(move || publish_cultnet_message_to_rudp_catalog(&message, options));
-    let started = Instant::now();
-    while !publisher.is_finished() {
-        let progressed = poll_server(server)?;
-        ensure!(
-            started.elapsed() < SELF_PUBLISH_TIMEOUT,
-            "Odin self-presence publication did not complete"
-        );
-        if !progressed {
-            thread::sleep(IDLE_POLL_INTERVAL);
-        }
+    server: &mut OdinServer,
+    timers: &mut ServingTimers,
+) -> Result<bool> {
+    let progressed = poll_server(server, &mut timers.poll_failing_since)?;
+    if is_due(timers.last_projection_refresh, PROJECTION_REFRESH_INTERVAL) {
+        survive(
+            "projection refresh",
+            state.borrow_mut().refresh_all_correlations(),
+        )?;
+        timers.last_projection_refresh = Some(Instant::now());
     }
-    publisher
-        .join()
-        .map_err(|_| anyhow!("Odin self-presence publisher panicked"))??;
-    Ok(())
+    if is_due(timers.last_heartbeat, HEARTBEAT_INTERVAL) {
+        survive(
+            "self-presence publication",
+            state.borrow_mut().publish_self_presence("ready"),
+        )?;
+        timers.last_heartbeat = Some(Instant::now());
+    }
+    Ok(progressed)
 }
 
-fn poll_server(
-    server: &mut CultMeshRudpDocumentServer<SinkHandle, SnapshotHandle, CultMeshSystemClock>,
+fn is_due(last: Option<Instant>, interval: Duration) -> bool {
+    last.is_none_or(|last| last.elapsed() >= interval)
+}
+
+/// Odin held its process-write lease and no longer does: another incarnation
+/// has been granted the state, or Idunn withdrew the grant. Serving on would be
+/// a second writer, so this is the one serving-loop condition that ends Odin.
+#[derive(Debug)]
+struct WriteLeaseLost(String);
+
+impl std::fmt::Display for WriteLeaseLost {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for WriteLeaseLost {}
+
+/// The serving loop's failure policy. Odin's liveness is Odin's own: a failed
+/// refresh, publication or read is logged and retried on the next pass, never
+/// allowed to end the daemon. Only `WriteLeaseLost`, wherever in the error chain
+/// it sits, is returned.
+fn survive<T>(what: &str, result: Result<T>) -> Result<Option<T>> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if error.downcast_ref::<WriteLeaseLost>().is_some() => Err(error),
+        Err(error) => {
+            eprintln!("Odin {what} failed; retrying on the next pass: {error:#}");
+            Ok(None)
+        }
+    }
+}
+
+fn poll_server(server: &mut OdinServer, failing_since: &mut Option<Instant>) -> Result<bool> {
+    settle_poll(server.poll_once(), failing_since, Instant::now())
+}
+
+/// A failed poll is logged and retried. The socket failing every poll for
+/// `POLL_FAILURE_LIMIT` is a dead socket, not a transient one; only then does
+/// Odin end, so Idunn restarts it. Any successful poll clears the failure run.
+fn settle_poll(
+    result: Result<CultMeshRudpPollOutcome>,
+    failing_since: &mut Option<Instant>,
+    now: Instant,
 ) -> Result<bool> {
-    match server.poll_once()? {
-        CultMeshRudpPollOutcome::Idle => Ok(false),
-        CultMeshRudpPollOutcome::Handled => Ok(true),
+    match result {
+        Ok(outcome) => {
+            *failing_since = None;
+            Ok(progress_of(outcome))
+        }
+        Err(error) => {
+            let since = *failing_since.get_or_insert(now);
+            ensure!(
+                now.duration_since(since) < POLL_FAILURE_LIMIT,
+                "Odin's RUDP socket has failed every poll for {POLL_FAILURE_LIMIT:?}: {error:#}"
+            );
+            eprintln!("Odin RUDP poll failed; retrying: {error:#}");
+            thread::sleep(POLL_FAILURE_BACKOFF);
+            Ok(false)
+        }
+    }
+}
+
+/// An application rejection ends only the offending peer's session, which the
+/// server has already done. It is logged and never ends Odin.
+fn progress_of(outcome: CultMeshRudpPollOutcome) -> bool {
+    match outcome {
+        CultMeshRudpPollOutcome::Idle => false,
+        CultMeshRudpPollOutcome::Handled => true,
         CultMeshRudpPollOutcome::ApplicationRejected(rejection) => {
             eprintln!(
                 "Odin rejected CultMesh RUDP application message {:?} {} from {:?}: {}",
                 rejection.operation, rejection.message_id, rejection.session, rejection.reason
             );
-            Ok(true)
+            true
         }
     }
 }
@@ -1229,6 +1280,14 @@ fn rfc3339_millis(value: u64) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+    use cultnet_rs::{
+        CultNetMessage, CultNetRudpReliableSendStatus, CultNetRudpSocketTransportConnection,
+        CultNetRudpSocketTransportOptions, CultNetWireContract,
+        GAMECULT_RUNTIME_PRESENCE_HEALTH_SIGNING_PURPOSE, GAMECULT_SERVICE_TRUST_ANCHOR_SCHEMA,
+        GameCultServiceTrustAnchorRecord, IdunnExpectedCapability, IdunnExpectedRoute,
+        IdunnRuntimeActivationLaunch, encode_cultnet_message_to_vec, enroll_service_identity_at,
+    };
+
     use super::*;
 
     #[test]
@@ -1336,5 +1395,453 @@ mod tests {
         assert_eq!(proofs.len(), MAX_RECENT_WARMING_PROOFS);
         assert_eq!(proofs.back().unwrap().0, "warming-64");
         assert!(!proofs.iter().any(|(proof, _)| proof == "warming-one"));
+    }
+
+    // ---- serving-loop liveness -------------------------------------------
+
+    fn digest(byte: char) -> String {
+        format!("sha256-{}", byte.to_string().repeat(64))
+    }
+
+    /// Odin as Idunn admits it: a real activation, provider anchor, write
+    /// lease and projection on disk, `try_activate` run for real, and the
+    /// production RUDP server bound to the candidate socket the Expected names.
+    struct OdinWorld {
+        _temp: tempfile::TempDir,
+        state: Rc<RefCell<RuntimeState>>,
+        server: OdinServer,
+        timers: ServingTimers,
+        store: PathBuf,
+        lease_path: PathBuf,
+        provider_identity_id: String,
+        lease: IdunnProcessWriteLeaseRecord,
+    }
+
+    fn write_single_record(path: &Path, envelope: CultCacheEnvelope) -> Result<()> {
+        let store = SingleFileMessagePackBackingStore::new(path);
+        let current = if path.is_file() {
+            store.pull_all_read_only_snapshot()?
+        } else {
+            Vec::new()
+        };
+        ensure!(
+            store.compare_exchange_snapshot(&current, &[envelope])?,
+            "test store CAS failed"
+        );
+        Ok(())
+    }
+
+    fn lease_envelope(lease: &IdunnProcessWriteLeaseRecord) -> Result<CultCacheEnvelope> {
+        Ok(CultCacheEnvelope {
+            key: lease.target.clone(),
+            r#type: IdunnProcessWriteLeaseRecord::TYPE.into(),
+            payload: lease.canonical_bytes()?,
+            stored_at: rfc3339_millis(lease.issued_at_unix_millis)?,
+            schema_id: Some(IDUNN_PROCESS_WRITE_LEASE_SCHEMA.into()),
+        })
+    }
+
+    fn activated_odin() -> Result<OdinWorld> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        let socket = UdpSocket::bind("127.0.0.1:0")?;
+        let candidate = socket.local_addr()?;
+        let now = unix_millis()?;
+        let idunn_signer =
+            enroll_service_identity_at::<IdunnServiceIdentity>(&root.join("idunn.cc"))?;
+        let idunn_anchor = idunn_signer.trust_anchor()?;
+        let odin_signer =
+            enroll_service_identity_at::<OdinTopologyIdentity>(&root.join("odin-topology.cc"))?;
+        let provider_signer = enroll_service_identity_at::<GameCultProviderHealthIdentity>(
+            &root.join("odin-provider.cc"),
+        )?;
+        let expected = IdunnExpectedIncarnationRecord {
+            schema_version: IDUNN_EXPECTED_INCARNATION_SCHEMA.into(),
+            target: TARGET.into(),
+            plan_id: digest('1'),
+            incarnation_id: "odin/generation-1".into(),
+            sealed_release_id: digest('2'),
+            source_repository: "github.com/GameCult/Odin".into(),
+            source_revision: "3".repeat(40),
+            recipe_sha256: digest('4'),
+            runtime_id: "odin-runtime".into(),
+            expected_signer_identity_id: provider_signer.entry().identity_id.clone(),
+            health_contract: HEALTH_CONTRACT.into(),
+            artifact_sha256: digest('5'),
+            state_schema_generation: Some(STATE_SCHEMA_GENERATION.into()),
+            state_contract_sha256: Some(STATE_CONTRACT_SHA256.into()),
+            write_lease_required: true,
+            route: Some(IdunnExpectedRoute {
+                route_id: "odin-route".into(),
+                transport: "rudp".into(),
+                stable_endpoint: "rudp://odin.internal:1000".into(),
+                candidate_endpoint: format!("rudp://{candidate}"),
+            }),
+            capabilities: vec![IdunnExpectedCapability {
+                capability: RENDEZVOUS_CAPABILITY.into(),
+                schema: RENDEZVOUS_SCHEMA.into(),
+                compatibility: RENDEZVOUS_COMPATIBILITY.into(),
+                minimum_capacity: 1,
+            }],
+            dependencies: Vec::new(),
+        };
+        expected.validate()?;
+        require_expected_contract(&expected, candidate)?;
+        let launch =
+            IdunnRuntimeActivationLaunch::issue(&expected, digest('7'), now - 20, &idunn_signer)?;
+        let activation = launch.activation().clone();
+        let mut credential = Vec::new();
+        launch.write_credential(&mut credential)?;
+        let activation_signer =
+            IdunnRuntimeActivationSigner::from_credential_reader(credential.as_slice())?;
+        let provider_anchor = GameCultServiceTrustAnchorRecord {
+            schema_version: GAMECULT_SERVICE_TRUST_ANCHOR_SCHEMA.into(),
+            trust_anchor_id: format!("root/{TARGET}/runtime-presence"),
+            service_id: TARGET.into(),
+            runtime_id: expected.runtime_id.clone(),
+            signer_identity_id: provider_signer.entry().identity_id.clone(),
+            signer_public_key: provider_signer.entry().public_key.clone(),
+            signature_algorithm: "ed25519".into(),
+            signing_purpose: GAMECULT_RUNTIME_PRESENCE_HEALTH_SIGNING_PURPOSE.into(),
+            signed_schema: GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA.into(),
+            binding_authority: "root".into(),
+            bound_at_unix_millis: now - 100,
+            expires_at_unix_millis: None,
+            private_state_exposed: false,
+        };
+        let provider_identity_id = provider_signer.entry().identity_id.clone();
+        let expected_sha256 = expected.canonical_sha256()?;
+        let authority_material = RuntimeAuthority {
+            activation_sha256: activation.canonical_sha256()?,
+            expected_sha256: expected_sha256.clone(),
+            expected: expected.clone(),
+            activation: activation.clone(),
+            activation_signer,
+            provider_signer,
+        };
+        let store = root.join(TOPOLOGY_SLOT);
+        let projection_path = root.join("idunn-projection.cc");
+        let lease_path = root.join("process-write-lease.cc");
+        let mut runtime = RuntimeState {
+            options: Options {
+                store: store.clone(),
+                idunn_projection: projection_path.clone(),
+                idunn_anchor: root.join("unused-idunn-anchor.cc"),
+            },
+            candidate,
+            authority_material,
+            idunn_anchor: Some(idunn_anchor),
+            topology_signer: Some(odin_signer),
+            topology: None,
+            write_lease: None,
+            write_lease_path: lease_path.clone(),
+            recent_warming_proofs: VecDeque::new(),
+            publisher_sequence: 0,
+        };
+
+        // The lease names the Warming presence Odin signed for Idunn's probe.
+        let warming = runtime.signed_presence_document("warming", "test warming")?;
+        let lease = IdunnProcessWriteLeaseRecord {
+            schema_version: IDUNN_PROCESS_WRITE_LEASE_SCHEMA.into(),
+            target: TARGET.into(),
+            expected_projection_sha256: expected_sha256,
+            plan_id: expected.plan_id.clone(),
+            incarnation_id: expected.incarnation_id.clone(),
+            sealed_release_id: expected.sealed_release_id.clone(),
+            activation_witness_sha256: activation.canonical_sha256()?,
+            state_schema_generation: STATE_SCHEMA_GENERATION.into(),
+            state_contract_sha256: STATE_CONTRACT_SHA256.into(),
+            runtime_id: expected.runtime_id.clone(),
+            runtime_instance_id: activation.runtime_instance_id.clone(),
+            warming_presence_sha256: decode_presence(&warming.payload)?.canonical_sha256()?,
+            lease_epoch: 1,
+            issued_at_unix_millis: now - 5,
+        };
+        write_single_record(&lease_path, lease_envelope(&lease)?)?;
+        File::create(sibling_lock_path(&lease_path)?)?;
+
+        let incarnation_key = IncarnationRef::of(&expected)?.key();
+        let mut projected_lease = lease_envelope(&lease)?;
+        projected_lease.key = incarnation_key.clone();
+        let projection = vec![
+            CultCacheEnvelope {
+                key: incarnation_key.clone(),
+                r#type: IdunnExpectedIncarnationRecord::TYPE.into(),
+                payload: expected.canonical_bytes()?,
+                stored_at: rfc3339_millis(now - 30)?,
+                schema_id: Some(IDUNN_EXPECTED_INCARNATION_SCHEMA.into()),
+            },
+            CultCacheEnvelope {
+                key: provider_anchor.trust_anchor_id.clone(),
+                r#type: GameCultServiceTrustAnchorRecord::TYPE.into(),
+                payload: rmp_serde::to_vec(&provider_anchor)?,
+                stored_at: rfc3339_millis(provider_anchor.bound_at_unix_millis)?,
+                schema_id: Some(GAMECULT_SERVICE_TRUST_ANCHOR_SCHEMA.into()),
+            },
+            CultCacheEnvelope {
+                key: incarnation_key,
+                r#type: IdunnRuntimeActivationRecord::TYPE.into(),
+                payload: activation.canonical_bytes()?,
+                stored_at: rfc3339_millis(activation.issued_at_unix_millis)?,
+                schema_id: Some(IDUNN_RUNTIME_ACTIVATION_SCHEMA.into()),
+            },
+            projected_lease,
+        ];
+        ensure!(
+            SingleFileMessagePackBackingStore::new(&projection_path)
+                .compare_exchange_snapshot(&[], &projection)?,
+            "test projection CAS failed"
+        );
+
+        ensure!(
+            runtime.try_activate()?,
+            "Odin did not activate in the fixture"
+        );
+        let state = Rc::new(RefCell::new(runtime));
+        let server = CultMeshRudpDocumentServer::new(
+            socket,
+            SinkHandle(state.clone()),
+            SnapshotHandle(state.clone()),
+            CultMeshSystemClock::default(),
+            CultMeshRudpDocumentServerOptions::default(),
+        )?;
+        Ok(OdinWorld {
+            _temp: temp,
+            state,
+            server,
+            timers: ServingTimers::default(),
+            store,
+            lease_path,
+            provider_identity_id,
+            lease,
+        })
+    }
+
+    impl OdinWorld {
+        fn pass(&mut self) -> Result<bool> {
+            serving_pass(&self.state, &mut self.server, &mut self.timers)
+        }
+
+        /// Odin's own publisher sequence as it is durably stored.
+        fn stored_sequence(&self) -> Result<u64> {
+            prior_self_publisher_sequence(&self.store, &self.provider_identity_id)
+        }
+
+        /// Run a peer on its own thread while Odin serves. Every pass Odin
+        /// takes meanwhile must succeed.
+        fn serve_while<T: Send + 'static>(
+            &mut self,
+            peer: impl FnOnce() -> T + Send + 'static,
+        ) -> Result<T> {
+            let peer = thread::spawn(peer);
+            while !peer.is_finished() {
+                if !self.pass()? {
+                    thread::sleep(IDLE_POLL_INTERVAL);
+                }
+            }
+            Ok(peer.join().expect("peer thread panicked"))
+        }
+    }
+
+    const PEER_CONNECTION_BASE: u32 = 0x7000_0000;
+
+    /// A publisher the way Ghostlight and CodexConnector behave: connect,
+    /// optionally put one message, never Disconnect.
+    fn lingering_peer(
+        target: SocketAddr,
+        connection_id: u32,
+        message: Option<CultNetMessage>,
+    ) -> Result<()> {
+        let socket = UdpSocket::bind("127.0.0.1:0")?;
+        socket.set_read_timeout(Some(Duration::from_millis(100)))?;
+        let mut transport = CultNetRudpSocketTransportConnection::new(
+            CultNetRudpSocketTransportOptions::client("test-peer", socket, target, connection_id),
+        )?;
+        transport.connect(Vec::new())?;
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while !transport.connected() {
+            let _ = transport.receive_once()?;
+            transport.poll_resends()?;
+            ensure!(Instant::now() < deadline, "timed out connecting");
+        }
+        if let Some(message) = message {
+            let receipt = transport.send_reliable(
+                "schema",
+                encode_cultnet_message_to_vec(&message, CultNetWireContract::CultNetSchemaV0)?,
+            )?;
+            let deadline = Instant::now() + Duration::from_millis(1500);
+            while transport.reliable_send_status(&receipt) == CultNetRudpReliableSendStatus::Pending
+                && Instant::now() < deadline
+            {
+                let _ = transport.receive_once()?;
+                transport.poll_resends()?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Soul's 70-lingering-session probe: with the server's session table
+    /// full of publishers that never Disconnect, Odin's own heartbeat still
+    /// lands. The table is Odin's own production server bound to the candidate
+    /// socket, so a self-publication that went over RUDP would find it full.
+    #[test]
+    fn self_presence_lands_while_lingering_publishers_hold_every_session() -> Result<()> {
+        let mut odin = activated_odin()?;
+        let target = odin.server.local_addr()?;
+        let admitted = odin.serve_while(move || {
+            (0..70)
+                .filter(|index| lingering_peer(target, PEER_CONNECTION_BASE + index, None).is_ok())
+                .count()
+        })?;
+        assert_eq!(admitted, 64, "the default session table is 64 wide");
+        assert_eq!(odin.server.session_count(), 64, "the table is full");
+
+        let before = odin.stored_sequence()?;
+        for _ in 0..5 {
+            odin.timers.last_heartbeat = None;
+            odin.pass()?;
+        }
+        assert_eq!(
+            odin.stored_sequence()?,
+            before + 5,
+            "each heartbeat is admitted into Odin's store"
+        );
+        assert_eq!(odin.server.session_count(), 64);
+        Ok(())
+    }
+
+    /// A publication or refresh that fails is logged and retried; it never
+    /// ends Odin, and the next attempt lands once the fault clears.
+    #[test]
+    fn a_failed_self_publication_or_refresh_does_not_end_odin() -> Result<()> {
+        let mut odin = activated_odin()?;
+        odin.pass()?;
+        assert!(odin.stored_sequence()? > 0, "the first pass publishes");
+
+        std::fs::write(&odin.store, b"not a cultcache store")?;
+        assert!(
+            odin.state
+                .borrow_mut()
+                .publish_self_presence("probe")
+                .is_err(),
+            "the injected fault must actually fail the publication"
+        );
+        odin.timers = ServingTimers::default();
+        odin.pass()?;
+
+        std::fs::remove_file(&odin.store)?;
+        odin.timers = ServingTimers::default();
+        odin.pass()?;
+        assert!(
+            odin.stored_sequence()? > 0,
+            "the publication after the fault clears lands"
+        );
+        Ok(())
+    }
+
+    /// Losing the write lease is the one condition that ends the serving loop.
+    #[test]
+    fn losing_the_write_lease_ends_odin() -> Result<()> {
+        let mut odin = activated_odin()?;
+        odin.pass()?;
+
+        let mut replaced = odin.lease.clone();
+        replaced.lease_epoch += 1;
+        // Odin holds a shared lock on the lease's lifetime lock, which is what
+        // stops Idunn from writing the lease under it; the test swaps the file
+        // underneath instead.
+        let scratch = odin.lease_path.with_file_name("replacement-lease.cc");
+        write_single_record(&scratch, lease_envelope(&replaced)?)?;
+        std::fs::copy(&scratch, &odin.lease_path)?;
+        odin.timers = ServingTimers::default();
+        let error = odin.pass().unwrap_err();
+        assert!(
+            error.downcast_ref::<WriteLeaseLost>().is_some(),
+            "{error:#}"
+        );
+
+        std::fs::remove_file(&odin.lease_path)?;
+        odin.timers = ServingTimers::default();
+        let error = odin.pass().unwrap_err();
+        assert!(
+            error.downcast_ref::<WriteLeaseLost>().is_some(),
+            "{error:#}"
+        );
+        Ok(())
+    }
+
+    /// An application rejection ends only the offending peer's session, and a
+    /// stray datagram is dropped; neither ends Odin's serving loop.
+    #[test]
+    fn an_application_rejection_or_a_stray_packet_does_not_end_odin() -> Result<()> {
+        let mut odin = activated_odin()?;
+        let target = odin.server.local_addr()?;
+        let not_a_presence = CultNetMessage::DocumentPutRaw {
+            message_id: "rejected".into(),
+            document: CultNetRawDocumentRecord {
+                schema_id: GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA.into(),
+                record_key: "ghostlight".into(),
+                stored_at: rfc3339_millis(unix_millis()?)?,
+                payload_encoding: CultNetRawPayloadEncoding::Messagepack,
+                payload: vec![0xc1],
+                source_runtime_id: None,
+                source_agent_id: None,
+                source_role: None,
+                tags: None,
+            },
+        };
+        odin.serve_while(move || {
+            lingering_peer(target, PEER_CONNECTION_BASE, Some(not_a_presence))
+        })??;
+        assert_eq!(
+            odin.server.session_count(),
+            0,
+            "the rejection ended the offending session"
+        );
+
+        UdpSocket::bind("127.0.0.1:0")?.send_to(b"junk", target)?;
+        for _ in 0..50 {
+            odin.pass()?;
+            thread::sleep(IDLE_POLL_INTERVAL);
+        }
+        assert!(odin.server.packets_dropped() >= 1);
+
+        odin.serve_while(move || lingering_peer(target, PEER_CONNECTION_BASE + 1, None))??;
+        assert_eq!(odin.server.session_count(), 1, "Odin still admits peers");
+        Ok(())
+    }
+
+    #[test]
+    fn only_the_write_lease_is_fatal_in_the_serving_loop() {
+        assert_eq!(survive("x", Ok(3)).unwrap(), Some(3));
+        assert_eq!(
+            survive::<()>("x", Err(anyhow::anyhow!("io"))).unwrap(),
+            None
+        );
+        let lost = anyhow::Error::new(WriteLeaseLost("gone".into())).context("refreshing");
+        assert!(survive::<()>("x", Err(lost)).is_err());
+    }
+
+    #[test]
+    fn a_failing_socket_is_retried_and_ends_odin_only_after_the_failure_limit() {
+        let start = Instant::now();
+        let mut since = None;
+        let fault = || Err(anyhow::anyhow!("socket fault"));
+        assert!(!settle_poll(fault(), &mut since, start).unwrap());
+        assert_eq!(since, Some(start));
+        assert!(
+            !settle_poll(
+                fault(),
+                &mut since,
+                start + POLL_FAILURE_LIMIT - Duration::from_millis(1)
+            )
+            .unwrap()
+        );
+        // A successful poll ends the run, so the same fault starts a new one.
+        assert!(settle_poll(Ok(CultMeshRudpPollOutcome::Handled), &mut since, start).unwrap());
+        assert_eq!(since, None);
+        let restart = start + POLL_FAILURE_LIMIT;
+        assert!(!settle_poll(fault(), &mut since, restart).unwrap());
+        assert!(settle_poll(fault(), &mut since, restart + POLL_FAILURE_LIMIT).is_err());
     }
 }
