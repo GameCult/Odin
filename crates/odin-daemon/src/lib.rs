@@ -195,23 +195,10 @@ impl CultCacheIdunnProjectionSource {
 
 impl IdunnProjectionSource for CultCacheIdunnProjectionSource {
     fn projections(&self, target: &str) -> Result<Vec<IdunnRuntimeProjection>> {
-        if !self.path.is_file() {
+        let Some(entries) = self.entries()? else {
             return Ok(Vec::new());
-        }
-        let entries =
-            SingleFileMessagePackBackingStore::new(&self.path).pull_all_read_only_snapshot()?;
-        let anchor_envelope = unique_envelope(
-            &entries,
-            GameCultServiceTrustAnchorRecord::TYPE,
-            &runtime_presence_anchor_id(target),
-        )?;
-        let provider_anchor: Option<GameCultServiceTrustAnchorRecord> = anchor_envelope
-            .map(|envelope| {
-                ensure_schema(envelope, GAMECULT_SERVICE_TRUST_ANCHOR_SCHEMA)?;
-                decode_canonical(&envelope.payload, "provider trust anchor")
-            })
-            .transpose()?;
-
+        };
+        let anchor = provider_anchor(&entries, target)?;
         // A record keyed by anything but its own incarnation key is not this
         // contract's. That includes the target-keyed single slot the previous
         // projection used; an Idunn still writing that shape projects nothing
@@ -227,38 +214,99 @@ impl IdunnProjectionSource for CultCacheIdunnProjectionSource {
             if incarnation.target != target {
                 continue;
             }
-            ensure_schema(envelope, IDUNN_EXPECTED_INCARNATION_SCHEMA)?;
-            let expected = IdunnExpectedIncarnationRecord::decode_canonical(&envelope.payload)?;
-            ensure!(
-                IncarnationRef::of(&expected)? == incarnation,
-                "Expected projection key is substituted"
-            );
-            let key = incarnation.key();
-            let activation = unique_envelope(&entries, IdunnRuntimeActivationRecord::TYPE, &key)?
-                .map(|envelope| {
-                    ensure_schema(envelope, IDUNN_RUNTIME_ACTIVATION_SCHEMA)?;
-                    IdunnRuntimeActivationRecord::decode_canonical(&envelope.payload)
-                })
-                .transpose()?;
-            let current_lease =
-                unique_envelope(&entries, IdunnProcessWriteLeaseRecord::TYPE, &key)?
-                    .map(|envelope| {
-                        ensure_schema(envelope, IDUNN_PROCESS_WRITE_LEASE_SCHEMA)?;
-                        IdunnProcessWriteLeaseRecord::decode_canonical(&envelope.payload)
-                    })
-                    .transpose()?;
-            let projection = IdunnRuntimeProjection {
-                expected,
-                provider_anchor: provider_anchor.clone(),
-                activation,
-                current_lease,
-            };
-            projection.validate()?;
-            projections.push(projection);
+            projections.push(assemble_projection(
+                &entries,
+                anchor.clone(),
+                envelope,
+                &incarnation,
+            )?);
         }
         projections.sort_by_key(|projection| projection.expected.incarnation_id.clone());
         Ok(projections)
     }
+
+    /// Only the named incarnation's own records are decoded: an undecodable
+    /// record under another incarnation's key is that incarnation's fault, and
+    /// never makes this one unreadable.
+    fn projection(&self, incarnation: &IncarnationRef) -> Result<Option<IdunnRuntimeProjection>> {
+        let Some(entries) = self.entries()? else {
+            return Ok(None);
+        };
+        let Some(envelope) = unique_envelope(
+            &entries,
+            IdunnExpectedIncarnationRecord::TYPE,
+            &incarnation.key(),
+        )?
+        else {
+            return Ok(None);
+        };
+        let anchor = provider_anchor(&entries, &incarnation.target)?;
+        assemble_projection(&entries, anchor, envelope, incarnation).map(Some)
+    }
+}
+
+impl CultCacheIdunnProjectionSource {
+    fn entries(&self) -> Result<Option<Vec<CultCacheEnvelope>>> {
+        if !self.path.is_file() {
+            return Ok(None);
+        }
+        Ok(Some(
+            SingleFileMessagePackBackingStore::new(&self.path).pull_all_read_only_snapshot()?,
+        ))
+    }
+}
+
+fn provider_anchor(
+    entries: &[CultCacheEnvelope],
+    target: &str,
+) -> Result<Option<GameCultServiceTrustAnchorRecord>> {
+    unique_envelope(
+        entries,
+        GameCultServiceTrustAnchorRecord::TYPE,
+        &runtime_presence_anchor_id(target),
+    )?
+    .map(|envelope| {
+        ensure_schema(envelope, GAMECULT_SERVICE_TRUST_ANCHOR_SCHEMA)?;
+        decode_canonical(&envelope.payload, "provider trust anchor")
+    })
+    .transpose()
+}
+
+fn assemble_projection(
+    entries: &[CultCacheEnvelope],
+    provider_anchor: Option<GameCultServiceTrustAnchorRecord>,
+    expected_envelope: &CultCacheEnvelope,
+    incarnation: &IncarnationRef,
+) -> Result<IdunnRuntimeProjection> {
+    ensure_schema(expected_envelope, IDUNN_EXPECTED_INCARNATION_SCHEMA)?;
+    let expected = IdunnExpectedIncarnationRecord::decode_canonical(&expected_envelope.payload)?;
+    ensure!(
+        IncarnationRef::of(&expected)? == *incarnation,
+        "Expected projection key is substituted"
+    );
+    let key = incarnation.key();
+    let activation = unique_envelope(entries, IdunnRuntimeActivationRecord::TYPE, &key)?
+        .map(|envelope| {
+            ensure_schema(envelope, IDUNN_RUNTIME_ACTIVATION_SCHEMA)?;
+            IdunnRuntimeActivationRecord::decode_canonical(&envelope.payload)
+        })
+        .transpose()?;
+    let current_lease = unique_envelope(entries, IdunnProcessWriteLeaseRecord::TYPE, &key)?
+        .map(|envelope| {
+            ensure_schema(envelope, IDUNN_PROCESS_WRITE_LEASE_SCHEMA)?;
+            IdunnProcessWriteLeaseRecord::decode_canonical(&envelope.payload)
+        })
+        .transpose()?;
+    let projection = IdunnRuntimeProjection {
+        expected,
+        provider_anchor,
+        activation,
+        current_lease,
+    };
+    projection
+        .validate()
+        .context(PresenceAuthorityRefused("Idunn's projection is invalid"))?;
+    Ok(projection)
 }
 
 pub trait OdinCorrelationSigner {
@@ -599,6 +647,21 @@ fn decode_publisher_watermark(target: &str, payload: &[u8]) -> Result<u64> {
     Ok(sequence)
 }
 
+/// Odin's own runtime presence cannot be admitted under the authority Idunn
+/// projects: the authority cannot be established, or the claim, or the stored
+/// presence of the same activation, does not authenticate under it. Marks the
+/// failure for the serving loop; see `survive` in the daemon.
+#[derive(Debug)]
+pub struct PresenceAuthorityRefused(pub &'static str);
+
+impl std::fmt::Display for PresenceAuthorityRefused {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.0)
+    }
+}
+
+impl std::error::Error for PresenceAuthorityRefused {}
+
 pub struct OdinTopologyAuthority<P, S, K, C> {
     projections: P,
     store: S,
@@ -689,7 +752,10 @@ where
         projection.validate()?;
         let now = self.clock.now_unix_millis()?;
         let (authority, projection_disagreements) =
-            classify_runtime_authority(&projection, &self.idunn_anchor, now)?;
+            classify_runtime_authority(&projection, &self.idunn_anchor, now)
+                .context(PresenceAuthorityRefused(
+                    "the projected runtime authority cannot be verified",
+                ))?;
         let (lease_sha256, lease_disagreement) = classify_current_lease(&projection)?;
         let query = OdinStoreQuery {
             incarnation: IncarnationRef::of(&projection.expected)?,
@@ -884,10 +950,12 @@ where
         authority: Option<&cultnet_rs::VerifiedRuntimeAuthority>,
     ) -> Result<SelectedPresence> {
         let Some(authority) = authority else {
-            ensure!(
-                incoming.is_none(),
-                "runtime presence has no exact current activation and provider anchor"
-            );
+            if incoming.is_some() {
+                return Err(PresenceAuthorityRefused(
+                    "runtime presence has no exact current activation and provider anchor",
+                )
+                .into());
+            }
             return Ok(observed
                 .presence
                 .as_ref()
@@ -915,7 +983,10 @@ where
                 bytes,
                 authority,
                 self.presence_context(received_at),
-            )?;
+            )
+            .context(PresenceAuthorityRefused(
+                "runtime presence does not authenticate under the projected authority",
+            ))?;
             // Publisher sequence orders the claims of one publisher: the
             // activation whose key signs them. Each activation counts from its
             // own start, so the stored presence constrains the claim only when
@@ -926,6 +997,16 @@ where
             // that names this activation is this publisher's, and it must
             // authenticate at the time Odin received it; failing to is an
             // error, never a reason to forget its sequence.
+            //
+            // The two ways a stored presence can fail to be the same
+            // publisher's are decided differently on purpose. One that cannot
+            // be decoded names no activation, so it cannot be this
+            // publisher's: it is treated as another publisher's and the claim
+            // supersedes it (fail-open; the store's own read refuses such a
+            // record earlier still). One that decodes and names this
+            // activation is this publisher's own count: if it no longer
+            // authenticates, the count is unknowable and the claim is
+            // refused (fail-closed).
             let same_publisher = match observed.presence.as_ref() {
                 Some(stored)
                     if decode_presence(&stored.canonical_bytes).is_ok_and(|record| {
@@ -938,9 +1019,9 @@ where
                             authority,
                             self.presence_context(stored.trusted_received_at_unix_millis),
                         )
-                        .context(
+                        .context(PresenceAuthorityRefused(
                             "stored presence of the current activation no longer authenticates",
-                        )?,
+                        ))?,
                     )
                 }
                 _ => None,
@@ -1729,6 +1810,34 @@ mod tests {
         Ok(())
     }
 
+    /// An Expected that will not decode is its own incarnation's fault: another
+    /// incarnation, even of the same target, is still read exactly.
+    #[test]
+    fn an_undecodable_expected_does_not_hide_its_sibling_incarnations() -> Result<()> {
+        let world = TestWorld::new()?;
+        let service = world.service("ghostlight", Vec::new(), false)?;
+        let store = SingleFileMessagePackBackingStore::new(&world.projection_path);
+        let current = store.pull_all_read_only_snapshot()?;
+        let mut with_ghost = current.clone();
+        with_ghost.push(CultCacheEnvelope {
+            key: IncarnationRef::new("ghostlight", digest('a')).key(),
+            r#type: IdunnExpectedIncarnationRecord::TYPE.into(),
+            payload: vec![0xc1, 0x00],
+            stored_at: rfc3339_millis(NOW - 1_000)?,
+            schema_id: Some(IDUNN_EXPECTED_INCARNATION_SCHEMA.into()),
+        });
+        ensure!(store.compare_exchange_snapshot(&current, &with_ghost)?);
+        let source = CultCacheIdunnProjectionSource::new(&world.projection_path);
+        assert!(source.projection(&service.incarnation()?)?.is_some());
+        assert!(
+            source
+                .projection(&IncarnationRef::new("ghostlight", digest('a')))
+                .is_err(),
+            "the ghost itself is refused"
+        );
+        Ok(())
+    }
+
     /// A store the target-keyed Odin wrote holds correlations under bare
     /// target keys. They are retired; presence history under any key stays.
     #[test]
@@ -2334,9 +2443,11 @@ mod tests {
     fn a_restarted_activation_counts_its_publisher_sequence_from_one() -> Result<()> {
         let world = TestWorld::new()?;
         let mut service = world.service("ghostlight", Vec::new(), false)?;
-        world
-            .engine(NOW)
-            .admit_presence("ghostlight", &service.signed_presence(5, |_| {})?, NOW)?;
+        world.engine(NOW).admit_presence(
+            "ghostlight",
+            &service.signed_presence(5, |_| {})?,
+            NOW,
+        )?;
 
         world.restart_activation(&mut service, RESTART)?;
         let restarted = service.signed_presence(1, |record| {
@@ -2385,9 +2496,11 @@ mod tests {
     fn a_stale_stored_presence_never_blocks_a_current_claim() -> Result<()> {
         let world = TestWorld::new()?;
         let mut service = world.service("ghostlight", Vec::new(), false)?;
-        world
-            .engine(NOW)
-            .admit_presence("ghostlight", &service.signed_presence(3, |_| {})?, NOW)?;
+        world.engine(NOW).admit_presence(
+            "ghostlight",
+            &service.signed_presence(3, |_| {})?,
+            NOW,
+        )?;
 
         world.restart_activation(&mut service, RESTART)?;
         let before = decode_signed(
@@ -2442,6 +2555,81 @@ mod tests {
                 .is_err()
         );
         assert_eq!(stored_presence_payload(&world, &service)?, admitted);
+        Ok(())
+    }
+
+    fn snapshot_with_stored_presence(
+        service: &TestService,
+        stored: AdmittedPresence,
+    ) -> Result<OdinStoreSnapshot> {
+        Ok(OdinStoreSnapshot {
+            query: OdinStoreQuery {
+                incarnation: service.incarnation()?,
+                provider_signer_identity_id: service
+                    .projection
+                    .expected
+                    .expected_signer_identity_id
+                    .clone(),
+                dependencies: Vec::new(),
+            },
+            presence: Some(stored),
+            correlation: None,
+            dependency_correlations: BTreeMap::new(),
+        })
+    }
+
+    /// A stored presence that names the current activation but no longer
+    /// authenticates at its own received time is an error, not "another
+    /// publisher": the claim must not slip past that publisher's sequence.
+    #[test]
+    fn a_same_activation_stored_presence_that_no_longer_authenticates_is_an_error() -> Result<()> {
+        let world = TestWorld::new()?;
+        let service = world.service("ghostlight", Vec::new(), false)?;
+        let later = NOW + 3_600_000;
+        let engine = world.engine(later);
+        let (authority, _) =
+            classify_runtime_authority(&service.projection, &world.idunn_anchor, later)?;
+        // Observed at NOW but received an hour later: outside the skew window
+        // at its own received time.
+        let stored = AdmittedPresence::new(service.signed_presence(5, |_| {})?, later)?;
+        let snapshot = snapshot_with_stored_presence(&service, stored)?;
+        let claim = service.signed_presence(6, |record| {
+            record.observed_at_unix_millis = later - 10;
+        })?;
+
+        let error = engine
+            .select_presence(&snapshot, Some((&claim, later)), authority.as_ref())
+            .err()
+            .context("a same-activation presence that fails authentication was ignored")?;
+        assert!(
+            format!("{error:#}").contains("no longer authenticates"),
+            "refused for the wrong reason: {error:#}"
+        );
+        Ok(())
+    }
+
+    /// A stored presence that cannot be decoded names no activation, so it is
+    /// another publisher's and a fresh claim supersedes it.
+    #[test]
+    fn an_undecodable_stored_presence_is_another_publisher_and_is_superseded() -> Result<()> {
+        let world = TestWorld::new()?;
+        let service = world.service("ghostlight", Vec::new(), false)?;
+        let engine = world.engine(NOW);
+        let (authority, _) =
+            classify_runtime_authority(&service.projection, &world.idunn_anchor, NOW)?;
+        let stored = AdmittedPresence::new(vec![0xc1], NOW)?;
+        let snapshot = snapshot_with_stored_presence(&service, stored)?;
+        let claim = service.signed_presence(1, |_| {})?;
+
+        let selected =
+            engine.select_presence(&snapshot, Some((&claim, NOW)), authority.as_ref())?;
+        assert!(matches!(
+            selected,
+            SelectedPresence::Current {
+                replacement: Some(_),
+                ..
+            }
+        ));
         Ok(())
     }
 
