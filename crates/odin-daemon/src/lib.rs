@@ -926,6 +926,16 @@ where
             // that names this activation is this publisher's, and it must
             // authenticate at the time Odin received it; failing to is an
             // error, never a reason to forget its sequence.
+            //
+            // The two ways a stored presence can fail to be the same
+            // publisher's are decided differently on purpose. One that cannot
+            // be decoded names no activation, so it cannot be this
+            // publisher's: it is treated as another publisher's and the claim
+            // supersedes it (fail-open; the store's own read refuses such a
+            // record earlier still). One that decodes and names this
+            // activation is this publisher's own count: if it no longer
+            // authenticates, the count is unknowable and the claim is
+            // refused (fail-closed).
             let same_publisher = match observed.presence.as_ref() {
                 Some(stored)
                     if decode_presence(&stored.canonical_bytes).is_ok_and(|record| {
@@ -2334,9 +2344,11 @@ mod tests {
     fn a_restarted_activation_counts_its_publisher_sequence_from_one() -> Result<()> {
         let world = TestWorld::new()?;
         let mut service = world.service("ghostlight", Vec::new(), false)?;
-        world
-            .engine(NOW)
-            .admit_presence("ghostlight", &service.signed_presence(5, |_| {})?, NOW)?;
+        world.engine(NOW).admit_presence(
+            "ghostlight",
+            &service.signed_presence(5, |_| {})?,
+            NOW,
+        )?;
 
         world.restart_activation(&mut service, RESTART)?;
         let restarted = service.signed_presence(1, |record| {
@@ -2385,9 +2397,11 @@ mod tests {
     fn a_stale_stored_presence_never_blocks_a_current_claim() -> Result<()> {
         let world = TestWorld::new()?;
         let mut service = world.service("ghostlight", Vec::new(), false)?;
-        world
-            .engine(NOW)
-            .admit_presence("ghostlight", &service.signed_presence(3, |_| {})?, NOW)?;
+        world.engine(NOW).admit_presence(
+            "ghostlight",
+            &service.signed_presence(3, |_| {})?,
+            NOW,
+        )?;
 
         world.restart_activation(&mut service, RESTART)?;
         let before = decode_signed(
@@ -2442,6 +2456,81 @@ mod tests {
                 .is_err()
         );
         assert_eq!(stored_presence_payload(&world, &service)?, admitted);
+        Ok(())
+    }
+
+    fn snapshot_with_stored_presence(
+        service: &TestService,
+        stored: AdmittedPresence,
+    ) -> Result<OdinStoreSnapshot> {
+        Ok(OdinStoreSnapshot {
+            query: OdinStoreQuery {
+                incarnation: service.incarnation()?,
+                provider_signer_identity_id: service
+                    .projection
+                    .expected
+                    .expected_signer_identity_id
+                    .clone(),
+                dependencies: Vec::new(),
+            },
+            presence: Some(stored),
+            correlation: None,
+            dependency_correlations: BTreeMap::new(),
+        })
+    }
+
+    /// A stored presence that names the current activation but no longer
+    /// authenticates at its own received time is an error, not "another
+    /// publisher": the claim must not slip past that publisher's sequence.
+    #[test]
+    fn a_same_activation_stored_presence_that_no_longer_authenticates_is_an_error() -> Result<()> {
+        let world = TestWorld::new()?;
+        let service = world.service("ghostlight", Vec::new(), false)?;
+        let later = NOW + 3_600_000;
+        let engine = world.engine(later);
+        let (authority, _) =
+            classify_runtime_authority(&service.projection, &world.idunn_anchor, later)?;
+        // Observed at NOW but received an hour later: outside the skew window
+        // at its own received time.
+        let stored = AdmittedPresence::new(service.signed_presence(5, |_| {})?, later)?;
+        let snapshot = snapshot_with_stored_presence(&service, stored)?;
+        let claim = service.signed_presence(6, |record| {
+            record.observed_at_unix_millis = later - 10;
+        })?;
+
+        let error = engine
+            .select_presence(&snapshot, Some((&claim, later)), authority.as_ref())
+            .err()
+            .context("a same-activation presence that fails authentication was ignored")?;
+        assert!(
+            format!("{error:#}").contains("no longer authenticates"),
+            "refused for the wrong reason: {error:#}"
+        );
+        Ok(())
+    }
+
+    /// A stored presence that cannot be decoded names no activation, so it is
+    /// another publisher's and a fresh claim supersedes it.
+    #[test]
+    fn an_undecodable_stored_presence_is_another_publisher_and_is_superseded() -> Result<()> {
+        let world = TestWorld::new()?;
+        let service = world.service("ghostlight", Vec::new(), false)?;
+        let engine = world.engine(NOW);
+        let (authority, _) =
+            classify_runtime_authority(&service.projection, &world.idunn_anchor, NOW)?;
+        let stored = AdmittedPresence::new(vec![0xc1], NOW)?;
+        let snapshot = snapshot_with_stored_presence(&service, stored)?;
+        let claim = service.signed_presence(1, |_| {})?;
+
+        let selected =
+            engine.select_presence(&snapshot, Some((&claim, NOW)), authority.as_ref())?;
+        assert!(matches!(
+            selected,
+            SelectedPresence::Current {
+                replacement: Some(_),
+                ..
+            }
+        ));
         Ok(())
     }
 
