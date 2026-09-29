@@ -883,11 +883,6 @@ where
         incoming: Option<(&[u8], u64)>,
         authority: Option<&cultnet_rs::VerifiedRuntimeAuthority>,
     ) -> Result<SelectedPresence> {
-        let stored_record = observed
-            .presence
-            .as_ref()
-            .map(|stored| decode_presence(&stored.canonical_bytes))
-            .transpose()?;
         let Some(authority) = authority else {
             ensure!(
                 incoming.is_none(),
@@ -921,11 +916,27 @@ where
                 authority,
                 self.presence_context(received_at),
             )?;
-            if let Some(stored) = &stored_record {
-                if claim.record().publisher_sequence < stored.publisher_sequence {
+            // Publisher sequence orders the claims of one publisher: the
+            // activation whose key signs them. Each activation counts from its
+            // own start, so the stored presence constrains the claim only when
+            // it still authenticates under the same current authority. One
+            // left by an earlier activation (on 2026-09-29 every StreamPixels
+            // restart was refused against its predecessor's count) or one that
+            // is otherwise stale is superseded whatever its sequence.
+            let same_publisher = observed.presence.as_ref().and_then(|stored| {
+                authenticate_runtime_presence_claim(
+                    &stored.canonical_bytes,
+                    authority,
+                    self.presence_context(stored.trusted_received_at_unix_millis),
+                )
+                .ok()
+            });
+            if let Some(stored) = &same_publisher {
+                let stored_sequence = stored.record().publisher_sequence;
+                if claim.record().publisher_sequence < stored_sequence {
                     bail!("runtime presence publisher sequence was reordered");
                 }
-                if claim.record().publisher_sequence == stored.publisher_sequence {
+                if claim.record().publisher_sequence == stored_sequence {
                     bail!("runtime presence publisher sequence was reused with different bytes");
                 }
             }
@@ -2108,6 +2119,24 @@ mod tests {
             service.projection.current_lease = None;
             self.publish_projection(&service.projection)
         }
+
+        /// A continuity restart: the same Expected, a new activation and a new
+        /// activation key, as Idunn issues when it relaunches the installed body.
+        fn restart_activation(&self, service: &mut TestService, issued_at: u64) -> Result<()> {
+            let launch = IdunnRuntimeActivationLaunch::issue(
+                &service.projection.expected,
+                digest('b'),
+                issued_at,
+                &self.idunn_signer,
+            )?;
+            let activation = launch.activation().clone();
+            let mut credential = Vec::new();
+            launch.write_credential(&mut credential)?;
+            service.activation_signer =
+                IdunnRuntimeActivationSigner::from_credential_reader(credential.as_slice())?;
+            service.projection.activation = Some(activation);
+            self.publish_projection(&service.projection)
+        }
     }
 
     fn digest(byte: char) -> String {
@@ -2264,6 +2293,112 @@ mod tests {
         .unwrap();
         assert_eq!(stored.payload, sequence_two);
         assert_eq!(parse_rfc3339_millis(&stored.stored_at)?, NOW);
+        Ok(())
+    }
+
+    /// Idunn relaunches at this time; the previous activation's presence was
+    /// received at `NOW`, beyond the skew window, as on yggdrasil 2026-09-29.
+    const RESTART: u64 = NOW + 10_000;
+
+    fn stored_presence_payload(world: &TestWorld, service: &TestService) -> Result<Vec<u8>> {
+        let entries = SingleFileMessagePackBackingStore::new(&world.topology_path)
+            .pull_all_read_only_snapshot()?;
+        Ok(unique_envelope(
+            &entries,
+            GameCultRuntimePresenceHealthRecord::TYPE,
+            &presence_store_key(
+                &service.incarnation()?,
+                &service.projection.expected.expected_signer_identity_id,
+            ),
+        )?
+        .context("no stored presence")?
+        .payload)
+    }
+
+    #[test]
+    fn a_restarted_activation_counts_its_publisher_sequence_from_one() -> Result<()> {
+        let world = TestWorld::new()?;
+        let mut service = world.service("ghostlight", Vec::new(), false)?;
+        world
+            .engine(NOW)
+            .admit_presence("ghostlight", &service.signed_presence(5, |_| {})?, NOW)?;
+
+        world.restart_activation(&mut service, RESTART)?;
+        let restarted = service.signed_presence(1, |record| {
+            record.observed_at_unix_millis = RESTART + 10;
+        })?;
+        let record = decode_signed(&world.engine(RESTART + 20).admit_presence(
+            "ghostlight",
+            &restarted,
+            RESTART + 20,
+        )?)?;
+        assert!(record.present);
+        assert!(record.ready);
+        assert_eq!(stored_presence_payload(&world, &service)?, restarted);
+        Ok(())
+    }
+
+    #[test]
+    fn a_stale_stored_presence_never_blocks_a_current_claim() -> Result<()> {
+        let world = TestWorld::new()?;
+        let mut service = world.service("ghostlight", Vec::new(), false)?;
+        world
+            .engine(NOW)
+            .admit_presence("ghostlight", &service.signed_presence(3, |_| {})?, NOW)?;
+
+        world.restart_activation(&mut service, RESTART)?;
+        let before = decode_signed(
+            &world
+                .engine(RESTART + 20)
+                .refresh(&service.incarnation()?)?
+                .unwrap(),
+        )?;
+        assert!(!before.present);
+        assert!(
+            before
+                .disagreements
+                .iter()
+                .any(|value| value.code == "stored-presence-not-current")
+        );
+
+        // The same sequence the stale presence carried is neither a reorder
+        // nor a reuse: it is another publisher's count.
+        let current = service.signed_presence(3, |record| {
+            record.observed_at_unix_millis = RESTART + 10;
+        })?;
+        let record = decode_signed(&world.engine(RESTART + 20).admit_presence(
+            "ghostlight",
+            &current,
+            RESTART + 20,
+        )?)?;
+        assert!(record.present);
+        assert!(record.ready);
+        assert_eq!(stored_presence_payload(&world, &service)?, current);
+        Ok(())
+    }
+
+    #[test]
+    fn a_claim_that_does_not_authenticate_under_the_current_activation_is_refused() -> Result<()> {
+        let world = TestWorld::new()?;
+        let mut service = world.service("ghostlight", Vec::new(), false)?;
+        let admitted = service.signed_presence(1, |_| {})?;
+        world
+            .engine(NOW)
+            .admit_presence("ghostlight", &admitted, NOW)?;
+        // Signed by the activation Idunn is about to replace, with a fresh
+        // observation time and a higher sequence than anything stored.
+        let superseded = service.signed_presence(9, |record| {
+            record.observed_at_unix_millis = RESTART + 10;
+        })?;
+
+        world.restart_activation(&mut service, RESTART)?;
+        assert!(
+            world
+                .engine(RESTART + 20)
+                .admit_presence("ghostlight", &superseded, RESTART + 20)
+                .is_err()
+        );
+        assert_eq!(stored_presence_payload(&world, &service)?, admitted);
         Ok(())
     }
 
