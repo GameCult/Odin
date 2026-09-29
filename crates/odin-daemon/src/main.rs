@@ -27,7 +27,7 @@ use cultnet_rs::{
     IDUNN_EXPECTED_INCARNATION_SCHEMA, IDUNN_PROCESS_WRITE_LEASE_SCHEMA,
     IDUNN_RUNTIME_ACTIVATION_CREDENTIAL_NAME, IDUNN_RUNTIME_ACTIVATION_SCHEMA,
     IdunnExpectedIncarnationRecord, IdunnProcessWriteLeaseRecord, IdunnRuntimeActivationRecord,
-    IdunnRuntimeActivationSigner, IdunnServiceIdentity, ODIN_RUNTIME_TOPOLOGY_CORRELATION_SCHEMA,
+    IdunnRuntimeActivationSigner, IdunnServiceIdentity,
     OdinRuntimeTopologyCorrelationRecord, OdinTopologyIdentity, ServiceIdentityProfile,
     ServiceIdentitySigner, ServiceIdentityTrustAnchor, derive_service_identity_id,
     open_service_identity_credential_reader, verify_runtime_authority,
@@ -35,7 +35,8 @@ use cultnet_rs::{
 use fs2::FileExt;
 use odin_daemon::{
     AuthenticationPolicy, CultCacheIdunnProjectionSource, CultCacheOdinTopologyStore,
-    IdunnProjectionSource, IncarnationRef, OdinTopologyAuthority, SystemClock,
+    IdunnProjectionSource, IncarnationRef, OdinTopologyAuthority, PresenceAuthorityRefused,
+    SystemClock,
 };
 
 const TARGET: &str = "odin";
@@ -313,7 +314,7 @@ impl RuntimeState {
             self.activated(),
             "Odin catalog is unavailable until Idunn grants its process-write lease"
         );
-        self.refresh_all_correlations()?;
+        self.require_current_write_lease()?;
         self.stored_snapshot(query)
     }
 
@@ -427,7 +428,11 @@ impl RuntimeState {
             .write_lease
             .as_ref()
             .context("Odin has no process-write lease")?;
-        let current = read_process_write_lease(&self.write_lease_path)?
+        // A lease Odin cannot read is a lease Odin cannot show it still holds.
+        let current = read_process_write_lease(&self.write_lease_path)
+            .map_err(|error| {
+                WriteLeaseLost(format!("Odin process-write lease is unreadable: {error:#}"))
+            })?
             .ok_or_else(|| WriteLeaseLost("Odin process-write lease was withdrawn".into()))?;
         if current != held.record || current.canonical_sha256()? != held.sha256 {
             return Err(
@@ -443,10 +448,23 @@ impl RuntimeState {
             .topology
             .as_ref()
             .context("Odin topology authority is absent")?;
-        let mut incarnations = projection_incarnations(&self.options.idunn_projection)?;
-        incarnations.extend(correlation_incarnations(&self.options.store)?);
+        let mut incarnations = incarnation_keys(
+            &self.options.idunn_projection,
+            IdunnExpectedIncarnationRecord::TYPE,
+        )?;
+        incarnations.extend(incarnation_keys(
+            &self.options.store,
+            OdinRuntimeTopologyCorrelationRecord::TYPE,
+        )?);
+        // Each incarnation is refreshed on its own: one whose records cannot be
+        // read is that incarnation's failure, and never stops the others.
         for incarnation in incarnations {
-            topology.refresh(&incarnation)?;
+            if let Err(error) = topology.refresh(&incarnation) {
+                eprintln!(
+                    "Odin could not refresh incarnation {}; the rest are unaffected: {error:#}",
+                    incarnation.key()
+                );
+            }
         }
         Ok(())
     }
@@ -667,11 +685,23 @@ impl std::error::Error for WriteLeaseLost {}
 /// The serving loop's failure policy. Odin's liveness is Odin's own: a failed
 /// refresh, publication or read is logged and retried on the next pass, never
 /// allowed to end the daemon. Only `WriteLeaseLost`, wherever in the error chain
-/// it sits, is returned.
+/// it sits, is returned -- and, as a named temporary rule, so is
+/// `PresenceAuthorityRefused`: a self-presence that Odin's own authority will
+/// never admit (no verifiable authority, a signer that does not match the
+/// anchor, a stored presence of this activation that no longer authenticates)
+/// leaves a frozen presence that goes stale, and a stale Odin presence makes
+/// `dependency_evidence` flip every dependent to not-Ready. Ending Odin lets
+/// Idunn replace it. Deleted when Idunn proves Odin by its own route challenge
+/// (Idunn audit cut A3, operator question Q-O5).
 fn survive<T>(what: &str, result: Result<T>) -> Result<Option<T>> {
     match result {
         Ok(value) => Ok(Some(value)),
-        Err(error) if error.downcast_ref::<WriteLeaseLost>().is_some() => Err(error),
+        Err(error)
+            if error.downcast_ref::<WriteLeaseLost>().is_some()
+                || error.downcast_ref::<PresenceAuthorityRefused>().is_some() =>
+        {
+            Err(error)
+        }
         Err(error) => {
             eprintln!("Odin {what} failed; retrying on the next pass: {error:#}");
             Ok(None)
@@ -1142,66 +1172,26 @@ fn decode_presence(payload: &[u8]) -> Result<GameCultRuntimePresenceHealthRecord
     Ok(presence)
 }
 
-/// Every incarnation Idunn currently projects, of every target.
+/// Every incarnation Idunn currently projects, of every target, and every
+/// incarnation Odin holds a correlation for, projected or not (the latter are
+/// refreshed so their correlations are withdrawn). Only the keys are read:
+/// decoding a record is the refresh of that one incarnation, so a record that
+/// will not decode cannot make the list unreadable.
 ///
-/// Records keyed by anything but an incarnation key are not this contract's
-/// and are skipped, not refused: a projection written by an older Idunn
-/// projects nothing this daemon acts on.
-fn projection_incarnations(path: &Path) -> Result<BTreeSet<IncarnationRef>> {
-    let entries = SingleFileMessagePackBackingStore::new(path).pull_all_read_only_snapshot()?;
-    entries
-        .into_iter()
-        .filter(|entry| entry.r#type == IdunnExpectedIncarnationRecord::TYPE)
-        .filter_map(|entry| {
-            let incarnation = IncarnationRef::parse_key(&entry.key)?;
-            Some((|| -> Result<IncarnationRef> {
-                ensure!(
-                    entry.schema_id.as_deref() == Some(IDUNN_EXPECTED_INCARNATION_SCHEMA),
-                    "Idunn projection contains an Expected record under the wrong schema"
-                );
-                let expected = IdunnExpectedIncarnationRecord::decode_canonical(&entry.payload)?;
-                ensure!(
-                    IncarnationRef::of(&expected)? == incarnation,
-                    "Idunn Expected key is substituted"
-                );
-                Ok(incarnation)
-            })())
-        })
-        .collect()
-}
-
-/// Every incarnation Odin holds a correlation for, projected by Idunn or not;
-/// the latter are refreshed so their correlations are withdrawn.
-fn correlation_incarnations(path: &Path) -> Result<BTreeSet<IncarnationRef>> {
+/// Records keyed by anything but an incarnation key are not this contract's and
+/// are skipped, not refused: a projection written by an older Idunn projects
+/// nothing this daemon acts on, and a correlation written by the previous,
+/// target-keyed Odin is retired at activation (`retire_legacy_correlations`).
+fn incarnation_keys(path: &Path, record_type: &str) -> Result<BTreeSet<IncarnationRef>> {
     if !path.is_file() {
         return Ok(BTreeSet::new());
     }
-    SingleFileMessagePackBackingStore::new(path)
+    Ok(SingleFileMessagePackBackingStore::new(path)
         .pull_all_read_only_snapshot()?
         .into_iter()
-        .filter(|entry| entry.r#type == OdinRuntimeTopologyCorrelationRecord::TYPE)
-        // A correlation keyed by anything but an incarnation key was written
-        // by the previous, target-keyed Odin. It is retired at activation
-        // (`retire_legacy_correlations`), never refreshed, and never a reason
-        // to refuse to start.
-        .filter(|entry| IncarnationRef::parse_key(&entry.key).is_some())
-        .map(|entry| {
-            ensure!(
-                entry.schema_id.as_deref() == Some(ODIN_RUNTIME_TOPOLOGY_CORRELATION_SCHEMA),
-                "Odin correlation is stored under the wrong schema"
-            );
-            let (record, _) =
-                OdinRuntimeTopologyCorrelationRecord::decode_canonical_signed_payload(
-                    &entry.payload,
-                )?;
-            let incarnation = IncarnationRef::new(record.target, record.expected_projection_sha256);
-            ensure!(
-                entry.key == incarnation.key(),
-                "Odin correlation key is substituted"
-            );
-            Ok(incarnation)
-        })
-        .collect()
+        .filter(|entry| entry.r#type == record_type)
+        .filter_map(|entry| IncarnationRef::parse_key(&entry.key))
+        .collect())
 }
 
 fn validate_snapshot_filters(query: &CultMeshRudpSnapshotQuery) -> Result<()> {
@@ -1285,7 +1275,8 @@ mod tests {
         CultNetRudpSocketTransportOptions, CultNetWireContract,
         GAMECULT_RUNTIME_PRESENCE_HEALTH_SIGNING_PURPOSE, GAMECULT_SERVICE_TRUST_ANCHOR_SCHEMA,
         GameCultServiceTrustAnchorRecord, IdunnExpectedCapability, IdunnExpectedRoute,
-        IdunnRuntimeActivationLaunch, encode_cultnet_message_to_vec, enroll_service_identity_at,
+        IdunnRuntimeActivationLaunch, ODIN_RUNTIME_TOPOLOGY_CORRELATION_SCHEMA,
+        encode_cultnet_message_to_vec, enroll_service_identity_at,
     };
 
     use super::*;
@@ -1622,6 +1613,66 @@ mod tests {
             serving_pass(&self.state, &mut self.server, &mut self.timers)
         }
 
+        /// Replace the lease under Odin with a later epoch. Odin holds a shared
+        /// lock on the lease's lifetime lock, which is what stops Idunn from
+        /// writing the lease under it; the test swaps the file underneath.
+        fn swap_lease(&self) -> Result<()> {
+            let mut replaced = self.lease.clone();
+            replaced.lease_epoch += 1;
+            let scratch = self.lease_path.with_file_name("replacement-lease.cc");
+            write_single_record(&scratch, lease_envelope(&replaced)?)?;
+            std::fs::copy(&scratch, &self.lease_path)?;
+            Ok(())
+        }
+
+        /// Add records to Idunn's projection as Idunn would publish them.
+        fn append_projection(&self, added: Vec<CultCacheEnvelope>) -> Result<()> {
+            self.tamper_projection(|mut entries| {
+                entries.extend(added);
+                entries
+            })
+        }
+
+        /// Rewrite Odin's own store as `change` sees it, in one exchange.
+        fn tamper_store(
+            &self,
+            change: impl FnOnce(Vec<CultCacheEnvelope>) -> Vec<CultCacheEnvelope>,
+        ) -> Result<()> {
+            let store = SingleFileMessagePackBackingStore::new(&self.store);
+            let current = store.pull_all_read_only_snapshot()?;
+            let next = change(current.clone());
+            ensure!(
+                store.compare_exchange_snapshot(&current, &next)?,
+                "test store CAS failed"
+            );
+            Ok(())
+        }
+
+        /// Rewrite Idunn's projection as `change` sees it, in one exchange.
+        fn tamper_projection(
+            &self,
+            change: impl FnOnce(Vec<CultCacheEnvelope>) -> Vec<CultCacheEnvelope>,
+        ) -> Result<()> {
+            let path = self.state.borrow().options.idunn_projection.clone();
+            let store = SingleFileMessagePackBackingStore::new(path);
+            let current = store.pull_all_read_only_snapshot()?;
+            let next = change(current.clone());
+            ensure!(
+                store.compare_exchange_snapshot(&current, &next)?,
+                "test projection CAS failed"
+            );
+            Ok(())
+        }
+
+        fn stored_keys(&self, record_type: &str) -> Result<Vec<String>> {
+            Ok(SingleFileMessagePackBackingStore::new(&self.store)
+                .pull_all_read_only_snapshot()?
+                .into_iter()
+                .filter(|entry| entry.r#type == record_type)
+                .map(|entry| entry.key)
+                .collect())
+        }
+
         /// Odin's own publisher sequence as it is durably stored.
         fn stored_sequence(&self) -> Result<u64> {
             prior_self_publisher_sequence(&self.store, &self.provider_identity_id)
@@ -1745,14 +1796,7 @@ mod tests {
         let mut odin = activated_odin()?;
         odin.pass()?;
 
-        let mut replaced = odin.lease.clone();
-        replaced.lease_epoch += 1;
-        // Odin holds a shared lock on the lease's lifetime lock, which is what
-        // stops Idunn from writing the lease under it; the test swaps the file
-        // underneath instead.
-        let scratch = odin.lease_path.with_file_name("replacement-lease.cc");
-        write_single_record(&scratch, lease_envelope(&replaced)?)?;
-        std::fs::copy(&scratch, &odin.lease_path)?;
+        odin.swap_lease()?;
         odin.timers = ServingTimers::default();
         let error = odin.pass().unwrap_err();
         assert!(
@@ -1767,6 +1811,191 @@ mod tests {
             error.downcast_ref::<WriteLeaseLost>().is_some(),
             "{error:#}"
         );
+        Ok(())
+    }
+
+    /// The heartbeat and the refresh each check the lease themselves: with only
+    /// one of them due, a swapped lease still ends Odin.
+    #[test]
+    fn each_timer_checks_the_write_lease_itself() -> Result<()> {
+        for heartbeat_due in [true, false] {
+            let mut odin = activated_odin()?;
+            odin.pass()?;
+            odin.swap_lease()?;
+            odin.timers = ServingTimers::default();
+            if heartbeat_due {
+                odin.timers.last_projection_refresh = Some(Instant::now());
+            } else {
+                odin.timers.last_heartbeat = Some(Instant::now());
+            }
+            let error = odin.pass().unwrap_err();
+            assert!(
+                error.downcast_ref::<WriteLeaseLost>().is_some(),
+                "heartbeat_due={heartbeat_due}: {error:#}"
+            );
+        }
+        Ok(())
+    }
+
+    /// A lease Odin cannot read is a lease it cannot show it still holds, so
+    /// it is lost, not a transient fault to retry.
+    #[test]
+    fn an_unreadable_write_lease_ends_odin() -> Result<()> {
+        let mut odin = activated_odin()?;
+        odin.pass()?;
+        std::fs::write(&odin.lease_path, b"not a cultcache store")?;
+        odin.timers = ServingTimers::default();
+        let error = odin.pass().unwrap_err();
+        assert!(
+            error.downcast_ref::<WriteLeaseLost>().is_some(),
+            "{error:#}"
+        );
+        Ok(())
+    }
+
+    /// Soul's ghost probe: one Expected that will not decode is that
+    /// incarnation's own failure. The other incarnations still refresh, and
+    /// the catalog still serves.
+    #[test]
+    fn one_undecodable_incarnation_leaves_the_others_and_the_catalog_readable() -> Result<()> {
+        let mut odin = activated_odin()?;
+        let mut candidate = odin.state.borrow().authority_material.expected.clone();
+        candidate.plan_id = digest('9');
+        candidate.incarnation_id = "odin/generation-2".into();
+        candidate.validate()?;
+        let candidate_key = IncarnationRef::of(&candidate)?.key();
+        // "aaghost" sorts before "odin", so a refresh that stops at its first
+        // failure never reaches the good incarnations.
+        let ghost_key = IncarnationRef::new("aaghost", digest('a')).key();
+        odin.append_projection(vec![
+            CultCacheEnvelope {
+                key: ghost_key,
+                r#type: IdunnExpectedIncarnationRecord::TYPE.into(),
+                payload: vec![0xc1, 0x00],
+                stored_at: rfc3339_millis(unix_millis()?)?,
+                schema_id: Some(IDUNN_EXPECTED_INCARNATION_SCHEMA.into()),
+            },
+            CultCacheEnvelope {
+                key: candidate_key.clone(),
+                r#type: IdunnExpectedIncarnationRecord::TYPE.into(),
+                payload: candidate.canonical_bytes()?,
+                stored_at: rfc3339_millis(unix_millis()?)?,
+                schema_id: Some(IDUNN_EXPECTED_INCARNATION_SCHEMA.into()),
+            },
+        ])?;
+        assert!(
+            !odin
+                .stored_keys(OdinRuntimeTopologyCorrelationRecord::TYPE)?
+                .contains(&candidate_key)
+        );
+
+        odin.pass()?;
+        assert!(
+            odin.stored_keys(OdinRuntimeTopologyCorrelationRecord::TYPE)?
+                .contains(&candidate_key),
+            "the good incarnation was refreshed past the ghost"
+        );
+
+        let catalog = odin.state.borrow_mut().raw_snapshot(&CultMeshRudpSnapshotQuery {
+            session: cultmesh_rs::CultMeshRudpSessionKey {
+                remote_addr: "127.0.0.1:1".parse()?,
+                connection_id: 7,
+            },
+            message_id: "catalog".into(),
+            requested_at_unix_millis: 1,
+            schema_ids: None,
+            record_keys: None,
+        })?;
+        assert!(
+            catalog
+                .iter()
+                .any(|document| document.schema_id == ODIN_RUNTIME_TOPOLOGY_CORRELATION_SCHEMA),
+            "the catalog serves its correlations"
+        );
+        Ok(())
+    }
+
+    fn assert_refused(error: &anyhow::Error) {
+        assert!(
+            error.downcast_ref::<PresenceAuthorityRefused>().is_some(),
+            "{error:#}"
+        );
+    }
+
+    /// Temporary rule (see `survive`): a self-presence Odin's authority will
+    /// never admit ends Odin. With no current activation Idunn projects, there
+    /// is no verifiable authority.
+    #[test]
+    fn a_projection_without_authority_ends_odin() -> Result<()> {
+        let mut odin = activated_odin()?;
+        odin.pass()?;
+        odin.tamper_projection(|entries| {
+            entries
+                .into_iter()
+                .filter(|entry| entry.r#type != IdunnRuntimeActivationRecord::TYPE)
+                .collect()
+        })?;
+        odin.timers = ServingTimers::default();
+        assert_refused(&odin.pass().unwrap_err());
+        Ok(())
+    }
+
+    /// The projected provider anchor names Odin's signer identity but carries
+    /// a key that identity does not derive from: the authority cannot verify.
+    #[test]
+    fn a_signer_that_does_not_match_the_anchor_ends_odin() -> Result<()> {
+        let mut odin = activated_odin()?;
+        odin.pass()?;
+        odin.tamper_projection(|entries| {
+            entries
+                .into_iter()
+                .map(|mut entry| {
+                    if entry.r#type == GameCultServiceTrustAnchorRecord::TYPE {
+                        let mut anchor: GameCultServiceTrustAnchorRecord =
+                            rmp_serde::from_slice(&entry.payload).unwrap();
+                        anchor.signer_public_key = vec![7; 32];
+                        entry.payload = rmp_serde::to_vec(&anchor).unwrap();
+                    }
+                    entry
+                })
+                .collect()
+        })?;
+        odin.timers = ServingTimers::default();
+        assert_refused(&odin.pass().unwrap_err());
+
+        // The other way round: the authority is sound, but the key Odin signs
+        // with is not the Expected signer.
+        let mut odin = activated_odin()?;
+        odin.pass()?;
+        let other = odin._temp.path().join("other-provider.cc");
+        odin.state.borrow_mut().authority_material.provider_signer =
+            enroll_service_identity_at::<GameCultProviderHealthIdentity>(&other)?;
+        odin.timers = ServingTimers::default();
+        assert_refused(&odin.pass().unwrap_err());
+        Ok(())
+    }
+
+    /// A stored presence of Odin's own activation that no longer authenticates
+    /// makes its publisher sequence unknowable; the claim is refused, closed.
+    #[test]
+    fn a_stored_presence_that_no_longer_authenticates_ends_odin() -> Result<()> {
+        let mut odin = activated_odin()?;
+        odin.pass()?;
+        // Received two minutes after it was observed: outside the trusted window.
+        let late = rfc3339_millis(unix_millis()? + 120_000)?;
+        odin.tamper_store(|entries| {
+            entries
+                .into_iter()
+                .map(|mut entry| {
+                    if entry.r#type == GameCultRuntimePresenceHealthRecord::TYPE {
+                        entry.stored_at = late.clone();
+                    }
+                    entry
+                })
+                .collect()
+        })?;
+        odin.timers = ServingTimers::default();
+        assert_refused(&odin.pass().unwrap_err());
         Ok(())
     }
 
