@@ -919,18 +919,32 @@ where
             // Publisher sequence orders the claims of one publisher: the
             // activation whose key signs them. Each activation counts from its
             // own start, so the stored presence constrains the claim only when
-            // it still authenticates under the same current authority. One
-            // left by an earlier activation (on 2026-09-29 every StreamPixels
-            // restart was refused against its predecessor's count) or one that
-            // is otherwise stale is superseded whatever its sequence.
-            let same_publisher = observed.presence.as_ref().and_then(|stored| {
-                authenticate_runtime_presence_claim(
-                    &stored.canonical_bytes,
-                    authority,
-                    self.presence_context(stored.trusted_received_at_unix_millis),
-                )
-                .ok()
-            });
+            // it was issued under this authority's activation. One left by an
+            // earlier activation (on 2026-09-29 every StreamPixels restart was
+            // refused against its predecessor's count) is another publisher's
+            // count and is superseded whatever its sequence. A stored presence
+            // that names this activation is this publisher's, and it must
+            // authenticate at the time Odin received it; failing to is an
+            // error, never a reason to forget its sequence.
+            let same_publisher = match observed.presence.as_ref() {
+                Some(stored)
+                    if decode_presence(&stored.canonical_bytes).is_ok_and(|record| {
+                        record.activation_witness_sha256 == authority.activation_sha256()
+                    }) =>
+                {
+                    Some(
+                        authenticate_runtime_presence_claim(
+                            &stored.canonical_bytes,
+                            authority,
+                            self.presence_context(stored.trusted_received_at_unix_millis),
+                        )
+                        .context(
+                            "stored presence of the current activation no longer authenticates",
+                        )?,
+                    )
+                }
+                _ => None,
+            };
             if let Some(stored) = &same_publisher {
                 let stored_sequence = stored.record().publisher_sequence;
                 if claim.record().publisher_sequence < stored_sequence {
@@ -2336,6 +2350,34 @@ mod tests {
         assert!(record.present);
         assert!(record.ready);
         assert_eq!(stored_presence_payload(&world, &service)?, restarted);
+        Ok(())
+    }
+
+    #[test]
+    fn the_stored_presence_is_reauthenticated_at_its_own_received_time() -> Result<()> {
+        let world = TestWorld::new()?;
+        let service = world.service("ghostlight", Vec::new(), false)?;
+        let admitted = service.signed_presence(5, |_| {})?;
+        world
+            .engine(NOW)
+            .admit_presence("ghostlight", &admitted, NOW)?;
+
+        // Forty seconds on, the stored presence is far outside the skew window
+        // of the incoming time, but it is the same activation's own count and
+        // must still be judged as of when Odin received it.
+        let later = NOW + 40_000;
+        let lower = service.signed_presence(4, |record| {
+            record.observed_at_unix_millis = later - 10;
+        })?;
+        let error = world
+            .engine(later)
+            .admit_presence("ghostlight", &lower, later)
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("reordered"),
+            "refused for the wrong reason: {error:#}"
+        );
+        assert_eq!(stored_presence_payload(&world, &service)?, admitted);
         Ok(())
     }
 
