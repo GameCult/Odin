@@ -1860,8 +1860,7 @@ mod tests {
     fn one_undecodable_incarnation_leaves_the_others_and_the_catalog_readable() -> Result<()> {
         let mut odin = activated_odin()?;
         let mut candidate = odin.state.borrow().authority_material.expected.clone();
-        candidate.plan_id = digest('9');
-        candidate.incarnation_id = "odin/generation-2".into();
+        candidate.target = "sibling".into();
         candidate.validate()?;
         let candidate_key = IncarnationRef::of(&candidate)?.key();
         // "aaghost" sorts before "odin", so a refresh that stops at its first
@@ -1933,6 +1932,32 @@ mod tests {
             entries
                 .into_iter()
                 .filter(|entry| entry.r#type != IdunnRuntimeActivationRecord::TYPE)
+                .collect()
+        })?;
+        odin.timers = ServingTimers::default();
+        assert_refused(&odin.pass().unwrap_err());
+        Ok(())
+    }
+
+    /// Idunn's activation of Odin carries a signature Idunn's anchor does not
+    /// verify: the authority cannot be verified.
+    #[test]
+    fn an_activation_that_does_not_verify_ends_odin() -> Result<()> {
+        let mut odin = activated_odin()?;
+        odin.pass()?;
+        odin.tamper_projection(|entries| {
+            entries
+                .into_iter()
+                .map(|mut entry| {
+                    if entry.r#type == IdunnRuntimeActivationRecord::TYPE {
+                        let mut activation =
+                            IdunnRuntimeActivationRecord::decode_canonical(&entry.payload)
+                                .unwrap();
+                        activation.signature[0] ^= 1;
+                        entry.payload = activation.canonical_bytes().unwrap();
+                    }
+                    entry
+                })
                 .collect()
         })?;
         odin.timers = ServingTimers::default();
