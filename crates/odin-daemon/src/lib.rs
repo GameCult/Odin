@@ -2312,7 +2312,8 @@ mod tests {
             ),
         )?
         .context("no stored presence")?
-        .payload)
+        .payload
+        .clone())
     }
 
     #[test]
