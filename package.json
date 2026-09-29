@@ -7,12 +7,7 @@
   "scripts": {
     "gjallar:persona": "node scripts/write-gjallar-persona-cc.mjs inspect",
     "gjallar:persona:write": "node scripts/write-gjallar-persona-cc.mjs write",
-    "muninn:build": "cargo build -p muninn-daemon",
-    "muninn:start": "cargo run -p muninn-daemon --",
-    "rust:test": "cargo test --workspace",
-    "check": "node scripts/check-syntax.cjs",
-    "test": "node --test test/*.test.cjs",
-    "start": "node src/odin-coordinator.cjs"
+    "rust:test": "cargo test --workspace"
   },
   "engines": {
     "node": ">=20"
