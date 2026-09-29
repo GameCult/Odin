@@ -589,6 +589,7 @@ dependencies = [
  "anyhow",
  "cultcache-rs",
  "cultmesh-rs",
+ "cultnet-rs",
  "pretty_assertions",
  "serde",
  "serde_json",
