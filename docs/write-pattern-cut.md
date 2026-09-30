@@ -19,6 +19,15 @@ approved. The copy is taken with `sudo cp` and decoded off the live path, and th
   - Recovery is mapped as its own pass. It covers an undecodable foreign write, a decodable one, and a failed
     load at activation.
 
+**Soul on write batch 2 (2026-09-30).** Q3 B changes the expected effect. Cut 2's row in section 6 ("at most
+3.5 MB/s, at most 1.05 writes/s") assumed Q3 A and is **superseded**. Under Q3 B, each peer put (presence
+heartbeats included) writes the store once.
+- With the live-shaped 3 MB store that is about 2.5-3 writes/s, about 7.5-9 MB/s, and 70-170 ms of the loop
+  blocked each second.
+- Measured: route-challenge p99 461 ms and 11 kernel drops.
+- After Cut 3's Odin half the store is about 80 KB and a put write is p50 about 4 ms.
+- **Cut 2 therefore deploys only together with Cut 3's Odin half**, which is now being built on `hands/odin-write`.
+
 **Q2 decode result (Eyes, 2026-09-30; full table in the CultLib session scratchpad `odin-topology-decode.md`).**
 - 77 records; 3,222,550 B of payload in a 3,240,078 B file.
 - The two "~1.55 MB records" are per-type totals. Each type is dominated by one Ghostlight operator surface:
