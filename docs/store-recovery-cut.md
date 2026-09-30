@@ -36,6 +36,22 @@ Recorded for later cuts:
 - **Tooling.**
   - `packages/cultcache-rs` has no committed `Cargo.lock`, so the map's `cargo test --locked` cannot run.
   - The cultcache-ts interop test needs `CARGO_TARGET_DIR` unset under ygg-verify.
+- **Soul on batch 3 (`2d7a3c78..3c9e195b`, gamecult-ops `bca7978`), 2026-09-30: merge both.** Pre-merge batch 4 is in
+  Hands: fix the README symlink claim (S1), close value echoes in the redb and typed-decode paths (S2) and in the
+  Python/TS non-string key echo (S3), make the unlock policy coherent (S9), classify encode refusals separately from
+  `NotReplaced` (S10), and fix a test timeout (S11). The ops branch deletes the guard test (S6) and the dead compose
+  layout (S5).
+  - **Open for R3:** writes through a symlinked store path replace the link, so a store behind a link to a mounted
+    volume moves into the container layer. R3 decides resolve or refuse.
+  - **Open for R3b:** Python and TS never fsync. After F1 their first create-by-rename is not covered by ext4
+    `auto_da_alloc`, so a crash can leave zero bytes, which every post-R1 reader refuses forever. **Bifrost's CultLib
+    pin moves past R1 only together with R3b's TS fsync.**
+  - **For W0 (Odin):** classify a write failure through `CultCacheStoreWriteFailed.kind` together with its `io::Error`,
+    never retry on `NotReplaced` alone (S10).
+  - Deployed Epiphany is `d2ca6630`, using a vendored cultcache-rs (`ba6a4874`) that reads a missing store as empty.
+    All Epiphany units have been inactive since 2026-08-22.
+  - Live zero-byte stores to move aside after the ops merge, in Soul's order (setgid on inbox, then rename in place,
+    then relocate): `observations.cc`, `deliveries.cc`, and a third, `/var/lib/gamecult/epiphany/idunn-provider-health-admission.cc`.
 - **Text matches.** gamecult-ops `scripts/idunn/start-idunn-local.ps1:143` matches the same removed text as Muninn
   (below). It must change with Idunn's next CultLib bump.
 - **Consumer follow-up that must travel with the next Muninn CultLib bump:**
