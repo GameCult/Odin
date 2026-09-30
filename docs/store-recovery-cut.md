@@ -13,6 +13,15 @@
   published as its own typed record, not as a degraded presence.
 - **Q-R6:** "Approved". Both drills.
 
+**R1 status (Self, 2026-09-30).** Built on CultLib `hands/cultcache-read-failures` (`c0b56e06`..`b7908668`); it
+is in Soul.
+- **Consumer follow-up that must travel with the next Muninn CultLib bump:**
+  `Muninn scripts/restart-starfire-muninn.ps1:144` matches `*failed to decode MessagePack*` to trigger
+  `Reset-CorruptMuninnStore`. R1 removes that text, so the reset would stop firing silently. The script must match
+  the typed `CultCacheStoreUnreadable` kind, or the new wording, in the same change.
+- C#'s truncated-store exception (`EndOfStreamException`) is an `IOException`, the same I/O-versus-undecodable
+  overlap. It goes with R3's C# work.
+
 Status: cut map, Imagination pass 1 (Opus), 2026-09-30. Nothing has landed. This map owns the means for repairing
 and recovering `/var/lib/gamecult/odin/topology.cc`. It follows `docs/write-pattern-cut.md` (Cuts 1-3) and starts
 from that campaign's landed head.
