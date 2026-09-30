@@ -775,23 +775,37 @@ fn main() -> Result<()> {
         }
     }
 
-    // Once serving, only losing the write lease ends Odin (see `survive`).
-    let mut timers = ServingTimers::default();
-    loop {
-        if stopping.load(Ordering::Relaxed) {
-            eprintln!("Odin stopping on request");
-            stop(&state.borrow());
-            return Ok(());
-        }
-        if !serving_pass(&state, &mut server, &mut timers)? {
-            thread::sleep(IDLE_POLL_INTERVAL);
-        }
-    }
+    serve(&state, &mut server, &mut ServingTimers::default(), &stopping)
 }
 
-/// The last write before Odin stops on request. `flush` makes it only while
-/// the lease is still current. A failure is logged and not returned: Odin is
-/// stopping either way, and the next Odin loads what the file holds.
+/// Serve until stopped on request or ended by a condition `survive` returns
+/// (or a dead socket). Every way out makes the last write (`stop`).
+fn serve(
+    state: &Rc<RefCell<RuntimeState>>,
+    server: &mut OdinServer,
+    timers: &mut ServingTimers,
+    stopping: &AtomicBool,
+) -> Result<()> {
+    let ended = loop {
+        if stopping.load(Ordering::Relaxed) {
+            eprintln!("Odin stopping on request");
+            break Ok(());
+        }
+        match serving_pass(state, server, timers) {
+            Ok(true) => {}
+            Ok(false) => thread::sleep(IDLE_POLL_INTERVAL),
+            Err(error) => break Err(error),
+        }
+    };
+    stop(&state.borrow());
+    ended
+}
+
+/// The last write before Odin ends. `flush` makes it only while the lease is
+/// still current and the file still holds what Odin wrote, so it writes
+/// nothing after `WriteLeaseLost` or `ForeignStoreWrite`. A failure is logged
+/// and not returned: Odin is ending either way, and the next Odin loads what
+/// the file holds.
 fn stop(state: &RuntimeState) {
     if let Err(error) = state.flush() {
         eprintln!("Odin's final store write was not made: {error:#}");
@@ -1564,6 +1578,8 @@ mod tests {
         _temp: tempfile::TempDir,
         state: Rc<RefCell<RuntimeState>>,
         server: OdinServer,
+        /// The server's own socket, shared: what is done to it is done to the server.
+        socket: UdpSocket,
         timers: ServingTimers,
         store: PathBuf,
         lease_path: PathBuf,
@@ -1775,6 +1791,7 @@ mod tests {
             "Odin did not activate in the fixture"
         );
         let state = Rc::new(RefCell::new(runtime));
+        let server_socket = socket.try_clone()?;
         let server = CultMeshRudpDocumentServer::new(
             socket,
             SinkHandle(state.clone()),
@@ -1786,6 +1803,7 @@ mod tests {
             _temp: temp,
             state,
             server,
+            socket: server_socket,
             timers: ServingTimers::default(),
             store,
             lease_path,
@@ -1797,6 +1815,22 @@ mod tests {
     impl OdinWorld {
         fn pass(&mut self) -> Result<bool> {
             serving_pass(&self.state, &mut self.server, &mut self.timers)
+        }
+
+        /// Serve as `main` does, with a stop already requested or not.
+        fn serve(&mut self, stop_requested: bool) -> Result<()> {
+            serve(
+                &self.state,
+                &mut self.server,
+                &mut self.timers,
+                &AtomicBool::new(stop_requested),
+            )
+        }
+
+        /// One heartbeat of Odin's own: a change to its bookkeeping, which is
+        /// written on the interval and not at once.
+        fn heartbeat(&self) -> Result<()> {
+            self.state.borrow_mut().publish_self_presence("test heartbeat")
         }
 
         /// Replace the lease under Odin with a later epoch. Odin holds a shared
@@ -3139,22 +3173,87 @@ mod tests {
         Ok(())
     }
 
-    /// Stopping on request writes what changed, while the lease is current,
-    /// and nothing once it is lost.
-    #[test]
-    fn stopping_writes_what_changed_only_under_the_lease() -> Result<()> {
-        let odin = activated_odin()?;
-        provider_put(&odin, "ghostlight.doc.v1", "doc-1", vec![1])?;
-        stop(&odin.state.borrow());
-        assert_eq!(odin.file_records()?, odin.working_set());
-
+    /// Odin serving, written once, with a change of its own not yet written.
+    fn odin_with_an_unwritten_change() -> Result<OdinWorld> {
         let mut odin = activated_odin()?;
         odin.pass()?;
+        odin.heartbeat()?;
+        assert_ne!(odin.file_records()?, odin.working_set());
+        Ok(odin)
+    }
+
+    /// Stopping on request makes the last write.
+    #[test]
+    fn a_stop_request_writes_what_changed() -> Result<()> {
+        let mut odin = odin_with_an_unwritten_change()?;
+        odin.serve(true)?;
+        assert_eq!(odin.file_records()?, odin.working_set());
+        Ok(())
+    }
+
+    /// Ending because Odin's own authority is refused, the lease is still
+    /// current: the last write is made.
+    #[test]
+    fn ending_on_a_refused_authority_writes_what_changed() -> Result<()> {
+        let mut odin = odin_with_an_unwritten_change()?;
+        odin.tamper_projection(|entries| {
+            entries
+                .into_iter()
+                .filter(|entry| entry.r#type != IdunnRuntimeActivationRecord::TYPE)
+                .collect()
+        })?;
+        odin.timers = ServingTimers::default();
+        assert_refused(&odin.serve(false).unwrap_err());
+        assert_eq!(odin.file_records()?, odin.working_set());
+        Ok(())
+    }
+
+    /// Ending on a dead socket, the lease is still current: the last write is
+    /// made. The socket's own failure is real (a refused datagram, reported on
+    /// the server's next receive); only the length of the failing run is set.
+    #[test]
+    fn ending_on_a_dead_socket_writes_what_changed() -> Result<()> {
+        let mut odin = odin_with_an_unwritten_change()?;
+        let closed = UdpSocket::bind("127.0.0.1:0")?.local_addr()?;
+        odin.socket.connect(closed)?;
+        odin.socket.send(b"to nobody")?;
+        thread::sleep(Duration::from_millis(50));
+        odin.timers.poll_failing_since = ago(POLL_FAILURE_LIMIT.as_millis() as u64 + 1_000);
+        let error = odin.serve(false).unwrap_err();
+        assert!(format!("{error:#}").contains("failed every poll"), "{error:#}");
+        assert_eq!(odin.file_records()?, odin.working_set());
+        Ok(())
+    }
+
+    /// Ending because the lease was lost, nothing more is written.
+    #[test]
+    fn ending_on_a_lost_lease_writes_nothing() -> Result<()> {
+        let mut odin = odin_with_an_unwritten_change()?;
         let written = file_identity(&odin.store)?;
-        provider_put(&odin, "ghostlight.doc.v1", "doc-1", vec![1])?;
         odin.swap_lease()?;
-        stop(&odin.state.borrow());
+        odin.timers = ServingTimers::default();
+        let error = odin.serve(false).unwrap_err();
+        assert!(error.downcast_ref::<WriteLeaseLost>().is_some(), "{error:#}");
         assert_eq!(file_identity(&odin.store)?, written);
+        Ok(())
+    }
+
+    /// Ending because another process wrote the file, nothing is written over
+    /// it.
+    #[test]
+    fn ending_on_a_foreign_write_writes_nothing() -> Result<()> {
+        let mut odin = odin_with_an_unwritten_change()?;
+        odin.tamper_store(|entries| {
+            entries
+                .into_iter()
+                .filter(|entry| entry.r#type != GameCultRuntimePresenceHealthRecord::TYPE)
+                .collect()
+        })?;
+        let foreign = file_identity(&odin.store)?;
+        odin.timers.last_flush = None;
+        let error = odin.serve(false).unwrap_err();
+        assert!(error.downcast_ref::<ForeignStoreWrite>().is_some(), "{error:#}");
+        assert_eq!(file_identity(&odin.store)?, foreign);
         Ok(())
     }
 
