@@ -627,10 +627,7 @@ impl RuntimeState {
 /// failure of Odin's own authority, marked for the fatal rule in `survive`,
 /// whatever error it wraps.
 fn own_projection_failure(error: anyhow::Error) -> anyhow::Error {
-    if error
-        .chain()
-        .any(|cause| cause.is::<ProjectionUnreadable>())
-    {
+    if error.downcast_ref::<ProjectionUnreadable>().is_some() {
         return error;
     }
     error.context(PresenceAuthorityRefused(
