@@ -3,7 +3,9 @@
 **2026-09-30, Self.** Operator: "Let's fix Odin up, that's some furious bookkeeping right there. Look at Odin's
 write pattern and see if append only or per-document is the way to go." Answer: neither is the first fix. Cuts 1-2
 go to Hands now. Q3 (a 1 s interval) and Q4 (the Rust directory store as a CultLib follow-up) are Self defaults,
-and the operator may overrule them. Q1 and Q2 are put to the operator, and Cut 3 waits on Q1.
+and the operator may overrule them. **Operator, 2026-09-30: "Q1: yes", so CultMesh refuses puts it could never
+serve and Cut 3 goes ahead; "Q2: yeah, of course", so a read-only decode of a copy of live `topology.cc` is
+approved. The copy is taken with `sudo cp` and decoded off the live path, and the copy is deleted afterwards.**
 
 Status: cut map, Imagination pass 1 (Opus), 2026-09-30. Nothing has landed. Anchors are Odin `main` at
 `44951a1` (the deployed build, live on Yggdrasil since 2026-09-30 04:20:48 UTC) and CultLib `3bf1c0ce`
