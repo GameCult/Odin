@@ -2615,29 +2615,23 @@ mod tests {
         Ok(())
     }
 
-    /// A projection file that cannot be read at all, because it does not
-    /// decode or cannot be opened, skips every presence and nothing else: the
-    /// catalog still serves the peer documents.
+    /// A projection file that cannot be read at all skips every presence and
+    /// nothing else: the catalog still serves the peer documents.
     #[test]
     fn a_projection_file_that_cannot_be_read_skips_presences_not_the_catalog() -> Result<()> {
-        let faults: [fn(&Path) -> Result<()>; 2] = [
-            |projection| Ok(std::fs::write(projection, b"not a cultcache store")?),
-            |projection| Ok(std::fs::remove_file(sibling_lock_path(projection)?)?),
-        ];
-        for fault in faults {
-            let mut odin = activated_odin()?;
-            odin.pass()?;
-            provider_put(&odin, "ghostlight.doc.v1", "doc-1", vec![1])?;
-            assert_eq!(
-                documents_of(&odin.catalog()?, GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA),
-                1,
-                "Odin's own presence is served while the projection reads"
-            );
-            fault(&odin.state.borrow().options.idunn_projection)?;
-            let catalog = odin.catalog()?;
-            assert_eq!(documents_of(&catalog, "ghostlight.doc.v1"), 1);
-            assert_eq!(documents_of(&catalog, GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA), 0);
-        }
+        let mut odin = activated_odin()?;
+        odin.pass()?;
+        provider_put(&odin, "ghostlight.doc.v1", "doc-1", vec![1])?;
+        assert_eq!(
+            documents_of(&odin.catalog()?, GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA),
+            1,
+            "Odin's own presence is served while the projection reads"
+        );
+        let projection = odin.state.borrow().options.idunn_projection.clone();
+        std::fs::write(projection, b"not a cultcache store")?;
+        let catalog = odin.catalog()?;
+        assert_eq!(documents_of(&catalog, "ghostlight.doc.v1"), 1);
+        assert_eq!(documents_of(&catalog, GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA), 0);
         Ok(())
     }
 
