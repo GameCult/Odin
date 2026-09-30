@@ -131,18 +131,8 @@ struct SinkHandle(Rc<RefCell<RuntimeState>>);
 struct SnapshotHandle(Rc<RefCell<RuntimeState>>);
 
 impl CultMeshRudpRawDocumentSink for SinkHandle {
-    fn accept_raw_        // The catalog serves past the ghost; correlations are not part of it.
-        let catalog = odin.catalog()?;
-        assert_eq!(
-            documents_of(&catalog, GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA),
-            1
-        );
-(&mut self, receipt: CultMeshRudpRawDocumentReceipt) -> Result<()> {
-        self.0.borrow_mut().accept_raw_document(receipt)            .ok_or_else(|| -> anyhow::Error {
-                PresenceAuthorityRefused("Idunn projects no Expected for Odin's own incarnation")
-                    .into()
-            })?;
-        Ok(())
+    fn accept_raw_document(&mut self, receipt: CultMeshRudpRawDocumentReceipt) -> Result<()> {
+        self.0.borrow_mut().accept_raw_document(receipt)
     }
 }
 
