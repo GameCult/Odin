@@ -25,8 +25,8 @@ use cultnet_rs::{
     IDUNN_EXPECTED_INCARNATION_SCHEMA, IDUNN_PROCESS_WRITE_LEASE_SCHEMA,
     IDUNN_RUNTIME_ACTIVATION_CREDENTIAL_NAME, IDUNN_RUNTIME_ACTIVATION_SCHEMA,
     IdunnExpectedIncarnationRecord, IdunnProcessWriteLeaseRecord, IdunnRuntimeActivationRecord,
-    IdunnRuntimeActivationSigner, IdunnServiceIdentity,
-    OdinRuntimeTopologyCorrelationRecord, OdinTopologyIdentity, ServiceIdentityProfile,
+    IdunnRuntimeActivationSigner, IdunnServiceIdentity, OdinTopologyIdentity,
+    ServiceIdentityProfile,
     ServiceIdentitySigner, ServiceIdentityTrustAnchor, derive_service_identity_id,
     open_service_identity_credential_reader, verify_runtime_authority,
 };
@@ -1469,7 +1469,8 @@ mod tests {
         GAMECULT_RUNTIME_PRESENCE_HEALTH_SIGNING_PURPOSE, GAMECULT_SERVICE_TRUST_ANCHOR_SCHEMA,
         GameCultServiceTrustAnchorRecord, IdunnExpectedCapability, IdunnExpectedRoute,
         IdunnRuntimeActivationLaunch, ODIN_RUNTIME_TOPOLOGY_CORRELATION_SCHEMA,
-        encode_cultnet_message_to_vec, enroll_service_identity_at,
+        OdinRuntimeTopologyCorrelationRecord, encode_cultnet_message_to_vec,
+        enroll_service_identity_at,
     };
 
     use super::*;
