@@ -60,7 +60,12 @@ Recorded for later cuts:
     `manifest.txt` recording owner, mode and mtime. None had gained bytes. All three Bifrost units stayed active, and
     persona-feedback logged nothing and did not restart.
   - The compose/container lane (the compose file, two deploy scripts, the `.ps1` uploader, two runbooks) is dead:
-    the live Bifrost units run native `dotnet` and `node`. Deleting it is put to the operator.
+    the live Bifrost units run native `dotnet` and `node`. **Deleted 2026-09-30, operator: "delete the Bifrost lane".**
+    gamecult-ops `fdb4356`. Its live trigger, the Idunn legacy actuator route `deploy bifrost-persona-feedback`, was
+    retired in Idunn `7793b5b` and installed on Yggdrasil at 21:50 CEST (sha256 `d95fa08c...`; the previous binary is
+    at `/root/idunn-yggdrasil.pre-bifrost-retire-20260930`). The manifest and `/srv/bifrost/compose` were moved to
+    `/srv/retired/retired-2026-09-30/`. All three Bifrost units stayed active. **Follow-up:** persona-feedback has no
+    Idunn deploy route now. Give it a real Idunn binding.
   - Live zero-byte stores to move aside after the ops merge, in Soul's order (setgid on inbox, then rename in place,
     then relocate): `observations.cc`, `deliveries.cc`, and a third, `/var/lib/gamecult/epiphany/idunn-provider-health-admission.cc`.
 - **Text matches.** gamecult-ops `scripts/idunn/start-idunn-local.ps1:143` matches the same removed text as Muninn
