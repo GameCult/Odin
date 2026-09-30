@@ -434,7 +434,8 @@ records; update the check's type list in the same pass.
     Odin healthy while its catalog is stuck.
   - C: reopen Q3 and go back to the 1 s interval. That brings back lost acknowledged puts on a crash.
 
-  **Recommended: A.**
+  **Recommended: A.** **RULED A by the operator, 2026-09-30: "agree on Odin writer thread".** Mapping is next
+  (Imagination): the cultmesh-rs deferred put reply, then the Odin writer thread with group commit.
 
 ## 8. Related findings
 
