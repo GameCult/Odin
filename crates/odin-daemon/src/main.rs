@@ -318,6 +318,14 @@ impl RuntimeState {
     /// once the store holding the put is on disk. The write is the one `flush`,
     /// so it carries everything else that changed too. A write that fails
     /// refuses the put.
+    ///
+    /// The promise runs one way only. An acknowledged put is always on disk. One
+    /// refused because its write failed may still be: it stays in the working set, so the catalog
+    /// serves it and the next write lands it (or the failed write had already
+    /// replaced the file). That is sound because a put is the latest value for
+    /// its type and key, not an event: a publisher that retries a refused put
+    /// stores the same value, and one that does not has lost nothing it was
+    /// promised.
     fn accept_raw_document(&mut self, receipt: CultMeshRudpRawDocumentReceipt) -> Result<()> {
         ensure!(
             self.activated(),
