@@ -7,6 +7,18 @@ and the operator may overrule them. **Operator, 2026-09-30: "Q1: yes", so CultMe
 serve and Cut 3 goes ahead; "Q2: yeah, of course", so a read-only decode of a copy of live `topology.cc` is
 approved. The copy is taken with `sudo cp` and decoded off the live path, and the copy is deleted afterwards.**
 
+**Soul on Cuts 1-2, and two operator rulings (2026-09-30).**
+- **Q3 restated.** The premise "puts carry no application acknowledgement" was false. The cultmesh-rs server
+  ACKs a put only after `accept_raw_document` returns Ok, so after Cut 1 an ACK meant "in memory", and a SIGKILL
+  lost acknowledged puts in 6 of 6 probe runs.
+  - **Operator ruling: "Q3: B".** Peer puts are fsynced before they are acknowledged. Only Odin's own
+    bookkeeping (heartbeats, correlations) waits for the 1 s interval. An ACK means durable.
+- **An undecodable foreign write.** Today Odin stays up, serves from memory and never persists again. Self offered
+  three options: degraded but loud, end Odin, or unchanged.
+  - **Operator: "None of these options involve repair and recovery, which is what ultimately needs to happen."**
+  - Recovery is mapped as its own pass. It covers an undecodable foreign write, a decodable one, and a failed
+    load at activation.
+
 **Q2 decode result (Eyes, 2026-09-30; full table in the CultLib session scratchpad `odin-topology-decode.md`).**
 - 77 records; 3,222,550 B of payload in a 3,240,078 B file.
 - The two "~1.55 MB records" are per-type totals. Each type is dominated by one Ghostlight operator surface:
