@@ -75,6 +75,15 @@ heartbeats included) writes the store once.
 - **Batch 4 in Hands:** S-4, S-6, S-8, the S-5 doc line, the attempted-list fixture gap, and committing Soul's
   probes. S-1 waits on Q5; S-2 and S-3 wait on CultLib.
 
+**CultLib side landed (2026-09-30).** Ack Cut D was merged at `2f06ef84`, R1 at `daedfdd6` and the put-serve bound at
+`9dcb3aa1`. That unblocks the Q5 sequence:
+1. R1 batch 3's typed write outcome is on main. It carries `Rejected` as well as `NotReplaced`/`ReplacedNotDurable`.
+   W0 must classify by kind together with the `io::Error`, never by `NotReplaced` alone.
+2. **C5 next:** cultmesh-rs deferred put reply, on main.
+3. **W0:** one Odin pin bump. It closes S-2 (put refusal with a `served_record` override) and S-3 (delete
+   `attempted`), and it brings in Cut D's and the put-serve error texts.
+4. **W1:** the writer thread.
+
 Status: cut map, Imagination pass 1 (Opus), 2026-09-30. Nothing has landed. Anchors are Odin `main` at
 `44951a1` (the deployed build, live on Yggdrasil since 2026-09-30 04:20:48 UTC) and CultLib `3bf1c0ce`
 (Odin's `Cargo.lock` pin). This map owns the means; there is no separate target document, because the ends are
