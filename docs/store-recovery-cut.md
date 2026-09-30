@@ -13,6 +13,11 @@
   published as its own typed record, not as a degraded presence.
 - **Q-R6:** "Approved". Both drills.
 
+**R1 LANDED: CultLib main `daedfdd6` (2026-09-30).** The merged tree `0e6891b3` was verified on Yggdrasil in every
+runtime, including the four-runtime store interop test. That test runs close to its 30 s per-command limit under
+load (`cult-cache.test.ts:1407`), so it is fragile: follow-up. Consumer pins still gate their own bumps: Bifrost only
+with R3b's TS fsync; Muninn and Idunn with their error-text matches.
+
 **R1 status (Self, 2026-09-30).** Built on CultLib `hands/cultcache-read-failures` (`c0b56e06`..`b7908668`), then
 fix batch 2 (`..2d7a3c78`). Soul's verdict on batch 2 was to hold the merge. Batch 3 is in Hands, fixing:
 - **Blocker, F1 (zero-byte stores on Yggdrasil).**
