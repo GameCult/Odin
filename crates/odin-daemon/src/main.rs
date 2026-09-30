@@ -559,7 +559,10 @@ impl RuntimeState {
     /// The catalog serves what is stored, one record at a time: a record that
     /// does not decode, or whose incarnation's projection does not, is skipped
     /// and logged, and is never a reason to refuse every other record. Idunn's
-    /// projection is read once per query. Odin's
+    /// projection is read once per query; a projection that cannot be read at
+    /// all is every presence's failure and no one else's, so the query is
+    /// answered as if Idunn projected nothing: peer documents are served and
+    /// presences skipped. Odin's
     /// correlations are not part of the catalog: Idunn reads them from the
     /// store file, and a target has one per incarnation, so keying them by
     /// target would collide for the whole deploy window.
@@ -568,8 +571,15 @@ impl RuntimeState {
         query: &CultMeshRudpSnapshotQuery,
     ) -> Result<Vec<CultNetRawDocumentRecord>> {
         let records = self.topology()?.store.records();
-        let projections =
-            CultCacheIdunnProjectionSource::new(&self.options.idunn_projection).snapshot()?;
+        let projections = CultCacheIdunnProjectionSource::new(&self.options.idunn_projection)
+            .snapshot()
+            .unwrap_or_else(|error| {
+                self.log_repeating(
+                    "catalog skips every presence",
+                    format!("Idunn's projection cannot be read: {error:#}"),
+                );
+                IdunnProjectionSnapshot::default()
+            });
         let mut selected = BTreeMap::new();
         for envelope in records.values() {
             let document = match self.public_document(&projections, envelope) {
@@ -2533,6 +2543,32 @@ mod tests {
             0,
             "the presence whose projection cannot be read is skipped"
         );
+        Ok(())
+    }
+
+    /// A projection file that cannot be read at all, because it does not
+    /// decode or cannot be opened, skips every presence and nothing else: the
+    /// catalog still serves the peer documents.
+    #[test]
+    fn a_projection_file_that_cannot_be_read_skips_presences_not_the_catalog() -> Result<()> {
+        let faults: [fn(&Path) -> Result<()>; 2] = [
+            |projection| Ok(std::fs::write(projection, b"not a cultcache store")?),
+            |projection| Ok(std::fs::remove_file(sibling_lock_path(projection)?)?),
+        ];
+        for fault in faults {
+            let mut odin = activated_odin()?;
+            odin.pass()?;
+            provider_put(&odin, "ghostlight.doc.v1", "doc-1", vec![1])?;
+            assert_eq!(
+                documents_of(&odin.catalog()?, GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA),
+                1,
+                "Odin's own presence is served while the projection reads"
+            );
+            fault(&odin.state.borrow().options.idunn_projection)?;
+            let catalog = odin.catalog()?;
+            assert_eq!(documents_of(&catalog, "ghostlight.doc.v1"), 1);
+            assert_eq!(documents_of(&catalog, GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA), 0);
+        }
         Ok(())
     }
 

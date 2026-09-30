@@ -213,7 +213,8 @@ impl CultCacheIdunnProjectionSource {
 }
 
 /// One reading of Idunn's projection file. Every lookup made against it is
-/// answered from the same bytes.
+/// answered from the same bytes. The default projects nothing.
+#[derive(Default)]
 pub struct IdunnProjectionSnapshot {
     entries: Vec<CultCacheEnvelope>,
 }
