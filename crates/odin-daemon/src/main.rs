@@ -809,11 +809,9 @@ fn serve(
     ended
 }
 
-/// The last write before Odin ends. `flush` makes it only while the lease is
-/// still current and the file still holds what Odin wrote, so it writes
-/// nothing after `WriteLeaseLost` or `ForeignStoreWrite`. A failure is logged
-/// and not returned: Odin is ending either way, and the next Odin loads what
-/// the file holds.
+/// The last write before Odin ends, under `flush`'s own checks: after
+/// `WriteLeaseLost` or `ForeignStoreWrite` it writes nothing. A failure is
+/// logged, not returned: Odin is ending either way.
 fn stop(state: &RuntimeState) {
     if let Err(error) = state.flush() {
         eprintln!("Odin's final store write was not made: {error:#}");

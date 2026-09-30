@@ -425,8 +425,6 @@ pub struct OdinStoreSnapshot {
 pub trait OdinTopologyStore {
     fn read(&self, query: OdinStoreQuery) -> Result<OdinStoreSnapshot>;
 
-    /// Replace the queried incarnation's correlation, and its presence when
-    /// one is given.
     fn commit(
         &self,
         query: &OdinStoreQuery,
@@ -526,7 +524,6 @@ impl MemoryOdinTopologyStore {
         })
     }
 
-    /// Every record, in the order the file stores them.
     pub fn records(&self) -> Ref<'_, BTreeMap<RecordId, CultCacheEnvelope>> {
         self.records.borrow()
     }
@@ -553,7 +550,6 @@ impl MemoryOdinTopologyStore {
         }
     }
 
-    /// Every incarnation this store holds a correlation for.
     pub fn correlated_incarnations(&self) -> BTreeSet<IncarnationRef> {
         self.records
             .borrow()
@@ -584,7 +580,6 @@ impl MemoryOdinTopologyStore {
         legacy.len()
     }
 
-    /// Whether the records differ from what was last loaded or written.
     pub fn is_dirty(&self) -> bool {
         self.dirty.get()
     }
