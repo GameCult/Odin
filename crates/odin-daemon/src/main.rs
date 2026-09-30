@@ -3210,6 +3210,26 @@ mod tests {
         Ok(())
     }
 
+    /// A due write with nothing to write does not start the interval: the next
+    /// change is written on the first pass after it.
+    #[test]
+    fn with_nothing_to_write_the_next_change_is_written_on_the_next_pass() -> Result<()> {
+        let mut odin = activated_odin()?;
+        odin.pass()?;
+        let written = file_identity(&odin.store)?;
+        odin.timers.last_projection_refresh = Some(Instant::now());
+        odin.timers.last_heartbeat = Some(Instant::now());
+        odin.timers.last_flush = ago(1_100);
+        odin.pass()?;
+        assert_eq!(file_identity(&odin.store)?, written, "nothing to write");
+
+        odin.heartbeat()?;
+        odin.pass()?;
+        assert_ne!(file_identity(&odin.store)?, written, "the change is written at once");
+        assert_eq!(odin.file_records()?, odin.working_set());
+        Ok(())
+    }
+
     /// The lease is checked at the write itself: lost between a change and
     /// its write, the write is not made and Odin ends.
     #[test]
