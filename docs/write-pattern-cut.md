@@ -435,7 +435,514 @@ records; update the check's type list in the same pass.
   - C: reopen Q3 and go back to the 1 s interval. That brings back lost acknowledged puts on a crash.
 
   **Recommended: A.** **RULED A by the operator, 2026-09-30: "agree on Odin writer thread".** Mapping is next
-  (Imagination): the cultmesh-rs deferred put reply, then the Odin writer thread with group commit.
+  (Imagination): the cultmesh-rs deferred put reply, then the Odin writer thread with group commit. Mapped below in
+  "Q5 cut: the writer thread" (cuts C5, W0, W1; forks Q5-A and Q5-B).
+
+## Q5 cut: the writer thread
+
+**Imagination pass (Opus), 2026-09-30.** Maps the operator's ruling on Q5, "agree on Odin writer thread" (option A,
+section 7). Anchors:
+- Odin `hands/odin-write` at `434756e` (`crates/odin-daemon/src/main.rs`, `lib.rs`), CultLib pin `3bf1c0ce`.
+- CultLib `hands/cultmesh-put-serve-bound` tip `e4e2a0b9` (`packages/cultmesh-rs/src/rudp_document_server.rs`).
+  Its merge base is `42ba0f08`, which already holds ack Cuts 1, 1b and 1c.
+- CultLib `hands/ack-cutD` tip `e9d5ae2c` (lands on main first), and R1 batch 3 `hands/cultcache-read-failures` tip
+  `93ac5945` (`CultCacheStoreWriteFailed`).
+
+The mapping raises two forks, **Q5-A** and **Q5-B** (at the end of this section). Cuts C5 and W1 wait on Q5-A.
+
+### Q5.1 Body facts (probed and read)
+
+**Probe O1, Odin `434756e` + scratch test, Yggdrasil slot 3 (`imag-q5-odin@31953c93`).** A test process holds the
+store's sibling lock for 1,500 ms, the way Soul modelled a disk stall. Full serving passes run meanwhile. A route
+challenge is sent at 200 ms, then a catalog read.
+
+| Case | Route challenge | Catalog read |
+|---|---|---|
+| nothing waiting to be written | served in **39 ms** | served in 29 ms |
+| only Odin's own heartbeat waiting, and the interval write due | served in **1,342 ms** | 33 ms (sent after the release) |
+
+- No read path takes the store lock. At `434756e` the lock is taken only by `MemoryOdinTopologyStore::load`
+  (`lib.rs:509`, at activation) and by `flush` (`lib.rs:612` → `compare_exchange_snapshot`).
+- The stall reaches the loop through **both** writes on it: a peer put (`main.rs:363`, Soul S-1) and the interval
+  write of Odin's own bookkeeping (`main.rs:933-941`). The interval write stalls the loop with no peer put at all.
+  So the bookkeeping write must move to the writer too, not only the put write.
+
+**The loop still reads two other files.** They are not the store and take no lock, but they are disk reads on the
+loop:
+- The lease file, on every route challenge and catalog read: `raw_snapshot` `main.rs:389-409` →
+  `require_current_write_lease` `:546-567` → `read_process_write_lease` `:1323` (`pull_all_read_only_snapshot`).
+- Idunn's projection, on every catalog read (`:608`), refresh (`:572`) and heartbeat (`:524-544`).
+- Both files are small and rewritten rarely by Idunn, so they are normally served from the page cache. Probe O1
+  cannot show whether a real disk stall evicts them. Only the Yggdrasil rerun (Q5.6) can. If it does, the answer
+  is to hold the lease record in memory and re-check it where it is decided. That is its own follow-up, not this
+  cut.
+
+**What a put's reply is on the wire today.** CultNet has no put-acknowledgement message: the list in
+`cultnet-rs/src/contracts.rs` has `document_put_raw` and `error.v0`, and no put result.
+- A Rust publisher (`publish_cultnet_message_to_rudp_catalog`, `cultmesh-rs/src/lib.rs:871-924` at `e4e2a0b9`)
+  succeeds when its reliable packet is acknowledged by the RUDP transport, and fails on a `cultnet.error.v0`.
+  - Its default `flush_timeout` is 300 ms, with a resend every 50 ms (`:144-157`).
+- The document server sends that acknowledgement at the end of `poll_once`, after the sink returns
+  (`rudp_document_server.rs:468-476`). A refusal ends the session with an Error frame that acknowledges nothing
+  (`end_rejected_session` `:760-793`, put-serve branch).
+- **So today the put's reply is the transport acknowledgement.** That is how Q3 B's "an ACK means durable" holds:
+  the sink writes before it returns.
+
+**Every packet a session sends carries acknowledgement fields** (`ack`, `ack_mask`, from `ack_state`, cultnet-rs
+`rudp.rs` at main).
+- The fields report every *received* reliable sequence, not only delivered ones.
+- `create_packet` stamps them on each new packet: data, Pong, the end-of-poll Ack.
+- A reliable packet is stored with the fields it was created with, and resent unchanged (`track_reliable`,
+  `due_resends`).
+
+Probes P1-P4 (cultnet-rs sessions at `e4e2a0b9`, scratch test `imag_q5_probe.rs`, Yggdrasil, `imag-q5-cultlib@8dcfe36a`):
+
+| # | Case | Result |
+|---|---|---|
+| P1 | two pipelined ordered puts, the first lost | the second is delivered to nobody, yet `create_ack` acknowledges it. **S-5 is still open after ack Cuts 1-1c.** `ack_state` at main is the same code, so the ack map's to-do resolves to "not closed by the pin bump" |
+| P2 | a put delivered, then a Ping | the Pong acknowledges the put |
+| P3 | the resend of a reply created **before** the put | does not acknowledge it |
+| P3 | a reliable reply created **after** the put | acknowledges it, and so does its resend |
+| P4 | a retransmit of a delivered put | not delivered again (the server's end-of-poll ack still answers it, `:468`) |
+
+Consequence for a reply sent later: holding back only the end-of-poll ack is not enough.
+- A Pong, or a snapshot response created on the same session after the put arrived, acknowledges the put too.
+- The snapshot response keeps doing so on every resend, even if its first copy were patched.
+- So a session with a put awaiting its answer must be **sent nothing created after that put arrived**. Resends of
+  earlier packets are safe: they carry the fields they were created with.
+
+**The other runtimes (parity).**
+- **TS** (`cultmesh-ts/src/index.ts:5891-5914` at `e4e2a0b9`):
+  - It acknowledges each packet at receipt (`createAckForReceived`), before the handler runs.
+  - It runs each session's frames through one promise chain (`record.work`), so handling is serial per session.
+  - `onDocumentPutRaw` may return a Promise and an application-level receipt document, which is sent when it
+    resolves (`:5951-5972`).
+  - So TS already "replies later", but at the application level, and its transport ack does not mean handled.
+- **Python** (`cultmesh-py/src/cultmesh_py/server.py:407`, `_handle_raw_put` `:415`): the handler is synchronous
+  and returns its responses.
+- Neither has a durability meaning for its ack. Parity is follow-up **F-Q5a** (Q5.8).
+
+**Consumers of the sink trait** (`CultMeshRudpRawDocumentSink`):
+- Odin's `SinkHandle` (`main.rs:168-172`).
+- Ratatoskr's catalog test (`Ratatoskr/crates/ratatoskr-core/tests/catalog.rs:29`).
+- CultLib's own tests, which use closures through the blanket impl (`rudp_document_server.rs:60-67`).
+- Vendored copies (StreamPixels, Heimdall) do not implement it.
+
+**cultcache-rs write outcome (R1 batch 3, `93ac5945`).**
+- Every failed single-file write carries `CultCacheStoreWriteFailed { kind: NotReplaced | ReplacedNotDurable }`.
+- Any other error from `compare_exchange_snapshot` (lock, read, decode, validation) comes before the write step,
+  so the file is unchanged.
+- One hole: `with_exclusive_lock` (`cultcache-rs/src/lib.rs:924-932` on that branch) returns the **unlock** error
+  after a write that succeeded, with no marker. Odin would read that as "not replaced". Its next write would then
+  find its own snapshot and report `ForeignStoreWrite`, and Odin would end.
+  - That is rare (unlock failing), and it belongs to R1: follow-up **F-Q5b**, not this cut.
+
+### Q5.2 Target shape
+
+1. **CultLib (cut C5).** A put's sink may answer later.
+   - While any put of a session awaits its answer, the server sends that session nothing new.
+     - The one exception is resends of packets created before the put arrived.
+     - A snapshot request behind the pending put waits in the session's order.
+   - An accepted answer releases one ordinary acknowledgement.
+   - A refusal ends the session with the Error frame the put-serve branch sends.
+   - The wire does not change, and existing publishers keep "acknowledged means the sink accepted", which for Odin
+     is durable (Q5-A).
+2. **Odin (cut W1).** One writer thread owns the store file after activation.
+   - The loop owns the working set, decides when to write, and answers put replies from the writer's outcomes.
+   - Every put accepted while a write is in flight is covered by the next single write (group commit).
+   - Route challenges and catalog reads never wait on the writer.
+3. **Odin (cut W0), before W1.**
+   - A pin bump.
+   - S-2: a `served_record` override so Odin's admission is exact.
+   - S-3: the `attempted` list dies, because the typed write outcome says what the file holds.
+
+### Q5.3 Identity, lifecycle, authority
+
+| Kind | Named by | Over time | Decided by |
+|---|---|---|---|
+| pending put (CultLib) | a server-minted `u64` put id, unique for the server's life, never reused across session generations | created when an admitted put is offered to the sink; ends when it is answered, or when its session ends (the answer is then discarded) | the sink answers; the server alone sends |
+| put reply handle (CultLib) | the put id, inside a `CultMeshRudpPutReply` | owned by whoever the sink hands it to; consumed by `accept` or `refuse`; dropping it unanswered refuses | the sink's owner |
+| working-set version (Odin) | a `u64` counter in `MemoryOdinTopologyStore` | +1 on every mutation that changes a record; never reset within an activation | the loop |
+| written-through version (Odin) | a `u64` in `RuntimeState` | raised only by a writer outcome `Written { version }` | the writer's outcome, applied by the loop |
+| write request (Odin) | its version | at most one in flight; replaced by nothing (the next request is built when the outcome arrives) | the loop submits; the writer executes |
+| what the file holds (Odin, `flushed`) | none: one snapshot | set at activation from the load; replaced on `Ok(true)` and on `ReplacedNotDurable` | the writer alone |
+
+"Dirty" stops being a flag (`lib.rs:502`, `dirty: Cell<bool>`): it is derived as `version > written_through`.
+
+### Q5.4 Cuts
+
+#### Cut C5. A put's sink may answer later (CultLib, cultmesh-rs, behaviour)
+
+- **Repo/branch:** CultLib `hands/cultmesh-put-reply-later` from `main` after the put-serve branch merges (Q5.7).
+  Anchors below are at put-serve `e4e2a0b9`; they move by Cut D's diff (Q5.7 names the conflicts).
+- **Deletes first:** the synchronous sink call and its error mapping in the put arm, `rudp_document_server.rs:621-633`
+  (they are replaced, not wrapped). Nothing else is deleted.
+- **Public API** (default D-1 below):
+
+  ```rust
+  pub trait CultMeshRudpRawDocumentSink {
+      /// Answer through `reply` now or later, from any thread.
+      fn accept_raw_document(&mut self, receipt: CultMeshRudpRawDocumentReceipt, reply: CultMeshRudpPutReply);
+  }
+  // Closures keep working and answer at once:
+  impl<F: FnMut(CultMeshRudpRawDocumentReceipt) -> Result<()>> CultMeshRudpRawDocumentSink for F { .. }
+
+  #[must_use] pub struct CultMeshRudpPutReply { /* put id, Sender to the server */ }  // Send, !Clone
+  impl CultMeshRudpPutReply {
+      pub fn accept(self);
+      pub fn refuse(self, reason: impl std::fmt::Display);
+  }
+  // Drop without an answer refuses: "the put was not answered".
+  ```
+
+  - `CultMeshRudpRawDocumentReceipt` (`:37-43`) is unchanged; the reply is a separate argument, so the receipt stays
+    `Clone + PartialEq`.
+  - `CultMeshRudpPollOutcome` (`:286-290`) is unchanged. A later refusal is returned as `ApplicationRejected` with
+    `SinkRefused(reason)` from the `poll_once` that sends it.
+- **Server changes, `rudp_document_server.rs`:**
+  - `CultMeshRudpDocumentServer` (`:303-311`) gains:
+    - The answer channel (`std::sync::mpsc`: the server keeps the receiver, each reply holds a sender).
+    - `answered: VecDeque`, the answers taken off the channel and not yet handled.
+    - A next put id.
+    - `pending: BTreeMap<u64, CultMeshRudpSessionKey>`.
+  - `SessionEntry` (`:292-297`) gains `pending_puts: BTreeSet<u64>` and `waiting: VecDeque<(u32, CultNetMessage)>`,
+    the delivered frames that may not be answered yet.
+  - **One predicate owns "withheld":** `fn acknowledgement_withheld(&self, key) -> bool`, true while
+    `pending_puts` is non-empty. The S-5 fix, if the ack map takes it here, adds its clause to this function and
+    nowhere else.
+  - `poll_once`:
+    - Drain answers first (before `maintain`, `:366`). Each answer is looked up in `pending`; an unknown id (its
+      session ended) is discarded.
+    - Refuse → `end_rejected_session(key, reason)`, and return one `ApplicationRejected`. Further answers stay in the
+      channel for the next poll.
+    - Accept → remove the id. When the session has none left, it is released: send its ack (the rule for which
+      poll sends it is under the put arm below), then handle `waiting` in order.
+    - `:436-438`: a `result.reply` (Pong) is not sent while withheld.
+    - `:468-476`: the end-of-poll ack is not sent while withheld.
+  - `deliver_application_message` (`:565`):
+    - Put arm (`:572`): admission is unchanged (put-serve `:587-619`). Then mint the id, record it, and call the sink
+      with a reply.
+    - `poll_once` looks at answers again after the delivered-frame loop (`:445-466`), before the end-of-poll ack,
+      but handles only those for this poll's session. The rest stay queued for the next poll's first step. (Answers
+      move from the channel into one server-side queue, so they can be taken selectively.) A sink that answered at
+      once is therefore acknowledged, or refused, in the same poll with the same datagrams as today, and another
+      session's refusal can never cut this session's ack short.
+    - A release sends `create_ack()` from the drain, except for the session whose packet this poll is handling:
+      that session gets its ordinary end-of-poll ack, so a synchronous sink's datagrams stay exactly as they were.
+    - Snapshot arm (`:634`): if the session is withheld, push the request onto `waiting` and return; otherwise
+      answer as today.
+    - A put that arrives while `waiting` is non-empty also queues, so a session's frames are handled in order. A
+      put behind another put that is only pending is offered at once, so pipelined puts can share one write.
+  - Session end, wherever a session is removed (`:441`, `:486-489`, `:523`, `end_refused_session`,
+    `end_rejected_session`, Cut D's `end_unsendable_session`): remove its ids from `pending`, so their answers are
+    discarded.
+    - **Put this in one `remove_session(key)` helper, so no removal path can forget it.** It is the one new helper
+      the cut earns: there are six removal sites today.
+  - Doc comments: the struct doc (`:300-302`, "no background thread") stays true. The sink trait doc says what
+    "acknowledged" means: the sink accepted.
+- **Authority map:**
+  - Owner of what the peer is told about a put: the server, and only through `poll_once`. The sink decides accept or
+    refuse; it never sends.
+  - Inputs: sink answers (channel); transport receipts.
+  - Outputs: one ack per release; one refusal per refused put's session.
+  - Derived: "withheld" is derived from `pending_puts`; it is not a flag.
+  - Forbidden writers:
+    - No send path to a withheld session except `maintain`'s resends.
+    - The sink must not be able to acknowledge by returning. The return type carries no answer, so this holds by
+      construction.
+  - Shared paths: a synchronous closure sink and a deferred sink answer through the same reply and the same drain.
+    There is no second code path for "answered at once".
+- **Verification (CultLib, Yggdrasil):**
+  - Wire-level test, the observer layer: a raw client socket records every datagram the server sends to its session.
+    - With the reply held across at least five resend intervals, including a Ping and a snapshot request on that
+      session, no datagram acknowledges the put's sequence.
+    - After `accept()`, the next poll sends an ack that does, and then the snapshot response.
+    - Mutations that must fail it: sending the end-of-poll ack regardless; sending the Pong; answering the snapshot
+      request at once.
+  - Another session's snapshot request is answered while the first session's put is held (the loop is not blocked).
+  - `refuse()` and dropping the reply: the peer receives `cultnet.error.v0` and a goodbye, and nothing acknowledges
+    the put (reuse the put-serve refusal assertions).
+  - Two pipelined puts on one session, each with its own held reply:
+    - Answering the second first releases nothing.
+    - Answering the first then releases one ack that covers both.
+    - This pins that a later put's acknowledgement never leaves before an earlier one's.
+  - Session ends while held (peer Disconnect; a new Connect from the same key): a later `accept()` sends nothing to
+    the new generation, and `pending` is empty.
+  - Closure sink: the datagram sequence is byte-identical to the pre-cut server for accept and refuse. This pins that
+    the synchronous path did not change.
+  - An unservable put is refused before the sink sees it: the sink is never called and no reply is minted.
+  - `cargo mutants --in-diff` on the cut's diff; every survivor is triaged.
+- **Estimate:** about +170 source, -15 source, +350 tests. No new target, dependency or wire field.
+
+#### Cut W0. Pin bump, exact admission and the one-candidate store (Odin, subtraction first)
+
+- **Repo/branch:** Odin `hands/odin-write-w0` from `hands/odin-write` (`434756e`, or batch 4's tip). It bumps the
+  CultLib pin to the main commit holding Cut D, put-serve, R1 batch 3 and C5 (Q5.7).
+- **Deletes first:**
+  - `attempted` (`lib.rs:494-499`, `:525`), the retry loop over it in `flush` (`:619-625`) and its push (`:628-633`).
+  - The tests that describe a file holding some older failed attempt:
+    - `a_write_that_failed_before_replacing_keeps_every_earlier_attempt_odins` (`lib.rs:2172`).
+    - `the_file_may_hold_a_later_failed_attempt_not_only_the_first` (`:2205`).
+    - Each models a `NotReplaced` failure that nonetheless changed the file, which the typed outcome now rules out.
+- **Changes:**
+  - `flush` (`lib.rs:612-640`) matches the error's `CultCacheStoreWriteFailed` kind (`downcast_ref`):
+    - `ReplacedNotDurable` → `flushed = current`, and the store stays dirty so the next write re-syncs.
+    - Anything else → no change.
+  - `a_write_that_failed_after_replacing_the_file_is_not_another_writer` (`:2141`) is re-targeted to inject
+    `ReplacedNotDurable` as the real outcome, not a hand-made replace.
+  - `a_failed_write_is_made_by_the_next_without_another_change` (`:2118`) stays.
+  - **S-2:** Odin's `SnapshotHandle` (`main.rs:174-181`) overrides `served_record`. It builds the envelope as
+    `persist_generic_document` (`:1462`) would store it, then serves it through `peer_document` (`:1400`), the
+    function `drop_unservable_documents` (`:1428`) sizes with. Admission and activation then use one sizing.
+    - A runtime-presence put keeps the default (as received). Presences are served in `public_document`'s shape and
+      are never near the bound, and `drop_unservable_documents` does not check them either.
+    - A schema that `persist_generic_document` would refuse returns an error, which the server turns into a
+      refusal before the sink.
+  - `accept_raw_document`'s doc (`main.rs:332-351`) drops its S-5 paragraph; it moves to W1's writer doc.
+- **Authority map:** what the file holds is decided by the one write outcome, not by a list of guesses.
+  `ForeignStoreWrite` means exactly "a snapshot Odin did not write".
+- **Verification:**
+  - Test: a `ReplacedNotDurable` failure, then a change, then a write → made over the failed snapshot.
+  - Test: a `NotReplaced` failure, after which another writer puts the failed snapshot into the file → `ForeignStoreWrite`.
+    Mutation: keeping a candidate fails it.
+  - Test: 1,000 failed writes leave nothing retained. This pins S-3; observe the store's retained records, or the
+    absence of the field.
+  - S-2 test: a 1.2 MB put is refused as `DocumentUnservable` and is not in the working set.
+  - Mutation: sizing with the received record instead of `peer_document` survives nothing.
+  - Negative: `rg -n attempted crates/odin-daemon/src` matches nothing.
+  - The pin bump carries ack Cuts 1-3 and D into Odin. The full Odin suite runs on Yggdrasil, and Soul reads this cut
+    as a transport change, not only a subtraction.
+- **Estimate:** about -150 (including the two tests) / +60.
+
+#### Cut W1. The writer thread (Odin, behaviour)
+
+- **Repo/branch:** Odin `hands/odin-writer` from W0.
+- **Deletes first:**
+  - `MemoryOdinTopologyStore::flush` (`lib.rs:602-640`), its `path` (`:490`) and `flushed` (`:493`) fields, and the
+    `dirty` flag (`:502`, `:600-602`).
+  - `RuntimeState::flush` (`main.rs:317-330`).
+  - The `self.flush()?` in `accept_raw_document` (`main.rs:363`).
+  - `stop`'s direct write (`main.rs:891-898`).
+  - The flush step of `serving_pass` (`main.rs:933-941`).
+  - No path is left on the loop that can write the file. That holds before the writer is added.
+- **Keeps:**
+  - `MemoryOdinTopologyStore::load` (`lib.rs:509`): the one locked read, at activation, on the loop, before any writer
+    exists. `load` returns the loaded snapshot beside the store, to become the writer's `flushed`.
+  - `ForeignStoreWrite`, `WriteLeaseLost`, `survive` (`main.rs:979-994`), unchanged in meaning.
+- **Adds, `crates/odin-daemon/src/writer.rs`** (a module, not a crate):
+  - `StoreWriter`: `spawn(file, flushed, lease) -> StoreWriter`, `submit(WriteRequest)`,
+    `try_outcome() -> Option<WriteOutcome>` and `finish(self)`.
+    - The channel is `sync_channel(1)`. The loop submits only when nothing is in flight, so `submit` never blocks.
+    - `WriteRequest { version, records }`.
+    - `WriteOutcome { version, result }`, where `result` is one of `Written`, `Failed(text)`, `Foreign` or
+      `LeaseLost(text)`.
+  - The thread:
+    - Checks the lease (the check extracted from `require_current_write_lease` `main.rs:546-567` into a free
+      function that the loop and the writer share), then `compare_exchange_snapshot(flushed, records)`.
+    - Applies W0's outcome rule to `flushed`, and sends the outcome.
+    - It never touches reply handles, the working set or the socket.
+  - Mock point: the thread writes through a one-method trait `StoreFile { compare_exchange_snapshot }`, implemented
+    for `SingleFileMessagePackBackingStore`. Tests gate it and count it. The lock-hold (Soul's method) is used where
+    the real file must be on the path.
+- **Changes, `main.rs`:**
+  - `RuntimeState` (`:141-161`) gains `writer: Option<StoreWriter>` (spawned in `try_activate` after the load,
+    `:284-305`), `written_through: u64`, `in_flight: Option<u64>` and `replies: VecDeque<(u64, CultMeshRudpPutReply)>`.
+  - `SinkHandle::accept_raw_document` (`:168-172`) takes the reply.
+  - `RuntimeState::accept_raw_document` (`:352-367`):
+    - Validates and mutates as today.
+    - Pushes `(store.version(), reply)`, or accepts at once when `version <= written_through` (nothing new to make
+      durable).
+    - Refuses through the reply on a validation error.
+    - Submits if nothing is in flight.
+  - A new `serving_pass` step, in place of `:933-941`, run every pass:
+    - `try_outcome`. On `Written { v }`: `written_through = v`, and accept every reply with version `<= v`, in queue
+      order.
+    - On `Failed`: refuse the replies with version `<= v`; they remain in the working set (refusal runs one way, as
+      documented at `:344-350`).
+    - On `Foreign` / `LeaseLost`: return the error to `survive`, which ends Odin.
+    - Then, if nothing is in flight and `version > written_through`, submit when a reply is waiting or when
+      `FLUSH_INTERVAL` is due.
+    - So puts never wait for the interval; bookkeeping-only changes do.
+  - `stop` (`:894`):
+    - If the lease is still current and anything is unwritten or in flight, wait for the in-flight outcome, submit the
+      rest, and wait for that outcome too. This is a blocking wait; it is the only one, and it happens only on the
+      way out.
+    - Answer the replies, run one `poll_server` so the acks leave, then `finish` (drop the sender and join the
+      thread).
+    - After `WriteLeaseLost` or `ForeignStoreWrite`, write nothing. Dropping the replies refuses them.
+  - `FLUSH_INTERVAL`'s comment (`:73-77`) and the store's doc (`lib.rs:484-488`) say: the writer thread owns the
+    file; puts are covered by the next write; bookkeeping waits for the interval.
+- **Authority map:**
+  - Owner of the store file after activation: the writer thread, the only holder of a
+    `SingleFileMessagePackBackingStore` for the store path. It also owns what the file holds (`flushed`).
+  - Owner of the working set, of when to write, and of put replies: the loop (`RuntimeState`).
+  - Inputs:
+    - Writer: one request at a time, and the lease file.
+    - Loop: provider puts, Idunn's projection, the lease file, and writer outcomes.
+  - Outputs: one atomic `.cc` snapshot per request; one outcome per request; replies answered in version order.
+  - Derived state:
+    - `dirty` is derived (`version > written_through`).
+    - `flushed` is no longer the loop's; it lives only in the writer.
+    - The interval decides only bookkeeping-only writes.
+  - Forbidden writers: no loop code path calls `compare_exchange_snapshot`, takes the store's lock, or answers a
+    put reply before the outcome covering its version.
+  - Shared paths: peer puts, self-presence, refresh, activation-time drops and the stop write all mutate the working
+    set, and reach the file only through `submit`.
+  - Deletion line: every loop-side write (above) is deleted before `writer.rs` is added.
+- **Batching rule, stated once.** The loop keeps at most one write in flight. Everything that changed while it was in
+  flight, puts and bookkeeping alike, goes into the next request as one snapshot of the working set. N puts accepted
+  during one write cost one more write and one fsync pair, not N.
+- **Backpressure** (Q5-B, recommended: hold):
+  - A stalled writer holds put replies. The loop keeps serving, and the working set keeps admitting (the catalog
+    serves admitted-not-durable puts, as it does today after a failed write).
+  - The queue is bounded by the server's existing limits: 64 sessions and 32 MiB of admitted payload. It adds no new
+    bound.
+  - A publisher that stops waiting (the Rust default is 300 ms) disconnects. Its session ends, its answer is
+    discarded, and its put is still written by the next write. That is what a publisher sees today during a stall,
+    minus the stalled challenges.
+- **Ordering.**
+  - Replies are answered in version order from one queue, and the server sends acks in answer order.
+  - Within a session, C5 releases one ack only when every pending put of the session is answered.
+  - So no later put's reply leaves before an earlier one's.
+- **Crash mid-batch.**
+  - The write is one atomic replace, so the file holds the old snapshot or the new one.
+  - No reply of a batch is answered before its `Written` outcome, so a SIGKILL anywhere loses no acknowledged put.
+  - A crash after the rename but before the directory sync is `ReplacedNotDurable` if the process lives; if it dies,
+    nothing of that batch was acknowledged.
+- **Activation.** The store is read once, by `load`, before the writer is spawned. While the writer lives, the loop
+  never reads the file (Cut 1's rule, unchanged).
+- **Verification (Odin, Yggdrasil):**
+  - **Loop latency under a stall.** This pins Q5's ruling; it is Soul's S-3 probe and O1, inverted into assertions.
+    - Hold the store's sibling lock for 1,500 ms, with a provider put in flight and Odin's heartbeat dirty with the
+      interval due.
+    - A route challenge and a catalog read are each served within 200 ms. The put's publisher sees no ack until the
+      lock is released, and then does, with the put on disk.
+    - Mutation that must fail it: running the write synchronously on the loop, by calling the `StoreFile` directly
+      from `serving_pass`.
+  - **Group commit.** Gated `StoreFile`, held on the first write, with 10 puts from 10 publishers accepted meanwhile.
+    - After release, exactly 2 writes are made and all 10 publishers are acknowledged.
+    - Mutation: one request per put gives 11 writes.
+  - **Ordering.** Gated `StoreFile`; put A's write is held and put B arrives.
+    - B's publisher is not acknowledged before A's; the answer order is observed at the server's answer channel.
+    - Mutation: answering the queue from the back.
+  - **Durability.** `daemon_process.rs`, extending `an_acknowledged_put_survives_sigkill` (`:326`).
+    - 20 rounds, each a stream of puts from 4 publishers while the test holds and releases the store's lock at random
+      offsets. SIGKILL at a random offset.
+    - Every put its publisher saw acknowledged is in the file after the kill.
+    - Mutation: accepting replies at submit instead of at `Written`.
+  - **One writer.** With the writer's `StoreFile` gated shut, N serving passes, a heartbeat and a stop request make no
+    write from the loop: the file's identity (`file_identity`, `main.rs:3343`) is unchanged until the gate opens.
+  - Negative grep: `rg -n "compare_exchange_snapshot|pull_all\(" crates/odin-daemon/src` matches only `writer.rs`,
+    `load` and the tests.
+  - **Lease lost with a write queued.** No write is made, Odin ends, and the queued replies are refused. The file's
+    identity is unchanged.
+  - **Foreign write.** Odin ends without writing over it (existing `:3696`, re-targeted through the writer).
+  - **Stop.** SIGTERM with a put held behind the lock: after the release Odin writes, the publisher is acknowledged,
+    and it exits 0. With the lease lost, it writes nothing.
+  - Re-targeted, not deleted: `changes_inside_one_interval_are_one_write` (`:3356`, now bookkeeping-only),
+    `a_put_is_written_before_it_is_accepted` (`:3389`, observed at the publisher's ack),
+    `a_put_whose_write_is_not_made_is_refused` (`:3516`), and the `ending_*` tests (`:3728-3800`).
+  - `cargo mutants --in-diff` on the cut's diff.
+- **Estimate:** about -120 / +230 source, +300 tests. One new module, one thread, no new crate, dependency or target.
+
+### Q5.5 What stays on the loop, and what does not
+
+| Path | Before (`434756e`) | After W1 |
+|---|---|---|
+| route challenge (`raw_snapshot`, exact self query) | lease-file read, sign; blocked behind any write on the loop | the same reads; never behind a write |
+| catalog read (`stored_snapshot`) | working set, projection read | unchanged; never behind a write |
+| peer put | mutate, then write and fsync on the loop | mutate, queue the reply, submit; the reply is sent after `Written` |
+| heartbeat, refresh | mutate; the interval write on the loop | mutate; the interval write on the writer |
+| store lock | taken by `flush` on the loop | taken only by `load` (activation) and the writer |
+
+### Q5.6 What only Yggdrasil can show
+
+- **Rerun Soul's ABBA** (`soul-c3/latency_cmd.txt`: `soul_loop_stall_under_live_put_rate`, base against cut, in
+  interleaved rounds, with `/proc/pressure/io` before and after each).
+  - The base is `434756e`; the cut is W1's tip. Expect route-challenge p99 to stop tracking IO pressure, while put
+    round trip p99 still does.
+  - Soul's figures at `434756e` and its base over 8 rounds, under 5-38% pressure: challenge p99 310-2,129 ms, put
+    round-trip p99 1,121-2,593 ms (`soul-c3/latency.log`).
+- Whether the loop's remaining disk reads (the lease and projection files) ever stall under real pressure. The ABBA
+  run shows it as challenge p99 outliers that coincide with pressure; if they appear, open the lease-in-memory
+  follow-up.
+- After deploy, section 6's script, plus the count of "admitted odin route continuity: timed out" per hour.
+
+### Q5.7 Sequencing (recommended order)
+
+1. **Cut D merges to CultLib main** (already slated first).
+2. **The put-serve branch rebases onto it and merges.** The conflicts:
+   - Cut D changes `send_packet` to return `Option<io::Error>` and adds `end_unsendable_session`.
+   - Its snapshot-send failure builds `reason: format!(..)`, where the put-serve branch made `reason` a typed
+     `CultMeshRudpRejectionReason`. It needs a variant (for example `ResponseSendFailed(String)`), and the put-serve
+     Hands owns it.
+   - Both branches edit `poll_once`'s ack site (`:468-476`) and `end_rejected_session`.
+3. **R1 batch 3 merges** (cultcache-rs only; no conflict with 1-2).
+4. **C5 is cut from that main** (it rewrites the lines 1-2 touched, so it goes after them), then Soul, then merge.
+5. **One Odin pin bump to that commit, as W0**, carrying S-2, S-3 and the transport cuts. Then **W1** on top.
+
+W0 may start on the commit after step 3 if C5 slips, at the cost of a second bump before W1. One bump is recommended:
+each bump moves Odin across ack Cuts 1, 1b, 1c, 3 and D, and a single Soul pass over that transport delta is cheaper
+than two.
+
+### Q5.8 Follow-ups this map does not own
+
+- **F-Q5a (parity).** TS and Python acknowledge a put at receipt, and TS's reply-later is an application receipt.
+  - Either they adopt C5's rule ("acknowledged means the sink accepted"), or the QUIC campaign defines an
+    application-level put reply for every runtime.
+  - QUIC has no transport ack an application can read, so it needs one anyway. Recommended owner: the QUIC campaign.
+    Rust C5 is then the RUDP-era contract, and TS's receipt is the seed of the QUIC shape.
+- **F-Q5b (R1).** `with_exclusive_lock` returns an unlock error after a successful write, with no write-outcome
+  marker (`cultcache-rs/src/lib.rs:924-932` at `93ac5945`). Odin would call its own next write foreign. Fix it in
+  cultcache-rs: tag it, or ignore the unlock error, since dropping the file releases the lock.
+- **S-5 interface.** C5 adds `acknowledgement_withheld` as the one place that decides "send no ack to this session".
+  The ack map's S-5 decision (probe P1) plugs in there as a second clause if it is fixed in the document server. C5
+  does not fix S-5.
+
+### Q5.9 Subtraction ledger (estimate)
+
+| Cut | Removed | Added | Targets, dependencies, wire |
+|---|---|---|---|
+| C5 (CultLib) | ~15 | ~170 source, ~350 tests | none; sink trait signature changes (Odin, Ratatoskr test) |
+| W0 (Odin) | ~150 (the `attempted` list and 2 tests) | ~60 | pin bump |
+| W1 (Odin) | ~120 (every loop-side write) | ~230 source, ~300 tests | one module, one thread |
+
+Net source is positive: about +175. It buys the ruled capability (challenges and reads independent of the disk, with
+Q3 B kept), and it removes S-3's unbounded list.
+
+### Q5.10 Operator questions and defaults
+
+- **Q5-A. What does a put's reply mean on the RUDP wire once it can come later?**
+  - A: the document server withholds the transport acknowledgement until the sink answers. Nothing created after the
+    put is sent to that session until then. The wire is unchanged, and every existing publisher (Rust
+    `publish_cultnet_message_to_rudp_catalog`, TS and Python publishers) keeps "acknowledged means accepted", which
+    for Odin is durable.
+  - B: a new CultNet message, a put result, sent after durability; the transport ack means received. This is a wire
+    change in the C# reference and four runtimes. Every Odin publisher that waits for the transport ack today must
+    be changed to wait for it; until then Q3 B silently weakens to "received".
+  - **Recommended: A.** It keeps Q3 B for every publisher with a server-only change, and RUDP is frozen except for
+    crash and data-loss fixes. B is the right shape under QUIC (F-Q5a), not a reason to change the RUDP wire now.
+    - What depends on it: C5's whole design.
+    - A also narrows the ack map's Q-A2 meaning for the document server: acknowledged means delivered *and answered*.
+      That was already true of the synchronous sink.
+- **Q5-B. A writer stalled for seconds: hold put replies, or refuse with a typed error?**
+  - A: hold. Replies wait, bounded by the server's session and payload limits. Publishers time out on their own
+    clock, and the put is written when the disk returns.
+  - B: refuse once more than N replies wait or the oldest waits longer than T. This needs a new `cultnet.error.v0`
+    code (the error-contract map owns the registry) and two tunables.
+  - **Recommended: A.** A refusal ends the publisher's session exactly as its own timeout does, but adds a code and
+    two numbers, and it tells the publisher less than the truth: the put may still become durable. B earns its place
+    only if publishers ever wait without a timeout.
+- **Default D-1 (Self, overridable). The API is a completion handle** (`CultMeshRudpPutReply`: `accept`, `refuse`,
+  and Drop refuses).
+  - The alternatives were a token with `server.answer_put(token, result)`, and a reply method keyed by session and
+    message id.
+  - Keying by session and message id is ambiguous: message ids are publisher-chosen, and a reconnect reuses the
+    session key.
+  - A token cannot be answered from another thread without routing it back to the server, and a forgotten token
+    leaves a session withheld until it ends.
+  - The handle is the Rust expression of TS's Promise-returning `onDocumentPutRaw`, and it keeps closure sinks
+    source-compatible.
 
 ## 8. Related findings
 
