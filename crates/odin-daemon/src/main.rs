@@ -121,6 +121,7 @@ struct RuntimeState {
     write_lease_path: PathBuf,
     recent_warming_proofs: VecDeque<(String, u64)>,
     publisher_sequence: u64,
+    log_gate: RefCell<LogGate>,
 }
 
 #[derive(Clone)]
@@ -130,8 +131,18 @@ struct SinkHandle(Rc<RefCell<RuntimeState>>);
 struct SnapshotHandle(Rc<RefCell<RuntimeState>>);
 
 impl CultMeshRudpRawDocumentSink for SinkHandle {
-    fn accept_raw_document(&mut self, receipt: CultMeshRudpRawDocumentReceipt) -> Result<()> {
-        self.0.borrow_mut().accept_raw_document(receipt)
+    fn accept_raw_        // The catalog serves past the ghost; correlations are not part of it.
+        let catalog = odin.catalog()?;
+        assert_eq!(
+            documents_of(&catalog, GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA),
+            1
+        );
+(&mut self, receipt: CultMeshRudpRawDocumentReceipt) -> Result<()> {
+        self.0.borrow_mut().accept_raw_document(receipt)            .ok_or_else(|| -> anyhow::Error {
+                PresenceAuthorityRefused("Idunn projects no Expected for Odin's own incarnation")
+                    .into()
+            })?;
+        Ok(())
     }
 }
 
@@ -217,6 +228,7 @@ impl RuntimeState {
             write_lease_path: PathBuf::from(required_environment(PROCESS_WRITE_LEASE_ENVIRONMENT)?),
             recent_warming_proofs: VecDeque::new(),
             publisher_sequence: store_sequence,
+            log_gate: RefCell::default(),
         })
     }
 
@@ -419,8 +431,29 @@ impl RuntimeState {
     /// liveness.
     fn publish_self_presence(&mut self, detail: &str) -> Result<()> {
         self.require_current_write_lease()?;
+        self.require_own_projection()?;
         let document = self.signed_presence_document("active", detail)?;
         self.admit_presence_document(&document, unix_millis()?)
+    }
+
+    /// Idunn's projection of this process's own incarnation. Every failure to
+    /// establish it -- unreadable, undecodable, ambiguous, substituted, or
+    /// absent -- is a failure of Odin's own authority, so it is marked for the
+    /// temporary fatal rule in `survive`. Failures about other incarnations are
+    /// not: they are read, logged and skipped where they are met.
+    fn require_own_projection(&self) -> Result<()> {
+        CultCacheIdunnProjectionSource::new(&self.options.idunn_projection)
+            .projection(&self_incarnation(&self.authority_material))
+            .map_err(|error| {
+                error.context(PresenceAuthorityRefused(
+                    "Odin's own projected authority cannot be read",
+                ))
+            })?
+            .ok_or_else(|| -> anyhow::Error {
+                PresenceAuthorityRefused("Idunn projects no Expected for Odin's own incarnation")
+                    .into()
+            })?;
+        Ok(())
     }
 
     fn require_current_write_lease(&self) -> Result<()> {
@@ -460,15 +493,21 @@ impl RuntimeState {
         // read is that incarnation's failure, and never stops the others.
         for incarnation in incarnations {
             if let Err(error) = topology.refresh(&incarnation) {
-                eprintln!(
-                    "Odin could not refresh incarnation {}; the rest are unaffected: {error:#}",
-                    incarnation.key()
+                self.log_repeating(
+                    &format!("refresh of incarnation {}", incarnation.key()),
+                    format!("failed; the rest are unaffected: {error:#}"),
                 );
             }
         }
         Ok(())
     }
 
+    /// The catalog serves what is stored, one record at a time: a record that
+    /// does not decode, or whose projection cannot be read, is skipped and
+    /// logged, and is never a reason to refuse every other record. Odin's
+    /// correlations are not part of the catalog: Idunn reads them from the
+    /// store file, and a target has one per incarnation, so keying them by
+    /// target would collide for the whole deploy window.
     fn stored_snapshot(
         &self,
         query: &CultMeshRudpSnapshotQuery,
@@ -481,73 +520,16 @@ impl RuntimeState {
         };
         let projections = CultCacheIdunnProjectionSource::new(&self.options.idunn_projection);
         let mut selected = BTreeMap::new();
-        for envelope in entries {
-            let Some(schema_id) = envelope.schema_id.clone() else {
-                continue;
-            };
-            let document = if envelope.r#type == GameCultRuntimePresenceHealthRecord::TYPE {
-                let presence = decode_presence(&envelope.payload)?;
-                let Some(projection) = projections.projection(&IncarnationRef::new(
-                    presence.target.clone(),
-                    presence.expected_projection_sha256.clone(),
-                ))?
-                else {
+        for envelope in &entries {
+            let document = match self.public_document(&projections, envelope) {
+                Ok(Some(document)) => document,
+                Ok(None) => continue,
+                Err(error) => {
+                    self.log_repeating(
+                        &format!("catalog skips {} {}", envelope.r#type, envelope.key),
+                        format!("{error:#}"),
+                    );
                     continue;
-                };
-                if projection.expected.expected_signer_identity_id != presence.signer_identity_id
-                    || projection
-                        .activation
-                        .as_ref()
-                        .map(IdunnRuntimeActivationRecord::canonical_sha256)
-                        .transpose()?
-                        .as_deref()
-                        != Some(presence.activation_witness_sha256.as_str())
-                    || projection
-                        .activation
-                        .as_ref()
-                        .map(|activation| activation.runtime_instance_id.as_str())
-                        != Some(presence.runtime_instance_id.as_str())
-                {
-                    continue;
-                }
-                CultNetRawDocumentRecord {
-                    schema_id,
-                    record_key: presence.target.clone(),
-                    stored_at: envelope.stored_at,
-                    payload_encoding: CultNetRawPayloadEncoding::Messagepack,
-                    payload: envelope.payload,
-                    source_runtime_id: Some(presence.runtime_id),
-                    source_agent_id: Some(presence.signer_identity_id),
-                    source_role: Some("runtime-presence-health-publisher".into()),
-                    tags: Some(vec!["odin-observed".into()]),
-                }
-            } else if envelope.r#type == OdinRuntimeTopologyCorrelationRecord::TYPE {
-                let (correlation, _) =
-                    OdinRuntimeTopologyCorrelationRecord::decode_canonical_signed_payload(
-                        &envelope.payload,
-                    )?;
-                CultNetRawDocumentRecord {
-                    schema_id,
-                    record_key: correlation.target,
-                    stored_at: envelope.stored_at,
-                    payload_encoding: CultNetRawPayloadEncoding::Messagepack,
-                    payload: envelope.payload,
-                    source_runtime_id: Some(self.authority_material.expected.runtime_id.clone()),
-                    source_agent_id: Some(correlation.signer_identity_id),
-                    source_role: Some("odin-topology-correlation".into()),
-                    tags: Some(vec!["odin-owned".into()]),
-                }
-            } else {
-                CultNetRawDocumentRecord {
-                    schema_id,
-                    record_key: envelope.key,
-                    stored_at: envelope.stored_at,
-                    payload_encoding: CultNetRawPayloadEncoding::Messagepack,
-                    payload: envelope.payload,
-                    source_runtime_id: None,
-                    source_agent_id: None,
-                    source_role: None,
-                    tags: None,
                 }
             };
             if !query_allows(query, &document) {
@@ -560,6 +542,132 @@ impl RuntimeState {
             );
         }
         Ok(selected.into_values().collect())
+    }
+
+    /// One stored record as the Verse sees it; `None` when it is not public.
+    fn public_document(
+        &self,
+        projections: &CultCacheIdunnProjectionSource,
+        envelope: &CultCacheEnvelope,
+    ) -> Result<Option<CultNetRawDocumentRecord>> {
+        let Some(schema_id) = envelope.schema_id.clone() else {
+            return Ok(None);
+        };
+        if envelope.r#type == OdinRuntimeTopologyCorrelationRecord::TYPE {
+            return Ok(None);
+        }
+        if envelope.r#type != GameCultRuntimePresenceHealthRecord::TYPE {
+            return Ok(Some(CultNetRawDocumentRecord {
+                schema_id,
+                record_key: envelope.key.clone(),
+                stored_at: envelope.stored_at.clone(),
+                payload_encoding: CultNetRawPayloadEncoding::Messagepack,
+                payload: envelope.payload.clone(),
+                source_runtime_id: None,
+                source_agent_id: None,
+                source_role: None,
+                tags: None,
+            }));
+        }
+        let presence = decode_presence(&envelope.payload)?;
+        let Some(projection) = projections.projection(&IncarnationRef::new(
+            presence.target.clone(),
+            presence.expected_projection_sha256.clone(),
+        ))?
+        else {
+            return Ok(None);
+        };
+        if projection.expected.expected_signer_identity_id != presence.signer_identity_id
+            || projection
+                .activation
+                .as_ref()
+                .map(IdunnRuntimeActivationRecord::canonical_sha256)
+                .transpose()?
+                .as_deref()
+                != Some(presence.activation_witness_sha256.as_str())
+            || projection
+                .activation
+                .as_ref()
+                .map(|activation| activation.runtime_instance_id.as_str())
+                != Some(presence.runtime_instance_id.as_str())
+        {
+            return Ok(None);
+        }
+        Ok(Some(CultNetRawDocumentRecord {
+            schema_id,
+            record_key: presence.target.clone(),
+            stored_at: envelope.stored_at.clone(),
+            payload_encoding: CultNetRawPayloadEncoding::Messagepack,
+            payload: envelope.payload.clone(),
+            source_runtime_id: Some(presence.runtime_id),
+            source_agent_id: Some(presence.signer_identity_id),
+            source_role: Some("runtime-presence-health-publisher".into()),
+            tags: Some(vec!["odin-observed".into()]),
+        }))
+    }
+
+    /// Log a line that a persistent fault would otherwise repeat on every pass:
+    /// once per subject per minute, or as soon as its message changes.
+    fn log_repeating(&self, subject: &str, message: String) {
+        if let Some(repeats) = self
+            .log_gate
+            .borrow_mut()
+            .admit(subject, &message, Instant::now())
+        {
+            if repeats == 0 {
+                eprintln!("Odin {subject}: {message}");
+            } else {
+                eprintln!("Odin {subject}: {message} ({repeats} repeats suppressed)");
+            }
+        }
+    }
+}
+
+/// Once-per-interval admission for repeating log lines, keyed by subject.
+#[derive(Default)]
+struct LogGate {
+    seen: BTreeMap<String, LoggedLine>,
+    suppressed_total: u64,
+}
+
+struct LoggedLine {
+    at: Instant,
+    message: String,
+    suppressed: u64,
+}
+
+const REPEATED_LOG_INTERVAL: Duration = Duration::from_secs(60);
+const MAX_LOG_SUBJECTS: usize = 1024;
+
+impl LogGate {
+    /// `Some(repeats suppressed since the last line)` when the line is to be
+    /// written, `None` when it repeats one written less than the interval ago.
+    fn admit(&mut self, subject: &str, message: &str, now: Instant) -> Option<u64> {
+        if let Some(line) = self.seen.get_mut(subject)
+            && line.message == message
+            && now.saturating_duration_since(line.at) < REPEATED_LOG_INTERVAL
+        {
+            line.suppressed += 1;
+            self.suppressed_total += 1;
+            return None;
+        }
+        let repeats = self.seen.remove(subject).map_or(0, |line| line.suppressed);
+        if self.seen.len() >= MAX_LOG_SUBJECTS {
+            self.seen
+                .retain(|_, line| now.saturating_duration_since(line.at) < REPEATED_LOG_INTERVAL);
+            if self.seen.len() >= MAX_LOG_SUBJECTS {
+                self.seen.clear();
+            }
+        }
+        self.seen.insert(
+            subject.to_owned(),
+            LoggedLine {
+                at: now,
+                message: message.to_owned(),
+                suppressed: 0,
+            },
+        );
+        Some(repeats)
     }
 }
 
@@ -686,12 +794,15 @@ impl std::error::Error for WriteLeaseLost {}
 /// refresh, publication or read is logged and retried on the next pass, never
 /// allowed to end the daemon. Only `WriteLeaseLost`, wherever in the error chain
 /// it sits, is returned -- and, as a named temporary rule, so is
-/// `PresenceAuthorityRefused`: a self-presence that Odin's own authority will
-/// never admit (no verifiable authority, a signer that does not match the
-/// anchor, a stored presence of this activation that no longer authenticates)
+/// `PresenceAuthorityRefused`: a failure to establish Odin's OWN authority
+/// (`require_own_projection`), or a self-presence that authority will never
+/// admit (no verifiable authority, a signer that does not match the anchor, a
+/// stored presence of this activation that no longer authenticates)
 /// leaves a frozen presence that goes stale, and a stale Odin presence makes
 /// `dependency_evidence` flip every dependent to not-Ready. Ending Odin lets
-/// Idunn replace it. Deleted when Idunn proves Odin by its own route challenge
+/// Idunn replace it. A host clock that has not yet reached the anchor's binding
+/// is not such a failure (`reconcile`): it is retried. Deleted when Idunn
+/// proves Odin by its own route challenge
 /// (Idunn audit cut A3, operator question Q-O5).
 fn survive<T>(what: &str, result: Result<T>) -> Result<Option<T>> {
     match result {
@@ -1058,24 +1169,37 @@ fn read_process_write_lease(path: &Path) -> Result<Option<IdunnProcessWriteLease
     Ok(Some(lease))
 }
 
+/// The highest publisher sequence Odin's own signer has stored, so the next
+/// presence continues from it. Only presences keyed under Odin's own target are
+/// read, and one that does not decode is skipped: a bad record can lower the
+/// count it carried, and can never stop Odin starting.
 fn prior_self_publisher_sequence(path: &Path, signer_identity_id: &str) -> Result<u64> {
     if !path.is_file() {
         return Ok(0);
     }
-    SingleFileMessagePackBackingStore::new(path)
+    Ok(SingleFileMessagePackBackingStore::new(path)
         .pull_all_read_only_snapshot()?
         .into_iter()
-        .filter(|entry| entry.r#type == GameCultRuntimePresenceHealthRecord::TYPE)
-        .try_fold(0, |maximum, entry| {
-            let presence = decode_presence(&entry.payload)?;
-            Ok(
-                if presence.target == TARGET && presence.signer_identity_id == signer_identity_id {
-                    maximum.max(presence.publisher_sequence)
-                } else {
-                    maximum
-                },
-            )
+        .filter(|entry| {
+            entry.r#type == GameCultRuntimePresenceHealthRecord::TYPE
+                && entry.key.starts_with(TARGET)
         })
+        .filter_map(|entry| match decode_presence(&entry.payload) {
+            Ok(presence) => Some(presence),
+            Err(error) => {
+                eprintln!(
+                    "Odin startup skipped its stored presence {}: {error:#}",
+                    entry.key
+                );
+                None
+            }
+        })
+        .filter(|presence| {
+            presence.target == TARGET && presence.signer_identity_id == signer_identity_id
+        })
+        .map(|presence| presence.publisher_sequence)
+        .max()
+        .unwrap_or(0))
 }
 
 fn persist_generic_document(path: &Path, document: &CultNetRawDocumentRecord) -> Result<()> {
@@ -1528,6 +1652,7 @@ mod tests {
             write_lease_path: lease_path.clone(),
             recent_warming_proofs: VecDeque::new(),
             publisher_sequence: 0,
+            log_gate: RefCell::default(),
         };
 
         // The lease names the Warming presence Odin signed for Idunn's probe.
@@ -1692,15 +1817,17 @@ mod tests {
             prior_self_publisher_sequence(&self.store, &self.provider_identity_id)
         }
 
-        /// Run a peer on its own thread while Odin serves. Every pass Odin
-        /// takes meanwhile must succeed.
+        /// Run a peer on its own thread while Odin polls its socket, and nothing
+        /// else. The timed work of a pass (refresh and heartbeat, both fsync-heavy)
+        /// would leave the peers waiting past their connect deadline on a loaded
+        /// host; the tests take the timed passes themselves afterwards.
         fn serve_while<T: Send + 'static>(
             &mut self,
             peer: impl FnOnce() -> T + Send + 'static,
         ) -> Result<T> {
             let peer = thread::spawn(peer);
             while !peer.is_finished() {
-                if !self.pass()? {
+                if !poll_server(&mut self.server, &mut self.timers.poll_failing_since)? {
                     thread::sleep(IDLE_POLL_INTERVAL);
                 }
             }
@@ -1723,7 +1850,7 @@ mod tests {
             CultNetRudpSocketTransportOptions::client("test-peer", socket, target, connection_id),
         )?;
         transport.connect(Vec::new())?;
-        let deadline = Instant::now() + Duration::from_millis(500);
+        let deadline = Instant::now() + Duration::from_secs(2);
         while !transport.connected() {
             let _ = transport.receive_once()?;
             transport.poll_resends()?;
@@ -1918,12 +2045,11 @@ mod tests {
             "the good incarnation was refreshed past the ghost"
         );
 
+        // The catalog serves past the ghost; correlations are not part of it.
         let catalog = odin.catalog()?;
-        assert!(
-            catalog
-                .iter()
-                .any(|document| document.schema_id == ODIN_RUNTIME_TOPOLOGY_CORRELATION_SCHEMA),
-            "the catalog serves its correlations"
+        assert_eq!(
+            documents_of(&catalog, GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA),
+            1
         );
         Ok(())
     }
@@ -2038,87 +2164,136 @@ mod tests {
         Ok(())
     }
 
-    fn soul_show<T: std::fmt::Debug>(label: &str, result: &Result<T>) {
-        match result {
-            Ok(value) => eprintln!("SOULPROBE {label}: Ok({value:?})"),
-            Err(error) => eprintln!(
-                "SOULPROBE {label}: Err(refused_marker={}, lease_lost={}) {error:#}",
-                error.downcast_ref::<PresenceAuthorityRefused>().is_some(),
-                error.downcast_ref::<WriteLeaseLost>().is_some()
-            ),
-        }
+    fn generic_document() -> Result<CultCacheEnvelope> {
+        Ok(CultCacheEnvelope {
+            key: "doc-1".into(),
+            r#type: "ghostlight.doc".into(),
+            payload: vec![1],
+            stored_at: rfc3339_millis(unix_millis()?)?,
+            schema_id: Some("ghostlight.doc.v1".into()),
+        })
     }
 
-    /// Soul P1: a candidate incarnation of the same target, as Idunn projects
-    /// it during every deployment of that target.
-    #[test]
-    fn soul_p1_two_incarnations_of_one_target() -> Result<()> {
-        let mut odin = activated_odin()?;
-        odin.pass()?;
+    fn documents_of(documents: &[CultNetRawDocumentRecord], schema: &str) -> usize {
+        documents
+            .iter()
+            .filter(|document| document.schema_id == schema)
+            .count()
+    }
+
+    /// A candidate incarnation of Odin, as Idunn projects it beside the
+    /// incumbent for the whole deploy window.
+    fn project_candidate_incarnation(odin: &OdinWorld) -> Result<IncarnationRef> {
         let mut candidate = odin.state.borrow().authority_material.expected.clone();
         candidate.incarnation_id = "odin/generation-2".into();
         candidate.sealed_release_id = digest('9');
         candidate.validate()?;
+        let incarnation = IncarnationRef::of(&candidate)?;
         odin.append_projection(vec![CultCacheEnvelope {
-            key: IncarnationRef::of(&candidate)?.key(),
+            key: incarnation.key(),
             r#type: IdunnExpectedIncarnationRecord::TYPE.into(),
             payload: candidate.canonical_bytes()?,
             stored_at: rfc3339_millis(unix_millis()?)?,
             schema_id: Some(IDUNN_EXPECTED_INCARNATION_SCHEMA.into()),
         }])?;
-        odin.timers = ServingTimers::default();
-        let pass = odin.pass();
-        soul_show("P1 pass", &pass);
-        eprintln!("SOULPROBE P1 correlation keys {:?}", odin.stored_keys(OdinRuntimeTopologyCorrelationRecord::TYPE)?);
-        let catalog = odin.catalog().map(|documents| documents.len());
-        soul_show("P1 whole catalog", &catalog);
-        let filtered = odin.state.borrow_mut().raw_snapshot(&CultMeshRudpSnapshotQuery {
-            session: cultmesh_rs::CultMeshRudpSessionKey { remote_addr: "127.0.0.1:1".parse()?, connection_id: 7 },
-            message_id: "presence-only".into(),
-            requested_at_unix_millis: 1,
-            schema_ids: Some(vec![GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA.into()]),
-            record_keys: None,
-        }).map(|documents| documents.len());
-        soul_show("P1 presence-only catalog", &filtered);
-        assert!(catalog.is_ok(), "SOUL P1: whole catalog refused");
-        Ok(())
+        Ok(incarnation)
     }
 
-    /// Soul P2: one presence in Odin's store that does not decode.
+    /// Idunn projects the incumbent and the candidate of a target for the whole
+    /// deploy window, and Odin writes a correlation for each. The catalog does
+    /// not serve correlations, so two of one target cannot collide in it, and
+    /// the presence queries every consumer makes are unaffected.
     #[test]
-    fn soul_p2_one_undecodable_presence() -> Result<()> {
+    fn two_incarnations_of_one_target_leave_the_catalog_readable() -> Result<()> {
         let mut odin = activated_odin()?;
         odin.pass()?;
-        let stamp = rfc3339_millis(unix_millis()?)?;
-        odin.tamper_store(|mut entries| {
-            entries.push(CultCacheEnvelope {
-                key: "ghost".into(),
-                r#type: GameCultRuntimePresenceHealthRecord::TYPE.into(),
-                payload: vec![0xc1],
-                stored_at: stamp.clone(),
-                schema_id: Some(GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA.into()),
-            });
-            entries
-        })?;
-        let catalog = odin.catalog().map(|documents| documents.len());
-        soul_show("P2 catalog", &catalog);
-        let startup = prior_self_publisher_sequence(&odin.store, &odin.provider_identity_id);
-        soul_show("P2 startup sequence read (RuntimeState::open)", &startup);
+        let candidate = project_candidate_incarnation(&odin)?;
         odin.timers = ServingTimers::default();
-        let before = odin.stored_sequence();
-        soul_show("P2 stored_sequence", &before);
-        let pass = odin.pass();
-        soul_show("P2 pass", &pass);
-        assert!(catalog.is_ok() && startup.is_ok(), "SOUL P2: one record broke the catalog or startup");
+        odin.pass()?;
+
+        // Idunn reads the correlations from the store, one per incarnation.
+        let keys = odin.stored_keys(OdinRuntimeTopologyCorrelationRecord::TYPE)?;
+        assert_eq!(keys.len(), 2, "{keys:?}");
+        assert!(keys.contains(&candidate.key()));
+
+        let catalog = odin.catalog()?;
+        assert_eq!(
+            documents_of(&catalog, ODIN_RUNTIME_TOPOLOGY_CORRELATION_SCHEMA),
+            0
+        );
+        assert_eq!(
+            documents_of(&catalog, GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA),
+            1
+        );
+        let presence_only = odin
+            .state
+            .borrow_mut()
+            .raw_snapshot(&CultMeshRudpSnapshotQuery {
+                session: cultmesh_rs::CultMeshRudpSessionKey {
+                    remote_addr: "127.0.0.1:1".parse()?,
+                    connection_id: 7,
+                },
+                message_id: "presence-only".into(),
+                requested_at_unix_millis: 1,
+                schema_ids: Some(vec![GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA.into()]),
+                record_keys: None,
+            })?;
+        assert_eq!(presence_only.len(), 1);
         Ok(())
     }
 
-    /// Soul P3: Odin's own projected provider anchor does not decode.
+    /// One record that does not decode is skipped where it is met: the catalog
+    /// still serves everything else, and startup still finds Odin's sequence.
     #[test]
-    fn soul_p3_undecodable_own_anchor() -> Result<()> {
+    fn records_that_do_not_decode_never_stop_the_catalog_or_startup() -> Result<()> {
         let mut odin = activated_odin()?;
         odin.pass()?;
         let before = odin.stored_sequence()?;
+        assert!(before > 0);
+        let stamp = rfc3339_millis(unix_millis()?)?;
+        let own_signer = odin.provider_identity_id.clone();
+        odin.tamper_store(|mut entries| {
+            for key in [
+                "ghost".to_owned(),
+                format!("{TARGET}@{}/{own_signer}", digest('c')),
+            ] {
+                entries.push(CultCacheEnvelope {
+                    key,
+                    r#type: GameCultRuntimePresenceHealthRecord::TYPE.into(),
+                    payload: vec![0xc1],
+                    stored_at: stamp.clone(),
+                    schema_id: Some(GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA.into()),
+                });
+            }
+            entries.push(generic_document().unwrap());
+            entries
+        })?;
+
+        let catalog = odin.catalog()?;
+        assert_eq!(
+            documents_of(&catalog, GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA),
+            1,
+            "Odin's own presence is served"
+        );
+        assert_eq!(documents_of(&catalog, "ghostlight.doc.v1"), 1);
+        assert_eq!(
+            prior_self_publisher_sequence(&odin.store, &odin.provider_identity_id)?,
+            before,
+            "the undecodable presences do not change the sequence Odin continues from"
+        );
+        Ok(())
+    }
+
+    /// A presence whose incarnation's projection cannot be read is skipped as
+    /// that record's failure; the rest of the catalog is still served.
+    #[test]
+    fn a_presence_whose_projection_cannot_be_read_is_skipped_not_fatal() -> Result<()> {
+        let mut odin = activated_odin()?;
+        odin.pass()?;
+        odin.tamper_store(|mut entries| {
+            entries.push(generic_document().unwrap());
+            entries
+        })?;
         odin.tamper_projection(|entries| {
             entries
                 .into_iter()
@@ -2130,18 +2305,133 @@ mod tests {
                 })
                 .collect()
         })?;
-        let catalog = odin.catalog().map(|documents| documents.len());
-        soul_show("P3 catalog", &catalog);
-        let mut outcomes = Vec::new();
-        for _ in 0..3 {
-            odin.timers = ServingTimers::default();
-            let pass = odin.pass();
-            soul_show("P3 pass", &pass);
-            outcomes.push(pass.is_ok());
-        }
-        eprintln!("SOULPROBE P3 self sequence before {before} after {}", odin.stored_sequence()?);
-        assert!(outcomes.iter().all(|ok| !ok), "SOUL P3: Odin survives an authority it cannot read, presence frozen");
+        let catalog = odin.catalog()?;
+        assert_eq!(catalog.len(), 1, "{catalog:?}");
+        assert_eq!(catalog[0].schema_id, "ghostlight.doc.v1");
         Ok(())
+    }
+
+    /// Every failure to establish Odin's OWN authority ends Odin (temporary
+    /// rule, see `survive`), whatever shape the failure takes: an anchor that
+    /// does not decode or names another schema, an Expected Idunn no longer
+    /// projects, an activation or lease that does not decode.
+    #[test]
+    fn every_failure_to_establish_its_own_authority_ends_odin() -> Result<()> {
+        type Tamper = fn(CultCacheEnvelope) -> Option<CultCacheEnvelope>;
+        let cases: [(&str, Tamper); 5] = [
+            ("anchor does not decode", |mut entry| {
+                if entry.r#type == GameCultServiceTrustAnchorRecord::TYPE {
+                    entry.payload = vec![0xc1];
+                }
+                Some(entry)
+            }),
+            ("anchor names another schema", |mut entry| {
+                if entry.r#type == GameCultServiceTrustAnchorRecord::TYPE {
+                    entry.schema_id = Some("gamecult.service_trust_anchor.v99".into());
+                }
+                Some(entry)
+            }),
+            ("activation does not decode", |mut entry| {
+                if entry.r#type == IdunnRuntimeActivationRecord::TYPE {
+                    entry.payload = vec![0xc1];
+                }
+                Some(entry)
+            }),
+            ("lease does not decode", |mut entry| {
+                if entry.r#type == IdunnProcessWriteLeaseRecord::TYPE {
+                    entry.payload = vec![0xc1];
+                }
+                Some(entry)
+            }),
+            ("Expected is no longer projected", |entry| {
+                (entry.r#type != IdunnExpectedIncarnationRecord::TYPE).then_some(entry)
+            }),
+        ];
+        for (name, tamper) in cases {
+            let mut odin = activated_odin()?;
+            odin.pass()?;
+            let before = odin.stored_sequence()?;
+            odin.tamper_projection(|entries| entries.into_iter().filter_map(tamper).collect())?;
+            for _ in 0..3 {
+                odin.timers = ServingTimers::default();
+                let error = odin
+                    .pass()
+                    .expect_err(&format!("{name}: Odin must not serve a frozen presence"));
+                assert!(
+                    error.downcast_ref::<PresenceAuthorityRefused>().is_some(),
+                    "{name}: {error:#}"
+                );
+            }
+            assert_eq!(odin.stored_sequence()?, before, "{name}");
+        }
+        Ok(())
+    }
+
+    /// Another target's broken records are that target's fault: Odin keeps
+    /// serving, and the failing refresh is logged once, not on every pass.
+    #[test]
+    fn another_targets_broken_authority_never_ends_odin_and_logs_once() -> Result<()> {
+        let mut odin = activated_odin()?;
+        let mut sibling = odin.state.borrow().authority_material.expected.clone();
+        sibling.target = "sibling".into();
+        sibling.validate()?;
+        odin.append_projection(vec![
+            CultCacheEnvelope {
+                key: IncarnationRef::of(&sibling)?.key(),
+                r#type: IdunnExpectedIncarnationRecord::TYPE.into(),
+                payload: sibling.canonical_bytes()?,
+                stored_at: rfc3339_millis(unix_millis()?)?,
+                schema_id: Some(IDUNN_EXPECTED_INCARNATION_SCHEMA.into()),
+            },
+            CultCacheEnvelope {
+                key: "root/sibling/runtime-presence".into(),
+                r#type: GameCultServiceTrustAnchorRecord::TYPE.into(),
+                payload: vec![0xc1],
+                stored_at: rfc3339_millis(unix_millis()?)?,
+                schema_id: Some(GAMECULT_SERVICE_TRUST_ANCHOR_SCHEMA.into()),
+            },
+        ])?;
+        let suppressed = |odin: &OdinWorld| odin.state.borrow().log_gate.borrow().suppressed_total;
+
+        odin.pass()?;
+        assert_eq!(suppressed(&odin), 0, "the first failure is logged");
+        for repeat in 1..=3 {
+            odin.timers = ServingTimers::default();
+            odin.pass()?;
+            assert_eq!(suppressed(&odin), repeat, "a repeat is not logged again");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_repeating_line_is_logged_once_per_interval_or_when_it_changes() {
+        let mut gate = LogGate::default();
+        let start = Instant::now();
+        assert_eq!(gate.admit("s", "m", start), Some(0));
+        assert_eq!(
+            gate.admit(
+                "s",
+                "m",
+                start + REPEATED_LOG_INTERVAL - Duration::from_millis(1)
+            ),
+            None
+        );
+        // A changed message is a new line, and reports what it swallowed.
+        let later = start + Duration::from_secs(1);
+        assert_eq!(gate.admit("s", "other", later), Some(1));
+        // Subjects are independent.
+        assert_eq!(gate.admit("t", "other", later), Some(0));
+        // The interval is measured from the last line written.
+        assert_eq!(
+            gate.admit("s", "other", later + REPEATED_LOG_INTERVAL),
+            Some(0)
+        );
+        assert_eq!(gate.suppressed_total, 1);
+
+        for index in 0..=2 * MAX_LOG_SUBJECTS {
+            gate.admit(&format!("subject-{index}"), "m", later);
+        }
+        assert!(gate.seen.len() <= MAX_LOG_SUBJECTS);
     }
 
     /// An application rejection ends only the offending peer's session, and a

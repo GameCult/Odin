@@ -756,6 +756,15 @@ where
                 .context(PresenceAuthorityRefused(
                     "the projected runtime authority cannot be verified",
                 ))?;
+        // A host whose clock has not reached the anchor's binding (booting
+        // before time sync) cannot yet tell whether the anchor is good. That is
+        // not a refusal of the authority, so it must not end Odin: it retries.
+        if authority.is_none()
+            && incoming.is_some()
+            && only_clock_precedes_anchor(&projection, &projection_disagreements, now)
+        {
+            bail!("the clock ({now}) precedes the provider trust anchor's binding; retrying");
+        }
         let (lease_sha256, lease_disagreement) = classify_current_lease(&projection)?;
         let query = OdinStoreQuery {
             incarnation: IncarnationRef::of(&projection.expected)?,
@@ -1274,6 +1283,8 @@ fn dependency_permits_ready(kind: &str, ready: bool) -> bool {
     matches!(kind, "optional" | "external-operator-binding") || ready
 }
 
+const PROVIDER_ANCHOR_TIME_CODE: &str = "provider-trust-anchor-time";
+
 fn classify_runtime_authority(
     projection: &IdunnRuntimeProjection,
     idunn_anchor: &ServiceIdentityTrustAnchor,
@@ -1334,7 +1345,7 @@ fn classify_runtime_authority(
                     .is_some_and(|expires_at| now >= expires_at)
             {
                 disagreements.push(OdinTopologyDisagreement {
-                    code: "provider-trust-anchor-time".into(),
+                    code: PROVIDER_ANCHOR_TIME_CODE.into(),
                     expected: Some(format!("current-at:{now}")),
                     observed: Some(format!(
                         "bound:{};expires:{}",
@@ -1402,6 +1413,23 @@ fn classify_runtime_authority(
         None
     };
     Ok((authority, disagreements))
+}
+
+/// The projected provider anchor is not yet bound at `now` and nothing else
+/// disagrees, so a later reading of the same projection would verify.
+fn only_clock_precedes_anchor(
+    projection: &IdunnRuntimeProjection,
+    disagreements: &[OdinTopologyDisagreement],
+    now: u64,
+) -> bool {
+    projection.provider_anchor.as_ref().is_some_and(|anchor| {
+        anchor.bound_at_unix_millis > now
+            && !anchor
+                .expires_at_unix_millis
+                .is_some_and(|expires_at| now >= expires_at)
+    }) && disagreements
+        .iter()
+        .all(|disagreement| disagreement.code == PROVIDER_ANCHOR_TIME_CODE)
 }
 
 fn classify_current_lease(
@@ -2555,6 +2583,57 @@ mod tests {
                 .is_err()
         );
         assert_eq!(stored_presence_payload(&world, &service)?, admitted);
+        Ok(())
+    }
+
+    fn is_refused(error: &anyhow::Error) -> bool {
+        error.downcast_ref::<PresenceAuthorityRefused>().is_some()
+    }
+
+    /// A host whose clock has not reached the anchor's binding (booting before
+    /// time sync) is retried, not refused: the same claim lands once the clock
+    /// catches up. The anchor is bound at NOW - 100.
+    #[test]
+    fn a_clock_before_the_anchors_binding_is_retried_not_refused() -> Result<()> {
+        let world = TestWorld::new()?;
+        let service = world.service("ghostlight", Vec::new(), false)?;
+        let claim = service.signed_presence(1, |_| {})?;
+        let error = world
+            .engine(NOW - 200)
+            .admit_presence("ghostlight", &claim, NOW - 200)
+            .unwrap_err();
+        assert!(!is_refused(&error), "{error:#}");
+        world
+            .engine(NOW)
+            .admit_presence("ghostlight", &claim, NOW)?;
+        Ok(())
+    }
+
+    /// The clock exemption is only for the binding time. An anchor that has
+    /// expired, or one that also disagrees with Expected, is a refusal.
+    #[test]
+    fn only_a_clock_before_the_binding_is_exempt_from_refusal() -> Result<()> {
+        let world = TestWorld::new()?;
+        let mut service = world.service("ghostlight", Vec::new(), false)?;
+        let claim = service.signed_presence(1, |_| {})?;
+
+        service.projection.provider_anchor.as_mut().unwrap().expires_at_unix_millis =
+            Some(NOW - 50);
+        world.publish_projection(&service.projection)?;
+        let error = world
+            .engine(NOW)
+            .admit_presence("ghostlight", &claim, NOW)
+            .unwrap_err();
+        assert!(is_refused(&error), "expired: {error:#}");
+
+        service.projection.provider_anchor.as_mut().unwrap().expires_at_unix_millis = None;
+        service.projection.provider_anchor.as_mut().unwrap().runtime_id = "other-runtime".into();
+        world.publish_projection(&service.projection)?;
+        let error = world
+            .engine(NOW - 200)
+            .admit_presence("ghostlight", &claim, NOW - 200)
+            .unwrap_err();
+        assert!(is_refused(&error), "early and mismatched: {error:#}");
         Ok(())
     }
 
