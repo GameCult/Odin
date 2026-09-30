@@ -1,5 +1,18 @@
 # Odin store repair and recovery: cut map
 
+**Operator rulings, 2026-09-30:**
+- **Q-R1:** "You got it". A foreign file under a running Odin is set aside and Odin continues.
+- **Q-R2:** "Yep". Keep the previous generation on disk.
+- **Q-R3:** "Start empty". Nothing decodable at activation means Odin starts empty.
+- **Q-R4:** "Yep, and Idunn needs better reporting capabilities so it can serve as watchdog. I ought to get a message
+  about this on Discord if it ever happens."
+  - Stop writing after the third set-aside in 10 minutes, and keep serving.
+  - **New requirement:** Idunn watchdog reporting that reaches the operator on Discord. It is mapped as its own
+    campaign and is not an Odin cut.
+- **Q-R5:** "That's fine, Odin still runs after all, right?" Yes. Odin keeps serving, and the store condition is
+  published as its own typed record, not as a degraded presence.
+- **Q-R6:** "Approved". Both drills.
+
 Status: cut map, Imagination pass 1 (Opus), 2026-09-30. Nothing has landed. This map owns the means for repairing
 and recovering `/var/lib/gamecult/odin/topology.cc`. It follows `docs/write-pattern-cut.md` (Cuts 1-3) and starts
 from that campaign's landed head.
