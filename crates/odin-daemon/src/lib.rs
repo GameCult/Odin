@@ -4,14 +4,15 @@
 //! read-only projection, a trusted receive time with any service-owned
 //! presence, and narrow clock/store/signer implementations.
 
-use std::collections::BTreeMap;
+use std::cell::{Cell, Ref, RefCell};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail, ensure};
 use chrono::{DateTime, SecondsFormat, Utc};
 use cultcache_rs::{
-    CultCacheEnvelope, CultCacheExpectedEnvelope, DatabaseEntry, SingleFileMessagePackBackingStore,
+    CacheBackingStore, CultCacheEnvelope, DatabaseEntry, SingleFileMessagePackBackingStore,
 };
 use cultnet_rs::{
     GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA, GAMECULT_RUNTIME_PRESENCE_HEALTH_SIGNING_PURPOSE,
@@ -28,8 +29,6 @@ use cultnet_rs::{
     correlate_runtime_presence_claim, verify_runtime_authority, verify_service_identity_signature,
     verify_service_identity_signature_with_public_key,
 };
-
-const CAS_ATTEMPTS: usize = 8;
 
 /// Odin's durable high-water mark for one target's correlation sequence.
 ///
@@ -195,16 +194,70 @@ impl CultCacheIdunnProjectionSource {
 
 impl IdunnProjectionSource for CultCacheIdunnProjectionSource {
     fn projections(&self, target: &str) -> Result<Vec<IdunnRuntimeProjection>> {
-        let Some(entries) = self.entries()? else {
-            return Ok(Vec::new());
-        };
-        let anchor = provider_anchor(&entries, target)?;
+        self.snapshot()?.projections(target)
+    }
+
+    fn projection(&self, incarnation: &IncarnationRef) -> Result<Option<IdunnRuntimeProjection>> {
+        self.snapshot()?.projection(incarnation)
+    }
+}
+
+impl CultCacheIdunnProjectionSource {
+    /// Read the projection file once. An absent file projects nothing.
+    pub fn snapshot(&self) -> Result<IdunnProjectionSnapshot> {
+        if !self.path.is_file() {
+            return Ok(IdunnProjectionSnapshot {
+                entries: Vec::new(),
+            });
+        }
+        SingleFileMessagePackBackingStore::new(&self.path)
+            .pull_all_read_only_snapshot()
+            .map(|entries| IdunnProjectionSnapshot { entries })
+            .map_err(|error| {
+                // The store's decode step reports its failures as text, so an
+                // I/O error in the chain here is from opening or reading the
+                // file and from nothing the file said.
+                if error.chain().any(|cause| cause.is::<std::io::Error>()) {
+                    error.context(ProjectionUnreadable)
+                } else {
+                    error
+                }
+            })
+    }
+}
+
+/// One reading of Idunn's projection file. Every lookup made against it is
+/// answered from the same bytes, so a pass that refreshes every incarnation
+/// reads the file once.
+pub struct IdunnProjectionSnapshot {
+    entries: Vec<CultCacheEnvelope>,
+}
+
+impl IdunnProjectionSnapshot {
+    /// Every incarnation Idunn projects an Expected for, of every target. Only
+    /// the keys are read: decoding a record is the refresh of that one
+    /// incarnation, so a record that will not decode cannot make the list
+    /// unreadable. A record keyed by anything but an incarnation key is not
+    /// this contract's and is skipped.
+    pub fn incarnations(&self) -> BTreeSet<IncarnationRef> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.r#type == IdunnExpectedIncarnationRecord::TYPE)
+            .filter_map(|entry| IncarnationRef::parse_key(&entry.key))
+            .collect()
+    }
+}
+
+impl IdunnProjectionSource for IdunnProjectionSnapshot {
+    fn projections(&self, target: &str) -> Result<Vec<IdunnRuntimeProjection>> {
+        let entries = &self.entries;
+        let anchor = provider_anchor(entries, target)?;
         // A record keyed by anything but its own incarnation key is not this
         // contract's. That includes the target-keyed single slot the previous
         // projection used; an Idunn still writing that shape projects nothing
         // this reader will act on, rather than something it will misread.
         let mut projections = Vec::new();
-        for envelope in &entries {
+        for envelope in entries {
             if envelope.r#type != IdunnExpectedIncarnationRecord::TYPE {
                 continue;
             }
@@ -215,7 +268,7 @@ impl IdunnProjectionSource for CultCacheIdunnProjectionSource {
                 continue;
             }
             projections.push(assemble_projection(
-                &entries,
+                entries,
                 anchor.clone(),
                 envelope,
                 &incarnation,
@@ -229,40 +282,17 @@ impl IdunnProjectionSource for CultCacheIdunnProjectionSource {
     /// record under another incarnation's key is that incarnation's fault, and
     /// never makes this one unreadable.
     fn projection(&self, incarnation: &IncarnationRef) -> Result<Option<IdunnRuntimeProjection>> {
-        let Some(entries) = self.entries()? else {
-            return Ok(None);
-        };
+        let entries = &self.entries;
         let Some(envelope) = unique_envelope(
-            &entries,
+            entries,
             IdunnExpectedIncarnationRecord::TYPE,
             &incarnation.key(),
         )?
         else {
             return Ok(None);
         };
-        let anchor = provider_anchor(&entries, &incarnation.target)?;
-        assemble_projection(&entries, anchor, envelope, incarnation).map(Some)
-    }
-}
-
-impl CultCacheIdunnProjectionSource {
-    fn entries(&self) -> Result<Option<Vec<CultCacheEnvelope>>> {
-        if !self.path.is_file() {
-            return Ok(None);
-        }
-        SingleFileMessagePackBackingStore::new(&self.path)
-            .pull_all_read_only_snapshot()
-            .map(Some)
-            .map_err(|error| {
-                // The store's decode step reports its failures as text, so an
-                // I/O error in the chain here is from opening or reading the
-                // file and from nothing the file said.
-                if error.chain().any(|cause| cause.is::<std::io::Error>()) {
-                    error.context(ProjectionUnreadable)
-                } else {
-                    error
-                }
-            })
+        let anchor = provider_anchor(entries, &incarnation.target)?;
+        assemble_projection(entries, anchor, envelope, incarnation).map(Some)
     }
 }
 
@@ -410,110 +440,233 @@ pub struct OdinStoreSnapshot {
 pub trait OdinTopologyStore {
     fn read(&self, query: OdinStoreQuery) -> Result<OdinStoreSnapshot>;
 
-    fn compare_exchange(
+    /// Replace the queried incarnation's correlation, and its presence when
+    /// one is given.
+    fn commit(
         &self,
-        observed: &OdinStoreSnapshot,
+        query: &OdinStoreQuery,
         replacement_presence: Option<&AdmittedPresence>,
         replacement_correlation: &StoredCorrelation,
-    ) -> Result<bool>;
+    ) -> Result<()>;
 
     fn withdraw_correlation(&self, incarnation: &IncarnationRef) -> Result<()>;
 
     /// Claim the next correlation sequence for this target, never returning a
-    /// value already used. `prior` is the sequence of the currently stored
+    /// value already published. `prior` is the sequence of the currently stored
     /// correlation, or 0 when there is none.
     ///
-    /// The mark is advanced before the correlation that uses it is published,
-    /// so a crash in between leaves it ahead. That is the safe direction:
-    /// sequences may skip, they may never repeat.
+    /// A sequence is published when the store is flushed. The mark is written
+    /// in the same atomic write as every correlation that uses it, so the file
+    /// never holds a correlation ahead of its mark. A sequence reserved and
+    /// never flushed was never published, and may be claimed again after a
+    /// restart.
     fn reserve_publisher_sequence(&self, target: &str, prior: u64) -> Result<u64>;
 }
 
-/// Odin's durable replay and correlation store. It persists existing CultNet
-/// documents directly instead of inventing a parallel admission schema.
-pub struct CultCacheOdinTopologyStore {
-    path: PathBuf,
+impl<T: OdinTopologyStore + ?Sized> OdinTopologyStore for &T {
+    fn read(&self, query: OdinStoreQuery) -> Result<OdinStoreSnapshot> {
+        (*self).read(query)
+    }
+
+    fn commit(
+        &self,
+        query: &OdinStoreQuery,
+        replacement_presence: Option<&AdmittedPresence>,
+        replacement_correlation: &StoredCorrelation,
+    ) -> Result<()> {
+        (*self).commit(query, replacement_presence, replacement_correlation)
+    }
+
+    fn withdraw_correlation(&self, incarnation: &IncarnationRef) -> Result<()> {
+        (*self).withdraw_correlation(incarnation)
+    }
+
+    fn reserve_publisher_sequence(&self, target: &str, prior: u64) -> Result<u64> {
+        (*self).reserve_publisher_sequence(target, prior)
+    }
 }
 
-impl CultCacheOdinTopologyStore {
-    pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+/// One record's identity in a CultCache store: its type, then its key.
+pub type RecordId = (String, String);
+
+fn record_id(envelope: &CultCacheEnvelope) -> RecordId {
+    (envelope.r#type.clone(), envelope.key.clone())
+}
+
+/// Odin's store, held in memory for as long as Odin holds its write lease. It
+/// persists existing CultNet documents directly instead of inventing a
+/// parallel admission schema.
+///
+/// The file is read once, by [`MemoryOdinTopologyStore::load`] when the lease
+/// is granted, and never again while Odin serves: every lookup is answered
+/// from memory. The file is Odin's durability checkpoint and Idunn's read-only
+/// crossing. It is written by [`MemoryOdinTopologyStore::flush`] and nothing
+/// else.
+pub struct MemoryOdinTopologyStore {
+    path: PathBuf,
+    records: RefCell<BTreeMap<RecordId, CultCacheEnvelope>>,
+    /// Exactly what the file held when it was loaded or last written.
+    flushed: RefCell<Vec<CultCacheEnvelope>>,
+    /// The records differ from what was last loaded or written.
+    dirty: Cell<bool>,
+}
+
+impl MemoryOdinTopologyStore {
+    /// Read the store file under its lock. An absent file is an empty store.
+    /// Records are loaded as they are stored: one that does not decode is that
+    /// record's failure, met where the record is used, and never stops the
+    /// load.
+    pub fn load(path: impl Into<PathBuf>) -> Result<Self> {
+        let path = path.into();
+        let flushed = SingleFileMessagePackBackingStore::new(&path).pull_all()?;
+        let mut records = BTreeMap::new();
+        for envelope in &flushed {
+            if records.insert(record_id(envelope), envelope.clone()).is_some() {
+                eprintln!(
+                    "Odin's store holds {} {} more than once; the last is kept",
+                    envelope.r#type, envelope.key
+                );
+            }
+        }
+        Ok(Self {
+            path,
+            records: RefCell::new(records),
+            flushed: RefCell::new(flushed),
+            dirty: Cell::new(false),
+        })
     }
 
     pub fn path(&self) -> &Path {
         &self.path
     }
 
+    /// Every record, in the order the file stores them.
+    pub fn records(&self) -> Ref<'_, BTreeMap<RecordId, CultCacheEnvelope>> {
+        self.records.borrow()
+    }
+
+    /// Store one record in place of any with the same type and key. Storing
+    /// the record already held changes nothing.
+    pub fn put(&self, envelope: CultCacheEnvelope) {
+        let id = record_id(&envelope);
+        let mut records = self.records.borrow_mut();
+        if records.get(&id) != Some(&envelope) {
+            records.insert(id, envelope);
+            self.dirty.set(true);
+        }
+    }
+
+    fn remove(&self, record_type: &str, key: &str) {
+        if self
+            .records
+            .borrow_mut()
+            .remove(&(record_type.to_owned(), key.to_owned()))
+            .is_some()
+        {
+            self.dirty.set(true);
+        }
+    }
+
+    /// Every incarnation this store holds a correlation for.
+    pub fn correlated_incarnations(&self) -> BTreeSet<IncarnationRef> {
+        self.records
+            .borrow()
+            .keys()
+            .filter(|(record_type, _)| record_type == OdinRuntimeTopologyCorrelationRecord::TYPE)
+            .filter_map(|(_, key)| IncarnationRef::parse_key(key))
+            .collect()
+    }
+
     /// Remove every correlation not keyed by an incarnation. Those were written
     /// by the previous, target-keyed Odin; nothing reads them under this
-    /// contract, and left in place `stored_snapshot` would serve them to the
-    /// Verse as current. Presence records are kept whatever their key: the
-    /// self publisher sequence is continued from them.
-    pub fn retire_legacy_correlations(&self) -> Result<usize> {
-        for _ in 0..CAS_ATTEMPTS {
-            if !self.path.is_file() {
-                return Ok(0);
-            }
-            let entries =
-                SingleFileMessagePackBackingStore::new(&self.path).pull_all_read_only_snapshot()?;
-            let retained = entries
-                .iter()
-                .filter(|entry| {
-                    !(entry.r#type == OdinRuntimeTopologyCorrelationRecord::TYPE
-                        && IncarnationRef::parse_key(&entry.key).is_none())
-                })
-                .cloned()
-                .collect::<Vec<_>>();
-            let removed = entries.len() - retained.len();
-            if removed == 0 {
-                return Ok(0);
-            }
-            if SingleFileMessagePackBackingStore::new(&self.path)
-                .compare_exchange_snapshot(&entries, &retained)?
-            {
-                return Ok(removed);
-            }
+    /// contract, and left in place the catalog would serve them to the Verse
+    /// as current. Presence records are kept whatever their key: the self
+    /// publisher sequence is continued from them.
+    pub fn retire_legacy_correlations(&self) -> usize {
+        let legacy: Vec<String> = self
+            .records
+            .borrow()
+            .keys()
+            .filter(|(record_type, key)| {
+                record_type == OdinRuntimeTopologyCorrelationRecord::TYPE
+                    && IncarnationRef::parse_key(key).is_none()
+            })
+            .map(|(_, key)| key.clone())
+            .collect();
+        for key in &legacy {
+            self.remove(OdinRuntimeTopologyCorrelationRecord::TYPE, key);
         }
-        bail!("Odin topology store changed repeatedly while retiring legacy correlations")
+        legacy.len()
+    }
+
+    /// Whether the records differ from what was last loaded or written.
+    pub fn is_dirty(&self) -> bool {
+        self.dirty.get()
+    }
+
+    /// Write every record to the file as one atomic snapshot, if anything
+    /// changed since the last write; returns whether it wrote.
+    ///
+    /// The file must still hold exactly what Odin last loaded or wrote. Anything
+    /// else was written by another process, and the write is refused with
+    /// [`ForeignStoreWrite`] rather than made over it.
+    pub fn flush(&self) -> Result<bool> {
+        if !self.dirty.get() {
+            return Ok(false);
+        }
+        let current: Vec<CultCacheEnvelope> = self.records.borrow().values().cloned().collect();
+        if !SingleFileMessagePackBackingStore::new(&self.path)
+            .compare_exchange_snapshot(&self.flushed.borrow(), &current)?
+        {
+            return Err(ForeignStoreWrite.into());
+        }
+        *self.flushed.borrow_mut() = current;
+        self.dirty.set(false);
+        Ok(true)
     }
 }
 
-impl OdinTopologyStore for CultCacheOdinTopologyStore {
+/// Odin's store file no longer holds what Odin last loaded or wrote, so another
+/// process wrote it. While Odin holds its write lease it is the file's only
+/// writer: this is a second writer, and Odin must not write over it.
+#[derive(Debug)]
+pub struct ForeignStoreWrite;
+
+impl std::fmt::Display for ForeignStoreWrite {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Odin's store file was written by another process")
+    }
+}
+
+impl std::error::Error for ForeignStoreWrite {}
+
+impl OdinTopologyStore for MemoryOdinTopologyStore {
     fn read(&self, mut query: OdinStoreQuery) -> Result<OdinStoreSnapshot> {
         query.dependencies.sort();
         query.dependencies.dedup();
-        let entries = if self.path.is_file() {
-            SingleFileMessagePackBackingStore::new(&self.path).pull_all_read_only_snapshot()?
-        } else {
-            Vec::new()
-        };
-        let presence_key =
-            presence_store_key(&query.incarnation, &query.provider_signer_identity_id);
-        let presence = unique_envelope(
-            &entries,
+        let records = self.records.borrow();
+        let find =
+            |record_type: &str, key: &str| records.get(&(record_type.to_owned(), key.to_owned()));
+        let presence = find(
             GameCultRuntimePresenceHealthRecord::TYPE,
-            &presence_key,
-        )?
+            &presence_store_key(&query.incarnation, &query.provider_signer_identity_id),
+        )
         .map(decode_presence_envelope)
         .transpose()?;
-        let correlation = unique_envelope(
-            &entries,
+        let correlation = find(
             OdinRuntimeTopologyCorrelationRecord::TYPE,
             &query.incarnation.key(),
-        )?
+        )
         .map(decode_correlation_envelope)
         .transpose()?;
         let mut dependency_correlations = BTreeMap::new();
         for dependency in &query.dependencies {
-            let current = unique_envelope(
-                &entries,
-                OdinRuntimeTopologyCorrelationRecord::TYPE,
-                &dependency.key(),
-            )?
-            .map(decode_correlation_envelope)
-            .transpose()?;
+            let current = find(OdinRuntimeTopologyCorrelationRecord::TYPE, &dependency.key())
+                .map(decode_correlation_envelope)
+                .transpose()?;
             dependency_correlations.insert(dependency.clone(), current);
         }
+        drop(records);
         Ok(OdinStoreSnapshot {
             query,
             presence,
@@ -522,128 +675,50 @@ impl OdinTopologyStore for CultCacheOdinTopologyStore {
         })
     }
 
-    fn compare_exchange(
+    fn commit(
         &self,
-        observed: &OdinStoreSnapshot,
+        query: &OdinStoreQuery,
         replacement_presence: Option<&AdmittedPresence>,
         replacement_correlation: &StoredCorrelation,
-    ) -> Result<bool> {
-        let presence_key = presence_store_key(
-            &observed.query.incarnation,
-            &observed.query.provider_signer_identity_id,
-        );
-        let correlation_key = observed.query.incarnation.key();
-        let mut conditions = BTreeMap::new();
-        insert_condition(
-            &mut conditions,
-            CultCacheExpectedEnvelope {
-                key: presence_key.clone(),
-                r#type: GameCultRuntimePresenceHealthRecord::TYPE.into(),
-                current: observed
-                    .presence
-                    .as_ref()
-                    .map(|presence| presence_envelope(&presence_key, presence)),
-            },
-        )?;
-        insert_condition(
-            &mut conditions,
-            CultCacheExpectedEnvelope {
-                key: correlation_key.clone(),
-                r#type: OdinRuntimeTopologyCorrelationRecord::TYPE.into(),
-                current: observed
-                    .correlation
-                    .as_ref()
-                    .map(|correlation| correlation_envelope(&correlation_key, correlation)),
-            },
-        )?;
-        for (dependency, correlation) in &observed.dependency_correlations {
-            let key = dependency.key();
-            insert_condition(
-                &mut conditions,
-                CultCacheExpectedEnvelope {
-                    key: key.clone(),
-                    r#type: OdinRuntimeTopologyCorrelationRecord::TYPE.into(),
-                    current: correlation
-                        .as_ref()
-                        .map(|correlation| correlation_envelope(&key, correlation)),
-                },
-            )?;
-        }
-        let mut replacements = vec![correlation_envelope(
-            &correlation_key,
+    ) -> Result<()> {
+        self.put(correlation_envelope(
+            &query.incarnation.key(),
             replacement_correlation,
-        )];
+        ));
         if let Some(presence) = replacement_presence {
-            replacements.push(presence_envelope(&presence_key, presence));
+            self.put(presence_envelope(
+                &presence_store_key(&query.incarnation, &query.provider_signer_identity_id),
+                presence,
+            ));
         }
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        SingleFileMessagePackBackingStore::new(&self.path)
-            .compare_exchange(&conditions.into_values().collect::<Vec<_>>(), &replacements)
+        Ok(())
     }
 
     fn withdraw_correlation(&self, incarnation: &IncarnationRef) -> Result<()> {
-        let key = incarnation.key();
-        for _ in 0..CAS_ATTEMPTS {
-            if !self.path.is_file() {
-                return Ok(());
-            }
-            let entries =
-                SingleFileMessagePackBackingStore::new(&self.path).pull_all_read_only_snapshot()?;
-            let current =
-                unique_envelope(&entries, OdinRuntimeTopologyCorrelationRecord::TYPE, &key)?;
-            let Some(current) = current else {
-                return Ok(());
-            };
-            let replacement = entries
-                .iter()
-                .filter(|entry| *entry != current)
-                .cloned()
-                .collect::<Vec<_>>();
-            if SingleFileMessagePackBackingStore::new(&self.path)
-                .compare_exchange_snapshot(&entries, &replacement)?
-            {
-                return Ok(());
-            }
-        }
-        bail!("Odin topology store changed repeatedly while withdrawing correlation")
+        self.remove(OdinRuntimeTopologyCorrelationRecord::TYPE, &incarnation.key());
+        Ok(())
     }
 
     fn reserve_publisher_sequence(&self, target: &str, prior: u64) -> Result<u64> {
-        for _ in 0..CAS_ATTEMPTS {
-            let entries = if self.path.is_file() {
-                SingleFileMessagePackBackingStore::new(&self.path).pull_all_read_only_snapshot()?
-            } else {
-                Vec::new()
-            };
-            let current = unique_envelope(&entries, TOPOLOGY_PUBLISHER_WATERMARK_TYPE, target)?;
-            let stored = current
-                .map(|envelope| decode_publisher_watermark(target, &envelope.payload))
-                .transpose()?
-                .unwrap_or(0);
-            // The stored correlation can be ahead of the mark on the first pass
-            // after this record was introduced, so take whichever is higher.
-            let next = stored
-                .max(prior)
-                .checked_add(1)
-                .context("Odin topology publisher sequence exhausted")?;
-            let replacement = publisher_watermark_envelope(target, next, &Utc::now().to_rfc3339())?;
-            if let Some(parent) = self.path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            if SingleFileMessagePackBackingStore::new(&self.path).compare_exchange(
-                &[CultCacheExpectedEnvelope {
-                    key: target.into(),
-                    r#type: TOPOLOGY_PUBLISHER_WATERMARK_TYPE.into(),
-                    current: current.cloned(),
-                }],
-                &[replacement],
-            )? {
-                return Ok(next);
-            }
-        }
-        bail!("Odin topology store changed repeatedly while reserving a publisher sequence")
+        let stored = self
+            .records
+            .borrow()
+            .get(&(TOPOLOGY_PUBLISHER_WATERMARK_TYPE.to_owned(), target.to_owned()))
+            .map(|envelope| decode_publisher_watermark(target, &envelope.payload))
+            .transpose()?
+            .unwrap_or(0);
+        // The stored correlation can be ahead of the mark on the first pass
+        // after this record was introduced, so take whichever is higher.
+        let next = stored
+            .max(prior)
+            .checked_add(1)
+            .context("Odin topology publisher sequence exhausted")?;
+        self.put(publisher_watermark_envelope(
+            target,
+            next,
+            &Utc::now().to_rfc3339(),
+        )?);
+        Ok(next)
     }
 }
 
@@ -796,184 +871,177 @@ where
             dependencies: managed_dependency_incarnations(&projection.expected.dependencies),
         };
 
-        for _ in 0..CAS_ATTEMPTS {
-            let observed = self.store.read(query.clone())?;
-            let admitted = self.select_presence(&observed, incoming, authority.as_ref())?;
-            let dependencies =
-                self.dependency_evidence(&projection.expected.dependencies, &observed, now)?;
-            let (presence, mut disagreements, replacement_presence) = match admitted {
-                SelectedPresence::None => (None, projection_disagreements.clone(), None),
-                SelectedPresence::Stale(stored) => {
-                    let record = decode_presence(&stored.canonical_bytes)?;
-                    let mut disagreements = projection_disagreements.clone();
-                    disagreements.push(OdinTopologyDisagreement {
-                        code: "stored-presence-not-current".into(),
-                        expected: projection
-                            .activation
-                            .as_ref()
-                            .map(IdunnRuntimeActivationRecord::canonical_sha256)
-                            .transpose()?,
-                        observed: Some(record.activation_witness_sha256),
-                    });
-                    (None, disagreements, None)
-                }
-                SelectedPresence::Current {
-                    correlation,
-                    replacement,
-                } => {
-                    let mut disagreements = projection_disagreements.clone();
-                    disagreements.extend_from_slice(correlation.disagreements());
-                    (Some(correlation), disagreements, replacement)
-                }
-            };
-            if let Some(disagreement) = &lease_disagreement {
-                disagreements.push(disagreement.clone());
-            }
-            if presence.is_none() {
+        let observed = self.store.read(query)?;
+        let admitted = self.select_presence(&observed, incoming, authority.as_ref())?;
+        let dependencies =
+            self.dependency_evidence(&projection.expected.dependencies, &observed, now)?;
+        let (presence, mut disagreements, replacement_presence) = match admitted {
+            SelectedPresence::None => (None, projection_disagreements.clone(), None),
+            SelectedPresence::Stale(stored) => {
+                let record = decode_presence(&stored.canonical_bytes)?;
+                let mut disagreements = projection_disagreements.clone();
                 disagreements.push(OdinTopologyDisagreement {
-                    code: "signed-presence-missing".into(),
-                    expected: Some("dual-authenticated-runtime-presence".into()),
-                    observed: None,
+                    code: "stored-presence-not-current".into(),
+                    expected: projection
+                        .activation
+                        .as_ref()
+                        .map(IdunnRuntimeActivationRecord::canonical_sha256)
+                        .transpose()?,
+                    observed: Some(record.activation_witness_sha256),
                 });
-                disagreements.extend(projection.expected.capabilities.iter().enumerate().map(
-                    |(index, capability)| OdinTopologyDisagreement {
-                        code: format!("expected-capability-{index:03}-missing"),
-                        expected: Some(format!(
-                            "{}/{}/{} capacity>={}",
-                            capability.capability,
-                            capability.schema,
-                            capability.compatibility,
-                            capability.minimum_capacity
-                        )),
-                        observed: None,
-                    },
-                ));
+                (None, disagreements, None)
             }
+            SelectedPresence::Current {
+                correlation,
+                replacement,
+            } => {
+                let mut disagreements = projection_disagreements.clone();
+                disagreements.extend_from_slice(correlation.disagreements());
+                (Some(correlation), disagreements, replacement)
+            }
+        };
+        if let Some(disagreement) = &lease_disagreement {
+            disagreements.push(disagreement.clone());
+        }
+        if presence.is_none() {
+            disagreements.push(OdinTopologyDisagreement {
+                code: "signed-presence-missing".into(),
+                expected: Some("dual-authenticated-runtime-presence".into()),
+                observed: None,
+            });
+            disagreements.extend(projection.expected.capabilities.iter().enumerate().map(
+                |(index, capability)| OdinTopologyDisagreement {
+                    code: format!("expected-capability-{index:03}-missing"),
+                    expected: Some(format!(
+                        "{}/{}/{} capacity>={}",
+                        capability.capability,
+                        capability.schema,
+                        capability.compatibility,
+                        capability.minimum_capacity
+                    )),
+                    observed: None,
+                },
+            ));
+        }
 
-            let observed_write_lease = if let Some(presence) = &presence {
-                correlate_write_lease(
-                    &projection.expected,
-                    lease_sha256.as_deref(),
-                    presence.claim().record().write_lease_sha256.as_deref(),
-                    &presence.claim().record().state,
-                    &mut disagreements,
-                )
-            } else {
-                None
-            };
-            disagreements.sort_by(|left, right| left.code.cmp(&right.code));
+        let observed_write_lease = if let Some(presence) = &presence {
+            correlate_write_lease(
+                &projection.expected,
+                lease_sha256.as_deref(),
+                presence.claim().record().write_lease_sha256.as_deref(),
+                &presence.claim().record().state,
+                &mut disagreements,
+            )
+        } else {
+            None
+        };
+        disagreements.sort_by(|left, right| left.code.cmp(&right.code));
 
-            let prior = observed
-                .correlation
+        let prior = observed
+            .correlation
+            .as_ref()
+            .map(|stored| decode_correlation(&stored.canonical_bytes))
+            .transpose()?;
+        let presence_record = presence.as_ref().map(|value| value.claim().record());
+        let ready = presence_record.is_some_and(|record| record.state == "active")
+            && disagreements.is_empty()
+            && dependencies
+                .iter()
+                .all(|dependency| dependency_permits_ready(&dependency.kind, dependency.ready));
+        let mut correlation = OdinRuntimeTopologyCorrelationRecord {
+            schema_version: ODIN_RUNTIME_TOPOLOGY_CORRELATION_SCHEMA.into(),
+            target: projection.expected.target.clone(),
+            expected_projection_sha256: projection.expected.canonical_sha256()?,
+            expected: true,
+            current_activation_sha256: projection
+                .activation
                 .as_ref()
-                .map(|stored| decode_correlation(&stored.canonical_bytes))
-                .transpose()?;
-            let presence_record = presence.as_ref().map(|value| value.claim().record());
-            let ready = presence_record.is_some_and(|record| record.state == "active")
-                && disagreements.is_empty()
-                && dependencies
-                    .iter()
-                    .all(|dependency| dependency_permits_ready(&dependency.kind, dependency.ready));
-            let mut correlation = OdinRuntimeTopologyCorrelationRecord {
-                schema_version: ODIN_RUNTIME_TOPOLOGY_CORRELATION_SCHEMA.into(),
-                target: projection.expected.target.clone(),
-                expected_projection_sha256: projection.expected.canonical_sha256()?,
-                expected: true,
-                current_activation_sha256: projection
-                    .activation
-                    .as_ref()
-                    .map(IdunnRuntimeActivationRecord::canonical_sha256)
-                    .transpose()?,
-                signed_presence_sha256: presence
-                    .as_ref()
-                    .map(|value| value.claim().signed_presence_sha256().into()),
-                observed_presence_state: presence_record.map(|record| record.state.clone()),
-                observed_presence_publisher_sequence: presence_record
-                    .map(|record| record.publisher_sequence),
-                observed_write_lease_sha256: observed_write_lease,
-                observed_capabilities: presence_record
-                    .map_or_else(Vec::new, |record| record.capabilities.clone()),
-                runtime_id: projection.expected.runtime_id.clone(),
-                runtime_instance_id: projection
-                    .activation
-                    .as_ref()
-                    .map(|activation| activation.runtime_instance_id.clone()),
-                present: presence.is_some(),
-                ready,
-                dependencies,
-                disagreements,
-                signer_identity_id: self.signer.identity_id().into(),
-                // Placeholder. A sequence is only reserved once the facts are
-                // known to have changed, below; same_correlation_facts compares
-                // against the prior's sequence regardless of what sits here.
-                publisher_sequence: prior.as_ref().map_or(0, |record| record.publisher_sequence),
-                observed_at_unix_millis: now,
-                signature_algorithm: "ed25519".into(),
-                signature: Vec::new(),
-            };
-            if let Some(prior) = &prior
-                && same_correlation_facts(prior, &correlation)
-            {
-                return Ok(observed
-                    .correlation
-                    .context("decoded prior correlation disappeared")?
-                    .canonical_bytes);
-            }
-            // Reserved only after the dedupe: a refresh that observes nothing
-            // new must not burn a sequence or fsync the store. Reserved from a
-            // mark that survives withdrawal, not derived from the stored
-            // correlation, so a withdrawn correlation does not take the count
-            // with it. See TOPOLOGY_PUBLISHER_WATERMARK_SCHEMA.
-            correlation.publisher_sequence = self.store.reserve_publisher_sequence(
-                &observed.query.incarnation.target,
-                prior.as_ref().map_or(0, |record| record.publisher_sequence),
-            )?;
-            correlation.signature = self
-                .signer
-                .sign_correlation(&correlation.unsigned_signature_payload()?)?;
-            let canonical = correlation.canonical_bytes()?;
-            correlation.validate_against_expected(&projection.expected, lease_sha256.as_deref())?;
-            let (signed, unsigned) =
-                OdinRuntimeTopologyCorrelationRecord::decode_canonical_signed_payload(&canonical)?;
-            verify_service_identity_signature_with_public_key::<
-                OdinTopologyIdentity,
-                OdinRuntimeTopologyCorrelationPurpose,
-            >(
+                .map(IdunnRuntimeActivationRecord::canonical_sha256)
+                .transpose()?,
+            signed_presence_sha256: presence
+                .as_ref()
+                .map(|value| value.claim().signed_presence_sha256().into()),
+            observed_presence_state: presence_record.map(|record| record.state.clone()),
+            observed_presence_publisher_sequence: presence_record
+                .map(|record| record.publisher_sequence),
+            observed_write_lease_sha256: observed_write_lease,
+            observed_capabilities: presence_record
+                .map_or_else(Vec::new, |record| record.capabilities.clone()),
+            runtime_id: projection.expected.runtime_id.clone(),
+            runtime_instance_id: projection
+                .activation
+                .as_ref()
+                .map(|activation| activation.runtime_instance_id.clone()),
+            present: presence.is_some(),
+            ready,
+            dependencies,
+            disagreements,
+            signer_identity_id: self.signer.identity_id().into(),
+            // Placeholder. A sequence is only reserved once the facts are
+            // known to have changed, below; same_correlation_facts compares
+            // against the prior's sequence regardless of what sits here.
+            publisher_sequence: prior.as_ref().map_or(0, |record| record.publisher_sequence),
+            observed_at_unix_millis: now,
+            signature_algorithm: "ed25519".into(),
+            signature: Vec::new(),
+        };
+        if let Some(prior) = &prior
+            && same_correlation_facts(prior, &correlation)
+        {
+            return Ok(observed
+                .correlation
+                .context("decoded prior correlation disappeared")?
+                .canonical_bytes);
+        }
+        // Reserved only after the dedupe: a refresh that observes nothing
+        // new must not burn a sequence or change the store. Reserved from a
+        // mark that survives withdrawal, not derived from the stored
+        // correlation, so a withdrawn correlation does not take the count
+        // with it. See TOPOLOGY_PUBLISHER_WATERMARK_SCHEMA.
+        correlation.publisher_sequence = self.store.reserve_publisher_sequence(
+            &observed.query.incarnation.target,
+            prior.as_ref().map_or(0, |record| record.publisher_sequence),
+        )?;
+        correlation.signature = self
+            .signer
+            .sign_correlation(&correlation.unsigned_signature_payload()?)?;
+        let canonical = correlation.canonical_bytes()?;
+        correlation.validate_against_expected(&projection.expected, lease_sha256.as_deref())?;
+        let (signed, unsigned) =
+            OdinRuntimeTopologyCorrelationRecord::decode_canonical_signed_payload(&canonical)?;
+        verify_service_identity_signature_with_public_key::<
+            OdinTopologyIdentity,
+            OdinRuntimeTopologyCorrelationPurpose,
+        >(
+            self.signer.public_key(),
+            &unsigned,
+            &ServiceIdentitySignature {
+                identity_id: signed.signer_identity_id,
+                signature: signed.signature,
+            },
+        )?;
+        if let Some(authority) = &authority {
+            authenticate_odin_runtime_topology_correlation(
+                &canonical,
+                authority,
+                lease_sha256.as_deref(),
                 self.signer.public_key(),
-                &unsigned,
-                &ServiceIdentitySignature {
-                    identity_id: signed.signer_identity_id,
-                    signature: signed.signature,
+                OdinTopologyAuthenticationContext {
+                    trusted_received_at_unix_millis: now,
+                    maximum_age_millis: self.policy.correlation_maximum_age_millis,
+                    maximum_future_skew_millis: self
+                        .policy
+                        .correlation_maximum_future_skew_millis,
                 },
             )?;
-            if let Some(authority) = &authority {
-                authenticate_odin_runtime_topology_correlation(
-                    &canonical,
-                    authority,
-                    lease_sha256.as_deref(),
-                    self.signer.public_key(),
-                    OdinTopologyAuthenticationContext {
-                        trusted_received_at_unix_millis: now,
-                        maximum_age_millis: self.policy.correlation_maximum_age_millis,
-                        maximum_future_skew_millis: self
-                            .policy
-                            .correlation_maximum_future_skew_millis,
-                    },
-                )?;
-            }
-            let stored_correlation = StoredCorrelation {
-                canonical_bytes: canonical.clone(),
-                stored_at: rfc3339_millis(now)?,
-            };
-            if self.store.compare_exchange(
-                &observed,
-                replacement_presence.as_ref(),
-                &stored_correlation,
-            )? {
-                return Ok(canonical);
-            }
         }
-        bail!("Odin topology store changed repeatedly during correlation")
+        let stored_correlation = StoredCorrelation {
+            canonical_bytes: canonical.clone(),
+            stored_at: rfc3339_millis(now)?,
+        };
+        self.store
+            .commit(&observed.query, replacement_presence.as_ref(), &stored_correlation)?;
+        Ok(canonical)
     }
 
     fn select_presence(
@@ -1619,22 +1687,6 @@ fn correlation_envelope(target: &str, correlation: &StoredCorrelation) -> CultCa
     }
 }
 
-fn insert_condition(
-    conditions: &mut BTreeMap<(String, String), CultCacheExpectedEnvelope>,
-    condition: CultCacheExpectedEnvelope,
-) -> Result<()> {
-    let identity = (condition.r#type.clone(), condition.key.clone());
-    if let Some(current) = conditions.get(&identity) {
-        ensure!(
-            current.current == condition.current,
-            "store read set is incoherent"
-        );
-    } else {
-        conditions.insert(identity, condition);
-    }
-    Ok(())
-}
-
 fn rfc3339_millis(value: u64) -> Result<String> {
     let value: i64 = value
         .try_into()
@@ -1891,16 +1943,19 @@ mod tests {
     }
 
     /// A store the target-keyed Odin wrote holds correlations under bare
-    /// target keys. They are retired; presence history under any key stays.
+    /// target keys. They are retired from the loaded set; presence history
+    /// under any key stays.
     #[test]
     fn legacy_target_keyed_correlations_are_retired_and_presence_is_kept() -> Result<()> {
         let world = TestWorld::new()?;
         let service = world.service("ghostlight", Vec::new(), false)?;
         let presence = service.signed_presence(1, |_| {})?;
-        let engine = world.engine(NOW);
-        let correlation = engine.admit_presence("ghostlight", &presence, NOW)?;
-        let store = SingleFileMessagePackBackingStore::new(&world.topology_path);
-        let current = store.pull_all_read_only_snapshot()?;
+        let correlation = world
+            .engine(NOW)
+            .admit_presence("ghostlight", &presence, NOW)?;
+        assert!(world.store.flush()?);
+        let file = SingleFileMessagePackBackingStore::new(&world.topology_path);
+        let current = file.pull_all_read_only_snapshot()?;
         let mut with_legacy = current.clone();
         with_legacy.push(CultCacheEnvelope {
             key: "ghostlight".into(),
@@ -1916,23 +1971,21 @@ mod tests {
             stored_at: rfc3339_millis(NOW - 1_000)?,
             schema_id: Some(GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA.into()),
         });
-        ensure!(store.compare_exchange_snapshot(&current, &with_legacy)?);
+        ensure!(file.compare_exchange_snapshot(&current, &with_legacy)?);
 
-        let odin_store = CultCacheOdinTopologyStore::new(&world.topology_path);
-        assert_eq!(odin_store.retire_legacy_correlations()?, 1);
-        assert_eq!(odin_store.retire_legacy_correlations()?, 0);
-        let after = store.pull_all_read_only_snapshot()?;
-        assert!(after.iter().all(|entry| {
-            entry.r#type != OdinRuntimeTopologyCorrelationRecord::TYPE
-                || IncarnationRef::parse_key(&entry.key).is_some()
+        let loaded = MemoryOdinTopologyStore::load(&world.topology_path)?;
+        assert_eq!(loaded.retire_legacy_correlations(), 1);
+        assert_eq!(loaded.retire_legacy_correlations(), 0);
+        let after = loaded.records();
+        assert!(after.keys().all(|(record_type, key)| {
+            record_type != OdinRuntimeTopologyCorrelationRecord::TYPE
+                || IncarnationRef::parse_key(key).is_some()
         }));
+        assert!(after.keys().any(|(_, key)| key == "ghostlight/legacy-signer"));
+        drop(after);
         assert!(
-            after
-                .iter()
-                .any(|entry| entry.key == "ghostlight/legacy-signer")
-        );
-        assert!(
-            engine
+            world
+                .engine_on(&loaded, NOW)
                 .current_signed_correlation(&service.incarnation()?)?
                 .is_some()
         );
@@ -1942,7 +1995,7 @@ mod tests {
     #[test]
     fn withdrawing_a_correlation_does_not_reset_its_publisher_sequence() -> Result<()> {
         let temp = TempDir::new()?;
-        let store = CultCacheOdinTopologyStore::new(temp.path().join("topology.cc"));
+        let store = MemoryOdinTopologyStore::load(temp.path().join("topology.cc"))?;
 
         assert_eq!(store.reserve_publisher_sequence("heimdall", 0)?, 1);
         assert_eq!(store.reserve_publisher_sequence("heimdall", 1)?, 2);
@@ -1962,6 +2015,36 @@ mod tests {
         // A stored correlation ahead of the mark wins, which is what carries a
         // store written before the mark existed onto the new scheme.
         assert_eq!(store.reserve_publisher_sequence("heimdall", 99)?, 100);
+        Ok(())
+    }
+
+    /// The store file is read once, when the store is loaded. Replaced behind
+    /// the loaded store with bytes that do not decode, it changes nothing the
+    /// store answers: admission, refresh and withdrawal all run from memory.
+    #[test]
+    fn a_loaded_store_never_reads_its_file_again() -> Result<()> {
+        let world = TestWorld::new()?;
+        let service = world.service("ghostlight", Vec::new(), false)?;
+        let engine = world.engine(NOW);
+        let first = engine.admit_presence("ghostlight", &service.signed_presence(1, |_| {})?, NOW)?;
+        assert!(world.store.flush()?);
+
+        std::fs::write(&world.topology_path, b"not a cultcache store")?;
+        assert_eq!(
+            engine.current_signed_correlation(&service.incarnation()?)?,
+            Some(first)
+        );
+        let second = decode_signed(&engine.admit_presence(
+            "ghostlight",
+            &service.signed_presence(2, |_| {})?,
+            NOW + 1,
+        )?)?;
+        assert_eq!(second.publisher_sequence, 2);
+        assert_eq!(
+            std::fs::read(&world.topology_path)?,
+            b"not a cultcache store",
+            "nothing was written without a flush"
+        );
         Ok(())
     }
 
@@ -2050,6 +2133,7 @@ mod tests {
         _temp: TempDir,
         projection_path: PathBuf,
         topology_path: PathBuf,
+        store: MemoryOdinTopologyStore,
         identity_root: PathBuf,
         idunn_signer: ServiceIdentitySigner<IdunnServiceIdentity>,
         idunn_anchor: ServiceIdentityTrustAnchor,
@@ -2066,9 +2150,11 @@ mod tests {
             let idunn_anchor = idunn_signer.trust_anchor()?;
             let odin_signer =
                 enroll_service_identity_at::<OdinTopologyIdentity>(&identity_root.join("odin.cc"))?;
+            let topology_path = temp.path().join("odin-topology.cc");
             Ok(Self {
                 projection_path: temp.path().join("idunn-projection.cc"),
-                topology_path: temp.path().join("odin-topology.cc"),
+                store: MemoryOdinTopologyStore::load(&topology_path)?,
+                topology_path,
                 identity_root,
                 idunn_signer,
                 idunn_anchor,
@@ -2259,18 +2345,15 @@ mod tests {
             Ok(())
         }
 
-        fn engine(
-            &self,
-            now: u64,
-        ) -> OdinTopologyAuthority<
-            CultCacheIdunnProjectionSource,
-            CultCacheOdinTopologyStore,
-            &ServiceIdentitySigner<OdinTopologyIdentity>,
-            FixedClock,
-        > {
+        fn engine(&self, now: u64) -> TestEngine<'_> {
+            self.engine_on(&self.store, now)
+        }
+
+        /// An engine over another store, as a restarted Odin loads one.
+        fn engine_on<'a>(&'a self, store: &'a MemoryOdinTopologyStore, now: u64) -> TestEngine<'a> {
             OdinTopologyAuthority::new(
                 CultCacheIdunnProjectionSource::new(&self.projection_path),
-                CultCacheOdinTopologyStore::new(&self.topology_path),
+                store,
                 &self.odin_signer,
                 FixedClock(now),
                 self.idunn_anchor.clone(),
@@ -2313,6 +2396,13 @@ mod tests {
             self.publish_projection(&service.projection)
         }
     }
+
+    type TestEngine<'a> = OdinTopologyAuthority<
+        CultCacheIdunnProjectionSource,
+        &'a MemoryOdinTopologyStore,
+        &'a ServiceIdentitySigner<OdinTopologyIdentity>,
+        FixedClock,
+    >;
 
     fn digest(byte: char) -> String {
         format!("sha256-{}", byte.to_string().repeat(64))
@@ -2455,19 +2545,9 @@ mod tests {
         let reused = service.signed_presence(2, |record| record.detail = "different".into())?;
         assert!(engine.admit_presence("ghostlight", &reused, NOW).is_err());
 
-        let entries = SingleFileMessagePackBackingStore::new(&world.topology_path)
-            .pull_all_read_only_snapshot()?;
-        let stored = unique_envelope(
-            &entries,
-            GameCultRuntimePresenceHealthRecord::TYPE,
-            &presence_store_key(
-                &service.incarnation()?,
-                &service.projection.expected.expected_signer_identity_id,
-            ),
-        )?
-        .unwrap();
-        assert_eq!(stored.payload, sequence_two);
-        assert_eq!(parse_rfc3339_millis(&stored.stored_at)?, NOW);
+        let (payload, stored_at) = stored_presence(&world, &service)?;
+        assert_eq!(payload, sequence_two);
+        assert_eq!(parse_rfc3339_millis(&stored_at)?, NOW);
         Ok(())
     }
 
@@ -2475,20 +2555,21 @@ mod tests {
     /// received at `NOW`, beyond the skew window, as on yggdrasil 2026-09-29.
     const RESTART: u64 = NOW + 10_000;
 
+    /// The service's presence as the store holds it: payload and receipt time.
+    fn stored_presence(world: &TestWorld, service: &TestService) -> Result<(Vec<u8>, String)> {
+        let key = presence_store_key(
+            &service.incarnation()?,
+            &service.projection.expected.expected_signer_identity_id,
+        );
+        let records = world.store.records();
+        let stored = records
+            .get(&(GameCultRuntimePresenceHealthRecord::TYPE.to_owned(), key))
+            .context("no stored presence")?;
+        Ok((stored.payload.clone(), stored.stored_at.clone()))
+    }
+
     fn stored_presence_payload(world: &TestWorld, service: &TestService) -> Result<Vec<u8>> {
-        let entries = SingleFileMessagePackBackingStore::new(&world.topology_path)
-            .pull_all_read_only_snapshot()?;
-        Ok(unique_envelope(
-            &entries,
-            GameCultRuntimePresenceHealthRecord::TYPE,
-            &presence_store_key(
-                &service.incarnation()?,
-                &service.projection.expected.expected_signer_identity_id,
-            ),
-        )?
-        .context("no stored presence")?
-        .payload
-        .clone())
+        Ok(stored_presence(world, service)?.0)
     }
 
     #[test]
@@ -2800,9 +2881,11 @@ mod tests {
         let first = world
             .engine(NOW)
             .admit_presence("ghostlight", &presence, NOW)?;
+        assert!(world.store.flush()?);
 
+        let restarted = MemoryOdinTopologyStore::load(&world.topology_path)?;
         let after_restart = world
-            .engine(NOW + 100)
+            .engine_on(&restarted, NOW + 100)
             .refresh(&service.incarnation()?)?
             .unwrap();
         assert_eq!(after_restart, first);
@@ -2831,12 +2914,11 @@ mod tests {
                 .is_none()
         );
 
-        let entries = SingleFileMessagePackBackingStore::new(&world.topology_path)
-            .pull_all_read_only_snapshot()?;
-        assert!(entries.iter().any(|entry| {
+        let records = world.store.records();
+        assert!(records.values().any(|entry| {
             entry.r#type == GameCultRuntimePresenceHealthRecord::TYPE && entry.payload == presence
         }));
-        assert!(!entries.iter().any(|entry| {
+        assert!(!records.values().any(|entry| {
             entry.r#type == OdinRuntimeTopologyCorrelationRecord::TYPE
                 && entry.key.starts_with("ghostlight@")
         }));

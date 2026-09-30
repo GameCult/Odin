@@ -12,9 +12,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail, ensure};
 use chrono::{DateTime, Utc};
-use cultcache_rs::{
-    CultCacheEnvelope, CultCacheExpectedEnvelope, DatabaseEntry, SingleFileMessagePackBackingStore,
-};
+use cultcache_rs::{CultCacheEnvelope, DatabaseEntry, SingleFileMessagePackBackingStore};
 use cultmesh_rs::{
     CultMeshRudpDocumentServer, CultMeshRudpDocumentServerOptions, CultMeshRudpPollOutcome,
     CultMeshRudpRawDocumentReceipt, CultMeshRudpRawDocumentSink, CultMeshRudpSnapshotQuery,
@@ -34,9 +32,9 @@ use cultnet_rs::{
 };
 use fs2::FileExt;
 use odin_daemon::{
-    AuthenticationPolicy, CultCacheIdunnProjectionSource, CultCacheOdinTopologyStore,
-    IdunnProjectionSource, IncarnationRef, OdinTopologyAuthority, PresenceAuthorityRefused,
-    ProjectionUnreadable, SystemClock,
+    AuthenticationPolicy, CultCacheIdunnProjectionSource, IdunnProjectionSource, IncarnationRef,
+    MemoryOdinTopologyStore, OdinTopologyAuthority, PresenceAuthorityRefused, ProjectionUnreadable,
+    SystemClock,
 };
 
 const TARGET: &str = "odin";
@@ -73,14 +71,6 @@ const PROJECTION_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(2);
 const MAX_RECENT_WARMING_PROOFS: usize = 64;
 const WARMING_PROOF_LIFETIME_MILLIS: u64 = 60_000;
-const CAS_ATTEMPTS: usize = 8;
-
-type TopologyAuthority = OdinTopologyAuthority<
-    CultCacheIdunnProjectionSource,
-    CultCacheOdinTopologyStore,
-    ServiceIdentitySigner<OdinTopologyIdentity>,
-    SystemClock,
->;
 
 /// Relative path of Odin's durable store inside the state root. The recipe's
 /// `topology` state slot in `deployment/idunn/recipe.toml` is the authority for
@@ -110,13 +100,43 @@ struct ProcessWriteLeaseGuard {
     sha256: String,
 }
 
+/// Odin's topology authority once its write lease is held: the store it loaded
+/// and the credentials that sign for it. An `OdinTopologyAuthority` is built
+/// over it for each operation, with the projection read for that operation.
+struct Topology {
+    store: MemoryOdinTopologyStore,
+    signer: ServiceIdentitySigner<OdinTopologyIdentity>,
+    idunn_anchor: ServiceIdentityTrustAnchor,
+}
+
+impl Topology {
+    fn authority<P: IdunnProjectionSource>(
+        &self,
+        projections: P,
+    ) -> OdinTopologyAuthority<
+        P,
+        &MemoryOdinTopologyStore,
+        &ServiceIdentitySigner<OdinTopologyIdentity>,
+        SystemClock,
+    > {
+        OdinTopologyAuthority::new(
+            projections,
+            &self.store,
+            &self.signer,
+            SystemClock,
+            self.idunn_anchor.clone(),
+            AuthenticationPolicy::default(),
+        )
+    }
+}
+
 struct RuntimeState {
     options: Options,
     candidate: SocketAddr,
     authority_material: RuntimeAuthority,
     idunn_anchor: Option<ServiceIdentityTrustAnchor>,
     topology_signer: Option<ServiceIdentitySigner<OdinTopologyIdentity>>,
-    topology: Option<TopologyAuthority>,
+    topology: Option<Topology>,
     write_lease: Option<ProcessWriteLeaseGuard>,
     write_lease_path: PathBuf,
     recent_warming_proofs: VecDeque<(String, u64)>,
@@ -198,14 +218,6 @@ impl RuntimeState {
                 )
             })?,
         )?;
-        let store_sequence = prior_self_publisher_sequence(
-            &options.store,
-            authority_material
-                .provider_signer
-                .entry()
-                .identity_id
-                .as_str(),
-        )?;
 
         Ok(Self {
             options,
@@ -217,7 +229,7 @@ impl RuntimeState {
             write_lease: None,
             write_lease_path: PathBuf::from(required_environment(PROCESS_WRITE_LEASE_ENVIRONMENT)?),
             recent_warming_proofs: VecDeque::new(),
-            publisher_sequence: store_sequence,
+            publisher_sequence: 0,
             log_gate: RefCell::default(),
         })
     }
@@ -246,6 +258,18 @@ impl RuntimeState {
         if projected.current_lease.as_ref() != Some(&lease.record) {
             return Ok(false);
         }
+        // The one read of the store file while this process lives: from here
+        // on the working set is in memory, and the file is only written.
+        let store = MemoryOdinTopologyStore::load(&self.options.store)?;
+        // Correlations the previous, target-keyed Odin left in this store are
+        // not this contract's and would otherwise be served to the Verse as
+        // current. Presence history is kept: the self publisher sequence
+        // continues from it.
+        store.retire_legacy_correlations();
+        let stored_sequence = prior_self_publisher_sequence(
+            store.records().values(),
+            &self.authority_material.provider_signer.entry().identity_id,
+        );
         let signer = self
             .topology_signer
             .take()
@@ -254,16 +278,26 @@ impl RuntimeState {
             .idunn_anchor
             .take()
             .context("Idunn trust anchor was already consumed")?;
+        self.publisher_sequence = self.publisher_sequence.max(stored_sequence);
         self.write_lease = Some(lease);
-        self.topology = Some(OdinTopologyAuthority::new(
-            CultCacheIdunnProjectionSource::new(&self.options.idunn_projection),
-            CultCacheOdinTopologyStore::new(&self.options.store),
+        self.topology = Some(Topology {
+            store,
             signer,
-            SystemClock,
             idunn_anchor,
-            AuthenticationPolicy::default(),
-        ));
+        });
         Ok(true)
+    }
+
+    fn topology(&self) -> Result<&Topology> {
+        self.topology
+            .as_ref()
+            .context("Odin topology authority is absent")
+    }
+
+    /// Write Odin's store file from the working set, if it changed.
+    fn flush(&self) -> Result<()> {
+        self.topology()?.store.flush()?;
+        Ok(())
     }
 
     fn accept_raw_document(&mut self, receipt: CultMeshRudpRawDocumentReceipt) -> Result<()> {
@@ -273,10 +307,11 @@ impl RuntimeState {
         );
         validate_raw_document_shape(&receipt.document)?;
         if receipt.document.schema_id == GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA {
-            return self
-                .admit_presence_document(&receipt.document, receipt.received_at_unix_millis);
+            self.admit_presence_document(&receipt.document, receipt.received_at_unix_millis)?;
+        } else {
+            persist_generic_document(&self.topology()?.store, &receipt.document)?;
         }
-        persist_generic_document(&self.options.store, &receipt.document)
+        self.flush()
     }
 
     /// The one admission path for a runtime-presence document, whether a
@@ -291,10 +326,13 @@ impl RuntimeState {
             document.record_key == presence.target,
             "runtime-presence document key differs from its signed target"
         );
-        self.topology
-            .as_ref()
-            .context("Odin topology authority is absent")?
-            .admit_presence(&presence.target, &document.payload, received_at_unix_millis)?;
+        let projections =
+            CultCacheIdunnProjectionSource::new(&self.options.idunn_projection).snapshot()?;
+        self.topology()?.authority(projections).admit_presence(
+            &presence.target,
+            &document.payload,
+            received_at_unix_millis,
+        )?;
         Ok(())
     }
 
@@ -423,7 +461,8 @@ impl RuntimeState {
         self.require_current_write_lease()?;
         self.require_own_projection()?;
         let document = self.signed_presence_document("active", detail)?;
-        self.admit_presence_document(&document, unix_millis()?)
+        self.admit_presence_document(&document, unix_millis()?)?;
+        self.flush()
     }
 
     /// Idunn's projection of this process's own incarnation. A failure to
@@ -473,31 +512,29 @@ impl RuntimeState {
         Ok(())
     }
 
-    fn refresh_all_correlations(&mut self) -> Result<()> {
+    /// Refresh every incarnation Idunn projects, and every incarnation Odin
+    /// holds a correlation for, projected or not (the latter are refreshed so
+    /// their correlations are withdrawn). The projection is read once for the
+    /// whole pass.
+    fn refresh_all_correlations(&self) -> Result<()> {
         self.require_current_write_lease()?;
-        let topology = self
-            .topology
-            .as_ref()
-            .context("Odin topology authority is absent")?;
-        let mut incarnations = incarnation_keys(
-            &self.options.idunn_projection,
-            IdunnExpectedIncarnationRecord::TYPE,
-        )?;
-        incarnations.extend(incarnation_keys(
-            &self.options.store,
-            OdinRuntimeTopologyCorrelationRecord::TYPE,
-        )?);
+        let topology = self.topology()?;
+        let projections =
+            CultCacheIdunnProjectionSource::new(&self.options.idunn_projection).snapshot()?;
+        let mut incarnations = projections.incarnations();
+        incarnations.extend(topology.store.correlated_incarnations());
+        let authority = topology.authority(projections);
         // Each incarnation is refreshed on its own: one whose records cannot be
         // read is that incarnation's failure, and never stops the others.
         for incarnation in incarnations {
-            if let Err(error) = topology.refresh(&incarnation) {
+            if let Err(error) = authority.refresh(&incarnation) {
                 self.log_repeating(
                     &format!("refresh of incarnation {}", incarnation.key()),
                     format!("failed; the rest are unaffected: {error:#}"),
                 );
             }
         }
-        Ok(())
+        self.flush()
     }
 
     /// The catalog serves what is stored, one record at a time: a record that
@@ -510,15 +547,10 @@ impl RuntimeState {
         &self,
         query: &CultMeshRudpSnapshotQuery,
     ) -> Result<Vec<CultNetRawDocumentRecord>> {
-        let entries = if self.options.store.is_file() {
-            SingleFileMessagePackBackingStore::new(&self.options.store)
-                .pull_all_read_only_snapshot()?
-        } else {
-            Vec::new()
-        };
+        let records = self.topology()?.store.records();
         let projections = CultCacheIdunnProjectionSource::new(&self.options.idunn_projection);
         let mut selected = BTreeMap::new();
-        for envelope in &entries {
+        for envelope in records.values() {
             let document = match self.public_document(&projections, envelope) {
                 Ok(Some(document)) => document,
                 Ok(None) => continue,
@@ -730,10 +762,6 @@ fn main() -> Result<()> {
         }
     }
 
-    // Correlations the previous, target-keyed Odin left in this store are not
-    // this contract's and would otherwise be served to the Verse as current.
-    // Presence history is kept: the self publisher sequence continues from it.
-    CultCacheOdinTopologyStore::new(&state.borrow().options.store).retire_legacy_correlations()?;
     // Once serving, only losing the write lease ends Odin (see `survive`).
     let mut timers = ServingTimers::default();
     loop {
@@ -1181,12 +1209,11 @@ fn read_process_write_lease(path: &Path) -> Result<Option<IdunnProcessWriteLease
 /// presence continues from it. Only presences keyed under Odin's own target are
 /// read, and one that does not decode is skipped: a bad record can lower the
 /// count it carried, and can never stop Odin starting.
-fn prior_self_publisher_sequence(path: &Path, signer_identity_id: &str) -> Result<u64> {
-    if !path.is_file() {
-        return Ok(0);
-    }
-    Ok(SingleFileMessagePackBackingStore::new(path)
-        .pull_all_read_only_snapshot()?
+fn prior_self_publisher_sequence<'a>(
+    records: impl IntoIterator<Item = &'a CultCacheEnvelope>,
+    signer_identity_id: &str,
+) -> u64 {
+    records
         .into_iter()
         .filter(|entry| {
             entry.r#type == GameCultRuntimePresenceHealthRecord::TYPE
@@ -1207,7 +1234,7 @@ fn prior_self_publisher_sequence(path: &Path, signer_identity_id: &str) -> Resul
         })
         .map(|presence| presence.publisher_sequence)
         .max()
-        .unwrap_or(0))
+        .unwrap_or(0)
 }
 
 /// The document namespaces providers publish to the rendezvous. A provider's
@@ -1263,49 +1290,23 @@ fn is_peer_document_type(document_type: &str) -> bool {
         })
 }
 
-fn persist_generic_document(path: &Path, document: &CultNetRawDocumentRecord) -> Result<()> {
+fn persist_generic_document(
+    store: &MemoryOdinTopologyStore,
+    document: &CultNetRawDocumentRecord,
+) -> Result<()> {
     let document_type = document_type_for_schema(&document.schema_id)?;
     ensure!(
         is_peer_document_type(&document_type),
         "Odin accepts no {document_type} document from a provider"
     );
-    let replacement = CultCacheEnvelope {
+    store.put(CultCacheEnvelope {
         key: document.record_key.clone(),
-        r#type: document_type.clone(),
+        r#type: document_type,
         payload: document.payload.clone(),
         stored_at: document.stored_at.clone(),
         schema_id: Some(document.schema_id.clone()),
-    };
-    let store = SingleFileMessagePackBackingStore::new(path);
-    for _ in 0..CAS_ATTEMPTS {
-        let entries = if path.is_file() {
-            store.pull_all_read_only_snapshot()?
-        } else {
-            Vec::new()
-        };
-        let mut matches = entries
-            .iter()
-            .filter(|entry| entry.r#type == document_type && entry.key == document.record_key);
-        let current = matches.next().cloned();
-        ensure!(
-            matches.next().is_none(),
-            "generic CultCache identity is ambiguous"
-        );
-        if current.as_ref() == Some(&replacement) {
-            return Ok(());
-        }
-        if store.compare_exchange(
-            &[CultCacheExpectedEnvelope {
-                key: document.record_key.clone(),
-                r#type: document_type.clone(),
-                current,
-            }],
-            &[replacement.clone()],
-        )? {
-            return Ok(());
-        }
-    }
-    bail!("Odin catalog changed repeatedly while persisting a provider document")
+    });
+    Ok(())
 }
 
 fn document_type_for_schema(schema_id: &str) -> Result<String> {
@@ -1347,28 +1348,6 @@ fn decode_presence(payload: &[u8]) -> Result<GameCultRuntimePresenceHealthRecord
     );
     presence.validate()?;
     Ok(presence)
-}
-
-/// Every incarnation Idunn currently projects, of every target, and every
-/// incarnation Odin holds a correlation for, projected or not (the latter are
-/// refreshed so their correlations are withdrawn). Only the keys are read:
-/// decoding a record is the refresh of that one incarnation, so a record that
-/// will not decode cannot make the list unreadable.
-///
-/// Records keyed by anything but an incarnation key are not this contract's and
-/// are skipped, not refused: a projection written by an older Idunn projects
-/// nothing this daemon acts on, and a correlation written by the previous,
-/// target-keyed Odin is retired at activation (`retire_legacy_correlations`).
-fn incarnation_keys(path: &Path, record_type: &str) -> Result<BTreeSet<IncarnationRef>> {
-    if !path.is_file() {
-        return Ok(BTreeSet::new());
-    }
-    Ok(SingleFileMessagePackBackingStore::new(path)
-        .pull_all_read_only_snapshot()?
-        .into_iter()
-        .filter(|entry| entry.r#type == record_type)
-        .filter_map(|entry| IncarnationRef::parse_key(&entry.key))
-        .collect())
 }
 
 fn validate_snapshot_filters(query: &CultMeshRudpSnapshotQuery) -> Result<()> {
@@ -1615,6 +1594,16 @@ mod tests {
 
     /// The same world with the production server bound under `options`.
     fn activated_odin_serving(options: CultMeshRudpDocumentServerOptions) -> Result<OdinWorld> {
+        activated_odin_with(options, |_| Ok(Vec::new()))
+    }
+
+    /// The same world, with Odin's store file holding what `seed` returns when
+    /// Odin activates. `seed` runs before the lease is granted, with the
+    /// runtime that is about to activate, so it can sign Odin's own presences.
+    fn activated_odin_with(
+        options: CultMeshRudpDocumentServerOptions,
+        seed: impl FnOnce(&mut RuntimeState) -> Result<Vec<CultCacheEnvelope>>,
+    ) -> Result<OdinWorld> {
         let temp = tempfile::tempdir()?;
         let root = temp.path();
         let socket = UdpSocket::bind("127.0.0.1:0")?;
@@ -1712,6 +1701,13 @@ mod tests {
             publisher_sequence: 0,
             log_gate: RefCell::default(),
         };
+        let seeded = seed(&mut runtime)?;
+        if !seeded.is_empty() {
+            ensure!(
+                SingleFileMessagePackBackingStore::new(&store).compare_exchange_snapshot(&[], &seeded)?,
+                "test store seed failed"
+            );
+        }
 
         // The lease names the Warming presence Odin signed for Idunn's probe.
         let warming = runtime.signed_presence_document("warming", "test warming")?;
@@ -1861,18 +1857,33 @@ mod tests {
             })
         }
 
+        /// Every record in Odin's working set.
+        fn working_set(&self) -> Vec<CultCacheEnvelope> {
+            let state = self.state.borrow();
+            let records = state.topology.as_ref().unwrap().store.records();
+            records.values().cloned().collect()
+        }
+
+        /// Every record in Odin's store file.
+        fn file_records(&self) -> Result<Vec<CultCacheEnvelope>> {
+            SingleFileMessagePackBackingStore::new(&self.store).pull_all_read_only_snapshot()
+        }
+
         fn stored_keys(&self, record_type: &str) -> Result<Vec<String>> {
-            Ok(SingleFileMessagePackBackingStore::new(&self.store)
-                .pull_all_read_only_snapshot()?
+            Ok(self
+                .working_set()
                 .into_iter()
                 .filter(|entry| entry.r#type == record_type)
                 .map(|entry| entry.key)
                 .collect())
         }
 
-        /// Odin's own publisher sequence as it is durably stored.
+        /// Odin's own publisher sequence as its store holds it.
         fn stored_sequence(&self) -> Result<u64> {
-            prior_self_publisher_sequence(&self.store, &self.provider_identity_id)
+            Ok(prior_self_publisher_sequence(
+                &self.working_set(),
+                &self.provider_identity_id,
+            ))
         }
 
         /// Run a peer on its own thread while Odin polls its socket, and nothing
@@ -1991,6 +2002,7 @@ mod tests {
         odin.pass()?;
         assert!(odin.stored_sequence()? > 0, "the first pass publishes");
 
+        let written = std::fs::read(&odin.store)?;
         std::fs::write(&odin.store, b"not a cultcache store")?;
         assert!(
             odin.state
@@ -2014,12 +2026,13 @@ mod tests {
             );
         }
 
-        std::fs::remove_file(&odin.store)?;
+        std::fs::write(&odin.store, written)?;
         odin.timers = ServingTimers::default();
         odin.pass()?;
-        assert!(
-            odin.stored_sequence()? > 0,
-            "the publication after the fault clears lands"
+        assert_eq!(
+            odin.file_records()?,
+            odin.working_set(),
+            "the write after the fault clears lands"
         );
         Ok(())
     }
@@ -2235,24 +2248,25 @@ mod tests {
 
     /// A stored presence of Odin's own activation that no longer authenticates
     /// makes its publisher sequence unknowable; the claim is refused, closed.
+    /// The store is Odin's alone while it serves, so the bad record is in the
+    /// file when Odin activates.
     #[test]
     fn a_stored_presence_that_no_longer_authenticates_ends_odin() -> Result<()> {
-        let mut odin = activated_odin()?;
-        odin.pass()?;
-        // Received two minutes after it was observed: outside the trusted window.
-        let late = rfc3339_millis(unix_millis()? + 120_000)?;
-        odin.tamper_store(|entries| {
-            entries
-                .into_iter()
-                .map(|mut entry| {
-                    if entry.r#type == GameCultRuntimePresenceHealthRecord::TYPE {
-                        entry.stored_at = late.clone();
-                    }
-                    entry
-                })
-                .collect()
+        let mut odin = activated_odin_with(CultMeshRudpDocumentServerOptions::default(), |runtime| {
+            let warming = runtime.signed_presence_document("warming", "earlier launch")?;
+            // Received two minutes after it was observed: outside the trusted window.
+            Ok(vec![CultCacheEnvelope {
+                key: format!(
+                    "{}/{}",
+                    self_incarnation(&runtime.authority_material).key(),
+                    runtime.authority_material.provider_signer.entry().identity_id
+                ),
+                r#type: GameCultRuntimePresenceHealthRecord::TYPE.into(),
+                payload: warming.payload,
+                stored_at: rfc3339_millis(unix_millis()? + 120_000)?,
+                schema_id: Some(GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA.into()),
+            }])
         })?;
-        odin.timers = ServingTimers::default();
         assert_refused(&odin.pass().unwrap_err());
         Ok(())
     }
@@ -2337,42 +2351,55 @@ mod tests {
 
     /// One record that does not decode is skipped where it is met: the catalog
     /// still serves everything else, and startup still finds Odin's sequence.
+    /// The records are in the file when Odin activates.
     #[test]
     fn records_that_do_not_decode_never_stop_the_catalog_or_startup() -> Result<()> {
-        let mut odin = activated_odin()?;
-        odin.pass()?;
-        let before = odin.stored_sequence()?;
-        assert!(before > 0);
-        let stamp = rfc3339_millis(unix_millis()?)?;
-        let own_signer = odin.provider_identity_id.clone();
-        odin.tamper_store(|mut entries| {
-            for key in [
-                "ghost".to_owned(),
-                format!("{TARGET}@{}/{own_signer}", digest('c')),
-            ] {
-                entries.push(CultCacheEnvelope {
-                    key,
+        const EARLIER: u64 = 41;
+        let mut odin = activated_odin_with(CultMeshRudpDocumentServerOptions::default(), |runtime| {
+            let own_signer = runtime
+                .authority_material
+                .provider_signer
+                .entry()
+                .identity_id
+                .clone();
+            let stamp = rfc3339_millis(unix_millis()?)?;
+            let bad_presence = |key: String| CultCacheEnvelope {
+                key,
+                r#type: GameCultRuntimePresenceHealthRecord::TYPE.into(),
+                payload: vec![0xc1],
+                stored_at: stamp.clone(),
+                schema_id: Some(GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA.into()),
+            };
+            // A presence an earlier incarnation of Odin stored, counted to 41.
+            runtime.publisher_sequence = EARLIER - 1;
+            let earlier = runtime.signed_presence_document("warming", "earlier incarnation")?;
+            runtime.publisher_sequence = 0;
+            Ok(vec![
+                bad_presence("ghost".into()),
+                bad_presence(format!("{TARGET}@{}/{own_signer}", digest('c'))),
+                CultCacheEnvelope {
+                    key: format!("{TARGET}@{}/{own_signer}", digest('d')),
                     r#type: GameCultRuntimePresenceHealthRecord::TYPE.into(),
-                    payload: vec![0xc1],
+                    payload: earlier.payload,
                     stored_at: stamp.clone(),
                     schema_id: Some(GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA.into()),
-                });
-            }
-            entries.push(generic_document().unwrap());
-            entries
+                },
+                generic_document()?,
+            ])
         })?;
 
         let catalog = odin.catalog()?;
         assert_eq!(
             documents_of(&catalog, GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA),
             1,
-            "Odin's own presence is served"
+            "the presence that decodes is served"
         );
         assert_eq!(documents_of(&catalog, "ghostlight.doc.v1"), 1);
+        odin.pass()?;
         assert_eq!(
-            prior_self_publisher_sequence(&odin.store, &odin.provider_identity_id)?,
-            before,
-            "the undecodable presences do not change the sequence Odin continues from"
+            odin.stored_sequence()?,
+            EARLIER + 1,
+            "Odin continues from the sequence it found past the undecodable presences"
         );
         Ok(())
     }
@@ -2383,10 +2410,7 @@ mod tests {
     fn a_presence_whose_projection_cannot_be_read_is_skipped_not_fatal() -> Result<()> {
         let mut odin = activated_odin()?;
         odin.pass()?;
-        odin.tamper_store(|mut entries| {
-            entries.push(generic_document().unwrap());
-            entries
-        })?;
+        provider_put(&odin, "ghostlight.doc.v1", "doc-1", vec![1])?;
         odin.tamper_projection(|entries| {
             entries
                 .into_iter()
@@ -2613,8 +2637,7 @@ mod tests {
         let mut odin = activated_odin()?;
         odin.pass()?;
         let before = odin.stored_sequence()?;
-        let stored_before =
-            SingleFileMessagePackBackingStore::new(&odin.store).pull_all_read_only_snapshot()?;
+        let stored_before = odin.working_set();
 
         // Every kind Odin itself stored (its watermark and correlations, found
         // rather than named), and the kinds Idunn projects to it.
@@ -2650,7 +2673,7 @@ mod tests {
             assert!(format!("{refused:#}").contains("accepts no"), "{refused:#}");
         }
         assert_eq!(
-            SingleFileMessagePackBackingStore::new(&odin.store).pull_all_read_only_snapshot()?,
+            odin.working_set(),
             stored_before,
             "no refused put touched the store"
         );
@@ -2672,12 +2695,11 @@ mod tests {
         let mut odin = activated_odin()?;
         odin.pass()?;
         provider_put(&odin, "ghostlight.doc.v1", "doc-1", vec![1])?;
-        let stored: BTreeSet<String> =
-            SingleFileMessagePackBackingStore::new(&odin.store)
-                .pull_all_read_only_snapshot()?
-                .into_iter()
-                .map(|entry| entry.r#type)
-                .collect();
+        let stored: BTreeSet<String> = odin
+            .working_set()
+            .into_iter()
+            .map(|entry| entry.r#type)
+            .collect();
         assert!(
             stored.len() >= 4,
             "Odin's store holds more than what it serves: {stored:?}"
@@ -2911,5 +2933,63 @@ mod tests {
         let restart = start + POLL_FAILURE_LIMIT;
         assert!(!settle_poll(fault(), &mut since, restart).unwrap());
         assert!(settle_poll(fault(), &mut since, restart + POLL_FAILURE_LIMIT).is_err());
+    }
+
+    // ---- the store file is not working memory -----------------------------
+
+    /// Once Odin holds its lease, its working set is in memory. Rewriting the
+    /// store file behind its back changes nothing Odin serves or refreshes;
+    /// only a restart, which loads the file again, would see it.
+    #[test]
+    fn rewriting_the_store_file_behind_odin_changes_nothing_it_serves() -> Result<()> {
+        let mut odin = activated_odin()?;
+        provider_put(&odin, "ghostlight.doc.v1", "doc-1", vec![1])?;
+        odin.pass()?;
+        let served = odin.catalog()?;
+        let working = odin.working_set();
+        assert_eq!(documents_of(&served, "ghostlight.doc.v1"), 1);
+
+        odin.tamper_store(|entries| {
+            let mut entries: Vec<_> = entries
+                .into_iter()
+                .filter(|entry| entry.r#type == "odin.topology_publisher_watermark")
+                .collect();
+            let mut foreign = generic_document().unwrap();
+            foreign.key = "foreign".into();
+            entries.push(foreign);
+            entries
+        })?;
+        for _ in 0..3 {
+            odin.state.borrow().refresh_all_correlations()?;
+        }
+        assert_eq!(odin.catalog()?, served);
+        assert_eq!(odin.working_set(), working);
+        assert_ne!(
+            MemoryOdinTopologyStore::load(&odin.store)?.records().len(),
+            working.len(),
+            "a restart would load what the file now holds"
+        );
+        Ok(())
+    }
+
+    /// Refresh passes and catalog reads never read the store file. With the
+    /// file replaced by bytes that do not decode, a reader would fail at once;
+    /// every pass succeeds and logs nothing.
+    #[test]
+    fn refresh_passes_and_catalog_reads_never_read_the_store_file() -> Result<()> {
+        let mut odin = activated_odin()?;
+        provider_put(&odin, "ghostlight.doc.v1", "doc-1", vec![1])?;
+        odin.pass()?;
+        let served = odin.catalog()?;
+        std::fs::write(&odin.store, b"not a cultcache store")?;
+        for _ in 0..5 {
+            odin.state.borrow().refresh_all_correlations()?;
+            assert_eq!(odin.catalog()?, served);
+        }
+        assert!(
+            odin.state.borrow().log_gate.borrow().seen.is_empty(),
+            "a pass failed and was logged"
+        );
+        Ok(())
     }
 }
