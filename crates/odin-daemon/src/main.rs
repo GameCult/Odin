@@ -32,9 +32,9 @@ use cultnet_rs::{
 };
 use fs2::FileExt;
 use odin_daemon::{
-    AuthenticationPolicy, CultCacheIdunnProjectionSource, IdunnProjectionSource, IncarnationRef,
-    MemoryOdinTopologyStore, OdinTopologyAuthority, PresenceAuthorityRefused, ProjectionUnreadable,
-    SystemClock,
+    AuthenticationPolicy, CultCacheIdunnProjectionSource, ForeignStoreWrite,
+    IdunnProjectionSource, IncarnationRef, MemoryOdinTopologyStore, OdinTopologyAuthority,
+    PresenceAuthorityRefused, ProjectionUnreadable, SystemClock,
 };
 
 const TARGET: &str = "odin";
@@ -68,6 +68,11 @@ const POLL_FAILURE_LIMIT: Duration = Duration::from_secs(30);
 const POLL_FAILURE_BACKOFF: Duration = Duration::from_millis(100);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 const PROJECTION_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
+// At most one write of the store file per interval, and none when nothing
+// changed. A crash loses at most this much of the catalog and presence;
+// providers republish, and a correlation sequence that was never written was
+// never published. Operator default Q3, docs/write-pattern-cut.md.
+const FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(2);
 const MAX_RECENT_WARMING_PROOFS: usize = 64;
 const WARMING_PROOF_LIFETIME_MILLIS: u64 = 60_000;
@@ -294,10 +299,18 @@ impl RuntimeState {
             .context("Odin topology authority is absent")
     }
 
-    /// Write Odin's store file from the working set, if it changed.
-    fn flush(&self) -> Result<()> {
-        self.topology()?.store.flush()?;
-        Ok(())
+    /// Write Odin's store file from the working set, if it changed; returns
+    /// whether it wrote. This is the only write of the file. The lease is
+    /// checked immediately before it, so nothing is written once the lease is
+    /// lost, and a file another process wrote is refused (`ForeignStoreWrite`)
+    /// rather than written over. Both end Odin (see `survive`).
+    fn flush(&self) -> Result<bool> {
+        let store = &self.topology()?.store;
+        if !store.is_dirty() {
+            return Ok(false);
+        }
+        self.require_current_write_lease()?;
+        store.flush()
     }
 
     fn accept_raw_document(&mut self, receipt: CultMeshRudpRawDocumentReceipt) -> Result<()> {
@@ -311,7 +324,7 @@ impl RuntimeState {
         } else {
             persist_generic_document(&self.topology()?.store, &receipt.document)?;
         }
-        self.flush()
+        Ok(())
     }
 
     /// The one admission path for a runtime-presence document, whether a
@@ -461,8 +474,7 @@ impl RuntimeState {
         self.require_current_write_lease()?;
         self.require_own_projection()?;
         let document = self.signed_presence_document("active", detail)?;
-        self.admit_presence_document(&document, unix_millis()?)?;
-        self.flush()
+        self.admit_presence_document(&document, unix_millis()?)
     }
 
     /// Idunn's projection of this process's own incarnation. A failure to
@@ -534,7 +546,7 @@ impl RuntimeState {
                 );
             }
         }
-        self.flush()
+        Ok(())
     }
 
     /// The catalog serves what is stored, one record at a time: a record that
@@ -767,11 +779,21 @@ fn main() -> Result<()> {
     loop {
         if stopping.load(Ordering::Relaxed) {
             eprintln!("Odin stopping on request");
+            stop(&state.borrow());
             return Ok(());
         }
         if !serving_pass(&state, &mut server, &mut timers)? {
             thread::sleep(IDLE_POLL_INTERVAL);
         }
+    }
+}
+
+/// The last write before Odin stops on request. `flush` makes it only while
+/// the lease is still current. A failure is logged and not returned: Odin is
+/// stopping either way, and the next Odin loads what the file holds.
+fn stop(state: &RuntimeState) {
+    if let Err(error) = state.flush() {
+        eprintln!("Odin's final store write was not made: {error:#}");
     }
 }
 
@@ -781,14 +803,17 @@ fn main() -> Result<()> {
 struct ServingTimers {
     last_heartbeat: Option<Instant>,
     last_projection_refresh: Option<Instant>,
+    /// When the store file was last written, or a write last failed.
+    last_flush: Option<Instant>,
     poll_failing_since: Option<Instant>,
 }
 
 type OdinServer = CultMeshRudpDocumentServer<SinkHandle, SnapshotHandle, CultMeshSystemClock>;
 
-/// One turn of the serving loop: serve a datagram, refresh the topology, and
-/// publish Odin's own presence when each is due. Returns whether the poll made
-/// progress. It fails only for `WriteLeaseLost` or a dead socket.
+/// One turn of the serving loop: serve a datagram, refresh the topology,
+/// publish Odin's own presence, and write the store file, when each is due.
+/// Returns whether the poll made progress. It fails only for the conditions
+/// `survive` returns, or a dead socket.
 fn serving_pass(
     state: &Rc<RefCell<RuntimeState>>,
     server: &mut OdinServer,
@@ -804,6 +829,15 @@ fn serving_pass(
         let published = state.borrow_mut().publish_self_presence("ready");
         survive(&state.borrow(), "self-presence publication", published)?;
         timers.last_heartbeat = Some(Instant::now());
+    }
+    if is_due(timers.last_flush, FLUSH_INTERVAL) {
+        let flushed = state.borrow().flush();
+        // Only an attempt starts the interval: with nothing to write, the next
+        // change is written on the first pass after it.
+        if !matches!(flushed, Ok(false)) {
+            timers.last_flush = Some(Instant::now());
+        }
+        survive(&state.borrow(), "store write", flushed)?;
     }
     Ok(progressed)
 }
@@ -828,8 +862,10 @@ impl std::error::Error for WriteLeaseLost {}
 
 /// The serving loop's failure policy. Odin's liveness is Odin's own: a failed
 /// refresh, publication or read is logged and retried on the next pass, never
-/// allowed to end the daemon. Only `WriteLeaseLost`, wherever in the error chain
-/// it sits, is returned -- and, as a named temporary rule, so is
+/// allowed to end the daemon. Only `WriteLeaseLost` and `ForeignStoreWrite`,
+/// wherever in the error chain they sit, are returned: each means another
+/// writer holds Odin's state, and writing on would be a second writer. As a
+/// named temporary rule, so is
 /// `PresenceAuthorityRefused`: a failure to establish Odin's OWN authority
 /// (`require_own_projection`), or a self-presence that authority will never
 /// admit (no verifiable authority, a signer that does not match the anchor, a
@@ -845,6 +881,7 @@ fn survive<T>(state: &RuntimeState, what: &str, result: Result<T>) -> Result<Opt
         Ok(value) => Ok(Some(value)),
         Err(error)
             if error.downcast_ref::<WriteLeaseLost>().is_some()
+                || error.downcast_ref::<ForeignStoreWrite>().is_some()
                 || error.downcast_ref::<PresenceAuthorityRefused>().is_some() =>
         {
             Err(error)
@@ -1994,29 +2031,27 @@ mod tests {
         Ok(())
     }
 
-    /// A publication or refresh that fails is logged and retried; it never
-    /// ends Odin, and the next attempt lands once the fault clears.
+    /// A store write that fails is logged and retried; it never ends Odin, and
+    /// the next attempt lands once the fault clears.
     #[test]
-    fn a_failed_self_publication_or_refresh_does_not_end_odin() -> Result<()> {
+    fn a_failed_store_write_does_not_end_odin() -> Result<()> {
         let mut odin = activated_odin()?;
         odin.pass()?;
-        assert!(odin.stored_sequence()? > 0, "the first pass publishes");
+        assert_eq!(odin.file_records()?, odin.working_set(), "the first pass writes");
 
         let written = std::fs::read(&odin.store)?;
         std::fs::write(&odin.store, b"not a cultcache store")?;
+        provider_put(&odin, "ghostlight.doc.v1", "doc-1", vec![1])?;
         assert!(
-            odin.state
-                .borrow_mut()
-                .publish_self_presence("probe")
-                .is_err(),
-            "the injected fault must actually fail the publication"
+            odin.state.borrow().flush().is_err(),
+            "the injected fault must actually fail the write"
         );
         odin.timers = ServingTimers::default();
         odin.pass()?;
         let suppressed = |odin: &OdinWorld| odin.state.borrow().log_gate.borrow().suppressed_total;
         assert_eq!(suppressed(&odin), 0, "each distinct failure is logged");
 
-        // The same faults on later passes are counted, not printed again.
+        // The same fault on later passes is counted, not printed again.
         for repeat in 1..=3 {
             odin.timers = ServingTimers::default();
             odin.pass()?;
@@ -2805,6 +2840,8 @@ mod tests {
         );
         let lost = anyhow::Error::new(WriteLeaseLost("gone".into())).context("refreshing");
         assert!(survive::<()>(&state, "x", Err(lost)).is_err());
+        let foreign = anyhow::Error::new(ForeignStoreWrite).context("writing");
+        assert!(survive::<()>(&state, "x", Err(foreign)).is_err());
         Ok(())
     }
 
@@ -2933,6 +2970,132 @@ mod tests {
         let restart = start + POLL_FAILURE_LIMIT;
         assert!(!settle_poll(fault(), &mut since, restart).unwrap());
         assert!(settle_poll(fault(), &mut since, restart + POLL_FAILURE_LIMIT).is_err());
+    }
+
+    // ---- one write per interval ----------------------------------------------
+
+    /// The store file as a reader sees it: which file, and what it holds. Each
+    /// write replaces the file atomically, so it is a new file.
+    fn file_identity(path: &Path) -> Result<(u64, Vec<u8>)> {
+        use std::os::unix::fs::MetadataExt;
+        Ok((std::fs::metadata(path)?.ino(), std::fs::read(path)?))
+    }
+
+    fn ago(millis: u64) -> Option<Instant> {
+        Instant::now().checked_sub(Duration::from_millis(millis))
+    }
+
+    /// Fifty changes inside one interval are one write, made once the
+    /// interval has passed: not at 0.9 s after the last write, at 1.1 s.
+    #[test]
+    fn changes_inside_one_interval_are_one_write() -> Result<()> {
+        let mut odin = activated_odin()?;
+        odin.pass()?;
+        let first = file_identity(&odin.store)?;
+        for index in 0..25 {
+            provider_put(&odin, "ghostlight.doc.v1", &format!("doc-{index}"), vec![1])?;
+            odin.timers.last_heartbeat = None;
+            odin.timers.last_flush = Some(Instant::now());
+            odin.pass()?;
+        }
+        assert!(odin.stored_sequence()? >= 26, "every heartbeat was admitted");
+        assert_eq!(file_identity(&odin.store)?, first, "no write inside the interval");
+
+        odin.timers.last_flush = ago(900);
+        odin.pass()?;
+        assert_eq!(file_identity(&odin.store)?, first, "0.9 s is inside the interval");
+
+        odin.timers.last_flush = ago(1_100);
+        odin.pass()?;
+        let second = file_identity(&odin.store)?;
+        assert_ne!(second.0, first.0, "one write once the interval passed");
+        assert_eq!(odin.file_records()?, odin.working_set());
+
+        odin.timers.last_flush = None;
+        odin.pass()?;
+        assert_eq!(file_identity(&odin.store)?, second, "and only one");
+        Ok(())
+    }
+
+    /// An interval in which nothing changed writes nothing, however often the
+    /// write is due.
+    #[test]
+    fn nothing_changed_is_no_write() -> Result<()> {
+        let mut odin = activated_odin()?;
+        odin.pass()?;
+        let written = file_identity(&odin.store)?;
+        for _ in 0..5 {
+            odin.timers.last_projection_refresh = None;
+            odin.timers.last_heartbeat = Some(Instant::now());
+            odin.timers.last_flush = None;
+            odin.pass()?;
+        }
+        assert_eq!(file_identity(&odin.store)?, written);
+        Ok(())
+    }
+
+    /// The lease is checked at the write itself: lost between a change and
+    /// its write, the write is not made and Odin ends.
+    #[test]
+    fn a_lease_lost_before_the_write_writes_nothing_and_ends_odin() -> Result<()> {
+        let mut odin = activated_odin()?;
+        odin.pass()?;
+        let written = file_identity(&odin.store)?;
+        provider_put(&odin, "ghostlight.doc.v1", "doc-1", vec![1])?;
+        odin.swap_lease()?;
+        odin.timers.last_projection_refresh = Some(Instant::now());
+        odin.timers.last_heartbeat = Some(Instant::now());
+        odin.timers.last_flush = None;
+        let error = odin.pass().unwrap_err();
+        assert!(
+            error.downcast_ref::<WriteLeaseLost>().is_some(),
+            "{error:#}"
+        );
+        assert_eq!(file_identity(&odin.store)?, written);
+        Ok(())
+    }
+
+    /// A file another process wrote between Odin's writes ends Odin, and is
+    /// not written over.
+    #[test]
+    fn a_foreign_write_ends_odin_and_is_not_written_over() -> Result<()> {
+        let mut odin = activated_odin()?;
+        odin.pass()?;
+        odin.tamper_store(|entries| {
+            entries
+                .into_iter()
+                .filter(|entry| entry.r#type != GameCultRuntimePresenceHealthRecord::TYPE)
+                .collect()
+        })?;
+        let foreign = file_identity(&odin.store)?;
+        provider_put(&odin, "ghostlight.doc.v1", "doc-1", vec![1])?;
+        odin.timers.last_flush = None;
+        let error = odin.pass().unwrap_err();
+        assert!(
+            error.downcast_ref::<ForeignStoreWrite>().is_some(),
+            "{error:#}"
+        );
+        assert_eq!(file_identity(&odin.store)?, foreign);
+        Ok(())
+    }
+
+    /// Stopping on request writes what changed, while the lease is current,
+    /// and nothing once it is lost.
+    #[test]
+    fn stopping_writes_what_changed_only_under_the_lease() -> Result<()> {
+        let odin = activated_odin()?;
+        provider_put(&odin, "ghostlight.doc.v1", "doc-1", vec![1])?;
+        stop(&odin.state.borrow());
+        assert_eq!(odin.file_records()?, odin.working_set());
+
+        let mut odin = activated_odin()?;
+        odin.pass()?;
+        let written = file_identity(&odin.store)?;
+        provider_put(&odin, "ghostlight.doc.v1", "doc-1", vec![1])?;
+        odin.swap_lease()?;
+        stop(&odin.state.borrow());
+        assert_eq!(file_identity(&odin.store)?, written);
+        Ok(())
     }
 
     // ---- the store file is not working memory -----------------------------

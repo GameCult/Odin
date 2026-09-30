@@ -2048,6 +2048,100 @@ mod tests {
         Ok(())
     }
 
+    /// A write is made only when something changed, and only over the file the
+    /// store last loaded or wrote. A file another process wrote is refused
+    /// and left as that process wrote it.
+    #[test]
+    fn a_flush_writes_only_changes_and_never_over_a_foreign_file() -> Result<()> {
+        let temp = TempDir::new()?;
+        let path = temp.path().join("topology.cc");
+        let store = MemoryOdinTopologyStore::load(&path)?;
+        assert!(!store.flush()?);
+        assert!(!path.exists(), "an unchanged empty store writes nothing");
+
+        let document = CultCacheEnvelope {
+            key: "doc-1".into(),
+            r#type: "ghostlight.doc".into(),
+            payload: vec![1],
+            stored_at: rfc3339_millis(NOW)?,
+            schema_id: Some("ghostlight.doc.v1".into()),
+        };
+        store.put(document.clone());
+        assert!(store.flush()?);
+        store.put(document.clone());
+        assert!(!store.flush()?, "storing the record already held is no change");
+
+        let file = SingleFileMessagePackBackingStore::new(&path);
+        let mut foreign = document.clone();
+        foreign.key = "foreign".into();
+        ensure!(file.compare_exchange_snapshot(&[document.clone()], &[foreign.clone()])?);
+        let mut changed = document;
+        changed.payload = vec![2];
+        store.put(changed);
+        let error = store.flush().unwrap_err();
+        assert!(error.downcast_ref::<ForeignStoreWrite>().is_some(), "{error:#}");
+        assert_eq!(file.pull_all_read_only_snapshot()?, vec![foreign]);
+        Ok(())
+    }
+
+    fn file_sequences(path: &Path) -> Result<(u64, Vec<u64>)> {
+        let entries = SingleFileMessagePackBackingStore::new(path).pull_all_read_only_snapshot()?;
+        let mark = unique_envelope(&entries, TOPOLOGY_PUBLISHER_WATERMARK_TYPE, "ghostlight")?
+            .map(|envelope| decode_publisher_watermark("ghostlight", &envelope.payload))
+            .transpose()?
+            .unwrap_or(0);
+        let correlations = entries
+            .iter()
+            .filter(|entry| entry.r#type == OdinRuntimeTopologyCorrelationRecord::TYPE)
+            .map(|entry| Ok(decode_correlation(&entry.payload)?.publisher_sequence))
+            .collect::<Result<Vec<_>>>()?;
+        Ok((mark, correlations))
+    }
+
+    /// A correlation sequence is published when it is written. The mark is
+    /// written with the correlations that use it, so the file never holds a
+    /// correlation ahead of its mark, and after a crash (the working set lost
+    /// without a final write) and a reload, the next correlation is above
+    /// every sequence the file holds -- even with the correlation withdrawn.
+    #[test]
+    fn a_crash_never_republishes_a_written_sequence() -> Result<()> {
+        let world = TestWorld::new()?;
+        let service = world.service("ghostlight", Vec::new(), false)?;
+        for sequence in 1..=2 {
+            world.engine(NOW).admit_presence(
+                "ghostlight",
+                &service.signed_presence(sequence, |_| {})?,
+                NOW + sequence,
+            )?;
+        }
+        world.withdraw_projection(&service.incarnation()?)?;
+        world.engine(NOW + 3).refresh(&service.incarnation()?)?;
+        assert!(world.store.flush()?);
+        let (mark, correlations) = file_sequences(&world.topology_path)?;
+        assert_eq!((mark, correlations.len()), (2, 0), "withdrawn, the mark stays");
+
+        // Changes made and never written, then the crash.
+        world.publish_projection(&service.projection)?;
+        world.engine(NOW + 4).admit_presence(
+            "ghostlight",
+            &service.signed_presence(3, |_| {})?,
+            NOW + 4,
+        )?;
+        let restarted = MemoryOdinTopologyStore::load(&world.topology_path)?;
+        assert_eq!(file_sequences(&world.topology_path)?.0, mark);
+
+        let next = decode_signed(&world.engine_on(&restarted, NOW + 5).admit_presence(
+            "ghostlight",
+            &service.signed_presence(4, |_| {})?,
+            NOW + 5,
+        )?)?;
+        assert!(next.publisher_sequence > mark, "{} repeats", next.publisher_sequence);
+        assert!(restarted.flush()?);
+        let (mark, correlations) = file_sequences(&world.topology_path)?;
+        assert!(correlations.iter().all(|sequence| *sequence <= mark));
+        Ok(())
+    }
+
     #[derive(Clone, Copy)]
     struct FixedClock(u64);
 
