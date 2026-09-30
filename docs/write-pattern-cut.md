@@ -450,6 +450,11 @@ section 7). Anchors:
 
 The mapping raises two forks, **Q5-A** and **Q5-B** (at the end of this section). Cuts C5 and W1 wait on Q5-A.
 
+**RULED, operator 2026-09-30: "Q5-A: A, but make a note of this for when we move on QUIC, Q5-B: A".**
+- **Q5-A = A.** The server withholds the session's transport ACK until the put is answered. The wire is unchanged.
+  The note for QUIC (a put-result message) is in the QUIC campaign handoff.
+- **Q5-B = A.** Puts are held during a writer stall, bounded by the existing session and byte limits.
+
 ### Q5.1 Body facts (probed and read)
 
 **Probe O1, Odin `434756e` + scratch test, Yggdrasil slot 3 (`imag-q5-odin@31953c93`).** A test process holds the
