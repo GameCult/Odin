@@ -2197,6 +2197,56 @@ mod tests {
         Ok(())
     }
 
+    /// Two writes fail before replacing the file, and the file then comes to
+    /// hold the later attempt's records (the state a failed directory sync of
+    /// that attempt would leave). Any failed attempt may be what the file
+    /// holds, not only the first: the next write is made over it.
+    #[test]
+    fn the_file_may_hold_a_later_failed_attempt_not_only_the_first() -> Result<()> {
+        let temp = TempDir::new()?;
+        let path = temp.path().join("topology.cc");
+        let file = SingleFileMessagePackBackingStore::new(&path);
+        let store = MemoryOdinTopologyStore::load(&path)?;
+        std::fs::write(&path, b"not a cultcache store")?;
+        store.put(peer_document("doc-1")?);
+        assert!(store.flush().is_err());
+        store.put(peer_document("doc-2")?);
+        assert!(store.flush().is_err());
+        std::fs::remove_file(&path)?;
+        ensure!(file.compare_exchange_snapshot(
+            &[],
+            &[peer_document("doc-1")?, peer_document("doc-2")?]
+        )?);
+
+        store.put(peer_document("doc-3")?);
+        assert!(store.flush()?, "the later attempt is Odin's own");
+        assert_eq!(
+            file.pull_all_read_only_snapshot()?,
+            vec![peer_document("doc-1")?, peer_document("doc-2")?, peer_document("doc-3")?]
+        );
+        Ok(())
+    }
+
+    /// Removing a record is a change of its own: the next flush writes the
+    /// file without it, with nothing else changed.
+    #[test]
+    fn a_removed_record_is_written_out() -> Result<()> {
+        let temp = TempDir::new()?;
+        let path = temp.path().join("topology.cc");
+        let file = SingleFileMessagePackBackingStore::new(&path);
+        let store = MemoryOdinTopologyStore::load(&path)?;
+        store.put(peer_document("doc-1")?);
+        store.put(peer_document("doc-2")?);
+        assert!(store.flush()?);
+
+        store.remove("ghostlight.doc", "doc-1");
+        assert!(store.flush()?, "the removal is written");
+        assert_eq!(file.pull_all_read_only_snapshot()?, vec![peer_document("doc-2")?]);
+        store.remove("ghostlight.doc", "doc-1");
+        assert!(!store.flush()?, "removing what is not held changes nothing");
+        Ok(())
+    }
+
     fn file_sequences(path: &Path) -> Result<(u64, Vec<u64>)> {
         let entries = SingleFileMessagePackBackingStore::new(path).pull_all_read_only_snapshot()?;
         let mark = unique_envelope(&entries, TOPOLOGY_PUBLISHER_WATERMARK_TYPE, "ghostlight")?
