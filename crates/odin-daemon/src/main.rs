@@ -33,8 +33,8 @@ use cultnet_rs::{
 use fs2::FileExt;
 use odin_daemon::{
     AuthenticationPolicy, CultCacheIdunnProjectionSource, ForeignStoreWrite,
-    IdunnProjectionSource, IncarnationRef, MemoryOdinTopologyStore, OdinTopologyAuthority,
-    PresenceAuthorityRefused, ProjectionUnreadable, SystemClock,
+    IdunnProjectionSnapshot, IdunnProjectionSource, IncarnationRef, MemoryOdinTopologyStore,
+    OdinTopologyAuthority, PresenceAuthorityRefused, ProjectionUnreadable, SystemClock,
 };
 
 const TARGET: &str = "odin";
@@ -180,7 +180,8 @@ impl RuntimeState {
         require_expected_contract(&authority_material.expected, candidate)?;
 
         let idunn_anchor = read_trust_anchor::<IdunnServiceIdentity>(&options.idunn_anchor)?;
-        let projection_source = CultCacheIdunnProjectionSource::new(&options.idunn_projection);
+        let projection_source =
+            CultCacheIdunnProjectionSource::new(&options.idunn_projection).snapshot()?;
         // This process is one exact incarnation, named by the Expected digest
         // in its immutable runtime bundle. The projection may carry other
         // incarnations of `odin` at the same time -- the one being replaced,
@@ -258,6 +259,7 @@ impl RuntimeState {
             return Ok(false);
         };
         let Some(projected) = CultCacheIdunnProjectionSource::new(&self.options.idunn_projection)
+            .snapshot()?
             .projection(&self_incarnation(&self.authority_material))?
         else {
             return Ok(false);
@@ -483,7 +485,8 @@ impl RuntimeState {
     fn require_own_projection(&self) -> Result<()> {
         let path = &self.options.idunn_projection;
         match CultCacheIdunnProjectionSource::new(path)
-            .projection(&self_incarnation(&self.authority_material))
+            .snapshot()
+            .and_then(|projections| projections.projection(&self_incarnation(&self.authority_material)))
         {
             Err(error) => Err(own_projection_failure(error)),
             // No file is an I/O condition (Idunn replaces it atomically, so it
@@ -546,8 +549,9 @@ impl RuntimeState {
     }
 
     /// The catalog serves what is stored, one record at a time: a record that
-    /// does not decode, or whose projection cannot be read, is skipped and
-    /// logged, and is never a reason to refuse every other record. Odin's
+    /// does not decode, or whose incarnation's projection does not, is skipped
+    /// and logged, and is never a reason to refuse every other record. Idunn's
+    /// projection is read once per query. Odin's
     /// correlations are not part of the catalog: Idunn reads them from the
     /// store file, and a target has one per incarnation, so keying them by
     /// target would collide for the whole deploy window.
@@ -556,7 +560,8 @@ impl RuntimeState {
         query: &CultMeshRudpSnapshotQuery,
     ) -> Result<Vec<CultNetRawDocumentRecord>> {
         let records = self.topology()?.store.records();
-        let projections = CultCacheIdunnProjectionSource::new(&self.options.idunn_projection);
+        let projections =
+            CultCacheIdunnProjectionSource::new(&self.options.idunn_projection).snapshot()?;
         let mut selected = BTreeMap::new();
         for envelope in records.values() {
             let document = match self.public_document(&projections, envelope) {
@@ -585,7 +590,7 @@ impl RuntimeState {
     /// One stored record as the Verse sees it; `None` when it is not public.
     fn public_document(
         &self,
-        projections: &CultCacheIdunnProjectionSource,
+        projections: &IdunnProjectionSnapshot,
         envelope: &CultCacheEnvelope,
     ) -> Result<Option<CultNetRawDocumentRecord>> {
         let Some(schema_id) = envelope.schema_id.clone() else {
@@ -2403,6 +2408,60 @@ mod tests {
         assert_eq!(documents_of(&catalog, "ghostlight.doc.v1"), 1);
         odin.pass()?;
         assert!(odin.stored_sequence()? > 0, "Odin publishes past them");
+        Ok(())
+    }
+
+    /// The bytes this thread has read so far, as the kernel counts them.
+    fn thread_bytes_read() -> Result<u64> {
+        let io = std::fs::read_to_string("/proc/thread-self/io")?;
+        Ok(io
+            .lines()
+            .find_map(|line| line.strip_prefix("rchar: "))
+            .context("no rchar in /proc/thread-self/io")?
+            .parse()?)
+    }
+
+    /// A catalog query reads Idunn's projection once, however many stored
+    /// presences it has to look up there.
+    #[test]
+    fn a_catalog_query_reads_the_projection_once() -> Result<()> {
+        const PRESENCES: usize = 8;
+        let odin = activated_odin_with(CultMeshRudpDocumentServerOptions::default(), |runtime| {
+            let stamp = rfc3339_millis(unix_millis()?)?;
+            (0..PRESENCES)
+                .map(|index| {
+                    Ok(CultCacheEnvelope {
+                        key: format!("stored-{index}"),
+                        r#type: GameCultRuntimePresenceHealthRecord::TYPE.into(),
+                        payload: runtime.signed_presence_document("warming", "stored")?.payload,
+                        stored_at: stamp.clone(),
+                        schema_id: Some(GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA.into()),
+                    })
+                })
+                .collect()
+        })?;
+        let projection = odin.state.borrow().options.idunn_projection.clone();
+        let projection_bytes = std::fs::metadata(&projection)?.len();
+        // Every stored presence is looked up in the projection; the filter
+        // then keeps none of them, so none collides with another in the reply.
+        let query = CultMeshRudpSnapshotQuery {
+            session: cultmesh_rs::CultMeshRudpSessionKey {
+                remote_addr: "127.0.0.1:1".parse()?,
+                connection_id: 7,
+            },
+            message_id: "lookups".into(),
+            requested_at_unix_millis: 1,
+            schema_ids: None,
+            record_keys: Some(vec!["absent".into()]),
+        };
+        let before = thread_bytes_read()?;
+        assert!(odin.state.borrow_mut().raw_snapshot(&query)?.is_empty());
+        let read = thread_bytes_read()? - before;
+        assert!(read >= projection_bytes, "the projection was read: {read} bytes");
+        assert!(
+            read < 2 * projection_bytes,
+            "and only once: {read} bytes read, the projection is {projection_bytes}"
+        );
         Ok(())
     }
 

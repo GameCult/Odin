@@ -6,7 +6,7 @@
 
 use std::cell::{Cell, Ref, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail, ensure};
@@ -177,7 +177,9 @@ pub trait IdunnProjectionSource {
     }
 }
 
-/// Read-only adapter for the atomic projection file published by Idunn.
+/// Read-only adapter for the atomic projection file published by Idunn. It
+/// answers no lookup itself: each [`snapshot`](Self::snapshot) is one read of
+/// the file, and every lookup is made against a snapshot.
 pub struct CultCacheIdunnProjectionSource {
     path: PathBuf,
 }
@@ -187,22 +189,6 @@ impl CultCacheIdunnProjectionSource {
         Self { path: path.into() }
     }
 
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl IdunnProjectionSource for CultCacheIdunnProjectionSource {
-    fn projections(&self, target: &str) -> Result<Vec<IdunnRuntimeProjection>> {
-        self.snapshot()?.projections(target)
-    }
-
-    fn projection(&self, incarnation: &IncarnationRef) -> Result<Option<IdunnRuntimeProjection>> {
-        self.snapshot()?.projection(incarnation)
-    }
-}
-
-impl CultCacheIdunnProjectionSource {
     /// Read the projection file once. An absent file projects nothing.
     pub fn snapshot(&self) -> Result<IdunnProjectionSnapshot> {
         if !self.path.is_file() {
@@ -227,8 +213,7 @@ impl CultCacheIdunnProjectionSource {
 }
 
 /// One reading of Idunn's projection file. Every lookup made against it is
-/// answered from the same bytes, so a pass that refreshes every incarnation
-/// reads the file once.
+/// answered from the same bytes.
 pub struct IdunnProjectionSnapshot {
     entries: Vec<CultCacheEnvelope>,
 }
@@ -534,10 +519,6 @@ impl MemoryOdinTopologyStore {
             flushed: RefCell::new(flushed),
             dirty: Cell::new(false),
         })
-    }
-
-    pub fn path(&self) -> &Path {
-        &self.path
     }
 
     /// Every record, in the order the file stores them.
@@ -1704,7 +1685,7 @@ fn parse_rfc3339_millis(value: &str) -> Result<u64> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use cultnet_rs::{
         GAMECULT_SERVICE_TRUST_ANCHOR_SCHEMA, GameCultProviderHealthIdentity,
@@ -1750,7 +1731,9 @@ mod tests {
             );
         }
         let projections =
-            CultCacheIdunnProjectionSource::new(&projection_path).projections(&target)?;
+            CultCacheIdunnProjectionSource::new(&projection_path)
+                .snapshot()?
+                .projections(&target)?;
         if projections.is_empty() {
             println!("== no incarnation-keyed projection for {target}");
             return Ok(());
@@ -1851,10 +1834,12 @@ mod tests {
         candidate.activation = None;
         candidate.current_lease = None;
         world.publish_projection(&candidate)?;
+        let engine = world.engine(NOW);
         let candidate_incarnation = IncarnationRef::of(&candidate.expected)?;
         assert_ne!(incumbent.incarnation()?, candidate_incarnation);
         assert_eq!(
             CultCacheIdunnProjectionSource::new(&world.projection_path)
+                .snapshot()?
                 .projections("odin")?
                 .len(),
             2
@@ -1907,7 +1892,7 @@ mod tests {
             })
             .collect();
         ensure!(store.compare_exchange_snapshot(&current, &legacy)?);
-        let source = CultCacheIdunnProjectionSource::new(&world.projection_path);
+        let source = CultCacheIdunnProjectionSource::new(&world.projection_path).snapshot()?;
         assert!(source.projections("ghostlight")?.is_empty());
         assert!(source.projection(&service.incarnation()?)?.is_none());
         Ok(())
@@ -1930,7 +1915,7 @@ mod tests {
             schema_id: Some(IDUNN_EXPECTED_INCARNATION_SCHEMA.into()),
         });
         ensure!(store.compare_exchange_snapshot(&current, &with_ghost)?);
-        let source = CultCacheIdunnProjectionSource::new(&world.projection_path);
+        let source = CultCacheIdunnProjectionSource::new(&world.projection_path).snapshot()?;
         assert!(source.projection(&service.incarnation()?)?.is_some());
         assert!(
             source
@@ -2442,10 +2427,13 @@ mod tests {
             self.engine_on(&self.store, now)
         }
 
-        /// An engine over another store, as a restarted Odin loads one.
+        /// An engine over another store, as a restarted Odin loads one. It reads
+        /// the projection once, when it is made, as each serving operation does.
         fn engine_on<'a>(&'a self, store: &'a MemoryOdinTopologyStore, now: u64) -> TestEngine<'a> {
             OdinTopologyAuthority::new(
-                CultCacheIdunnProjectionSource::new(&self.projection_path),
+                CultCacheIdunnProjectionSource::new(&self.projection_path)
+                    .snapshot()
+                    .expect("the test projection reads"),
                 store,
                 &self.odin_signer,
                 FixedClock(now),
@@ -2491,7 +2479,7 @@ mod tests {
     }
 
     type TestEngine<'a> = OdinTopologyAuthority<
-        CultCacheIdunnProjectionSource,
+        IdunnProjectionSnapshot,
         &'a MemoryOdinTopologyStore,
         &'a ServiceIdentitySigner<OdinTopologyIdentity>,
         FixedClock,
@@ -3001,6 +2989,7 @@ mod tests {
         );
 
         std::fs::remove_file(&world.projection_path)?;
+        let engine = world.engine(NOW);
         assert!(
             engine
                 .current_signed_correlation(&service.incarnation()?)?
@@ -3055,6 +3044,7 @@ mod tests {
         assert!(ready.dependencies[0].provider_evidence_sha256.is_some());
 
         world.replace_provider_generation(&mut provider)?;
+        let engine = world.engine(NOW);
         let no_longer_exact = decode_signed(&engine.refresh(&consumer.incarnation()?)?.unwrap())?;
         assert!(no_longer_exact.present);
         assert!(!no_longer_exact.ready);
