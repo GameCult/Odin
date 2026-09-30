@@ -986,3 +986,23 @@ Q3 B kept), and it removes S-3's unbounded list.
 - **F7** `accept_raw_document` (`main.rs:269-280`) checks `activated()` but not the *current* lease before
   mutating. Cut 2 moves the lease check to the only write, which closes this for the file. Soul should confirm
   that nothing else acts on a lost lease.
+
+## C5 status (2026-10-01)
+
+**Hands done, Soul not yet run.** Drain mode: Soul waits for the operator's go.
+
+- **Branch:** CultLib `hands/cultmesh-deferred-put-reply`, commits `08e0c229..d708247e`, based on `9dcb3aa1`.
+- **Mechanism:** the sink answers through `CultMeshRudpPutReply` with `accept()` or `refuse(reason)`. Dropping the reply unanswered refuses with `UNANSWERED_PUT_REASON`. `acknowledgement_withheld` is the single owner of the hold: while a put is unanswered, the session gets no end-of-poll ack, Pong, snapshot response or reply to a repeated Connect.
+- **Verification (Hands):**
+  - cultmesh-rs: 21 unit and 32 integration tests pass. A byte-exact golden test also passes before the cut.
+  - cultnet-rs: 486 pass.
+  - Interop: 27 pass, 0 fail.
+  - cargo-mutants: 57 mutants; 0 missed, 5 timeouts, all in the `take_answers` loop.
+- **Spec deviations Soul should attack:**
+  - A repeated Connect's ack is now withheld.
+  - Puts queued behind a waiting snapshot count as withheld. Snapshot responses are held in a new `responses_owed` queue: P1 pending, then S, then P2 must not acknowledge P2 early.
+  - Answers are checked after each message.
+  - A release that arrives during an unreliable packet sends its own ack.
+- **Structural delta:** +406/−96 in `rudp_document_server.rs`, against a +170/−15 estimate.
+- **Consumers:** Odin `SinkHandle` and Ratatoskr `tests/catalog.rs:29` break until the W0 pin bump.
+- **Still open:** S-5. Its fix belongs in `acknowledgement_withheld`.
