@@ -1878,6 +1878,8 @@ mod tests {
         assert_eq!(admitted, 64, "the default session table is 64 wide");
         assert_eq!(odin.server.session_count(), 64, "the table is full");
 
+        // The first timed pass, with the table already full, publishes once.
+        odin.pass()?;
         let before = odin.stored_sequence()?;
         for _ in 0..5 {
             odin.timers.last_heartbeat = None;
@@ -2296,8 +2298,12 @@ mod tests {
                 .collect()
         })?;
         let catalog = odin.catalog()?;
-        assert_eq!(catalog.len(), 1, "{catalog:?}");
-        assert_eq!(catalog[0].schema_id, "ghostlight.doc.v1");
+        assert_eq!(documents_of(&catalog, "ghostlight.doc.v1"), 1);
+        assert_eq!(
+            documents_of(&catalog, GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA),
+            0,
+            "the presence whose projection cannot be read is skipped"
+        );
         Ok(())
     }
 
