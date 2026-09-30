@@ -13,8 +13,31 @@
   published as its own typed record, not as a degraded presence.
 - **Q-R6:** "Approved". Both drills.
 
-**R1 status (Self, 2026-09-30).** Built on CultLib `hands/cultcache-read-failures` (`c0b56e06`..`b7908668`); it
-is in Soul.
+**R1 status (Self, 2026-09-30).** Built on CultLib `hands/cultcache-read-failures` (`c0b56e06`..`b7908668`), then
+fix batch 2 (`..2d7a3c78`). Soul's verdict on batch 2 was to hold the merge. Batch 3 is in Hands, fixing:
+- **Blocker, F1 (zero-byte stores on Yggdrasil).**
+  - Two zero-byte stores are live: `/srv/bifrost/persona-feedback/{inbox/observations,outbox/deliveries}.cc`.
+  - They are pre-created by `touch` in gamecult-ops `install-bifrost-persona-feedback-native-yggdrasil.sh:42,46`
+    and `bootstrap-bifrost-persona-feedback-yggdrasil.sh:22,29`.
+  - Bifrost `persona-feedback.mjs serve` and Epiphany `epiphany-swarm` crash-loop on them once their CultLib pins
+    move past R1.
+  - **Neither pin may move until the scripts stop pre-creating stores and Self has moved the live files aside.**
+- **F4.** Rust errors echo record values through serde's text (`lib.rs:753-758`). The header is echoed without bound.
+- **F6.** A dangling symlink reads as absent, and the writer then replaces it.
+- **F7.** The same NotFound-only rule in Python's `JsonLinesBackingStore` and in TS `pullAll`'s repair write.
+- **M7.** A header-prefix fixture.
+Recorded for later cuts:
+- **F3 → R2/R3b.** TS, Python and C# decode the whole buffer before reading the header. A truncated newer-format
+  store (20..n-1 bytes) is "unsupported format" in Rust and a raw decode error elsewhere.
+- **F5 → R3.** C# `ReadSnapshot` reads ENOTDIR/EISDIR as an empty store (`FileInfo.Exists`, `CultCache.cs:3439`).
+  C# `DirectoryMessagePackBackingStore` `File.Exists` (`:409`, `:497`) is the same. This is a live disagreement between
+  runtimes until R3.
+- **F8 → R3b.** Python leaves its staging file behind when a write fails (`stores.py:124-128`).
+- **Tooling.**
+  - `packages/cultcache-rs` has no committed `Cargo.lock`, so the map's `cargo test --locked` cannot run.
+  - The cultcache-ts interop test needs `CARGO_TARGET_DIR` unset under ygg-verify.
+- **Text matches.** gamecult-ops `scripts/idunn/start-idunn-local.ps1:143` matches the same removed text as Muninn
+  (below). It must change with Idunn's next CultLib bump.
 - **Consumer follow-up that must travel with the next Muninn CultLib bump:**
   `Muninn scripts/restart-starfire-muninn.ps1:144` matches `*failed to decode MessagePack*` to trigger
   `Reset-CorruptMuninnStore`. R1 removes that text, so the reset would stop firing silently. The script must match
