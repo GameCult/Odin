@@ -3019,7 +3019,9 @@ mod tests {
     }
 
     /// An interval in which nothing changed writes nothing, however often the
-    /// write is due.
+    /// write is due. With nothing to write the write step reads nothing
+    /// either, not even the lease: it is due on every pass until something
+    /// changes.
     #[test]
     fn nothing_changed_is_no_write() -> Result<()> {
         let mut odin = activated_odin()?;
@@ -3031,6 +3033,13 @@ mod tests {
             odin.timers.last_flush = None;
             odin.pass()?;
         }
+        assert_eq!(file_identity(&odin.store)?, written);
+
+        std::fs::write(&odin.lease_path, b"not a cultcache store")?;
+        odin.timers.last_projection_refresh = Some(Instant::now());
+        odin.timers.last_heartbeat = Some(Instant::now());
+        odin.timers.last_flush = None;
+        odin.pass()?;
         assert_eq!(file_identity(&odin.store)?, written);
         Ok(())
     }
