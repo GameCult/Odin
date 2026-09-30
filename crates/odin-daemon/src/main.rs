@@ -19,7 +19,8 @@ use cultmesh_rs::{
     CultMeshRudpSnapshotSource, CultMeshSystemClock,
 };
 use cultnet_rs::{
-    CultNetRawDocumentRecord, CultNetRawPayloadEncoding, GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA,
+    CultNetMessage, CultNetRawDocumentRecord, CultNetRawPayloadEncoding, CultNetWireContract,
+    GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA,
     GameCultProviderHealthIdentity, GameCultRuntimeCapability,
     GameCultRuntimePresenceHealthPurpose, GameCultRuntimePresenceHealthRecord,
     IDUNN_EXPECTED_INCARNATION_SCHEMA, IDUNN_PROCESS_WRITE_LEASE_SCHEMA,
@@ -28,7 +29,8 @@ use cultnet_rs::{
     IdunnRuntimeActivationSigner, IdunnServiceIdentity, OdinTopologyIdentity,
     ServiceIdentityProfile,
     ServiceIdentitySigner, ServiceIdentityTrustAnchor, derive_service_identity_id,
-    open_service_identity_credential_reader, verify_runtime_authority,
+    encode_cultnet_message_to_vec, open_service_identity_credential_reader,
+    verify_runtime_authority,
 };
 use fs2::FileExt;
 use odin_daemon::{
@@ -145,6 +147,9 @@ struct RuntimeState {
     topology: Option<Topology>,
     write_lease: Option<ProcessWriteLeaseGuard>,
     write_lease_path: PathBuf,
+    /// The largest snapshot response the server sends: its own
+    /// `max_snapshot_response_bytes`, handed over where the server is built.
+    max_snapshot_response_bytes: usize,
     recent_warming_proofs: VecDeque<(String, u64)>,
     /// Counts from this launch. Every launch is a fresh activation, and
     /// presences are ordered only within one activation.
@@ -174,7 +179,11 @@ impl CultMeshRudpSnapshotSource for SnapshotHandle {
 }
 
 impl RuntimeState {
-    fn open(options: Options, candidate: SocketAddr) -> Result<Self> {
+    fn open(
+        options: Options,
+        candidate: SocketAddr,
+        max_snapshot_response_bytes: usize,
+    ) -> Result<Self> {
         let authority_material = load_runtime_authority(Path::new(&required_environment(
             RUNTIME_BUNDLE_ENVIRONMENT,
         )?))?;
@@ -237,6 +246,7 @@ impl RuntimeState {
             topology: None,
             write_lease: None,
             write_lease_path: PathBuf::from(required_environment(PROCESS_WRITE_LEASE_ENVIRONMENT)?),
+            max_snapshot_response_bytes,
             recent_warming_proofs: VecDeque::new(),
             publisher_sequence: 0,
             log_gate: RefCell::default(),
@@ -275,6 +285,14 @@ impl RuntimeState {
         // not this contract's and would otherwise be served to the Verse as
         // current.
         store.retire_legacy_correlations();
+        for (record_type, key, size) in
+            drop_unservable_documents(&store, self.max_snapshot_response_bytes)
+        {
+            eprintln!(
+                "Odin dropped {record_type} {key} from its store: its snapshot response is {size} bytes, over the {} the server sends",
+                self.max_snapshot_response_bytes
+            );
+        }
         let signer = self
             .topology_signer
             .take()
@@ -619,24 +637,12 @@ impl RuntimeState {
         projections: &IdunnProjectionSnapshot,
         envelope: &CultCacheEnvelope,
     ) -> Result<Option<CultNetRawDocumentRecord>> {
+        if envelope.r#type != GameCultRuntimePresenceHealthRecord::TYPE {
+            return Ok(peer_document(envelope));
+        }
         let Some(schema_id) = envelope.schema_id.clone() else {
             return Ok(None);
         };
-        if envelope.r#type != GameCultRuntimePresenceHealthRecord::TYPE {
-            return Ok(is_peer_document_type(&envelope.r#type).then(|| {
-                CultNetRawDocumentRecord {
-                    schema_id,
-                    record_key: envelope.key.clone(),
-                    stored_at: envelope.stored_at.clone(),
-                    payload_encoding: CultNetRawPayloadEncoding::Messagepack,
-                    payload: envelope.payload.clone(),
-                    source_runtime_id: None,
-                    source_agent_id: None,
-                    source_role: None,
-                    tags: None,
-                }
-            }));
-        }
         let presence = decode_presence(&envelope.payload)?;
         let Some(projection) = projections.projection(&IncarnationRef::new(
             presence.target.clone(),
@@ -765,13 +771,18 @@ fn main() -> Result<()> {
     );
     let socket = UdpSocket::bind(candidate)
         .with_context(|| format!("binding Odin CultNet RUDP candidate {candidate}"))?;
-    let state = Rc::new(RefCell::new(RuntimeState::open(options, candidate)?));
+    let server_options = CultMeshRudpDocumentServerOptions::default();
+    let state = Rc::new(RefCell::new(RuntimeState::open(
+        options,
+        candidate,
+        server_options.max_snapshot_response_bytes,
+    )?));
     let mut server = CultMeshRudpDocumentServer::new(
         socket,
         SinkHandle(state.clone()),
         SnapshotHandle(state.clone()),
         CultMeshSystemClock::default(),
-        CultMeshRudpDocumentServerOptions::default(),
+        server_options,
     )?;
 
     // Idunn runs this process as PID 1 of its own PID namespace, and a
@@ -1334,6 +1345,56 @@ fn is_peer_document_type(document_type: &str) -> bool {
         })
 }
 
+/// One stored peer document as the catalog serves it; `None` for any other
+/// record.
+fn peer_document(envelope: &CultCacheEnvelope) -> Option<CultNetRawDocumentRecord> {
+    let schema_id = envelope.schema_id.clone()?;
+    is_peer_document_type(&envelope.r#type).then(|| CultNetRawDocumentRecord {
+        schema_id,
+        record_key: envelope.key.clone(),
+        stored_at: envelope.stored_at.clone(),
+        payload_encoding: CultNetRawPayloadEncoding::Messagepack,
+        payload: envelope.payload.clone(),
+        source_runtime_id: None,
+        source_agent_id: None,
+        source_role: None,
+        tags: None,
+    })
+}
+
+/// Drop every stored peer document the server could never serve, and return
+/// each one's type, key and response size. A document is unservable when a
+/// snapshot response holding it alone, encoded as the server encodes one and
+/// with the shortest message id, is larger than the largest response the
+/// server sends (`limit`, the server's own `max_snapshot_response_bytes`).
+/// Nobody can read such a document, and every write of the store would carry
+/// it. Presences are Odin's own admitted records, never this large, and are
+/// not checked; nor is anything the catalog does not serve.
+fn drop_unservable_documents(
+    store: &MemoryOdinTopologyStore,
+    limit: usize,
+) -> Vec<(String, String, usize)> {
+    let unservable: Vec<(String, String, usize)> = store
+        .records()
+        .values()
+        .filter_map(|envelope| {
+            let response = CultNetMessage::SnapshotResponseRaw {
+                message_id: String::new(),
+                documents: vec![peer_document(envelope)?],
+            };
+            let size =
+                encode_cultnet_message_to_vec(&response, CultNetWireContract::CultNetSchemaV0)
+                    .ok()?
+                    .len();
+            (size > limit).then(|| (envelope.r#type.clone(), envelope.key.clone(), size))
+        })
+        .collect();
+    for (record_type, key, _) in &unservable {
+        store.remove(record_type, key);
+    }
+    unservable
+}
+
 fn persist_generic_document(
     store: &MemoryOdinTopologyStore,
     document: &CultNetRawDocumentRecord,
@@ -1471,12 +1532,11 @@ fn rfc3339_millis(value: u64) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use cultnet_rs::{
-        CultNetMessage, CultNetRudpReliableSendStatus, CultNetRudpSocketTransportConnection,
-        CultNetRudpSocketTransportOptions, CultNetWireContract,
-        GAMECULT_RUNTIME_PRESENCE_HEALTH_SIGNING_PURPOSE, GAMECULT_SERVICE_TRUST_ANCHOR_SCHEMA,
-        GameCultServiceTrustAnchorRecord, IdunnExpectedCapability, IdunnExpectedRoute,
-        IdunnRuntimeActivationLaunch, ODIN_RUNTIME_TOPOLOGY_CORRELATION_SCHEMA,
-        OdinRuntimeTopologyCorrelationRecord, encode_cultnet_message_to_vec,
+        CultNetRudpReliableSendStatus, CultNetRudpSocketTransportConnection,
+        CultNetRudpSocketTransportOptions, GAMECULT_RUNTIME_PRESENCE_HEALTH_SIGNING_PURPOSE,
+        GAMECULT_SERVICE_TRUST_ANCHOR_SCHEMA, GameCultServiceTrustAnchorRecord,
+        IdunnExpectedCapability, IdunnExpectedRoute, IdunnRuntimeActivationLaunch,
+        ODIN_RUNTIME_TOPOLOGY_CORRELATION_SCHEMA, OdinRuntimeTopologyCorrelationRecord,
         enroll_service_identity_at,
     };
 
@@ -1744,6 +1804,7 @@ mod tests {
             topology: None,
             write_lease: None,
             write_lease_path: lease_path.clone(),
+            max_snapshot_response_bytes: options.max_snapshot_response_bytes,
             recent_warming_proofs: VecDeque::new(),
             publisher_sequence: 0,
             log_gate: RefCell::default(),
@@ -3215,6 +3276,77 @@ mod tests {
         odin.timers.last_flush = None;
         odin.pass()?;
         assert_eq!(file_identity(&odin.store)?, written);
+        Ok(())
+    }
+
+    /// A peer document whose single-document snapshot response, encoded as the
+    /// server encodes one with an empty message id, is `response_bytes` long.
+    fn document_answering_in(key: &str, response_bytes: usize) -> Result<CultCacheEnvelope> {
+        let document = |payload_bytes: usize| -> Result<CultCacheEnvelope> {
+            Ok(CultCacheEnvelope {
+                key: key.into(),
+                r#type: "ghostlight.doc".into(),
+                payload: vec![7; payload_bytes],
+                stored_at: rfc3339_millis(unix_millis()?)?,
+                schema_id: Some("ghostlight.doc.v1".into()),
+            })
+        };
+        let response = |envelope: &CultCacheEnvelope| -> Result<usize> {
+            let served = CultNetRawDocumentRecord {
+                schema_id: "ghostlight.doc.v1".into(),
+                record_key: envelope.key.clone(),
+                stored_at: envelope.stored_at.clone(),
+                payload_encoding: CultNetRawPayloadEncoding::Messagepack,
+                payload: envelope.payload.clone(),
+                source_runtime_id: None,
+                source_agent_id: None,
+                source_role: None,
+                tags: None,
+            };
+            let message = CultNetMessage::SnapshotResponseRaw {
+                message_id: String::new(),
+                documents: vec![served],
+            };
+            Ok(encode_cultnet_message_to_vec(&message, CultNetWireContract::CultNetSchemaV0)?.len())
+        };
+        let overhead = response(&document(1_000)?)? - 1_000;
+        let sized = document(response_bytes - overhead)?;
+        ensure!(response(&sized)? == response_bytes, "the document was not sized exactly");
+        Ok(sized)
+    }
+
+    /// A stored peer document the server could never serve is dropped when
+    /// Odin activates, everything else is served, and the first write removes
+    /// it from the file. The bound is the server's own limit, from the options
+    /// it was built with: a document answering in exactly that many bytes is
+    /// kept, one byte more is dropped.
+    #[test]
+    fn a_stored_document_the_server_could_never_serve_is_dropped_at_activation() -> Result<()> {
+        const LIMIT: usize = 4_096;
+        let options = CultMeshRudpDocumentServerOptions {
+            max_snapshot_response_bytes: LIMIT,
+            ..CultMeshRudpDocumentServerOptions::default()
+        };
+        let mut odin = activated_odin_with(options, |_| {
+            Ok(vec![
+                document_answering_in("at-limit", LIMIT)?,
+                document_answering_in("over-limit", LIMIT + 1)?,
+                document_answering_in("small", 200)?,
+            ])
+        })?;
+        let held = odin.stored_keys("ghostlight.doc")?;
+        assert_eq!(held, vec!["at-limit".to_owned(), "small".to_owned()]);
+        let catalog = odin.catalog()?;
+        assert_eq!(documents_of(&catalog, "ghostlight.doc.v1"), 2);
+        assert!(
+            odin.file_records()?.iter().any(|entry| entry.key == "over-limit"),
+            "activation itself writes nothing"
+        );
+
+        odin.pass()?;
+        let written = odin.file_records()?;
+        assert!(!written.iter().any(|entry| entry.key == "over-limit"));
+        assert_eq!(written, odin.working_set());
         Ok(())
     }
 

@@ -542,7 +542,8 @@ impl MemoryOdinTopologyStore {
         }
     }
 
-    fn remove(&self, record_type: &str, key: &str) {
+    /// Remove the record with this type and key, if one is held.
+    pub fn remove(&self, record_type: &str, key: &str) {
         if self
             .records
             .borrow_mut()
