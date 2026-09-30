@@ -50,6 +50,12 @@ Recorded for later cuts:
     never retry on `NotReplaced` alone (S10).
   - Deployed Epiphany is `d2ca6630`, using a vendored cultcache-rs (`ba6a4874`) that reads a missing store as empty.
     All Epiphany units have been inactive since 2026-08-22.
+  - **Done 2026-09-30 20:48 CEST (Self).** gamecult-ops merged at `3fa22aa`. The inbox is setgid 2750. All three
+    zero-byte stores were renamed in place and moved to `/root/zero-byte-stores-20260930/` on Yggdrasil, with
+    `manifest.txt` recording owner, mode and mtime. None had gained bytes. All three Bifrost units stayed active, and
+    persona-feedback logged nothing and did not restart.
+  - The compose/container lane (the compose file, two deploy scripts, the `.ps1` uploader, two runbooks) is dead:
+    the live Bifrost units run native `dotnet` and `node`. Deleting it is put to the operator.
   - Live zero-byte stores to move aside after the ops merge, in Soul's order (setgid on inbox, then rename in place,
     then relocate): `observations.cc`, `deliveries.cc`, and a third, `/var/lib/gamecult/epiphany/idunn-provider-health-admission.cc`.
 - **Text matches.** gamecult-ops `scripts/idunn/start-idunn-local.ps1:143` matches the same removed text as Muninn
