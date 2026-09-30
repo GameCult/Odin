@@ -492,6 +492,10 @@ pub struct MemoryOdinTopologyStore {
     records: RefCell<BTreeMap<RecordId, CultCacheEnvelope>>,
     /// Exactly what the file held when it was loaded or last written.
     flushed: RefCell<Vec<CultCacheEnvelope>>,
+    /// What the last write tried to write, when it failed. A write can fail
+    /// after the file was replaced (syncing the directory), and then the file
+    /// holds these records: Odin's own, not another writer's.
+    attempted: RefCell<Option<Vec<CultCacheEnvelope>>>,
     /// The records differ from what was last loaded or written.
     dirty: Cell<bool>,
 }
@@ -517,6 +521,7 @@ impl MemoryOdinTopologyStore {
             path,
             records: RefCell::new(records),
             flushed: RefCell::new(flushed),
+            attempted: RefCell::new(None),
             dirty: Cell::new(false),
         })
     }
@@ -587,20 +592,33 @@ impl MemoryOdinTopologyStore {
     /// Write every record to the file as one atomic snapshot, if anything
     /// changed since the last write; returns whether it wrote.
     ///
-    /// The file must still hold exactly what Odin last loaded or wrote. Anything
-    /// else was written by another process, and the write is refused with
-    /// [`ForeignStoreWrite`] rather than made over it.
+    /// The file must still hold exactly what Odin last loaded or wrote, or what
+    /// a failed write last tried to write. Anything else was written by another
+    /// process, and the write is refused with [`ForeignStoreWrite`] rather than
+    /// made over it. A failed write leaves the records dirty, so the next
+    /// write retries it.
     pub fn flush(&self) -> Result<bool> {
         if !self.dirty.get() {
             return Ok(false);
         }
         let current: Vec<CultCacheEnvelope> = self.records.borrow().values().cloned().collect();
-        if !SingleFileMessagePackBackingStore::new(&self.path)
-            .compare_exchange_snapshot(&self.flushed.borrow(), &current)?
-        {
-            return Err(ForeignStoreWrite.into());
+        let file = SingleFileMessagePackBackingStore::new(&self.path);
+        let exchanged = file
+            .compare_exchange_snapshot(&self.flushed.borrow(), &current)
+            .and_then(|exchanged| match &*self.attempted.borrow() {
+                Some(attempted) if !exchanged => file.compare_exchange_snapshot(attempted, &current),
+                _ => Ok(exchanged),
+            });
+        match exchanged {
+            Ok(true) => {}
+            Ok(false) => return Err(ForeignStoreWrite.into()),
+            Err(error) => {
+                *self.attempted.borrow_mut() = Some(current);
+                return Err(error);
+            }
         }
         *self.flushed.borrow_mut() = current;
+        *self.attempted.borrow_mut() = None;
         self.dirty.set(false);
         Ok(true)
     }
@@ -2065,6 +2083,68 @@ mod tests {
         let error = store.flush().unwrap_err();
         assert!(error.downcast_ref::<ForeignStoreWrite>().is_some(), "{error:#}");
         assert_eq!(file.pull_all_read_only_snapshot()?, vec![foreign]);
+        Ok(())
+    }
+
+    fn peer_document(key: &str) -> Result<CultCacheEnvelope> {
+        Ok(CultCacheEnvelope {
+            key: key.into(),
+            r#type: "ghostlight.doc".into(),
+            payload: vec![1],
+            stored_at: rfc3339_millis(NOW)?,
+            schema_id: Some("ghostlight.doc.v1".into()),
+        })
+    }
+
+    /// A write that fails leaves its change to be written: the next write
+    /// lands it with nothing changed in between.
+    #[test]
+    fn a_failed_write_is_made_by_the_next_without_another_change() -> Result<()> {
+        let temp = TempDir::new()?;
+        let path = temp.path().join("topology.cc");
+        let store = MemoryOdinTopologyStore::load(&path)?;
+        store.put(peer_document("doc-1")?);
+        std::fs::write(&path, b"not a cultcache store")?;
+        assert!(store.flush().is_err(), "the injected fault fails the write");
+
+        // The fault clears: the file holds what Odin loaded, which was nothing.
+        std::fs::remove_file(&path)?;
+        assert!(store.flush()?, "the failed change is written");
+        assert_eq!(
+            SingleFileMessagePackBackingStore::new(&path).pull_all_read_only_snapshot()?,
+            vec![peer_document("doc-1")?]
+        );
+        assert!(!store.flush()?, "and nothing is left to write");
+        Ok(())
+    }
+
+    /// A write can fail after it replaced the file (the directory sync), and
+    /// the file then holds Odin's own records: the next write is made over
+    /// them. Once a write lands, those records are no longer Odin's to expect.
+    #[test]
+    fn a_write_that_failed_after_replacing_the_file_is_not_another_writer() -> Result<()> {
+        let temp = TempDir::new()?;
+        let path = temp.path().join("topology.cc");
+        let file = SingleFileMessagePackBackingStore::new(&path);
+        let store = MemoryOdinTopologyStore::load(&path)?;
+        store.put(peer_document("doc-1")?);
+        std::fs::write(&path, b"not a cultcache store")?;
+        assert!(store.flush().is_err());
+        // The state a failed directory sync leaves: the replace landed.
+        std::fs::remove_file(&path)?;
+        ensure!(file.compare_exchange_snapshot(&[], &[peer_document("doc-1")?])?);
+
+        store.put(peer_document("doc-2")?);
+        assert!(store.flush()?, "Odin's own records are written over");
+        let written = file.pull_all_read_only_snapshot()?;
+        assert_eq!(written, vec![peer_document("doc-1")?, peer_document("doc-2")?]);
+
+        // Another writer puts back what the failed write had tried to write.
+        ensure!(file.compare_exchange_snapshot(&written, &[peer_document("doc-1")?])?);
+        store.put(peer_document("doc-3")?);
+        let error = store.flush().unwrap_err();
+        assert!(error.downcast_ref::<ForeignStoreWrite>().is_some(), "{error:#}");
+        assert_eq!(file.pull_all_read_only_snapshot()?, vec![peer_document("doc-1")?]);
         Ok(())
     }
 
