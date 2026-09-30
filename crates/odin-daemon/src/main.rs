@@ -148,8 +148,10 @@ struct RuntimeState {
     write_lease: Option<ProcessWriteLeaseGuard>,
     write_lease_path: PathBuf,
     /// The largest snapshot response the server sends: its own
-    /// `max_snapshot_response_bytes`, handed over where the server is built.
-    max_snapshot_response_bytes: usize,
+    /// `max_snapshot_response_bytes`, set by `serve_with` from the options it
+    /// builds the server with. `None` until then, and Odin cannot activate
+    /// without it.
+    max_snapshot_response_bytes: Option<usize>,
     recent_warming_proofs: VecDeque<(String, u64)>,
     /// Counts from this launch. Every launch is a fresh activation, and
     /// presences are ordered only within one activation.
@@ -179,11 +181,7 @@ impl CultMeshRudpSnapshotSource for SnapshotHandle {
 }
 
 impl RuntimeState {
-    fn open(
-        options: Options,
-        candidate: SocketAddr,
-        max_snapshot_response_bytes: usize,
-    ) -> Result<Self> {
+    fn open(options: Options, candidate: SocketAddr) -> Result<Self> {
         let authority_material = load_runtime_authority(Path::new(&required_environment(
             RUNTIME_BUNDLE_ENVIRONMENT,
         )?))?;
@@ -246,7 +244,7 @@ impl RuntimeState {
             topology: None,
             write_lease: None,
             write_lease_path: PathBuf::from(required_environment(PROCESS_WRITE_LEASE_ENVIRONMENT)?),
-            max_snapshot_response_bytes,
+            max_snapshot_response_bytes: None,
             recent_warming_proofs: VecDeque::new(),
             publisher_sequence: 0,
             log_gate: RefCell::default(),
@@ -261,6 +259,9 @@ impl RuntimeState {
         if self.activated() {
             return Ok(true);
         }
+        let limit = self
+            .max_snapshot_response_bytes
+            .context("Odin cannot activate before its server is built")?;
         let Some(lease) = acquire_process_write_lease(
             &self.write_lease_path,
             &self.authority_material,
@@ -285,12 +286,9 @@ impl RuntimeState {
         // not this contract's and would otherwise be served to the Verse as
         // current.
         store.retire_legacy_correlations();
-        for (record_type, key, size) in
-            drop_unservable_documents(&store, self.max_snapshot_response_bytes)
-        {
+        for (record_type, key, size) in drop_unservable_documents(&store, limit) {
             eprintln!(
-                "Odin dropped {record_type} {key} from its store: its snapshot response is {size} bytes, over the {} the server sends",
-                self.max_snapshot_response_bytes
+                "Odin dropped {record_type} {key} from its store: its snapshot response is {size} bytes, over the {limit} the server sends"
             );
         }
         let signer = self
@@ -771,18 +769,10 @@ fn main() -> Result<()> {
     );
     let socket = UdpSocket::bind(candidate)
         .with_context(|| format!("binding Odin CultNet RUDP candidate {candidate}"))?;
-    let server_options = CultMeshRudpDocumentServerOptions::default();
-    let state = Rc::new(RefCell::new(RuntimeState::open(
-        options,
-        candidate,
-        server_options.max_snapshot_response_bytes,
-    )?));
-    let mut server = CultMeshRudpDocumentServer::new(
+    let (state, mut server) = serve_with(
         socket,
-        SinkHandle(state.clone()),
-        SnapshotHandle(state.clone()),
-        CultMeshSystemClock::default(),
-        server_options,
+        CultMeshRudpDocumentServerOptions::default(),
+        RuntimeState::open(options, candidate)?,
     )?;
 
     // Idunn runs this process as PID 1 of its own PID namespace, and a
@@ -813,6 +803,27 @@ fn main() -> Result<()> {
     }
 
     serve(&state, &mut server, &mut ServingTimers::default(), &stopping)
+}
+
+/// Build the server over `socket` and hand it `state`, from one set of
+/// options: the largest response the server sends is the limit `state`
+/// sizes stored documents against when it activates, so the two cannot
+/// disagree.
+fn serve_with(
+    socket: UdpSocket,
+    options: CultMeshRudpDocumentServerOptions,
+    mut state: RuntimeState,
+) -> Result<(Rc<RefCell<RuntimeState>>, OdinServer)> {
+    state.max_snapshot_response_bytes = Some(options.max_snapshot_response_bytes);
+    let state = Rc::new(RefCell::new(state));
+    let server = CultMeshRudpDocumentServer::new(
+        socket,
+        SinkHandle(state.clone()),
+        SnapshotHandle(state.clone()),
+        CultMeshSystemClock::default(),
+        options,
+    )?;
+    Ok((state, server))
 }
 
 /// Serve until stopped on request or ended by a condition `survive` returns
@@ -1818,7 +1829,7 @@ mod tests {
             topology: None,
             write_lease: None,
             write_lease_path: lease_path.clone(),
-            max_snapshot_response_bytes: options.max_snapshot_response_bytes,
+            max_snapshot_response_bytes: None,
             recent_warming_proofs: VecDeque::new(),
             publisher_sequence: 0,
             log_gate: RefCell::default(),
@@ -1885,19 +1896,20 @@ mod tests {
             "test projection CAS failed"
         );
 
+        // Without its server Odin has no limit to size stored documents
+        // against, so it does not activate.
         ensure!(
-            runtime.try_activate()?,
+            runtime.try_activate().is_err(),
+            "Odin activated before its server was built"
+        );
+        // Built as `main` builds it, so the activation below sizes stored
+        // documents against this server's own limit.
+        let server_socket = socket.try_clone()?;
+        let (state, server) = serve_with(socket, options, runtime)?;
+        ensure!(
+            state.borrow_mut().try_activate()?,
             "Odin did not activate in the fixture"
         );
-        let state = Rc::new(RefCell::new(runtime));
-        let server_socket = socket.try_clone()?;
-        let server = CultMeshRudpDocumentServer::new(
-            socket,
-            SinkHandle(state.clone()),
-            SnapshotHandle(state.clone()),
-            CultMeshSystemClock::default(),
-            options,
-        )?;
         Ok(OdinWorld {
             _temp: temp,
             state,
