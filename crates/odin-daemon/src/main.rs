@@ -3401,6 +3401,115 @@ mod tests {
         Ok(())
     }
 
+    /// Two puts pipelined on one session with the first datagram lost on the
+    /// way: the transport resends it and delivers both in order, and Odin
+    /// accepts, and so writes, both. The transport may acknowledge the second
+    /// before the first is resent (see `accept_raw_document`); what holds is
+    /// that neither put is lost and both are on disk once delivered.
+    #[test]
+    fn pipelined_puts_with_a_lost_datagram_are_both_written() -> Result<()> {
+        let mut odin = activated_odin()?;
+        odin.pass()?;
+        let server = odin.server.local_addr()?;
+        let acknowledged = odin.serve_while(move || -> Result<bool> {
+            // A relay that drops the client's first reliable data datagram.
+            let relay_socket = UdpSocket::bind("127.0.0.1:0")?;
+            relay_socket.set_read_timeout(Some(Duration::from_millis(5)))?;
+            let relay_addr = relay_socket.local_addr()?;
+            let stop = Arc::new(AtomicBool::new(false));
+            let relay = thread::spawn({
+                let stop = stop.clone();
+                move || -> Result<()> {
+                    let mut client = None;
+                    let mut dropped = false;
+                    let mut buffer = vec![0u8; 65_535];
+                    while !stop.load(Ordering::Relaxed) {
+                        let Ok((length, from)) = relay_socket.recv_from(&mut buffer) else {
+                            continue;
+                        };
+                        let datagram = &buffer[..length];
+                        if from == server {
+                            if let Some(client) = client {
+                                relay_socket.send_to(datagram, client)?;
+                            }
+                            continue;
+                        }
+                        client = Some(from);
+                        let reliable_data = cultnet_rs::decode_rudp_packet(datagram).is_ok_and(
+                            |packet| {
+                                packet.packet_type == cultnet_rs::CultNetRudpPacketType::Data
+                                    && packet.reliable
+                            },
+                        );
+                        if reliable_data && !dropped {
+                            dropped = true;
+                            continue;
+                        }
+                        relay_socket.send_to(datagram, server)?;
+                    }
+                    Ok(())
+                }
+            });
+            let socket = UdpSocket::bind("127.0.0.1:0")?;
+            socket.set_read_timeout(Some(Duration::from_millis(5)))?;
+            let mut transport = CultNetRudpSocketTransportConnection::new(
+                CultNetRudpSocketTransportOptions::client("pipeliner", socket, relay_addr, 0x6100_0001),
+            )?;
+            transport.connect(Vec::new())?;
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while !transport.connected() {
+                let _ = transport.receive_once()?;
+                transport.poll_resends()?;
+                ensure!(Instant::now() < deadline, "timed out connecting");
+            }
+            let put = |key: &str| -> Result<Vec<u8>> {
+                let message = CultNetMessage::DocumentPutRaw {
+                    message_id: format!("put-{key}"),
+                    document: CultNetRawDocumentRecord {
+                        schema_id: "ghostlight.doc.v1".into(),
+                        record_key: key.into(),
+                        stored_at: rfc3339_millis(unix_millis()?)?,
+                        payload_encoding: CultNetRawPayloadEncoding::Messagepack,
+                        payload: vec![7; 64],
+                        source_runtime_id: None,
+                        source_agent_id: None,
+                        source_role: None,
+                        tags: None,
+                    },
+                };
+                Ok(encode_cultnet_message_to_vec(&message, CultNetWireContract::CultNetSchemaV0)?)
+            };
+            let receipts = [
+                transport.send_reliable("schema", put("first")?)?,
+                transport.send_reliable("schema", put("second")?)?,
+            ];
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let all_acknowledged = |transport: &CultNetRudpSocketTransportConnection| {
+                receipts.iter().all(|receipt| {
+                    transport.reliable_send_status(receipt)
+                        == CultNetRudpReliableSendStatus::Acknowledged
+                })
+            };
+            while !all_acknowledged(&transport) && Instant::now() < deadline {
+                let _ = transport.receive_once()?;
+                transport.poll_resends()?;
+            }
+            stop.store(true, Ordering::Relaxed);
+            relay.join().expect("relay thread panicked")?;
+            Ok(all_acknowledged(&transport))
+        })??;
+        assert!(acknowledged, "both puts were delivered");
+        let written: Vec<String> = odin
+            .file_records()?
+            .into_iter()
+            .filter(|entry| entry.r#type == "ghostlight.doc")
+            .map(|entry| entry.key)
+            .collect();
+        assert_eq!(written, vec!["first".to_owned(), "second".to_owned()]);
+        assert_eq!(odin.file_records()?, odin.working_set());
+        Ok(())
+    }
+
     /// A put whose write is not made is refused, so it is never accepted:
     /// with the write failing, and with the lease lost.
     #[test]
