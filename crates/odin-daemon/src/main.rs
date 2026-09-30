@@ -3012,9 +3012,34 @@ mod tests {
         assert_ne!(second.0, first.0, "one write once the interval passed");
         assert_eq!(odin.file_records()?, odin.working_set());
 
-        odin.timers.last_flush = None;
+        // The write itself starts the next interval: a change right after it
+        // waits.
+        provider_put(&odin, "ghostlight.doc.v1", "doc-late", vec![1])?;
         odin.pass()?;
         assert_eq!(file_identity(&odin.store)?, second, "and only one");
+        Ok(())
+    }
+
+    /// A correlation for an incarnation Idunn no longer projects is found
+    /// through the correlations Odin holds, and the refresh pass withdraws it.
+    #[test]
+    fn a_correlation_whose_incarnation_is_no_longer_projected_is_withdrawn() -> Result<()> {
+        let mut odin = activated_odin()?;
+        odin.pass()?;
+        let candidate = project_candidate_incarnation(&odin)?;
+        odin.state.borrow().refresh_all_correlations()?;
+        let correlations = || odin.stored_keys(OdinRuntimeTopologyCorrelationRecord::TYPE);
+        assert!(correlations()?.contains(&candidate.key()));
+
+        odin.tamper_projection(|entries| {
+            entries
+                .into_iter()
+                .filter(|entry| entry.key != candidate.key())
+                .collect()
+        })?;
+        odin.state.borrow().refresh_all_correlations()?;
+        assert!(!correlations()?.contains(&candidate.key()));
+        assert_eq!(correlations()?.len(), 1, "Odin's own stays");
         Ok(())
     }
 
