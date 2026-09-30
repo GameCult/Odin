@@ -250,11 +250,35 @@ impl CultCacheIdunnProjectionSource {
         if !self.path.is_file() {
             return Ok(None);
         }
-        Ok(Some(
-            SingleFileMessagePackBackingStore::new(&self.path).pull_all_read_only_snapshot()?,
-        ))
+        SingleFileMessagePackBackingStore::new(&self.path)
+            .pull_all_read_only_snapshot()
+            .map(Some)
+            .map_err(|error| {
+                // The store's decode step reports its failures as text, so an
+                // I/O error in the chain here is from opening or reading the
+                // file and from nothing the file said.
+                if error.chain().any(|cause| cause.is::<std::io::Error>()) {
+                    error.context(ProjectionUnreadable)
+                } else {
+                    error
+                }
+            })
     }
 }
+
+/// The projection file could not be opened or read. Marks the read step only:
+/// a failure while decoding or validating what was read never carries it,
+/// whatever it wraps.
+#[derive(Debug)]
+pub struct ProjectionUnreadable;
+
+impl std::fmt::Display for ProjectionUnreadable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Idunn's projection file could not be read")
+    }
+}
+
+impl std::error::Error for ProjectionUnreadable {}
 
 fn provider_anchor(
     entries: &[CultCacheEnvelope],

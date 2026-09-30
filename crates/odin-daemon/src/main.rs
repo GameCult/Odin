@@ -36,7 +36,7 @@ use fs2::FileExt;
 use odin_daemon::{
     AuthenticationPolicy, CultCacheIdunnProjectionSource, CultCacheOdinTopologyStore,
     IdunnProjectionSource, IncarnationRef, OdinTopologyAuthority, PresenceAuthorityRefused,
-    SystemClock,
+    ProjectionUnreadable, SystemClock,
 };
 
 const TARGET: &str = "odin";
@@ -427,10 +427,10 @@ impl RuntimeState {
     }
 
     /// Idunn's projection of this process's own incarnation. A failure to
-    /// establish it that is not plain I/O -- undecodable, ambiguous,
+    /// establish it that is not a failed file read -- undecodable, ambiguous,
     /// substituted, or with no Expected for this incarnation -- is a failure of
     /// Odin's own authority, so it is marked for the temporary fatal rule in
-    /// `survive`. A plain I/O error is not (see `own_projection_failure`), nor
+    /// `survive`. A failed file read is not (see `own_projection_failure`), nor
     /// are failures about other incarnations: they are read, logged and skipped
     /// where they are met.
     fn require_own_projection(&self) -> Result<()> {
@@ -620,14 +620,16 @@ impl RuntimeState {
     }
 }
 
-/// A failure to read Odin's own projection. A plain I/O error (permission
+/// A failure to read Odin's own projection. Only a failure of the file read
+/// itself (marked `ProjectionUnreadable` where the file is read: permission
 /// denied, not found, interrupted) says nothing about what Idunn published and
-/// is retried; anything the reader decoded or validated and did not accept is a
-/// failure of Odin's own authority, marked for the fatal rule in `survive`.
+/// is retried. Anything the reader decoded or validated and did not accept is a
+/// failure of Odin's own authority, marked for the fatal rule in `survive`,
+/// whatever error it wraps.
 fn own_projection_failure(error: anyhow::Error) -> anyhow::Error {
     if error
         .chain()
-        .any(|cause| cause.is::<std::io::Error>())
+        .any(|cause| cause.is::<ProjectionUnreadable>())
     {
         return error;
     }
@@ -1216,29 +1218,52 @@ fn prior_self_publisher_sequence(path: &Path, signer_identity_id: &str) -> Resul
 /// records (correlations, the publisher watermark, every `odin.*` type) and
 /// Idunn's projected authority live in namespaces no provider can name, so a
 /// peer cannot write them and the catalog cannot serve them.
+///
+/// The list is evidence, not a guess: each entry is a namespace some GameCult
+/// source publishes to Odin's catalog connection, and the publisher is named
+/// here so the next edit can check it. Add a namespace only with its publisher.
+///   ghostlight     Ghostlight, `ghostlight.schema_catalog.v1`
+///                  (schema: CultLib `packages/cultcache-ts/src/swarm-documents.ts`)
+///   heimdall       Heimdall `src/odin-publication.ts` via `src/verse-state.ts`,
+///                  `heimdall.command_boundary.v1`
+///   muninn         Muninn `crates/muninn-contracts/src/records.rs`,
+///                  `muninn.obs_stream_catalog.v1`
+///   sleipnir       Sleipnir, `sleipnir.input_mapping.v1`
+///                  (schema: CultLib `packages/cultcache-ts/src/swarm-documents.ts`)
+///   gamecult.eve   Eve providers (Heimdall `src/odin-publication.ts`, Muninn,
+///                  AetheriaEve): `provider_advertisement`, `surface`,
+///                  `surface_state`, `plugin_advertisement`
+///   gamecult.model Epiphany `epiphany-core/src/atlas/transport.rs`,
+///                  `gamecult.model.atlas_publication.v0`
+///   gamecult.aetheria  AetheriaEve `Aetheria.State.Daemon/Program.cs`,
+///                  `gamecult.aetheria.asset_manifest.v1`
 const PEER_DOCUMENT_NAMESPACES: &[&str] = &[
     "ghostlight",
     "heimdall",
     "muninn",
-    "mimir",
     "sleipnir",
-    "streampixels",
-    "spotiverse",
-    "vili",
-    "weksa",
-    "repixelizer",
-    "stonks",
     "gamecult.eve",
-    "gamecult.vili",
-    "gamecult.loki",
+    "gamecult.model",
+    "gamecult.aetheria",
+];
+
+/// Whole document types published under no dotted namespace: Muninn's media
+/// stream advertisement and Ratatoskr/Muninn's request for it (`gamecult.media`
+/// is their prefix, `_stream_advertisement` and `_stream_request` are not a
+/// segment of it). Publisher: Muninn `crates/muninn-daemon/src/main.rs`
+/// (`GAMECULT_MEDIA_STREAM_ADVERTISEMENT_SCHEMA`, `GAMECULT_MEDIA_STREAM_REQUEST_SCHEMA`).
+const PEER_DOCUMENT_TYPES: &[&str] = &[
+    "gamecult.media_stream_advertisement",
+    "gamecult.media_stream_request",
 ];
 
 fn is_peer_document_type(document_type: &str) -> bool {
-    PEER_DOCUMENT_NAMESPACES.iter().any(|namespace| {
-        document_type
-            .strip_prefix(namespace)
-            .is_some_and(|rest| rest.starts_with('.'))
-    })
+    PEER_DOCUMENT_TYPES.contains(&document_type)
+        || PEER_DOCUMENT_NAMESPACES.iter().any(|namespace| {
+            document_type
+                .strip_prefix(namespace)
+                .is_some_and(|rest| rest.starts_with('.'))
+        })
 }
 
 fn persist_generic_document(path: &Path, document: &CultNetRawDocumentRecord) -> Result<()> {
@@ -2678,7 +2703,7 @@ mod tests {
 
     #[test]
     fn provider_namespaces_match_whole_segments() {
-        for accepted in ["ghostlight.doc", "heimdall.command_boundary", "gamecult.eve.command"] {
+        for accepted in ["ghostlight.doc", "heimdall.command_boundary", "gamecult.eve.command", "gamecult.media_stream_request"] {
             assert!(is_peer_document_type(accepted), "{accepted}");
         }
         for refused in [
@@ -2692,6 +2717,62 @@ mod tests {
         ] {
             assert!(!is_peer_document_type(refused), "{refused}");
         }
+    }
+
+    /// One real schema id per namespace, each taken from its publisher (see
+    /// `PEER_DOCUMENT_NAMESPACES`): Odin accepts the put and the catalog serves
+    /// it. Soul's probe P1-A is the media pair, which Muninn and Ratatoskr
+    /// exchange through Odin.
+    #[test]
+    fn every_publisher_schema_is_accepted_and_served() -> Result<()> {
+        const PUBLISHED: &[&str] = &[
+            "ghostlight.schema_catalog.v1",
+            "heimdall.command_boundary.v1",
+            "muninn.obs_stream_catalog.v1",
+            "sleipnir.input_mapping.v1",
+            "gamecult.eve.provider_advertisement.v1",
+            "gamecult.eve.surface.v1",
+            "gamecult.eve.surface_state.v1",
+            "gamecult.eve.plugin_advertisement.v1",
+            "gamecult.model.atlas_publication.v0",
+            "gamecult.aetheria.asset_manifest.v1",
+            "gamecult.media_stream_advertisement.v1",
+            "gamecult.media_stream_request.v1",
+        ];
+        let odin = activated_odin()?;
+        for schema in PUBLISHED {
+            provider_put(&odin, schema, "key", vec![1])?;
+        }
+        let served: BTreeSet<String> = odin
+            .catalog()?
+            .into_iter()
+            .map(|document| document.schema_id)
+            .collect();
+        for schema in PUBLISHED {
+            assert!(served.contains(*schema), "{schema} is not served");
+        }
+        Ok(())
+    }
+
+    /// Namespaces no source publishes to Odin are refused, and a lookalike of
+    /// the media types is not the media types.
+    #[test]
+    fn unpublished_namespaces_are_refused() -> Result<()> {
+        let odin = activated_odin()?;
+        for schema in [
+            "mimir.doc.v1",
+            "streampixels.doc.v1",
+            "vili.doc.v1",
+            "gamecult.loki.doc.v1",
+            "gamecult.media.doc.v1",
+            "gamecult.media_stream_advertisement_x.v1",
+        ] {
+            assert!(
+                provider_put(&odin, schema, "key", vec![1]).is_err(),
+                "{schema}"
+            );
+        }
+        Ok(())
     }
 
     #[test]
@@ -2708,13 +2789,12 @@ mod tests {
         Ok(())
     }
 
-    /// A plain I/O error reading Odin's own projection (permission denied, not
-    /// found, interrupted) says nothing about what Idunn published: it is
-    /// retried. A record the reader could not decode or validate is Odin's own
-    /// authority failing, and stays fatal.
+    /// A failure of the projection file read (permission denied, not found,
+    /// interrupted) says nothing about what Idunn published: it is retried. A
+    /// record the reader could not decode or validate is Odin's own authority
+    /// failing, and stays fatal even when the decoder wraps an I/O error.
     #[test]
-    fn a_plain_io_error_reading_its_own_projection_is_retried_a_decode_failure_is_not() -> Result<()>
-    {
+    fn a_projection_read_failure_is_retried_a_decode_failure_is_not() -> Result<()> {
         let odin = activated_odin()?;
         let state = odin.state.borrow();
         for kind in [
@@ -2722,7 +2802,9 @@ mod tests {
             std::io::ErrorKind::NotFound,
             std::io::ErrorKind::Interrupted,
         ] {
-            let read = anyhow::Error::new(std::io::Error::from(kind)).context("failed to read");
+            let read = anyhow::Error::new(std::io::Error::from(kind))
+                .context("failed to read")
+                .context(ProjectionUnreadable);
             assert_eq!(
                 survive::<()>(&state, "projection", Err(own_projection_failure(read)))?,
                 None,
@@ -2734,6 +2816,48 @@ mod tests {
             &survive::<()>(&state, "projection", Err(own_projection_failure(undecodable)))
                 .unwrap_err(),
         );
+        // A decoder that wraps an I/O error (MessagePack does, for a record
+        // that ends early) is still a decode failure.
+        let wrapped = anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::UnexpectedEof))
+            .context("failed to decode Expected");
+        assert_refused(
+            &survive::<()>(&state, "projection", Err(own_projection_failure(wrapped)))
+                .unwrap_err(),
+        );
+        Ok(())
+    }
+
+    /// Odin's own Expected record cut short by one byte is undecodable, so
+    /// Odin ends, though the decoder's error wraps an unexpected end of file.
+    #[test]
+    fn a_truncated_own_expected_record_ends_odin() -> Result<()> {
+        let mut odin = activated_odin()?;
+        odin.pass()?;
+        odin.tamper_projection(|mut entries| {
+            for entry in &mut entries {
+                if entry.r#type == IdunnExpectedIncarnationRecord::TYPE {
+                    entry.payload.pop();
+                }
+            }
+            entries
+        })?;
+        odin.timers = ServingTimers::default();
+        assert_refused(&odin.pass().unwrap_err());
+        Ok(())
+    }
+
+    /// A projection store cut short on disk is a decode failure of the file's
+    /// content, not a read failure of the file.
+    #[test]
+    fn a_truncated_projection_store_ends_odin() -> Result<()> {
+        let mut odin = activated_odin()?;
+        odin.pass()?;
+        let projection = odin.state.borrow().options.idunn_projection.clone();
+        let mut bytes = std::fs::read(&projection)?;
+        bytes.pop();
+        std::fs::write(&projection, bytes)?;
+        odin.timers = ServingTimers::default();
+        assert_refused(&odin.pass().unwrap_err());
         Ok(())
     }
 
