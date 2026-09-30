@@ -7,6 +7,25 @@ and the operator may overrule them. **Operator, 2026-09-30: "Q1: yes", so CultMe
 serve and Cut 3 goes ahead; "Q2: yeah, of course", so a read-only decode of a copy of live `topology.cc` is
 approved. The copy is taken with `sudo cp` and decoded off the live path, and the copy is deleted afterwards.**
 
+**Q2 decode result (Eyes, 2026-09-30; full table in the CultLib session scratchpad `odin-topology-decode.md`).**
+- 77 records; 3,222,550 B of payload in a 3,240,078 B file.
+- The two "~1.55 MB records" are per-type totals. Each type is dominated by one Ghostlight operator surface:
+  `eve:operator:ghostlight.campaign.27d444b3-...` (1,456,210 B) and its `operator-state` twin (1,456,341 B).
+  Together they are 89.9% of the file.
+- Publisher: provider `gamecult.ghostlight.dungeon`. 99.5% of each record is one Eve `code` node holding a
+  pretty-printed JSON dump of the whole campaign state.
+- These records are dead residue. They were stored 2026-09-23 and have not been rewritten since. Ghostlight `HEAD`
+  (`eeb3a68`) no longer contains the emitter (last touched at `6bb6869`, 2026-09-02).
+- **So Q1's refusal breaks no live publisher.** Cut 3's Odin half drops exactly these two at activation. Every other
+  surface is 70 KB or less.
+- Correction to section 3: the 1 MiB snapshot refusals in the journal are per-type responses, not per-record.
+  Cut 3's per-document bound is still right: each of these records is over 1 MiB alone. A type whose many small
+  records add up past 1 MiB would still be unservable as a whole-type snapshot. That is a follow-up for CultMesh
+  (paged snapshot responses), not part of this campaign.
+- Presence history: 41 records, 42 KB, 37 of them withdrawn. F4 is a slow leak, not a size problem.
+- The current `streampixels-web` incarnation has a correlation but no presence record; its last presence was
+  09-29 19:53 UTC. This matches Idunn's "not Odin-correlated" state.
+
 Status: cut map, Imagination pass 1 (Opus), 2026-09-30. Nothing has landed. Anchors are Odin `main` at
 `44951a1` (the deployed build, live on Yggdrasil since 2026-09-30 04:20:48 UTC) and CultLib `3bf1c0ce`
 (Odin's `Cargo.lock` pin). This map owns the means; there is no separate target document, because the ends are
