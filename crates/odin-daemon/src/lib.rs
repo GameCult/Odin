@@ -554,6 +554,19 @@ impl MemoryOdinTopologyStore {
         }
     }
 
+    /// Whether Odin's correlation of this incarnation says it is Ready. No
+    /// correlation, or one that does not decode, is not Ready.
+    pub fn correlation_ready(&self, incarnation: &IncarnationRef) -> bool {
+        self.records
+            .borrow()
+            .get(&(
+                OdinRuntimeTopologyCorrelationRecord::TYPE.to_owned(),
+                incarnation.key(),
+            ))
+            .and_then(|envelope| decode_correlation(&envelope.payload).ok())
+            .is_some_and(|correlation| correlation.ready)
+    }
+
     pub fn correlated_incarnations(&self) -> BTreeSet<IncarnationRef> {
         self.records
             .borrow()

@@ -586,7 +586,9 @@ impl RuntimeState {
     /// projection is read once per query; a projection that cannot be read at
     /// all is every presence's failure and no one else's, so the query is
     /// answered as if Idunn projected nothing: peer documents are served and
-    /// presences skipped. Odin's
+    /// presences skipped. Two incarnations of one target holding presences
+    /// under the same identity are never a refusal either: one is served (see
+    /// `presence_precedence`) and the other skipped. Odin's
     /// correlations are not part of the catalog: Idunn reads them from the
     /// store file, and a target has one per incarnation, so keying them by
     /// target would collide for the whole deploy window.
@@ -621,12 +623,42 @@ impl RuntimeState {
                 continue;
             }
             let identity = (document.schema_id.clone(), document.record_key.clone());
-            ensure!(
-                selected.insert(identity, document).is_none(),
-                "Odin catalog contains duplicate public document identities"
-            );
+            let precedence = self.presence_precedence(envelope);
+            match selected.entry(identity) {
+                std::collections::btree_map::Entry::Vacant(slot) => {
+                    slot.insert((document, precedence));
+                }
+                std::collections::btree_map::Entry::Occupied(mut slot) => {
+                    let (Some(this), Some(held)) = (precedence, slot.get().1) else {
+                        bail!("Odin catalog contains duplicate public document identities");
+                    };
+                    self.log_repeating(
+                        &format!("catalog serves one presence of {}", document.record_key),
+                        "more than one incarnation holds an admitted presence; the Ready one,                          or else the latest, is served"
+                            .into(),
+                    );
+                    if this > held {
+                        slot.insert((document, precedence));
+                    }
+                }
+            }
         }
-        Ok(selected.into_values().collect())
+        Ok(selected.into_values().map(|(document, _)| document).collect())
+    }
+
+    /// The order in which presences of one target are preferred when more than
+    /// one incarnation of it holds an admitted presence, as every target does
+    /// while it is being replaced: the incarnation whose correlation is Ready
+    /// first, then the latest observation. `None` for anything but a presence,
+    /// which has one record per identity and never competes.
+    fn presence_precedence(&self, envelope: &CultCacheEnvelope) -> Option<(bool, u64)> {
+        if envelope.r#type != GameCultRuntimePresenceHealthRecord::TYPE {
+            return None;
+        }
+        let presence = decode_presence(&envelope.payload).ok()?;
+        let incarnation = IncarnationRef::new(presence.target, presence.expected_projection_sha256);
+        let ready = self.topology().ok()?.store.correlation_ready(&incarnation);
+        Some((ready, presence.observed_at_unix_millis))
     }
 
     /// One stored record as the Verse sees it; `None` when it is not public.
@@ -1694,6 +1726,8 @@ mod tests {
         lease_path: PathBuf,
         provider_identity_id: String,
         lease: IdunnProcessWriteLeaseRecord,
+        /// Idunn's signer, for activations of further incarnations.
+        idunn_signer: ServiceIdentitySigner<IdunnServiceIdentity>,
     }
 
     fn write_single_record(path: &Path, envelope: CultCacheEnvelope) -> Result<()> {
@@ -1920,6 +1954,7 @@ mod tests {
             lease_path,
             provider_identity_id,
             lease,
+            idunn_signer,
         })
     }
 
@@ -2469,6 +2504,127 @@ mod tests {
         Ok(incarnation)
     }
 
+    /// A candidate incarnation of Odin that Idunn has activated, with its
+    /// Warming presence admitted beside the incumbent's, as every target has
+    /// for the moment it is being replaced. The candidate's presence is
+    /// observed after every presence already held.
+    fn admit_candidate_presence(odin: &OdinWorld) -> Result<IncarnationRef> {
+        let now = unix_millis()?;
+        let mut candidate = odin.state.borrow().authority_material.expected.clone();
+        candidate.incarnation_id = "odin/generation-2".into();
+        candidate.sealed_release_id = digest('9');
+        candidate.validate()?;
+        let incarnation = IncarnationRef::of(&candidate)?;
+        let launch =
+            IdunnRuntimeActivationLaunch::issue(&candidate, digest('8'), now - 10, &odin.idunn_signer)?;
+        let activation = launch.activation().clone();
+        let mut credential = Vec::new();
+        launch.write_credential(&mut credential)?;
+        odin.append_projection(vec![
+            CultCacheEnvelope {
+                key: incarnation.key(),
+                r#type: IdunnExpectedIncarnationRecord::TYPE.into(),
+                payload: candidate.canonical_bytes()?,
+                stored_at: rfc3339_millis(now - 30)?,
+                schema_id: Some(IDUNN_EXPECTED_INCARNATION_SCHEMA.into()),
+            },
+            CultCacheEnvelope {
+                key: incarnation.key(),
+                r#type: IdunnRuntimeActivationRecord::TYPE.into(),
+                payload: activation.canonical_bytes()?,
+                stored_at: rfc3339_millis(activation.issued_at_unix_millis)?,
+                schema_id: Some(IDUNN_RUNTIME_ACTIVATION_SCHEMA.into()),
+            },
+        ])?;
+        // Signed as the candidate process would sign it: its own Expected and
+        // activation, no lease yet.
+        thread::sleep(Duration::from_millis(5));
+        let document = {
+            let mut state = odin.state.borrow_mut();
+            let authority = &mut state.authority_material;
+            let expected_sha256 = candidate.canonical_sha256()?;
+            let activation_sha256 = activation.canonical_sha256()?;
+            let signer = IdunnRuntimeActivationSigner::from_credential_reader(credential.as_slice())?;
+            let incumbent = (
+                std::mem::replace(&mut authority.expected, candidate),
+                std::mem::replace(&mut authority.expected_sha256, expected_sha256),
+                std::mem::replace(&mut authority.activation, activation),
+                std::mem::replace(&mut authority.activation_sha256, activation_sha256),
+                std::mem::replace(&mut authority.activation_signer, signer),
+            );
+            let lease = state.write_lease.take();
+            let signed = state.signed_presence_document("warming", "test candidate");
+            state.write_lease = lease;
+            let authority = &mut state.authority_material;
+            (
+                authority.expected,
+                authority.expected_sha256,
+                authority.activation,
+                authority.activation_sha256,
+                authority.activation_signer,
+            ) = incumbent;
+            signed?
+        };
+        provider_put_document(odin, document)?;
+        Ok(incarnation)
+    }
+
+    /// The presence of `target` the catalog serves, by the incarnation it names.
+    fn served_presence_incarnation(odin: &OdinWorld) -> Result<String> {
+        let catalog = odin.catalog()?;
+        let presences: Vec<_> = catalog
+            .iter()
+            .filter(|document| document.schema_id == GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA)
+            .collect();
+        ensure!(presences.len() == 1, "{} presences served", presences.len());
+        Ok(decode_presence(&presences[0].payload)?.expected_projection_sha256)
+    }
+
+    /// While a target is being replaced, its incumbent and its candidate each
+    /// hold an admitted presence under the same catalog identity. The catalog
+    /// serves one: the incarnation whose correlation is Ready, even though the
+    /// other is newer.
+    #[test]
+    fn a_target_being_replaced_serves_the_presence_of_its_ready_incarnation() -> Result<()> {
+        let mut odin = activated_odin()?;
+        odin.pass()?;
+        let incumbent = self_incarnation(&odin.state.borrow().authority_material);
+        let candidate = admit_candidate_presence(&odin)?;
+        {
+            let state = odin.state.borrow();
+            let store = &state.topology.as_ref().unwrap().store;
+            assert!(store.correlation_ready(&incumbent));
+            assert!(!store.correlation_ready(&candidate), "the candidate is still Warming");
+        }
+        assert_eq!(served_presence_incarnation(&odin)?, incumbent.expected_sha256);
+        Ok(())
+    }
+
+    /// With no correlation to tell them apart, the later presence is served,
+    /// whichever incarnation holds it.
+    #[test]
+    fn a_target_being_replaced_serves_the_later_presence_when_neither_is_ready() -> Result<()> {
+        let odin = activated_odin()?;
+        let incumbent = self_incarnation(&odin.state.borrow().authority_material);
+        odin.heartbeat()?;
+        let candidate = admit_candidate_presence(&odin)?;
+        let forget_correlations = || {
+            let state = odin.state.borrow();
+            let store = &state.topology.as_ref().unwrap().store;
+            for incarnation in [&incumbent, &candidate] {
+                store.remove(OdinRuntimeTopologyCorrelationRecord::TYPE, &incarnation.key());
+            }
+        };
+        forget_correlations();
+        assert_eq!(served_presence_incarnation(&odin)?, candidate.expected_sha256);
+
+        thread::sleep(Duration::from_millis(5));
+        odin.heartbeat()?;
+        forget_correlations();
+        assert_eq!(served_presence_incarnation(&odin)?, incumbent.expected_sha256);
+        Ok(())
+    }
+
     /// Idunn projects the incumbent and the candidate of a target for the whole
     /// deploy window, and Odin writes a correlation for each. The catalog does
     /// not serve correlations, so two of one target cannot collide in it, and
@@ -2832,6 +2988,23 @@ mod tests {
         key: &str,
         payload: Vec<u8>,
     ) -> Result<()> {
+        provider_put_document(
+            odin,
+            CultNetRawDocumentRecord {
+                schema_id: schema.into(),
+                record_key: key.into(),
+                stored_at: rfc3339_millis(unix_millis()?)?,
+                payload_encoding: CultNetRawPayloadEncoding::Messagepack,
+                payload,
+                source_runtime_id: None,
+                source_agent_id: None,
+                source_role: None,
+                tags: None,
+            },
+        )
+    }
+
+    fn provider_put_document(odin: &OdinWorld, document: CultNetRawDocumentRecord) -> Result<()> {
         odin.state
             .borrow_mut()
             .accept_raw_document(CultMeshRudpRawDocumentReceipt {
@@ -2842,17 +3015,7 @@ mod tests {
                 message_id: "put".into(),
                 transport_sequence: 1,
                 received_at_unix_millis: unix_millis()?,
-                document: CultNetRawDocumentRecord {
-                    schema_id: schema.into(),
-                    record_key: key.into(),
-                    stored_at: rfc3339_millis(unix_millis()?)?,
-                    payload_encoding: CultNetRawPayloadEncoding::Messagepack,
-                    payload,
-                    source_runtime_id: None,
-                    source_agent_id: None,
-                    source_role: None,
-                    tags: None,
-                },
+                document,
             })
     }
 
