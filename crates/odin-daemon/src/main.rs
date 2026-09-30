@@ -145,6 +145,8 @@ struct RuntimeState {
     write_lease: Option<ProcessWriteLeaseGuard>,
     write_lease_path: PathBuf,
     recent_warming_proofs: VecDeque<(String, u64)>,
+    /// Counts from this launch. Every launch is a fresh activation, and
+    /// presences are ordered only within one activation.
     publisher_sequence: u64,
     log_gate: RefCell<LogGate>,
 }
@@ -268,13 +270,8 @@ impl RuntimeState {
         let store = MemoryOdinTopologyStore::load(&self.options.store)?;
         // Correlations the previous, target-keyed Odin left in this store are
         // not this contract's and would otherwise be served to the Verse as
-        // current. Presence history is kept: the self publisher sequence
-        // continues from it.
+        // current.
         store.retire_legacy_correlations();
-        let stored_sequence = prior_self_publisher_sequence(
-            store.records().values(),
-            &self.authority_material.provider_signer.entry().identity_id,
-        );
         let signer = self
             .topology_signer
             .take()
@@ -283,7 +280,6 @@ impl RuntimeState {
             .idunn_anchor
             .take()
             .context("Idunn trust anchor was already consumed")?;
-        self.publisher_sequence = self.publisher_sequence.max(stored_sequence);
         self.write_lease = Some(lease);
         self.topology = Some(Topology {
             store,
@@ -1242,38 +1238,6 @@ fn read_process_write_lease(path: &Path) -> Result<Option<IdunnProcessWriteLease
     Ok(Some(lease))
 }
 
-/// The highest publisher sequence Odin's own signer has stored, so the next
-/// presence continues from it. Only presences keyed under Odin's own target are
-/// read, and one that does not decode is skipped: a bad record can lower the
-/// count it carried, and can never stop Odin starting.
-fn prior_self_publisher_sequence<'a>(
-    records: impl IntoIterator<Item = &'a CultCacheEnvelope>,
-    signer_identity_id: &str,
-) -> u64 {
-    records
-        .into_iter()
-        .filter(|entry| {
-            entry.r#type == GameCultRuntimePresenceHealthRecord::TYPE
-                && entry.key.starts_with(TARGET)
-        })
-        .filter_map(|entry| match decode_presence(&entry.payload) {
-            Ok(presence) => Some(presence),
-            Err(error) => {
-                eprintln!(
-                    "Odin startup skipped its stored presence {}: {error:#}",
-                    entry.key
-                );
-                None
-            }
-        })
-        .filter(|presence| {
-            presence.target == TARGET && presence.signer_identity_id == signer_identity_id
-        })
-        .map(|presence| presence.publisher_sequence)
-        .max()
-        .unwrap_or(0)
-}
-
 /// The document namespaces providers publish to the rendezvous. A provider's
 /// document is stored and served back only under one of these; Odin's own
 /// records (correlations, the publisher watermark, every `odin.*` type) and
@@ -1916,12 +1880,22 @@ mod tests {
                 .collect())
         }
 
-        /// Odin's own publisher sequence as its store holds it.
+        /// The publisher sequence of Odin's own admitted presence, 0 when none
+        /// is held.
         fn stored_sequence(&self) -> Result<u64> {
-            Ok(prior_self_publisher_sequence(
-                &self.working_set(),
-                &self.provider_identity_id,
-            ))
+            let key = format!(
+                "{}/{}",
+                self_incarnation(&self.state.borrow().authority_material).key(),
+                self.provider_identity_id
+            );
+            self.working_set()
+                .into_iter()
+                .find(|entry| {
+                    entry.r#type == GameCultRuntimePresenceHealthRecord::TYPE && entry.key == key
+                })
+                .map_or(Ok(0), |entry| {
+                    Ok(decode_presence(&entry.payload)?.publisher_sequence)
+                })
         }
 
         /// Run a peer on its own thread while Odin polls its socket, and nothing
@@ -2385,12 +2359,11 @@ mod tests {
         Ok(())
     }
 
-    /// One record that does not decode is skipped where it is met: the catalog
-    /// still serves everything else, and startup still finds Odin's sequence.
-    /// The records are in the file when Odin activates.
+    /// One record that does not decode is skipped where it is met: Odin still
+    /// starts and serves, and the catalog serves everything else. The records
+    /// are in the file when Odin activates.
     #[test]
     fn records_that_do_not_decode_never_stop_the_catalog_or_startup() -> Result<()> {
-        const EARLIER: u64 = 41;
         let mut odin = activated_odin_with(CultMeshRudpDocumentServerOptions::default(), |runtime| {
             let own_signer = runtime
                 .authority_material
@@ -2406,10 +2379,7 @@ mod tests {
                 stored_at: stamp.clone(),
                 schema_id: Some(GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA.into()),
             };
-            // A presence an earlier incarnation of Odin stored, counted to 41.
-            runtime.publisher_sequence = EARLIER - 1;
             let earlier = runtime.signed_presence_document("warming", "earlier incarnation")?;
-            runtime.publisher_sequence = 0;
             Ok(vec![
                 bad_presence("ghost".into()),
                 bad_presence(format!("{TARGET}@{}/{own_signer}", digest('c'))),
@@ -2432,11 +2402,7 @@ mod tests {
         );
         assert_eq!(documents_of(&catalog, "ghostlight.doc.v1"), 1);
         odin.pass()?;
-        assert_eq!(
-            odin.stored_sequence()?,
-            EARLIER + 1,
-            "Odin continues from the sequence it found past the undecodable presences"
-        );
+        assert!(odin.stored_sequence()? > 0, "Odin publishes past them");
         Ok(())
     }
 

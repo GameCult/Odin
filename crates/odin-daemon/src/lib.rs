@@ -580,8 +580,7 @@ impl MemoryOdinTopologyStore {
     /// Remove every correlation not keyed by an incarnation. Those were written
     /// by the previous, target-keyed Odin; nothing reads them under this
     /// contract, and left in place the catalog would serve them to the Verse
-    /// as current. Presence records are kept whatever their key: the self
-    /// publisher sequence is continued from them.
+    /// as current.
     pub fn retire_legacy_correlations(&self) -> usize {
         let legacy: Vec<String> = self
             .records
