@@ -3339,7 +3339,7 @@ mod tests {
             Ok(vec![
                 document_answering_in("at-limit", LIMIT)?,
                 document_answering_in("over-limit", LIMIT + 1)?,
-                document_answering_in("small", 200)?,
+                document_answering_in("small", 2_000)?,
             ])
         })?;
         let held = odin.stored_keys("ghostlight.doc")?;
