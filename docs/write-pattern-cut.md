@@ -47,6 +47,34 @@ heartbeats included) writes the store once.
 - The current `streampixels-web` incarnation has a correlation but no presence record; its last presence was
   09-29 19:53 UTC. This matches Idunn's "not Odin-correlated" state.
 
+**Soul on write batch 3 + Cut 3 Odin half (`f4a1f89..726e0f3`, 2026-09-30): not fit to deploy.**
+- **S-1 (high; operator question Q5, below).** Every write, the fsync pair included, runs on the serving loop
+  (`main.rs:358` → `flush` → `compare_exchange_snapshot`; the interval flush at `:883` is on the same thread).
+  - A disk stall passes into route-challenge latency one for one. A probe that held the store lock measured: a 0 ms
+    stall gave 86 ms, 300 ms gave 288 ms, 1,500 ms gave 1,487 ms.
+  - Interleaved runs (ABBA) under IO pressure of 5-38% gave a challenge p99 no better with Cut 3 than without it.
+  - Cut 3 halves the bytes written, not the stalls. **The premise that the store's size caused the stalls was
+    wrong; they come from the disk.**
+- **S-2 (high).** Q1's put refusal has not landed. Odin's pin `3bf1c0ce` has no put bound, so a 1.2 MB put is
+  ACKed, fsynced, and dropped at the next activation. It waits on the CultLib put-serve merge, then a pin bump with
+  a `served_record` override.
+- **S-3 (medium).** `attempted` grows about 98 KB per failed write, roughly 0.9 GB/h on a full disk, which ends in
+  OOM.
+  - Fix in the owner: cultcache-rs returns a typed `NotReplaced`/`ReplacedNotDurable` write outcome (added to CultLib
+    R1 batch 3), and Odin keeps at most one candidate.
+- **S-4 (medium).** Two admitted presences for one target, which a provider in a deploy window produces, refuse the
+  whole catalog (`main.rs:~628`).
+- **S-5 (medium).** A RUDP transport ACK is recorded at receipt, so with pipelined puts a later put is ACKed while
+  an earlier one is still held. With the first datagram lost, the second is never delivered. That is data loss
+  under the QUIC-pivot rule; it is tracked in the CultLib ack map. `dcd36fc`'s doc line overstates.
+- **S-6, S-8.** Test gaps (the limit taken through `main`; `remove_not_dirty`).
+- **S-7.** The drop log echoes the key. Self ruled keys and schema ids are identities and may be logged, as in
+  CultLib R1.
+- **Held:** F1's logic, F4's projection fallback, F5, F3's refusal, and Cut 3's activation bound, drop and removal.
+  Sizing uses `peer_document`, so it matches what is served.
+- **Batch 4 in Hands:** S-4, S-6, S-8, the S-5 doc line, the attempted-list fixture gap, and committing Soul's
+  probes. S-1 waits on Q5; S-2 and S-3 wait on CultLib.
+
 Status: cut map, Imagination pass 1 (Opus), 2026-09-30. Nothing has landed. Anchors are Odin `main` at
 `44951a1` (the deployed build, live on Yggdrasil since 2026-09-30 04:20:48 UTC) and CultLib `3bf1c0ce`
 (Odin's `Cargo.lock` pin). This map owns the means; there is no separate target document, because the ends are
@@ -394,6 +422,19 @@ records; update the check's type list in the same pass.
 - **Q4. CultLib parity: port `DirectoryMessagePackBackingStore` (v4) to cultcache-rs?** It is not needed by
   Odin after Cuts 1-3. A reasonable consumer of the Rust runtime would expect the reference's store.
   **Recommended: record it as CultLib follow-up F1 with no deadline.** It is independent of this map.
+- **Q5 (2026-09-30, from Soul S-1). Where does the durable write run?** Today the serving loop runs the fsync, so
+  any disk stall stalls route challenges, catalog reads and every other put.
+  - A: a writer thread with group commit.
+    - The loop hands each accepted put to one writer thread. The writer writes and fsyncs everything queued since
+      its last write in one go, then the loop sends those puts' replies.
+    - Challenges and reads are never behind the disk. A stall delays only put replies, and Q3 B still holds (a
+      reply means durable).
+    - It needs cultmesh-rs to let a put handler reply later (a CultLib API change) plus one Odin thread.
+  - B: answer route challenges on their own path. Everything else still stalls, and the challenge would report
+    Odin healthy while its catalog is stuck.
+  - C: reopen Q3 and go back to the 1 s interval. That brings back lost acknowledged puts on a crash.
+
+  **Recommended: A.**
 
 ## 8. Related findings
 
