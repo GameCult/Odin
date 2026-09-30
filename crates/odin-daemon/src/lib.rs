@@ -2637,6 +2637,31 @@ mod tests {
         Ok(())
     }
 
+    /// The clock exemption belongs to a claim being admitted. A refresh has no
+    /// claim to refuse: with the clock before the binding it still writes the
+    /// incarnation's correlation, carrying the time disagreement, and neither
+    /// fails nor is refused.
+    #[test]
+    fn a_refresh_before_the_anchors_binding_records_the_time_disagreement() -> Result<()> {
+        let world = TestWorld::new()?;
+        let service = world.service("ghostlight", Vec::new(), false)?;
+        let signed = world
+            .engine(NOW - 200)
+            .refresh(&service.incarnation()?)?
+            .expect("Idunn projects the incarnation");
+        let correlation = decode_signed(&signed)?;
+        assert!(
+            correlation
+                .disagreements
+                .iter()
+                .any(|disagreement| disagreement.code == PROVIDER_ANCHOR_TIME_CODE),
+            "{:?}",
+            correlation.disagreements
+        );
+        assert!(!correlation.ready);
+        Ok(())
+    }
+
     fn snapshot_with_stored_presence(
         service: &TestService,
         stored: AdmittedPresence,
