@@ -68,10 +68,11 @@ const POLL_FAILURE_LIMIT: Duration = Duration::from_secs(30);
 const POLL_FAILURE_BACKOFF: Duration = Duration::from_millis(100);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 const PROJECTION_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
-// At most one write of the store file per interval, and none when nothing
-// changed. A crash loses at most this much of the catalog and presence;
-// providers republish, and a correlation sequence that was never written was
-// never published. Operator default Q3, docs/write-pattern-cut.md.
+// Odin's own changes (its heartbeat, correlations, the watermark) are written
+// at most once per interval, and not at all when nothing changed. A crash loses
+// at most this much of them; a correlation sequence that was never written was
+// never published. A peer's put is written before it is acknowledged
+// (`accept_raw_document`). Operator ruling Q3 B, docs/write-pattern-cut.md.
 const FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(2);
 const MAX_RECENT_WARMING_PROOFS: usize = 64;
@@ -298,7 +299,8 @@ impl RuntimeState {
     }
 
     /// Write Odin's store file from the working set, if it changed; returns
-    /// whether it wrote. This is the only write of the file. The lease is
+    /// whether it wrote. This is the only write of the file, made on the
+    /// interval, for a peer's put, and on the way out. The lease is
     /// checked immediately before it, so nothing is written once the lease is
     /// lost, and a file another process wrote is refused (`ForeignStoreWrite`)
     /// rather than written over. Both end Odin (see `survive`).
@@ -311,6 +313,11 @@ impl RuntimeState {
         store.flush()
     }
 
+    /// A peer's put is written before it is acknowledged: the server sends the
+    /// acknowledgement only when this returns `Ok`, and it returns `Ok` only
+    /// once the store holding the put is on disk. The write is the one `flush`,
+    /// so it carries everything else that changed too. A write that fails
+    /// refuses the put.
     fn accept_raw_document(&mut self, receipt: CultMeshRudpRawDocumentReceipt) -> Result<()> {
         ensure!(
             self.activated(),
@@ -322,6 +329,7 @@ impl RuntimeState {
         } else {
             persist_generic_document(&self.topology()?.store, &receipt.document)?;
         }
+        self.flush()?;
         Ok(())
     }
 
@@ -2055,7 +2063,10 @@ mod tests {
 
         let written = std::fs::read(&odin.store)?;
         std::fs::write(&odin.store, b"not a cultcache store")?;
-        provider_put(&odin, "ghostlight.doc.v1", "doc-1", vec![1])?;
+        assert!(
+            provider_put(&odin, "ghostlight.doc.v1", "doc-1", vec![1]).is_err(),
+            "a put whose write fails is refused"
+        );
         assert!(
             odin.state.borrow().flush().is_err(),
             "the injected fault must actually fail the write"
@@ -3045,15 +3056,15 @@ mod tests {
         Instant::now().checked_sub(Duration::from_millis(millis))
     }
 
-    /// Fifty changes inside one interval are one write, made once the
-    /// interval has passed: not at 0.9 s after the last write, at 1.1 s.
+    /// Twenty-five of Odin's own changes (heartbeats) inside one interval are
+    /// one write, made once the interval has passed: not at 0.9 s after the
+    /// last write, at 1.1 s.
     #[test]
     fn changes_inside_one_interval_are_one_write() -> Result<()> {
         let mut odin = activated_odin()?;
         odin.pass()?;
         let first = file_identity(&odin.store)?;
-        for index in 0..25 {
-            provider_put(&odin, "ghostlight.doc.v1", &format!("doc-{index}"), vec![1])?;
+        for _ in 0..25 {
             odin.timers.last_heartbeat = None;
             odin.timers.last_flush = Some(Instant::now());
             odin.pass()?;
@@ -3073,9 +3084,46 @@ mod tests {
 
         // The write itself starts the next interval: a change right after it
         // waits.
-        provider_put(&odin, "ghostlight.doc.v1", "doc-late", vec![1])?;
+        odin.heartbeat()?;
         odin.pass()?;
         assert_eq!(file_identity(&odin.store)?, second, "and only one");
+        Ok(())
+    }
+
+    /// A peer's put is on disk when Odin accepts it, inside the interval, and
+    /// the write carries Odin's own unwritten changes with it.
+    #[test]
+    fn a_put_is_written_before_it_is_accepted() -> Result<()> {
+        let mut odin = activated_odin()?;
+        odin.pass()?;
+        odin.heartbeat()?;
+        odin.timers.last_flush = Some(Instant::now());
+        provider_put(&odin, "ghostlight.doc.v1", "doc-1", vec![1])?;
+        assert!(
+            odin.file_records()?
+                .iter()
+                .any(|entry| entry.r#type == "ghostlight.doc" && entry.key == "doc-1")
+        );
+        assert_eq!(odin.file_records()?, odin.working_set());
+        Ok(())
+    }
+
+    /// A put whose write is not made is refused, so it is never acknowledged:
+    /// with the write failing, and with the lease lost.
+    #[test]
+    fn a_put_whose_write_is_not_made_is_refused() -> Result<()> {
+        let mut odin = activated_odin()?;
+        odin.pass()?;
+        std::fs::write(&odin.store, b"not a cultcache store")?;
+        assert!(provider_put(&odin, "ghostlight.doc.v1", "doc-1", vec![1]).is_err());
+
+        let mut odin = activated_odin()?;
+        odin.pass()?;
+        let written = file_identity(&odin.store)?;
+        odin.swap_lease()?;
+        let error = provider_put(&odin, "ghostlight.doc.v1", "doc-1", vec![1]).unwrap_err();
+        assert!(error.downcast_ref::<WriteLeaseLost>().is_some(), "{error:#}");
+        assert_eq!(file_identity(&odin.store)?, written);
         Ok(())
     }
 
@@ -3135,7 +3183,7 @@ mod tests {
         let mut odin = activated_odin()?;
         odin.pass()?;
         let written = file_identity(&odin.store)?;
-        provider_put(&odin, "ghostlight.doc.v1", "doc-1", vec![1])?;
+        odin.heartbeat()?;
         odin.swap_lease()?;
         odin.timers.last_projection_refresh = Some(Instant::now());
         odin.timers.last_heartbeat = Some(Instant::now());
@@ -3162,7 +3210,7 @@ mod tests {
                 .collect()
         })?;
         let foreign = file_identity(&odin.store)?;
-        provider_put(&odin, "ghostlight.doc.v1", "doc-1", vec![1])?;
+        odin.heartbeat()?;
         odin.timers.last_flush = None;
         let error = odin.pass().unwrap_err();
         assert!(
