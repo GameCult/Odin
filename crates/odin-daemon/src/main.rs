@@ -426,24 +426,32 @@ impl RuntimeState {
         self.admit_presence_document(&document, unix_millis()?)
     }
 
-    /// Idunn's projection of this process's own incarnation. Every failure to
-    /// establish it -- unreadable, undecodable, ambiguous, substituted, or
-    /// absent -- is a failure of Odin's own authority, so it is marked for the
-    /// temporary fatal rule in `survive`. Failures about other incarnations are
-    /// not: they are read, logged and skipped where they are met.
+    /// Idunn's projection of this process's own incarnation. A failure to
+    /// establish it that is not plain I/O -- undecodable, ambiguous,
+    /// substituted, or with no Expected for this incarnation -- is a failure of
+    /// Odin's own authority, so it is marked for the temporary fatal rule in
+    /// `survive`. A plain I/O error is not (see `own_projection_failure`), nor
+    /// are failures about other incarnations: they are read, logged and skipped
+    /// where they are met.
     fn require_own_projection(&self) -> Result<()> {
-        CultCacheIdunnProjectionSource::new(&self.options.idunn_projection)
+        let path = &self.options.idunn_projection;
+        match CultCacheIdunnProjectionSource::new(path)
             .projection(&self_incarnation(&self.authority_material))
-            .map_err(|error| {
-                error.context(PresenceAuthorityRefused(
-                    "Odin's own projected authority cannot be read",
-                ))
-            })?
-            .ok_or_else(|| -> anyhow::Error {
-                PresenceAuthorityRefused("Idunn projects no Expected for Odin's own incarnation")
-                    .into()
-            })?;
-        Ok(())
+        {
+            Err(error) => Err(own_projection_failure(error)),
+            // No file is an I/O condition (Idunn replaces it atomically, so it
+            // is briefly or wrongly unreadable), not a projection that
+            // disowns Odin.
+            Ok(None) if !path.is_file() => Err(anyhow::Error::new(std::io::Error::from(
+                std::io::ErrorKind::NotFound,
+            ))
+            .context(format!("Idunn's projection {} is absent", path.display()))),
+            Ok(None) => Err(PresenceAuthorityRefused(
+                "Idunn projects no Expected for Odin's own incarnation",
+            )
+            .into()),
+            Ok(Some(_)) => Ok(()),
+        }
     }
 
     fn require_current_write_lease(&self) -> Result<()> {
@@ -543,20 +551,19 @@ impl RuntimeState {
         let Some(schema_id) = envelope.schema_id.clone() else {
             return Ok(None);
         };
-        if envelope.r#type == OdinRuntimeTopologyCorrelationRecord::TYPE {
-            return Ok(None);
-        }
         if envelope.r#type != GameCultRuntimePresenceHealthRecord::TYPE {
-            return Ok(Some(CultNetRawDocumentRecord {
-                schema_id,
-                record_key: envelope.key.clone(),
-                stored_at: envelope.stored_at.clone(),
-                payload_encoding: CultNetRawPayloadEncoding::Messagepack,
-                payload: envelope.payload.clone(),
-                source_runtime_id: None,
-                source_agent_id: None,
-                source_role: None,
-                tags: None,
+            return Ok(is_peer_document_type(&envelope.r#type).then(|| {
+                CultNetRawDocumentRecord {
+                    schema_id,
+                    record_key: envelope.key.clone(),
+                    stored_at: envelope.stored_at.clone(),
+                    payload_encoding: CultNetRawPayloadEncoding::Messagepack,
+                    payload: envelope.payload.clone(),
+                    source_runtime_id: None,
+                    source_agent_id: None,
+                    source_role: None,
+                    tags: None,
+                }
             }));
         }
         let presence = decode_presence(&envelope.payload)?;
@@ -611,6 +618,22 @@ impl RuntimeState {
             }
         }
     }
+}
+
+/// A failure to read Odin's own projection. A plain I/O error (permission
+/// denied, not found, interrupted) says nothing about what Idunn published and
+/// is retried; anything the reader decoded or validated and did not accept is a
+/// failure of Odin's own authority, marked for the fatal rule in `survive`.
+fn own_projection_failure(error: anyhow::Error) -> anyhow::Error {
+    if error
+        .chain()
+        .any(|cause| cause.is::<std::io::Error>())
+    {
+        return error;
+    }
+    error.context(PresenceAuthorityRefused(
+        "Odin's own projected authority cannot be read",
+    ))
 }
 
 /// Once-per-interval admission for repeating log lines, keyed by subject.
@@ -746,17 +769,13 @@ fn serving_pass(
 ) -> Result<bool> {
     let progressed = poll_server(server, &mut timers.poll_failing_since)?;
     if is_due(timers.last_projection_refresh, PROJECTION_REFRESH_INTERVAL) {
-        survive(
-            "projection refresh",
-            state.borrow_mut().refresh_all_correlations(),
-        )?;
+        let refreshed = state.borrow_mut().refresh_all_correlations();
+        survive(&state.borrow(), "projection refresh", refreshed)?;
         timers.last_projection_refresh = Some(Instant::now());
     }
     if is_due(timers.last_heartbeat, HEARTBEAT_INTERVAL) {
-        survive(
-            "self-presence publication",
-            state.borrow_mut().publish_self_presence("ready"),
-        )?;
+        let published = state.borrow_mut().publish_self_presence("ready");
+        survive(&state.borrow(), "self-presence publication", published)?;
         timers.last_heartbeat = Some(Instant::now());
     }
     Ok(progressed)
@@ -794,7 +813,7 @@ impl std::error::Error for WriteLeaseLost {}
 /// is not such a failure (`reconcile`): it is retried. Deleted when Idunn
 /// proves Odin by its own route challenge
 /// (Idunn audit cut A3, operator question Q-O5).
-fn survive<T>(what: &str, result: Result<T>) -> Result<Option<T>> {
+fn survive<T>(state: &RuntimeState, what: &str, result: Result<T>) -> Result<Option<T>> {
     match result {
         Ok(value) => Ok(Some(value)),
         Err(error)
@@ -804,7 +823,7 @@ fn survive<T>(what: &str, result: Result<T>) -> Result<Option<T>> {
             Err(error)
         }
         Err(error) => {
-            eprintln!("Odin {what} failed; retrying on the next pass: {error:#}");
+            state.log_repeating(what, format!("failed; retrying on the next pass: {error:#}"));
             Ok(None)
         }
     }
@@ -1192,19 +1211,41 @@ fn prior_self_publisher_sequence(path: &Path, signer_identity_id: &str) -> Resul
         .unwrap_or(0))
 }
 
+/// The document namespaces providers publish to the rendezvous. A provider's
+/// document is stored and served back only under one of these; Odin's own
+/// records (correlations, the publisher watermark, every `odin.*` type) and
+/// Idunn's projected authority live in namespaces no provider can name, so a
+/// peer cannot write them and the catalog cannot serve them.
+const PEER_DOCUMENT_NAMESPACES: &[&str] = &[
+    "ghostlight",
+    "heimdall",
+    "muninn",
+    "mimir",
+    "sleipnir",
+    "streampixels",
+    "spotiverse",
+    "vili",
+    "weksa",
+    "repixelizer",
+    "stonks",
+    "gamecult.eve",
+    "gamecult.vili",
+    "gamecult.loki",
+];
+
+fn is_peer_document_type(document_type: &str) -> bool {
+    PEER_DOCUMENT_NAMESPACES.iter().any(|namespace| {
+        document_type
+            .strip_prefix(namespace)
+            .is_some_and(|rest| rest.starts_with('.'))
+    })
+}
+
 fn persist_generic_document(path: &Path, document: &CultNetRawDocumentRecord) -> Result<()> {
     let document_type = document_type_for_schema(&document.schema_id)?;
     ensure!(
-        !matches!(
-            document_type.as_str(),
-            "gamecult.runtime_presence_health"
-                | "odin.runtime_topology_correlation"
-                | "idunn.expected_incarnation"
-                | "idunn.runtime_activation"
-                | "idunn.process_write_lease"
-                | "gamecult.service_trust_anchor"
-        ),
-        "generic provider traffic cannot write an authority-owned Odin/Idunn document"
+        is_peer_document_type(&document_type),
+        "Odin accepts no {document_type} document from a provider"
     );
     let replacement = CultCacheEnvelope {
         key: document.record_key.clone(),
@@ -1547,6 +1588,11 @@ mod tests {
     }
 
     fn activated_odin() -> Result<OdinWorld> {
+        activated_odin_serving(CultMeshRudpDocumentServerOptions::default())
+    }
+
+    /// The same world with the production server bound under `options`.
+    fn activated_odin_serving(options: CultMeshRudpDocumentServerOptions) -> Result<OdinWorld> {
         let temp = tempfile::tempdir()?;
         let root = temp.path();
         let socket = UdpSocket::bind("127.0.0.1:0")?;
@@ -1709,7 +1755,7 @@ mod tests {
             SinkHandle(state.clone()),
             SnapshotHandle(state.clone()),
             CultMeshSystemClock::default(),
-            CultMeshRudpDocumentServerOptions::default(),
+            options,
         )?;
         Ok(OdinWorld {
             _temp: temp,
@@ -1868,18 +1914,27 @@ mod tests {
     /// socket, so a self-publication that went over RUDP would find it full.
     #[test]
     fn self_presence_lands_while_lingering_publishers_hold_every_session() -> Result<()> {
-        let mut odin = activated_odin()?;
+        // Sessions do not idle out in this world. The property is that the
+        // heartbeat lands while the table is full, and the fsync-bound passes
+        // it takes can outlast the default 30 s idle timeout on a saturated
+        // disk (Yggdrasil, 2026-09-30: the first pass alone took 20 s, and
+        // 20 of the 64 sessions had expired by the last assertion), which
+        // ends the sessions the test is holding rather than testing anything.
+        let mut odin = activated_odin_serving(CultMeshRudpDocumentServerOptions {
+            session_idle_timeout: Duration::from_secs(3600),
+            ..CultMeshRudpDocumentServerOptions::default()
+        })?;
         let target = odin.server.local_addr()?;
         // Peers arrive until 64 are admitted, then one more is refused. A peer
         // that times out under load is retried as a new one: the property is a
         // full table, not that no packet is ever late. Refused peers wait out
-        // their whole connect deadline, so only one is tried, or the first
-        // sessions would idle out before the heartbeats are taken.
+        // their whole connect deadline, so only one is tried.
         let (admitted, overflow_admitted) = odin.serve_while(move || {
             let (mut admitted, mut next) = (0, 0);
             while admitted < 64 && next < 96 {
-                if lingering_peer(target, PEER_CONNECTION_BASE + next, None).is_ok() {
-                    admitted += 1;
+                match lingering_peer(target, PEER_CONNECTION_BASE + next, None) {
+                    Ok(()) => admitted += 1,
+                    Err(error) => eprintln!("peer {next} was not admitted: {error:#}"),
                 }
                 next += 1;
             }
@@ -1924,6 +1979,18 @@ mod tests {
         );
         odin.timers = ServingTimers::default();
         odin.pass()?;
+        let suppressed = |odin: &OdinWorld| odin.state.borrow().log_gate.borrow().suppressed_total;
+        assert_eq!(suppressed(&odin), 0, "each distinct failure is logged");
+
+        // The same faults on later passes are counted, not printed again.
+        for repeat in 1..=3 {
+            odin.timers = ServingTimers::default();
+            odin.pass()?;
+            assert!(
+                suppressed(&odin) >= repeat,
+                "pass {repeat} repeated a logged failure"
+            );
+        }
 
         std::fs::remove_file(&odin.store)?;
         odin.timers = ServingTimers::default();
@@ -2483,15 +2550,223 @@ mod tests {
         Ok(())
     }
 
+    /// A provider put, as the server hands it to the sink.
+    fn provider_put(
+        odin: &OdinWorld,
+        schema: &str,
+        key: &str,
+        payload: Vec<u8>,
+    ) -> Result<()> {
+        odin.state
+            .borrow_mut()
+            .accept_raw_document(CultMeshRudpRawDocumentReceipt {
+                session: cultmesh_rs::CultMeshRudpSessionKey {
+                    remote_addr: "127.0.0.1:1".parse()?,
+                    connection_id: 7,
+                },
+                message_id: "put".into(),
+                transport_sequence: 1,
+                received_at_unix_millis: unix_millis()?,
+                document: CultNetRawDocumentRecord {
+                    schema_id: schema.into(),
+                    record_key: key.into(),
+                    stored_at: rfc3339_millis(unix_millis()?)?,
+                    payload_encoding: CultNetRawPayloadEncoding::Messagepack,
+                    payload,
+                    source_runtime_id: None,
+                    source_agent_id: None,
+                    source_role: None,
+                    tags: None,
+                },
+            })
+    }
+
+    /// Soul's probe P-B: a peer that puts a document of Odin's own kind (the
+    /// publisher watermark, keyed by Odin's target, holding the largest
+    /// sequence) would freeze every later heartbeat and survive restarts. Odin
+    /// accepts only the namespaces providers publish in, so every record Odin
+    /// or Idunn owns is refused, and presence keeps advancing.
     #[test]
-    fn only_the_write_lease_is_fatal_in_the_serving_loop() {
-        assert_eq!(survive("x", Ok(3)).unwrap(), Some(3));
+    fn a_peer_cannot_write_a_record_odin_owns_and_presence_keeps_advancing() -> Result<()> {
+        let mut odin = activated_odin()?;
+        odin.pass()?;
+        let before = odin.stored_sequence()?;
+        let stored_before =
+            SingleFileMessagePackBackingStore::new(&odin.store).pull_all_read_only_snapshot()?;
+
+        // Every kind Odin itself stored (its watermark and correlations, found
+        // rather than named), and the kinds Idunn projects to it.
+        let mut owned: BTreeSet<(String, String)> = stored_before
+            .iter()
+            .filter(|entry| entry.r#type != GameCultRuntimePresenceHealthRecord::TYPE)
+            .map(|entry| (entry.r#type.clone(), entry.key.clone()))
+            .collect();
+        for kind in [
+            IdunnExpectedIncarnationRecord::TYPE,
+            IdunnRuntimeActivationRecord::TYPE,
+            IdunnProcessWriteLeaseRecord::TYPE,
+            GameCultServiceTrustAnchorRecord::TYPE,
+            "odin.topology_publisher_watermark",
+            "odin.interface_layout",
+        ] {
+            owned.insert((kind.into(), TARGET.into()));
+        }
+        assert!(
+            owned
+                .iter()
+                .any(|(kind, _)| kind == OdinRuntimeTopologyCorrelationRecord::TYPE),
+            "the store holds Odin's own records: {owned:?}"
+        );
+        for (kind, key) in &owned {
+            let refused = provider_put(
+                &odin,
+                &format!("{kind}.v1"),
+                key,
+                rmp_serde::to_vec(&(format!("{kind}.v1"), TARGET, u64::MAX))?,
+            )
+            .expect_err(&format!("{kind} must be refused"));
+            assert!(format!("{refused:#}").contains("accepts no"), "{refused:#}");
+        }
         assert_eq!(
-            survive::<()>("x", Err(anyhow::anyhow!("io"))).unwrap(),
+            SingleFileMessagePackBackingStore::new(&odin.store).pull_all_read_only_snapshot()?,
+            stored_before,
+            "no refused put touched the store"
+        );
+
+        odin.timers = ServingTimers::default();
+        odin.pass()?;
+        assert_eq!(
+            odin.stored_sequence()?,
+            before + 1,
+            "Odin's own presence still advances"
+        );
+        Ok(())
+    }
+
+    /// The same rule read the other way: the catalog serves a provider's
+    /// document and Odin's presence, and nothing else Odin holds.
+    #[test]
+    fn the_catalog_serves_provider_documents_and_presence_only() -> Result<()> {
+        let mut odin = activated_odin()?;
+        odin.pass()?;
+        provider_put(&odin, "ghostlight.doc.v1", "doc-1", vec![1])?;
+        let stored: BTreeSet<String> =
+            SingleFileMessagePackBackingStore::new(&odin.store)
+                .pull_all_read_only_snapshot()?
+                .into_iter()
+                .map(|entry| entry.r#type)
+                .collect();
+        assert!(
+            stored.len() >= 4,
+            "Odin's store holds more than what it serves: {stored:?}"
+        );
+
+        let served: BTreeSet<String> = odin
+            .catalog()?
+            .into_iter()
+            .map(|document| document.schema_id)
+            .collect();
+        assert_eq!(
+            served,
+            BTreeSet::from([
+                GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA.to_owned(),
+                "ghostlight.doc.v1".to_owned()
+            ])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn provider_namespaces_match_whole_segments() {
+        for accepted in ["ghostlight.doc", "heimdall.command_boundary", "gamecult.eve.command"] {
+            assert!(is_peer_document_type(accepted), "{accepted}");
+        }
+        for refused in [
+            "ghostlightx.doc",
+            "ghostlight",
+            "gamecult.eve",
+            "gamecult.runtime_presence_health",
+            "gamecult.service_trust_anchor",
+            "odin.topology_publisher_watermark",
+            "idunn.process_write_lease",
+        ] {
+            assert!(!is_peer_document_type(refused), "{refused}");
+        }
+    }
+
+    #[test]
+    fn only_the_write_lease_is_fatal_in_the_serving_loop() -> Result<()> {
+        let odin = activated_odin()?;
+        let state = odin.state.borrow();
+        assert_eq!(survive(&state, "x", Ok(3))?, Some(3));
+        assert_eq!(
+            survive::<()>(&state, "x", Err(anyhow::anyhow!("io")))?,
             None
         );
         let lost = anyhow::Error::new(WriteLeaseLost("gone".into())).context("refreshing");
-        assert!(survive::<()>("x", Err(lost)).is_err());
+        assert!(survive::<()>(&state, "x", Err(lost)).is_err());
+        Ok(())
+    }
+
+    /// A plain I/O error reading Odin's own projection (permission denied, not
+    /// found, interrupted) says nothing about what Idunn published: it is
+    /// retried. A record the reader could not decode or validate is Odin's own
+    /// authority failing, and stays fatal.
+    #[test]
+    fn a_plain_io_error_reading_its_own_projection_is_retried_a_decode_failure_is_not() -> Result<()>
+    {
+        let odin = activated_odin()?;
+        let state = odin.state.borrow();
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::NotFound,
+            std::io::ErrorKind::Interrupted,
+        ] {
+            let read = anyhow::Error::new(std::io::Error::from(kind)).context("failed to read");
+            assert_eq!(
+                survive::<()>(&state, "projection", Err(own_projection_failure(read)))?,
+                None,
+                "{kind:?}"
+            );
+        }
+        let undecodable = anyhow::anyhow!("failed to decode MessagePack: invalid marker");
+        assert_refused(
+            &survive::<()>(&state, "projection", Err(own_projection_failure(undecodable)))
+                .unwrap_err(),
+        );
+        Ok(())
+    }
+
+    /// The same rule through the serving loop: with Idunn's projection file
+    /// gone Odin keeps serving and publishes again once it is back; with a
+    /// projection that does not decode it ends.
+    #[test]
+    fn a_missing_projection_file_is_retried_by_the_serving_loop() -> Result<()> {
+        let mut odin = activated_odin()?;
+        odin.pass()?;
+        let before = odin.stored_sequence()?;
+        let projection = odin.state.borrow().options.idunn_projection.clone();
+        let bytes = std::fs::read(&projection)?;
+
+        std::fs::remove_file(&projection)?;
+        for _ in 0..3 {
+            odin.timers = ServingTimers::default();
+            odin.pass()?;
+        }
+        assert_eq!(odin.stored_sequence()?, before, "nothing is published blind");
+
+        std::fs::write(&projection, bytes)?;
+        odin.timers = ServingTimers::default();
+        odin.pass()?;
+        assert!(
+            odin.stored_sequence()? > before,
+            "publication resumes once the projection is readable"
+        );
+
+        std::fs::write(&projection, b"not a cultcache store")?;
+        odin.timers = ServingTimers::default();
+        assert_refused(&odin.pass().unwrap_err());
+        Ok(())
     }
 
     #[test]
