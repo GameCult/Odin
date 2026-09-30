@@ -1362,14 +1362,19 @@ fn peer_document(envelope: &CultCacheEnvelope) -> Option<CultNetRawDocumentRecor
     })
 }
 
+/// CultNet refuses an empty message id, so a response carries at least one
+/// byte of it.
+const SHORTEST_MESSAGE_ID: &str = "0";
+
 /// Drop every stored peer document the server could never serve, and return
 /// each one's type, key and response size. A document is unservable when a
 /// snapshot response holding it alone, encoded as the server encodes one and
-/// with the shortest message id, is larger than the largest response the
-/// server sends (`limit`, the server's own `max_snapshot_response_bytes`).
-/// Nobody can read such a document, and every write of the store would carry
-/// it. Presences are Odin's own admitted records, never this large, and are
-/// not checked; nor is anything the catalog does not serve.
+/// with the shortest message id CultNet admits, is larger than the largest
+/// response the server sends (`limit`, the server's own
+/// `max_snapshot_response_bytes`). Nobody can read such a document, and every
+/// write of the store would carry it. Presences are Odin's own admitted
+/// records, never this large, and are not checked; nor is anything the
+/// catalog does not serve.
 fn drop_unservable_documents(
     store: &MemoryOdinTopologyStore,
     limit: usize,
@@ -1379,13 +1384,22 @@ fn drop_unservable_documents(
         .values()
         .filter_map(|envelope| {
             let response = CultNetMessage::SnapshotResponseRaw {
-                message_id: String::new(),
+                message_id: SHORTEST_MESSAGE_ID.into(),
                 documents: vec![peer_document(envelope)?],
             };
             let size =
-                encode_cultnet_message_to_vec(&response, CultNetWireContract::CultNetSchemaV0)
-                    .ok()?
-                    .len();
+                match encode_cultnet_message_to_vec(&response, CultNetWireContract::CultNetSchemaV0) {
+                    Ok(payload) => payload.len(),
+                    // Kept: the catalog meets the same failure when it serves
+                    // the record, and logs it there.
+                    Err(error) => {
+                        eprintln!(
+                            "Odin cannot size {} {} as a snapshot response; kept: {error:#}",
+                            envelope.r#type, envelope.key
+                        );
+                        return None;
+                    }
+                };
             (size > limit).then(|| (envelope.r#type.clone(), envelope.key.clone(), size))
         })
         .collect();
@@ -3274,7 +3288,7 @@ mod tests {
     }
 
     /// A peer document whose single-document snapshot response, encoded as the
-    /// server encodes one with an empty message id, is `response_bytes` long.
+    /// server encodes one with a one-byte message id, is `response_bytes` long.
     fn document_answering_in(key: &str, response_bytes: usize) -> Result<CultCacheEnvelope> {
         let document = |payload_bytes: usize| -> Result<CultCacheEnvelope> {
             Ok(CultCacheEnvelope {
@@ -3298,7 +3312,7 @@ mod tests {
                 tags: None,
             };
             let message = CultNetMessage::SnapshotResponseRaw {
-                message_id: String::new(),
+                message_id: "m".into(),
                 documents: vec![served],
             };
             Ok(encode_cultnet_message_to_vec(&message, CultNetWireContract::CultNetSchemaV0)?.len())
