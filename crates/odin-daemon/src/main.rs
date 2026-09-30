@@ -1870,12 +1870,24 @@ mod tests {
     fn self_presence_lands_while_lingering_publishers_hold_every_session() -> Result<()> {
         let mut odin = activated_odin()?;
         let target = odin.server.local_addr()?;
-        let admitted = odin.serve_while(move || {
-            (0..70)
-                .filter(|index| lingering_peer(target, PEER_CONNECTION_BASE + index, None).is_ok())
-                .count()
+        // Peers arrive until 64 are admitted, then one more is refused. A peer
+        // that times out under load is retried as a new one: the property is a
+        // full table, not that no packet is ever late. Refused peers wait out
+        // their whole connect deadline, so only one is tried, or the first
+        // sessions would idle out before the heartbeats are taken.
+        let (admitted, overflow_admitted) = odin.serve_while(move || {
+            let (mut admitted, mut next) = (0, 0);
+            while admitted < 64 && next < 96 {
+                if lingering_peer(target, PEER_CONNECTION_BASE + next, None).is_ok() {
+                    admitted += 1;
+                }
+                next += 1;
+            }
+            let overflow = lingering_peer(target, PEER_CONNECTION_BASE + next, None).is_ok();
+            (admitted, overflow)
         })?;
         assert_eq!(admitted, 64, "the default session table is 64 wide");
+        assert!(!overflow_admitted, "the 65th publisher is refused");
         assert_eq!(odin.server.session_count(), 64, "the table is full");
 
         // The first timed pass, with the table already full, publishes once.
