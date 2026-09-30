@@ -73,7 +73,7 @@ const PROJECTION_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 // Odin's own changes (its heartbeat, correlations, the watermark) are written
 // at most once per interval, and not at all when nothing changed. A crash loses
 // at most this much of them; a correlation sequence that was never written was
-// never published. A peer's put is written before it is acknowledged
+// never published. A peer's put is written before Odin accepts it
 // (`accept_raw_document`). Operator ruling Q3 B, docs/write-pattern-cut.md.
 const FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(2);
@@ -329,14 +329,21 @@ impl RuntimeState {
         store.flush()
     }
 
-    /// A peer's put is written before it is acknowledged: the server sends the
-    /// acknowledgement only when this returns `Ok`, and it returns `Ok` only
+    /// A peer's put is written before Odin accepts it: this returns `Ok` only
     /// once the store holding the put is on disk. The write is the one `flush`,
     /// so it carries everything else that changed too. A write that fails
-    /// refuses the put.
+    /// refuses the put, and the server answers a refusal with an application
+    /// rejection naming the put.
     ///
-    /// The promise runs one way only. An acknowledged put is always on disk. One
-    /// refused because its write failed may still be: it stays in the working set, so the catalog
+    /// What this promises is Odin's answer, not the transport's. The RUDP
+    /// acknowledgement of the datagram carrying a put is sent when it is
+    /// received, before ordered delivery hands the put here (a later put can
+    /// be acknowledged while an earlier one is still being resent), so it says
+    /// nothing about durability. A put accepted here is on disk; a put refused
+    /// here is rejected by name.
+    ///
+    /// A refusal runs one way only. A put refused because its write failed may
+    /// still become durable: it stays in the working set, so the catalog
     /// serves it and the next write lands it (or the failed write had already
     /// replaced the file). That is sound because a put is the latest value for
     /// its type and key, not an event: a publisher that retries a refused put
@@ -3394,7 +3401,7 @@ mod tests {
         Ok(())
     }
 
-    /// A put whose write is not made is refused, so it is never acknowledged:
+    /// A put whose write is not made is refused, so it is never accepted:
     /// with the write failing, and with the lease lost.
     #[test]
     fn a_put_whose_write_is_not_made_is_refused() -> Result<()> {
