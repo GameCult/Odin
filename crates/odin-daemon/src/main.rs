@@ -1930,6 +1930,122 @@ mod tests {
         Ok(())
     }
 
+    /// A receipt-capable publisher: says hello with both receipt frames, puts
+    /// each document under its own id, and returns the schema frames Odin
+    /// answers with (its hello first, then one answer per put).
+    fn receipt_peer(
+        target: SocketAddr,
+        connection_id: u32,
+        puts: Vec<(&'static str, &'static str, &'static str)>,
+    ) -> Result<Vec<CultNetMessage>> {
+        let socket = UdpSocket::bind("127.0.0.1:0")?;
+        socket.set_read_timeout(Some(Duration::from_millis(100)))?;
+        let mut transport = CultNetRudpSocketTransportConnection::new(
+            CultNetRudpSocketTransportOptions::client("receipt-peer", socket, target, connection_id),
+        )?;
+        transport.connect(Vec::new())?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !transport.connected() {
+            let _ = transport.receive_once()?;
+            transport.poll_resends()?;
+            ensure!(Instant::now() < deadline, "timed out connecting");
+        }
+        let mut send = |message: CultNetMessage| -> Result<()> {
+            transport.send_reliable(
+                "schema",
+                encode_cultnet_message_to_vec(&message, CultNetWireContract::CultNetSchemaV0)?,
+            )?;
+            Ok(())
+        };
+        send(CultNetMessage::Hello {
+            runtime_id: "receipt-peer".into(),
+            runtime_kind: "test".into(),
+            agent_id: None,
+            role: None,
+            display_name: None,
+            supported_document_types: None,
+            supported_mutation_contracts: None,
+            supported_message_versions: Some(vec![
+                "cultnet.write_admitted.v0".into(),
+                "cultnet.error.v1".into(),
+            ]),
+            transport_profiles: None,
+            supports_schema_catalog: None,
+        })?;
+        for (id, schema, key) in &puts {
+            send(CultNetMessage::DocumentPutRaw {
+                message_id: (*id).into(),
+                document: CultNetRawDocumentRecord {
+                    schema_id: (*schema).into(),
+                    record_key: (*key).into(),
+                    stored_at: rfc3339_millis(unix_millis()?)?,
+                    payload_encoding: CultNetRawPayloadEncoding::Messagepack,
+                    payload: vec![1],
+                    source_runtime_id: None,
+                    source_agent_id: None,
+                    source_role: None,
+                    tags: None,
+                },
+            })?;
+        }
+        let mut frames = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while frames.len() < puts.len() + 1 && Instant::now() < deadline {
+            if let Some(frame) = transport.receive_once()? {
+                if frame.channel_id == "schema" {
+                    frames.push(cultnet_rs::decode_cultnet_message_from_slice(
+                        &frame.payload,
+                        CultNetWireContract::CultNetSchemaV0,
+                    )?);
+                }
+            }
+            transport.poll_resends()?;
+        }
+        Ok(frames)
+    }
+
+    /// The CultNet write receipt through Odin's own sink and server: an
+    /// admitted put is answered `write_admitted` carrying its id, and a put the
+    /// sink refuses is answered `error.v1` carrying its id, never dropped.
+    #[test]
+    fn a_receipt_peer_is_told_admitted_or_refused_for_each_put_by_id() -> Result<()> {
+        let mut odin = activated_odin()?;
+        let target = odin.server.local_addr()?;
+        let frames = odin.serve_while(move || {
+            receipt_peer(
+                target,
+                PEER_CONNECTION_BASE + 2,
+                vec![
+                    ("ok-1", "ghostlight.doc.v1", "doc-1"),
+                    ("refused-1", "odin.topology_publisher_watermark.v1", TARGET),
+                ],
+            )
+        })??;
+        assert_eq!(frames.len(), 3, "hello and one answer per put: {frames:?}");
+        assert!(matches!(&frames[0], CultNetMessage::Hello { .. }));
+        assert_eq!(
+            frames[1],
+            CultNetMessage::WriteAdmitted {
+                message_id: "ok-1".into(),
+                operation: "put".into(),
+                schema_id: "ghostlight.doc.v1".into(),
+                record_key: "doc-1".into(),
+            }
+        );
+        let CultNetMessage::ErrorV1 { message_id, .. } = &frames[2] else {
+            panic!("a refused put must be answered error.v1: {:?}", frames[2]);
+        };
+        assert_eq!(message_id.as_deref(), Some("refused-1"));
+        assert_eq!(odin.server.session_count(), 1, "the refusal kept the session");
+        let stored: BTreeSet<String> = SingleFileMessagePackBackingStore::new(&odin.store)
+            .pull_all_read_only_snapshot()?
+            .into_iter()
+            .map(|entry| entry.key)
+            .collect();
+        assert!(stored.contains("doc-1"), "the admitted put is stored");
+        Ok(())
+    }
+
     /// Soul's 70-lingering-session probe: with the server's session table
     /// full of publishers that never Disconnect, Odin's own heartbeat still
     /// lands. The table is Odin's own production server bound to the candidate

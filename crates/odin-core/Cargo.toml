@@ -11,9 +11,9 @@ path = "src/lib.rs"
 
 [dependencies]
 anyhow = "1"
-cultcache-rs = { git = "https://github.com/GameCult/CultLib.git", rev = "3bf1c0cea53e0092187fa2e59a75ba1571947ffe", package = "cultcache-rs" }
-cultmesh-rs = { git = "https://github.com/GameCult/CultLib.git", rev = "3bf1c0cea53e0092187fa2e59a75ba1571947ffe", package = "cultmesh-rs" }
-cultnet-rs = { git = "https://github.com/GameCult/CultLib.git", rev = "3bf1c0cea53e0092187fa2e59a75ba1571947ffe", package = "cultnet-rs" }
+cultcache-rs = { git = "https://github.com/GameCult/CultLib.git", rev = "7665df33ae1b4335c3343914e2b85fde01d48311", package = "cultcache-rs" }
+cultmesh-rs = { git = "https://github.com/GameCult/CultLib.git", rev = "7665df33ae1b4335c3343914e2b85fde01d48311", package = "cultmesh-rs" }
+cultnet-rs = { git = "https://github.com/GameCult/CultLib.git", rev = "7665df33ae1b4335c3343914e2b85fde01d48311", package = "cultnet-rs" }
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 
