@@ -4,8 +4,11 @@
 > https://github.com/GameCult/Idunn. Entries below citing `scripts/idunn-*.ps1`,
 > `scripts/health-idunn-*`, `scripts/notify-idunn-*` or `scripts/start-idunn-local.ps1`
 > refer to paths that moved to `gamecult-ops/scripts/idunn/`; unit files and Idunn
-> documentation moved to the Idunn repository. This is a dated ledger and the
-> entries are left as written.
+> documentation moved to the Idunn repository. In 2026-11 gamecult-ops (PR #101, merge 25ca595) deleted
+> the legacy Windows Idunn scripts (`idunn-deployment-targets.ps1`,
+> `show-idunn-deployment-targets.ps1`, `health-idunn-swarm-deployment-coverage.*`,
+> `install-idunn-startup.ps1`, `start-idunn-local.ps1`), so those paths no longer
+> resolve anywhere. This is a dated ledger and the entries are left as written.
 
 Status date: 2026-07-03
 
